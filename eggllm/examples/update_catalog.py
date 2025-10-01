@@ -10,8 +10,8 @@ from pathlib import Path
 from egg_llm import LLMClient
 
 HERE = Path(__file__).resolve().parent
-MODELS = HERE.parent / "models.json"
-ALL = HERE.parent / "all-models.json"
+MODELS = HERE.parent / "models.json.example"
+ALL = HERE.parent / "all-models.json.example"
 
 def main():
     if len(sys.argv) < 2:
