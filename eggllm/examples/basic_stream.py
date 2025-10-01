@@ -28,7 +28,7 @@ def main():
     print("Streaming response:\n")
     for event in llm.stream_chat(messages):
         t = event.get("type")
-        if t == "content_delta":
+        if t == "content_delta" or t == "reasoning_delta":
             print(event["text"], end="", flush=True)
         elif t == "done":
             print("\n\n---\nFinal message:\n", event["message"])
