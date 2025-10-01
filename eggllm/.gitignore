@@ -22,3 +22,6 @@ dist/
 .pytest_cache/
 .coverage*
 htmlcov/
+.env
+*.swp
+*.swo
