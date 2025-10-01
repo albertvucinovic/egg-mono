@@ -27,3 +27,11 @@ Issues = "https://github.com/YOUR_ORG/egg-llm/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["egg_llm*"]
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "pyflakes>=3",
+  "coverage[toml]>=7",
+  "tox>=4",
+  "build>=1",
+]
