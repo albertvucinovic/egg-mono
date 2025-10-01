@@ -73,6 +73,22 @@ class LLMClient:
     def update_all_models(self, provider: str) -> str:
         return self.catalog.update_provider(provider, self.registry.providers_config)
 
+    def update_all_providers(self, providers: Optional[List[str]] = None) -> Dict[str, str]:
+         """Update all-models.json catalogs for multiple providers.
+
+         - If `providers` is None, updates all configured providers (excluding meta keys).
+         - Returns a mapping provider -> result message (success or error/warning).
+         """
+         results: Dict[str, str] = {}
+         if providers is None:
+             providers = [p for p in self.get_providers() if p != "_meta"]
+         for prov in providers:
+             try:
+                 results[prov] = self.update_all_models(prov)
+             except Exception as e:
+                 results[prov] = f"Error: {e}"
+         return results
+
     # Public: chat streaming
     def stream_chat(self,
                     messages: List[Dict[str, Any]],
