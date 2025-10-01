@@ -10,7 +10,7 @@ install:
 	. .venv/bin/activate; pip install -e .[dev]
 
 lint:
-	. .venv/bin/activate; pyflakes egg_llm tests
+	. .venv/bin/activate; pyflakes eggllm tests
 
 pytest:
 	. .venv/bin/activate; pytest -q

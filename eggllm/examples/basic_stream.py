@@ -1,5 +1,5 @@
 """
-Basic streaming example using egg_llm.
+Basic streaming example using eggllm.
 
 Usage:
   export OPENAI_API_KEY=...
@@ -9,7 +9,7 @@ Assumes a models.json is available next to this script or pass a path.
 """
 from pathlib import Path
 import os
-from egg_llm import LLMClient
+from eggllm import LLMClient
 
 HERE = Path(__file__).resolve().parent
 MODELS = HERE.parent / "models.json.example"

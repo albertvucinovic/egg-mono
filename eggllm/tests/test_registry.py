@@ -1,5 +1,5 @@
-from egg_llm.registry import ModelRegistry
-from egg_llm.catalog import AllModelsCatalog
+from eggllm.registry import ModelRegistry
+from eggllm.catalog import AllModelsCatalog
 
 class DummyCatalog:
     def __init__(self, models):

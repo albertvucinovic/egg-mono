@@ -1,6 +1,6 @@
-from egg_llm.client import LLMClient
-from egg_llm.config import load_models_config
-from egg_llm.catalog import AllModelsCatalog
+from eggllm.client import LLMClient
+from eggllm.config import load_models_config
+from eggllm.catalog import AllModelsCatalog
 
 from pathlib import Path
 import json

@@ -1,6 +1,6 @@
-# egg_llm — Lightweight, OpenAI‑compatible LLM Router
+# eggllm — Lightweight, OpenAI‑compatible LLM Router
 
-egg_llm is a small, dependency‑light library for routing chat requests to multiple
+eggllm is a small, dependency‑light library for routing chat requests to multiple
 LLM providers using a single configuration. It borrows the spirit of libraries
 like LiteLLM/Any‑LLM, but is purposely focused on:
 
@@ -42,7 +42,7 @@ pip install requests
 ## File layout
 
 ```
-egg_llm/
+eggllm/
   README.md
   __init__.py
   client.py              # LLMClient (main entry point)
@@ -149,7 +149,7 @@ This works for most OpenAI‑compatible APIs.
 ### Import and construct
 
 ```
-from egg_llm import LLMClient
+from eggllm import LLMClient
 
 llm = LLMClient(models_path="models.json", all_models_path="all-models.json")
 ```
@@ -221,7 +221,7 @@ function call arguments.
 ### Streaming chat
 
 ```
-from egg_llm import LLMClient
+from eggllm import LLMClient
 
 llm = LLMClient("models.json", "all-models.json")
 llm.set_model("OpenAI GPT-4o")
@@ -339,7 +339,7 @@ Wrap calls in try/except if you want to handle errors explicitly.
 
 ## Provider support
 
-egg_llm currently targets OpenAI‑compatible chat endpoints (`/v1/chat/completions`).
+eggllm currently targets OpenAI‑compatible chat endpoints (`/v1/chat/completions`).
 This covers many providers and gateways (OpenAI, OpenRouter, Groq, local proxies, etc.).
 
 Additional adapters for non‑OpenAI APIs (e.g., Anthropic native, Google native)

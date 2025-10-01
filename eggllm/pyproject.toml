@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "egg-llm"
+name = "eggllm"
 version = "0.1.0"
 description = "Lightweight, OpenAI-compatible LLM router library"
 readme = "README.md"
@@ -20,13 +20,13 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_ORG/egg-llm"
-Source = "https://github.com/YOUR_ORG/egg-llm"
-Issues = "https://github.com/YOUR_ORG/egg-llm/issues"
+Homepage = "https://github.com/YOUR_ORG/eggllm"
+Source = "https://github.com/YOUR_ORG/eggllm"
+Issues = "https://github.com/YOUR_ORG/eggllm/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["egg_llm*"]
+include = ["eggllm*"]
 [project.optional-dependencies]
 dev = [
   "pytest>=7",

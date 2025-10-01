@@ -7,7 +7,7 @@ Usage:
 """
 import sys
 from pathlib import Path
-from egg_llm import LLMClient
+from eggllm import LLMClient
 
 HERE = Path(__file__).resolve().parent
 MODELS = HERE.parent / "models.json.example"
