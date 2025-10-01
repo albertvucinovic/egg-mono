@@ -1,0 +1,94 @@
+import json
+import uuid
+from typing import Dict, Any, Optional
+
+import requests
+
+from .base import ProviderAdapter
+
+
+class OpenAICompatAdapter(ProviderAdapter):
+    """Streams OpenAI-compatible SSE responses from /chat/completions endpoints.
+
+    Accumulates tool_calls per-index, stitching id/name/arguments across deltas.
+    """
+
+    def stream(self,
+               url: str,
+               headers: Dict[str, str],
+               payload: Dict[str, Any],
+               timeout: int = 600,
+               session: Optional[requests.Session] = None):
+        sess = session or requests
+        resp = sess.post(url, headers=headers, json=payload, timeout=timeout, stream=True)
+        resp.raise_for_status()
+
+        assistant_text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls_buf: Dict[int, Dict[str, Any]] = {}
+
+        def tool_calls_values():
+            # Preserve insertion order of indices
+            return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
+
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            line_str = line.decode('utf-8', errors='ignore')
+            if not line_str.startswith('data: '):
+                continue
+            data_str = line_str[6:]
+            if data_str == '[DONE]':
+                break
+            try:
+                payload = json.loads(data_str)
+            except Exception:
+                continue
+            delta = (payload.get("choices", [{}])[0] or {}).get("delta", {})
+            if not isinstance(delta, dict):
+                continue
+
+            if (content := delta.get("content")):
+                assistant_text_parts.append(content)
+                yield {"type": "content_delta", "text": content}
+
+            if (reason := delta.get("reasoning_content")):
+                reasoning_parts.append(reason)
+                yield {"type": "reasoning_delta", "text": reason}
+
+            if (tc_chunk := delta.get("tool_calls")):
+                for tc_delta in tc_chunk:
+                    raw_idx = tc_delta.get("index")
+                    idx = raw_idx
+                    if idx is None:
+                        next_i = 0
+                        while next_i in tool_calls_buf:
+                            next_i += 1
+                        idx = next_i
+                    if idx not in tool_calls_buf:
+                        tool_calls_buf[idx] = {
+                            "id": f"call_{uuid.uuid4().hex[:10]}",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    if tc_delta.get("id"):
+                        tool_calls_buf[idx]["id"] = tc_delta["id"]
+                    if f_delta := tc_delta.get("function"):
+                        if n := f_delta.get("name"):
+                            tool_calls_buf[idx]["function"]["name"] += n
+                        if a := f_delta.get("arguments"):
+                            tool_calls_buf[idx]["function"]["arguments"] += a
+                yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
+
+        final_message: Dict[str, Any] = {"role": "assistant"}
+        content = "".join(assistant_text_parts)
+        if content:
+            final_message["content"] = content
+        if tool_calls_buf:
+            final_message["tool_calls"] = tool_calls_values()
+        reasoning = "".join(reasoning_parts)
+        if reasoning.strip():
+            final_message["reasoning_content"] = reasoning
+
+        yield {"type": "done", "message": final_message}
+
