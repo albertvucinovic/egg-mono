@@ -92,3 +92,94 @@ class OpenAICompatAdapter(ProviderAdapter):
 
         yield {"type": "done", "message": final_message}
 
+    async def stream_async(self,
+               url: str,
+               headers: Dict[str, str],
+               payload: Dict[str, Any],
+               timeout: int = 600,
+               session: Optional[Any] = None):
+        """Async streaming using aiohttp when available, falling back to the
+        default thread-bridged async implementation from ProviderAdapter.
+
+        This preserves the same event protocol as stream().
+        """
+        try:
+            import aiohttp
+        except Exception:
+            async for evt in super().stream_async(url, headers, payload, timeout=timeout, session=session):
+                yield evt
+            return
+
+        assistant_text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls_buf: Dict[int, Dict[str, Any]] = {}
+
+        def tool_calls_values():
+            return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
+
+        client_timeout = aiohttp.ClientTimeout(total=timeout) if timeout else aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=client_timeout) as sess:
+            async with sess.post(url, headers=headers, json=payload) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {text}")
+                # Iterate line by line from the SSE stream using readline() for proper delimitation
+                while True:
+                    line = await resp.content.readline()
+                    if not line:
+                        break
+                    line_str = line.decode('utf-8', errors='ignore')
+                    if not line_str.startswith('data: '):
+                        continue
+                    data_str = line_str[6:]
+                    if data_str.strip() == '[DONE]':
+                        break
+                    try:
+                        pj = json.loads(data_str)
+                    except Exception:
+                        continue
+                    delta = (pj.get("choices", [{}])[0] or {}).get("delta", {})
+                    if not isinstance(delta, dict):
+                        continue
+                    if (content := delta.get("content")):
+                        assistant_text_parts.append(content)
+                        yield {"type": "content_delta", "text": content}
+                    if (reason := delta.get("reasoning_content")):
+                        reasoning_parts.append(reason)
+                        yield {"type": "reasoning_delta", "text": reason}
+                    if (tc_chunk := delta.get("tool_calls")):
+                        for tc_delta in tc_chunk:
+                            raw_idx = tc_delta.get("index")
+                            idx = raw_idx
+                            if idx is None:
+                                next_i = 0
+                                while next_i in tool_calls_buf:
+                                    next_i += 1
+                                idx = next_i
+                            if idx not in tool_calls_buf:
+                                tool_calls_buf[idx] = {
+                                    "id": f"call_{uuid.uuid4().hex[:10]}",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            if tc_delta.get("id"):
+                                tool_calls_buf[idx]["id"] = tc_delta["id"]
+                            if f_delta := tc_delta.get("function"):
+                                if n := f_delta.get("name"):
+                                    tool_calls_buf[idx]["function"]["name"] += n
+                                if a := f_delta.get("arguments"):
+                                    tool_calls_buf[idx]["function"]["arguments"] += a
+                        yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
+
+        final_message: Dict[str, Any] = {"role": "assistant"}
+        content = "".join(assistant_text_parts)
+        if content:
+            final_message["content"] = content
+        if tool_calls_buf:
+            final_message["tool_calls"] = tool_calls_values()
+        reasoning = "".join(reasoning_parts)
+        if reasoning.strip():
+            final_message["reasoning_content"] = reasoning
+
+        yield {"type": "done", "message": final_message}
+

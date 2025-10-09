@@ -139,6 +139,61 @@ class LLMClient:
         for evt in self._provider_adapter.stream(base_url, headers, payload, timeout=timeout):
             yield evt
 
+    async def astream_chat(self,
+                    messages: List[Dict[str, Any]],
+                    tools: Optional[List[Dict[str, Any]]] = None,
+                    tool_choice: Optional[str] = "auto",
+                    timeout: int = 600,
+                    extra_headers: Optional[Dict[str, str]] = None):
+        """Async streaming variant of stream_chat().
+
+        This keeps the synchronous API untouched for chat.sh and other callers,
+        while providing an asyncio-friendly interface for eggthreads.
+        """
+        mc = self.registry.get_model_config(self.current_model_key)
+        api_model_name = mc.get("model_name")
+        if not api_model_name:
+            raise ValueError("API model name not found")
+
+        provider_name, base_url, headers = self.current_provider_and_url()
+        if extra_headers:
+            headers = {**headers, **extra_headers}
+
+        def _sanitize(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            sanitized = []
+            keys_to_remove = {"reasoning_content", "model_key", "local_tool"}
+            for m in msgs:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                if role == "tool" and m.get("local_tool"):
+                    continue
+                s = {k: v for k, v in m.items() if k not in keys_to_remove}
+                if s.get("content") is None and "tool_calls" not in s:
+                    s["content"] = ""
+                if s.get("role") == "assistant" and "tool_calls" in s and not s["tool_calls"]:
+                    del s["tool_calls"]
+                sanitized.append(s)
+            return sanitized
+
+        merged_params = self.registry.merge_parameters(self.current_model_key)
+        payload: Dict[str, Any] = {
+            "model": api_model_name,
+            "messages": _sanitize(messages),
+            "stream": True,
+        }
+        if tools is not None:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+        payload.update(merged_params)
+
+        async for evt in self._provider_adapter.stream_async(base_url, headers, payload, timeout=timeout):
+            yield evt
+
+    # Backward-compat alias
+    stream_chat_async = astream_chat
+
     def complete_chat(self,
                       messages: List[Dict[str, Any]],
                       tools: Optional[List[Dict[str, Any]]] = None,
