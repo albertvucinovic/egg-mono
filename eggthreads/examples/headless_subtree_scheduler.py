@@ -141,6 +141,117 @@ def word_count_from_snapshot(db: ThreadsDB, tid: str) -> int:
     return count_words(snap)
 
 
+
+
+
+def word_count_from_events(db: ThreadsDB, tid: str) -> int:
+    """Approximate real-time word count from events:
+    total = words(snapshot) + words(streaming deltas for open invoke) + words(other events since snapshot).
+    We count only user-visible text fields: content/text/reasoning/reason and tool/tool_call text.
+    This avoids counting metadata like model_key, ids, names.
+    """
+    import json as _json
+
+    def _strings_from_payload(payload: dict) -> list[str]:
+        out: list[str] = []
+        if not isinstance(payload, dict):
+            return out
+        # content/reason top-level
+        for k in ('text', 'content', 'reason', 'reasoning'):
+            v = payload.get(k)
+            if isinstance(v, str) and v:
+                out.append(v)
+        # tool streaming outputs
+        tl = payload.get('tool')
+        if isinstance(tl, dict):
+            tv = tl.get('text')
+            if isinstance(tv, str) and tv:
+                out.append(tv)
+        # tool-call streaming arguments
+        tc = payload.get('tool_call')
+        if isinstance(tc, dict):
+            tv = tc.get('text')
+            if isinstance(tv, str) and tv:
+                out.append(tv)
+        return out
+
+    def _count_words_from_payload(payload: dict) -> int:
+        total = 0
+        for s in _strings_from_payload(payload):
+            total += len(s.split())
+        return total
+
+    base = word_count_from_snapshot(db, tid)
+    extra = 0
+
+    # Current open stream: count its deltas (not yet folded into snapshot)
+    open_row = None
+    try:
+        open_row = db.current_open(tid)
+    except Exception:
+        open_row = None
+    open_invoke = (open_row["invoke_id"] if open_row else None)
+
+    if open_invoke:
+        try:
+            cur = db.conn.execute(
+                "SELECT payload_json FROM events WHERE invoke_id=? AND type='stream.delta' ORDER BY event_seq ASC",
+                (open_invoke,),
+            )
+            for r in cur.fetchall():
+                pj = r[0]
+                try:
+                    payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
+                except Exception:
+                    payload = {}
+                extra += _count_words_from_payload(payload)
+        except Exception:
+            pass
+
+    # After-snapshot events: count new words while avoiding obvious double counts
+    last_seq = -1
+    try:
+        th = db.get_thread(tid)
+        if th and isinstance(th.snapshot_last_event_seq, int):
+            last_seq = th.snapshot_last_event_seq
+    except Exception:
+        pass
+
+    try:
+        cur = db.conn.execute(
+            "SELECT type, invoke_id, payload_json FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
+            (tid, last_seq),
+        )
+        for t, inv, pj in cur.fetchall():
+            try:
+                payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
+            except Exception:
+                payload = {}
+            # Skip stream.delta for the currently open invoke (already counted above)
+            if t == 'stream.delta' and open_invoke and inv == open_invoke:
+                continue
+            if t == 'stream.delta':
+                extra += _count_words_from_payload(payload)
+            elif t == 'msg.create':
+                # Count user/tool messages; skip assistant content to avoid doubling deltas
+                role = payload.get('role')
+                if role in ('user', 'tool'):
+                    content = payload.get('content')
+                    if isinstance(content, str) and content:
+                        extra += len(content.split())
+                    # For tool messages we only count content above
+                elif role == 'assistant':
+                    # Only count reasoning text if present (assistant reasoning may not be fully streamed)
+                    reas = payload.get('reasoning')
+                    if isinstance(reas, str) and reas:
+                        extra += len(reas.split())
+                # else: ignore other roles
+            # ignore other event types
+    except Exception:
+        pass
+
+    return base + extra
+
 def list_active_threads(db: ThreadsDB, subtree: List[str]) -> List[str]:
     active: List[str] = []
     for tid in subtree:
@@ -181,7 +292,7 @@ async def periodic_reporter(db: ThreadsDB, root_id: str, interval_sec: float = 2
                     print(f"[status] failed to snapshot {tid[-8:]}: {e}")
             
             # Now do the report
-            counts = {tid: word_count_from_snapshot(db, tid) for tid in children}
+            counts = {tid: word_count_from_events(db, tid) for tid in children}
             active_summary = ", ".join(f"{tid[-8:]}({counts.get(tid,0)})" for tid in active) or "-"
             total_words = sum(counts.values())
             print(f"[status] active {len(active)}/{len(children)} | total_words={total_words} | active: {active_summary}")

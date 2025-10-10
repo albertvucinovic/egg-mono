@@ -497,11 +497,16 @@ class ThreadRunner:
                 def _extract_short(text: str) -> Optional[str]:
                     if not isinstance(text, str):
                         return None
-                    start = text.find('<short_recap>')
-                    end = text.find('</short_recap>')
-                    if start != -1 and end != -1 and end >= start+13:
-                        return text[start+13:end].strip()
-                    return None
+                    end = text.rfind('</short_recap')
+                    if end == -1:
+                      return None
+                    start = text.rfind('<short_recap>', 0, end)
+                    if start == -1:
+                      return None
+                    inner_start = start+len('<short_recap>')
+                    if(end<inner_start):
+                      return None
+                    return text[inner_start:end].strip()
                 msgs = snap.get("messages", []) if isinstance(snap, dict) else []
                 last_assist = None
                 for m in reversed(msgs):
