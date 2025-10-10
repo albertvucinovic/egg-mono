@@ -7,49 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from pathlib import Path
-
-# Try to import eggllm normally; if unavailable, add likely local paths, else provide a stub client.
-try:
-    from eggllm import LLMClient  # type: ignore
-except Exception:
-    import sys as _sys
-    from pathlib import Path as _Path
-    here = _Path(__file__).resolve()
-    candidates = [
-        here.parents[3] / 'eggllm',  # ..../ai/eggllm
-        here.parents[2] / 'eggllm',  # ..../chat.sh/eggllm (if present)
-    ]
-    for c in candidates:
-        try:
-            if (c / 'eggllm').exists() or (c / 'pyproject.toml').exists():
-                _sys.path.insert(0, str(c))
-                break
-        except Exception:
-            pass
-    try:
-        from eggllm import LLMClient  # type: ignore
-    except Exception:
-        # Fallback stub that echoes the last user message, useful for offline dev/testing
-        class LLMClient:  # type: ignore
-            def __init__(self, models_path: str | None = None, all_models_path: str | None = None):
-                self.model = 'stub'
-
-            def set_model(self, key: str):
-                self.model = key
-
-            def stream_chat(self, messages, tools=None, tool_choice=None):
-                # find last user content
-                last_user = ''
-                for m in reversed(messages or []):
-                    if m.get('role') == 'user':
-                        last_user = m.get('content') or ''
-                        break
-                text = f"(stub:{self.model}) " + (last_user or 'Hello')
-                # produce a few deltas
-                for i in range(0, len(text), 10):
-                    yield {"type": "content_delta", "text": text[i:i+10]}
-                yield {"type": "done", "message": {"content": text, "tool_calls": []}}
-
+from eggllm import LLMClient
 from .db import ThreadsDB
 from .tools import ToolRegistry, create_default_tools
 
@@ -473,6 +431,7 @@ class ThreadRunner:
                     pass
                 self.db.append_event(event_id=os.urandom(10).hex(), thread_id=self.thread_id, type_='msg.create',
                                      msg_id=os.urandom(10).hex(), payload=err_payload)
+                print(f"LLM error: {e}")
             except Exception:
                 pass
         finally:
@@ -572,6 +531,7 @@ class SubtreeScheduler:
         self.db = db
         self.root = root_thread_id
         self.llm = llm or LLMClient(models_path=models_path or "models.json", all_models_path=all_models_path or "all-models.json")
+        print(f"LLMClient type: {type(self.llm)} module: {type(self.llm).__module__} has astream_chat: {hasattr(self.llm, 'astream_chat')}")
         self.owner = owner or os.environ.get("USER") or "scheduler"
         self.cfg = config or RunnerConfig()
         self.tools = tools or create_default_tools()
@@ -625,7 +585,6 @@ class SubtreeScheduler:
                     if self._is_thread_runnable(tid):
                         running_threads.add(tid)
                         asyncio.create_task(drive(tid))
-            
             await asyncio.sleep(poll_sec)
 
     def _is_thread_runnable(self, tid: str) -> bool:

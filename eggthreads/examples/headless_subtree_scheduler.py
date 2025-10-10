@@ -22,7 +22,7 @@ from typing import List, Optional
 
 # Allow running this file directly: add project root to sys.path
 try:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 except Exception:
     pass
 
@@ -42,19 +42,6 @@ def _env_path(name: str, default: str) -> str:
     v = os.environ.get(name)
     if v and isinstance(v, str) and v.strip():
         return v.strip()
-    # Try relative to project root
-    project_root = Path(__file__).resolve().parents[2]
-    if name == "EGG_MODELS_PATH":
-        cand = project_root / "egg" / "models.json"
-        if cand.exists():
-            return str(cand)
-        cand = project_root / "models.json"
-        if cand.exists():
-            return str(cand)
-    elif name == "EGG_ALL_MODELS_PATH":
-        cand = project_root / "egg" / "all-models.json"
-        if cand.exists():
-            return str(cand)
     return default
 
 
@@ -231,8 +218,9 @@ async def main():
     db.init_schema()
 
     system_prompt = load_system_prompt()
-    models_path = _env_path("EGG_MODELS_PATH", "egg/models.json")
-    all_models_path = _env_path("EGG_ALL_MODELS_PATH", "egg/all-models.json")
+    models_path = _env_path("EGG_MODELS_PATH", "models.json")
+    all_models_path = _env_path("EGG_ALL_MODELS_PATH", "all-models.json")
+    print(f"models_path={models_path}")
 
     # Create root and 10 children with tasks
     root_id = create_root_thread(db, name="Batch Root")
@@ -246,12 +234,13 @@ async def main():
 
     # Start a scheduler for the entire subtree rooted at 'root_id'
     max_concurrent = int(os.environ.get("MAX_CONCURRENT", "8") or "8")
-    from eggthreads.eggthreads.runner import RunnerConfig  # type: ignore
+    from eggthreads.runner import RunnerConfig  # type: ignore
     cfg = RunnerConfig(max_concurrent_threads=max_concurrent)
     scheduler = SubtreeScheduler(db, root_thread_id=root_id, config=cfg, models_path=models_path, all_models_path=all_models_path)
 
     sched_task = asyncio.create_task(scheduler.run_forever(poll_sec=0.05))
     report_task = asyncio.create_task(periodic_reporter(db, root_id, 2.0))
+    print("Created tasks!")
 
     # Wait until subtree becomes idle (no runnable threads)
     await wait_subtree_idle(db, root_id)
