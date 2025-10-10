@@ -25,3 +25,4 @@ htmlcov/
 .env
 *.swp
 *.swo
+.egg
