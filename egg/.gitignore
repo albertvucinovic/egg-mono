@@ -2,3 +2,8 @@
 *.swp
 *.swn
 .env
+.egg/
+doc/
+temp/
+venv/
+
