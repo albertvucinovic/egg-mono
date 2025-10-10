@@ -335,7 +335,7 @@ async def main():
 
     # Create root and 10 children with tasks
     root_id = create_root_thread(db, name="Batch Root")
-    num_tasks=4
+    num_tasks=20
     tasks = [f"Write a story named story_#{i} into a file story_#{i}.md and include <short_recap>...</short_recap>." for i in range(1, num_tasks)]
 
     for i, task in enumerate(tasks, start=1):
