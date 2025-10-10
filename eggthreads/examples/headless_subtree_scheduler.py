@@ -178,11 +178,11 @@ async def periodic_reporter(db: ThreadsDB, root_id: str, interval_sec: float = 2
                 try:
                     create_snapshot(db, tid)
                 except Exception as e:
-                    print(f"[status] failed to snapshot {tid[:8]}: {e}")
+                    print(f"[status] failed to snapshot {tid[-8:]}: {e}")
             
             # Now do the report
             counts = {tid: word_count_from_snapshot(db, tid) for tid in children}
-            active_summary = ", ".join(f"{tid[:8]}({counts.get(tid,0)})" for tid in active) or "-"
+            active_summary = ", ".join(f"{tid[-8:]}({counts.get(tid,0)})" for tid in active) or "-"
             total_words = sum(counts.values())
             print(f"[status] active {len(active)}/{len(children)} | total_words={total_words} | active: {active_summary}")
             
@@ -224,7 +224,8 @@ async def main():
 
     # Create root and 10 children with tasks
     root_id = create_root_thread(db, name="Batch Root")
-    tasks = [f"Write a story named story_#{i} into a file story_#{i}.md and include <short_recap>...</short_recap>." for i in range(1, 11)]
+    num_tasks=4
+    tasks = [f"Write a story named story_#{i} into a file story_#{i}.md and include <short_recap>...</short_recap>." for i in range(1, num_tasks)]
 
     for i, task in enumerate(tasks, start=1):
         child = create_child_thread(db, root_id, name=f"agent-{i:03d}")
@@ -264,7 +265,7 @@ async def main():
         row = db.get_thread(tid)
         if row and row.thread_id != root_id:
             recap = (row.short_recap or "").strip()
-            print(f"{tid[:8]}: {recap or '(no short_recap found)'}")
+            print(f"{tid[-8:]}: {recap or '(no short_recap found)'}")
 
 
 if __name__ == "__main__":
