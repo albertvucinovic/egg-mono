@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.text import Text
+from rich.markdown import Markdown
+from rich.live import Live
+
+# Prompt session for robust input while we use Rich for output/streaming
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'eggthreads'))
+from eggthreads import (
+    ThreadsDB,
+    SubtreeScheduler,
+    create_root_thread,
+    create_child_thread,
+    append_message,
+    create_snapshot,
+    interrupt_thread,
+    pause_thread,
+    resume_thread,
+)
+from eggthreads.event_watcher import EventWatcher
+
+
+MODELS_PATH = Path(__file__).resolve().parent / 'models.json'
+ALL_MODELS_PATH = Path(__file__).resolve().parent / 'all-models.json'
+SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / 'systemPrompt'
+
+# For model listing/completion via eggllm (no network here)
+import sys as _sys2
+# Ensure local sibling libraries are importable
+_sys2.path.insert(0, str(Path(__file__).resolve().parent.parent / 'eggllm'))
+try:
+    from eggllm import LLMClient  # type: ignore
+except Exception:
+    LLMClient = None  # type: ignore
+
+class _ModelCompleter(Completer):
+    def __init__(self, llm: "LLMClient | None"):
+        self.llm = llm
+
+    def _normalize(self, s: str) -> str:
+        import re as _re
+        if not s:
+            return ""
+        ns = _re.sub(r"[^0-9a-z]+", " ", s.lower()).strip()
+        ns = _re.sub(r"\s+", " ", ns)
+        return ns
+
+    def get_completions(self, document, complete_event):  # type: ignore
+        text = getattr(document, 'text_before_cursor', '')
+        if not isinstance(text, str) or not text.startswith('/model '):
+            return
+        prefix = text[len('/model '):]
+        pref_norm = self._normalize(prefix)
+        llm = self.llm
+        if llm is None:
+            return
+        seen = set()
+
+        # Explicit all: path uses catalog suggestions
+        if prefix.lower().startswith('all:'):
+            try:
+                for s in llm.catalog.get_all_models_suggestions(prefix):
+                    yield Completion(s, start_position=-len(prefix))
+            except Exception:
+                pass
+            return
+
+        # Configured display names
+        try:
+            display_names = list(llm.registry.models_config.keys())
+        except Exception:
+            display_names = []
+        for name in sorted(display_names):
+            if pref_norm == "" or pref_norm in self._normalize(name):
+                if name not in seen:
+                    seen.add(name)
+                    yield Completion(name, start_position=-len(prefix))
+
+        # provider:name and provider:alias
+        try:
+            items = list((llm.registry.models_config or {}).items())
+        except Exception:
+            items = []
+        for display, cfg in items:
+            prov = (cfg or {}).get('provider', 'unknown')
+            prov_pref = f"{prov}:{display}"
+            if pref_norm == "" or pref_norm in self._normalize(prov_pref):
+                if prov_pref not in seen:
+                    seen.add(prov_pref)
+                    yield Completion(prov_pref, start_position=-len(prefix))
+            for a in (cfg or {}).get('alias', []) or []:
+                if not isinstance(a, str):
+                    continue
+                prov_alias = f"{prov}:{a}"
+                if pref_norm == "" or pref_norm in self._normalize(prov_alias):
+                    if prov_alias not in seen:
+                        seen.add(prov_alias)
+                        yield Completion(prov_alias, start_position=-len(prefix))
+
+        # Plain aliases
+        for display, cfg in items:
+            for a in (cfg or {}).get('alias', []) or []:
+                if isinstance(a, str) and (pref_norm == "" or pref_norm in self._normalize(a)):
+                    if a not in seen:
+                        seen.add(a)
+                        yield Completion(a, start_position=-len(prefix))
+
+        # Search cached provider-wide catalogs to surface all:prov:model
+        if pref_norm:
+            try:
+                for prov in (llm.get_providers() or []):
+                    mids = llm.catalog.get_all_models_for_provider(prov) or []
+                    for mid in mids:
+                        cand = f"all:{prov}:{mid}"
+                        if cand in seen:
+                            continue
+                        if pref_norm in self._normalize(mid) or pref_norm in self._normalize(cand):
+                            seen.add(cand)
+                            yield Completion(cand, start_position=-len(prefix))
+            except Exception:
+                pass
+
+
+def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
+    role = m.get('role')
+    content = (m.get('content') or '').strip()
+    if not content:
+        return None
+    model_key = m.get('model_key') or ''
+    # Promote error-looking messages for visibility
+    if role == 'system' and isinstance(content, str) and content.lower().startswith('llm error:'):
+        title = '[bold red]Error[/bold red]'
+        if model_key:
+            title += f" [dim](model: {model_key})[/dim]"
+        return Panel(Text(content, no_wrap=False, overflow='fold'), title=title, border_style='red')
+    if role == 'user':
+        title = "[bold green]User[/bold green]"
+        if model_key:
+            title += f" [dim](model: {model_key})[/dim]"
+        return Panel(Text(content, no_wrap=False, overflow='fold'), title=title, border_style='green')
+    elif role == 'assistant':
+        title = '[bold cyan]Assistant[/bold cyan]'
+        if model_key:
+            title += f" [dim](model: {model_key})[/dim]"
+        border = 'cyan'
+        # Markdown for assistant if it looks like markdown
+        if _looks_markdown(content):
+            renderable = Markdown(content)
+        else:
+            renderable = Text(content, no_wrap=False, overflow='fold')
+    elif role == 'tool':
+        name = m.get('name') or 'Tool'
+        title = f'[bold yellow]{name}[/bold yellow]'
+        if model_key:
+            title += f" [dim](model: {model_key})[/dim]"
+        border = 'yellow'
+        renderable = Text(content, no_wrap=False, overflow='fold')
+    else:
+        title = role or 'Message'
+        if model_key:
+            title += f" [dim](model: {model_key})[/dim]"
+        border = 'blue'
+        renderable = Text(content, no_wrap=False, overflow='fold')
+    return Panel(renderable, title=title, border_style=border)
+
+
+def _get_system_prompt() -> str:
+    try:
+        with open(SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception:
+        return "You are a helpful assistant."
+
+
+def _looks_markdown(content: str) -> bool:
+    if not content:
+        return False
+    indicators = ['```', '# ', '## ', '### ', '* ', '- ', '> ', '`']
+    hits = sum(1 for i in indicators if i in content)
+    if hits >= 2:
+        return True
+    if content.count('\n') >= 2 and hits >= 1:
+        return True
+    return False
+
+
+def _snapshot_messages(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
+    th = db.get_thread(thread_id)
+    if not th or not th.snapshot_json:
+        return []
+    try:
+        snap = json.loads(th.snapshot_json)
+        msgs = snap.get('messages', [])
+        return msgs
+    except Exception:
+        return []
+
+
+def _get_subtree(db: ThreadsDB, root_id: str) -> List[str]:
+    # BFS to get subtree threads
+    out: List[str] = []
+    q = [root_id]
+    seen = set()
+    while q:
+        t = q.pop(0)
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        for row in db.conn.execute("SELECT child_id FROM children WHERE parent_id=?", (t,)):
+            q.append(row[0])
+    return out[1:]  # exclude root
+
+
+def _render_static_view(db: ThreadsDB, thread_id: str) -> None:
+    console = Console()
+    msgs = _snapshot_messages(db, thread_id)
+    if not msgs:
+        console.print(Panel('[dim]No messages yet[/dim]', border_style='blue'))
+        return
+    for m in msgs[-5:]:
+        panel = _render_message_panel(m)
+        if panel:
+            console.print(panel)
+
+
+async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
+    console = Console()
+    # Start watching from last persisted snapshot event to capture the new turn's stream.open and deltas
+    try:
+        th = db.get_thread(thread_id)
+        start_after = int(th.snapshot_last_event_seq) if th and isinstance(th.snapshot_last_event_seq, int) else -1
+    except Exception:
+        start_after = -1
+    ew = EventWatcher(db, thread_id, after_seq=start_after, poll_sec=0.05)
+    live_content = ''
+    live_reason = ''
+    active_invoke: Optional[str] = None
+    # tool streaming buffers: name -> text
+    tool_stream: Dict[str, str] = {}
+    # tool-call args streaming panels: maintain ordered panels to avoid reusing old panel
+    tc_panels_order: List[str] = []  # ordered panel keys
+    tc_text: Dict[str, str] = {}     # panel_key -> accumulated text
+    tc_map: Dict[str, List[str]] = {}  # raw_key (id or name) -> list of panel_keys created for that key
+    # any tool_call or tool output seen in this invoke (debug) – removed (unused)
+
+    def _live_group() -> Group:
+        panels = []
+        # Only show streaming panels here; static panels are printed before entering Live
+        # Determine model from the latest stream events (scan a few recent events)
+        model_label = ''
+        try:
+            # find the most recent model_key from stream events for this invoke
+            for e in reversed(batch[-10:] if batch else []):
+                try:
+                    pj = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+                except Exception:
+                    pj = {}
+                mk = pj.get('model_key')
+                if isinstance(mk, str) and mk.strip():
+                    model_label = mk.strip()
+                    break
+        except Exception:
+            model_label = ''
+
+        if live_reason.strip():
+            title = 'Reasoning (streaming)'
+            if model_label:
+                title += f" [dim](model: {model_label})[/dim]"
+            panels.append(Panel(Text(live_reason, no_wrap=False, overflow='fold'), title=title, border_style='magenta'))
+        # show tool-call arguments panels in creation order
+        for pkey in tc_panels_order:
+            delta = tc_text.get(pkey, '').strip()
+            if delta:
+                title = f'Tool Call Args: {pkey}'
+                if model_label:
+                    title += f" [dim](model: {model_label})[/dim]"
+                panels.append(Panel(Text(delta, no_wrap=False, overflow='fold'), title=title, border_style='yellow'))
+        for name, txt in tool_stream.items():
+            if txt.strip():
+                title = f'Tool: {name} (streaming)'
+                if model_label:
+                    title += f" [dim](model: {model_label})[/dim]"
+                panels.append(Panel(Text(txt, no_wrap=False, overflow='fold'), title=title, border_style='yellow'))
+        if live_content.strip():
+            title = 'Assistant (streaming)'
+            if model_label:
+                title += f" [dim](model: {model_label})[/dim]"
+            panels.append(Panel(Text(live_content, no_wrap=False, overflow='fold'), title=title, border_style='cyan'))
+        return Group(*panels) if panels else Group(Panel('[dim]No messages yet[/dim]', border_style='blue'))
+
+    # In-place streaming
+    with Live(console=console, auto_refresh=False, vertical_overflow='visible') as live:
+        live.update(_live_group(), refresh=True)
+        while True:
+            updated = False
+            batch = []
+            async for b in ew.aiter():
+                batch = b
+                break  # take one batch per loop
+            for e in batch:
+                t = e['type']
+                if t == 'stream.open':
+                    active_invoke = e['invoke_id']
+                    live_content = ''
+                    live_reason = ''
+                    tool_stream.clear()
+                    tc_panels_order.clear()
+                    tc_text.clear()
+                    tc_map.clear()
+                    # reset any per-invoke trackers if needed
+                    updated = True
+                elif t == 'stream.delta' and active_invoke and e['invoke_id'] == active_invoke:
+                    payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+                    txt = payload.get('text') or payload.get('delta') or payload.get('content')
+                    if isinstance(txt, str) and txt:
+                        live_content += txt
+                        updated = True
+                    rs = payload.get('reason')
+                    if isinstance(rs, str) and rs:
+                        live_reason += rs
+                        updated = True
+                    tl = payload.get('tool')
+                    if isinstance(tl, dict):
+                        nm = tl.get('name') or 'tool'
+                        tool_stream[nm] = tool_stream.get(nm, '') + (tl.get('text') or '')
+                        updated = True
+                    tcd = payload.get('tool_call')
+                    if isinstance(tcd, dict):
+                        raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
+                        frag = tcd.get('text') or tcd.get('arguments_delta') or ''
+                        if frag is None:
+                            frag = ''
+                        if isinstance(frag, str) and frag:
+                            # determine current panel for this raw_key
+                            existing_keys = tc_map.get(raw_key, [])
+                            current_pkey = existing_keys[-1] if existing_keys else None
+                            # start a new panel if no current panel
+                            if not current_pkey:
+                                new_pkey = f"{raw_key}-{len(tc_panels_order)}"
+                                tc_panels_order.append(new_pkey)
+                                tc_text[new_pkey] = ''
+                                tc_map.setdefault(raw_key, []).append(new_pkey)
+                                current_pkey = new_pkey
+                            # append text (assume incremental deltas)
+                            tc_text[current_pkey] += frag
+                            updated = True
+                elif t == 'stream.close' and active_invoke and e['invoke_id'] == active_invoke:
+                    active_invoke = None
+                    updated = True
+                    # finalize this invoke's live display and return to caller
+                    live.update(_live_group(), refresh=True)
+                    return
+            if updated:
+                live.update(_live_group(), refresh=True)
+            # If no new events, sleep briefly before next poll
+            if not batch:
+                await asyncio.sleep(0.05)
+
+
+async def run_cli():
+    console = Console()
+    db = ThreadsDB()
+    db.init_schema()
+
+    system_content = _get_system_prompt()
+
+    root = create_root_thread(db, name='Root')
+    append_message(db, root, 'system', system_content)
+    create_snapshot(db, root)
+    current_thread = root
+
+    # local scheduler (start after first prompt to avoid race with initial render)
+    scheduler = SubtreeScheduler(db, root_thread_id=root, models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
+
+    # prompt
+    def _current_model_for_thread(tid: str) -> Optional[str]:
+        # Scan recent msg.create events for a model_key
+        try:
+            rows = db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
+                (tid,)
+            ).fetchall()
+            for r in rows:
+                try:
+                    pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
+                except Exception:
+                    pj = {}
+                mk = pj.get('model_key')
+                if isinstance(mk, str) and mk.strip():
+                    return mk.strip()
+        except Exception:
+            pass
+        th = db.get_thread(tid)
+        return th.initial_model_key if th else None
+
+    def prompt_message():
+        mk = _current_model_for_thread(current_thread) or 'default'
+        return f"You & {mk}: "
+
+    try:
+        llm_for_completion = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH) if LLMClient else None
+    except Exception:
+        llm_for_completion = None
+
+    session = PromptSession(
+        message=prompt_message,
+        auto_suggest=AutoSuggestFromHistory(),
+        completer=_ModelCompleter(llm_for_completion),
+    )
+    kb = KeyBindings()
+
+    @kb.add('c-c')
+    def _(event):
+        try:
+            interrupt_thread(db, current_thread)
+        except Exception:
+            pass
+        event.app.invalidate()
+
+    session.key_bindings = kb
+
+    console.print(Panel('Started chat. Type /help for commands.', border_style='blue'))
+
+    while True:
+        # Start scheduler lazily on first loop iteration (guard with attribute)
+        if not getattr(run_cli, '_sched_started', False):
+            asyncio.create_task(scheduler.run_forever())
+            setattr(run_cli, '_sched_started', True)
+
+        try:
+            user_input = (await session.prompt_async()).strip()
+        except KeyboardInterrupt:
+            break
+        except EOFError:
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.startswith('/'):
+            parts = user_input[1:].split(None, 1)
+            cmd = parts[0]
+            arg = parts[1] if len(parts) > 1 else ''
+            if cmd == 'help':
+                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /quit')
+            elif cmd == 'model':
+                if arg:
+                    db.append_event(event_id=os.urandom(10).hex(), thread_id=current_thread, type_='msg.create',
+                                    msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{arg}]', 'model_key': arg})
+                    create_snapshot(db, current_thread)
+                else:
+                    # Pretty print available models grouped by provider
+                    try:
+                        llm = llm_for_completion
+                        if not llm:
+                            console.print('Models not available (llm client not initialized).')
+                        else:
+                            by_provider: Dict[str, List[str]] = {}
+                            for name, cfg in (llm.registry.models_config or {}).items():
+                                prov = cfg.get('provider', 'unknown')
+                                by_provider.setdefault(prov, []).append(name)
+                            lines = []
+                            for prov in sorted(by_provider.keys()):
+                                lines.append(f"{prov}:")
+                                for m in sorted(by_provider[prov]):
+                                    lines.append(f"  - {m}")
+                            lines.append("\nTip: type 'all:' to see full provider catalogs (if downloaded). Use 'all:provider:model'.")
+                            console.print("[bold]Available models (by provider):[/bold]\n" + "\n".join(lines))
+                    except Exception as e:
+                        console.print(f"[red]Error listing models: {e}[/red]")
+            elif cmd == 'pause':
+                pause_thread(db, current_thread)
+            elif cmd == 'resume':
+                resume_thread(db, current_thread)
+            elif cmd == 'spawn':
+                child = create_child_thread(db, current_thread, name='spawn')
+                append_message(db, child, 'system', system_content)
+                append_message(db, child, 'user', arg or 'Spawned task')
+                create_snapshot(db, child)
+            elif cmd == 'child':
+                patt = (arg or '').lower()
+                cur = db.conn.execute(
+                    "SELECT c.child_id, t.name, t.short_recap FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=?",
+                    (current_thread,)
+                )
+                candidates: List[str] = []
+                for r in cur.fetchall():
+                    name, recap = (r[1] or ''), (r[2] or '')
+                    if not patt or patt in (name + ' ' + recap).lower():
+                        candidates.append(r[0])
+                if candidates:
+                    current_thread = candidates[0]
+                else:
+                    console.print('No matching child.')
+            elif cmd == 'parent':
+                row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (current_thread,)).fetchone()
+                if row and row[0]:
+                    current_thread = row[0]
+                else:
+                    console.print('Already at root or no parent found.')
+            elif cmd == 'children':
+                sub = _get_subtree(db, current_thread)
+                if sub:
+                    for tid in sub:
+                        th = db.get_thread(tid)
+                        status = th.status if th else 'unknown'
+                        recap = th.short_recap if th and th.short_recap else 'No recap'
+                        # show last known model for each thread
+                        mk = _current_model_for_thread(tid) or 'default'
+                        console.print(f'{tid[:8]}: {status} - {recap}  [model: {mk}]')
+                else:
+                    console.print('No subthreads.')
+            elif cmd == 'updateAllModels':
+                provider = (arg or '').strip()
+                if not provider:
+                    console.print('Usage: /updateAllModels <provider>')
+                else:
+                    # Defer to eggllm catalog updater via a lightweight LLMClient
+                    try:
+                        if not LLMClient:
+                            raise RuntimeError('eggllm not available')
+                        llm_tmp = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
+                        res = llm_tmp.update_all_models(provider)
+                        console.print(Panel(res, border_style='cyan', title='Update All Models'))
+                    except Exception as e:
+                        console.print(Panel(f'Error: {e}', border_style='red', title='Update All Models'))
+            elif cmd == 'quit':
+                break
+            else:
+                console.print('Unknown command')
+            continue
+
+        # Normal user message
+        append_message(db, current_thread, 'user', user_input)
+        create_snapshot(db, current_thread)
+        # Stream response synchronously, continuing until no more pending tool continuations
+        while True:
+            try:
+                await _stream_thread(db, current_thread)
+            except KeyboardInterrupt:
+                try:
+                    interrupt_thread(db, current_thread)
+                except Exception:
+                    pass
+                break  # Break out of while on interrupt
+            # Check if we need to continue
+            msgs = _snapshot_messages(db, current_thread)
+            if not msgs:
+                break
+            last = msgs[-1]
+            role = last.get('role')
+            # Continue automatically if tool execution just happened or assistant had tool_calls
+            if role == 'tool' or (role == 'assistant' and last.get('tool_calls')):
+                continue
+            break
+
+if __name__ == '__main__':
+    asyncio.run(run_cli())
