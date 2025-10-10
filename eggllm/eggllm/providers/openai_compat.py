@@ -1,5 +1,4 @@
 import json
-import uuid
 from typing import Dict, Any, Optional
 
 import requests
@@ -66,8 +65,9 @@ class OpenAICompatAdapter(ProviderAdapter):
                             next_i += 1
                         idx = next_i
                     if idx not in tool_calls_buf:
+                        # Defer to provider-sent id; do not invent our own to avoid mismatch on subsequent tool results
                         tool_calls_buf[idx] = {
-                            "id": f"call_{uuid.uuid4().hex[:10]}",
+                            "id": "",
                             "type": "function",
                             "function": {"name": "", "arguments": ""},
                         }
@@ -158,7 +158,7 @@ class OpenAICompatAdapter(ProviderAdapter):
                                 idx = next_i
                             if idx not in tool_calls_buf:
                                 tool_calls_buf[idx] = {
-                                    "id": f"call_{uuid.uuid4().hex[:10]}",
+                                    "id": "",
                                     "type": "function",
                                     "function": {"name": "", "arguments": ""},
                                 }
