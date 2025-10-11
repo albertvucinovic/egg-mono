@@ -139,30 +139,62 @@ class _ModelCompleter(Completer):
 def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
     role = m.get('role')
     content = (m.get('content') or '').strip()
-    if not content:
-        return None
     model_key = m.get('model_key') or ''
+
     # Promote error-looking messages for visibility
     if role == 'system' and isinstance(content, str) and content.lower().startswith('llm error:'):
         title = '[bold red]Error[/bold red]'
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
         return Panel(Text(content, no_wrap=False, overflow='fold'), title=title, border_style='red')
+
     if role == 'user':
         title = "[bold green]User[/bold green]"
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
-        return Panel(Text(content, no_wrap=False, overflow='fold'), title=title, border_style='green')
+        body = content if content else ''
+        return Panel(Text(body, no_wrap=False, overflow='fold'), title=title, border_style='green')
+
     elif role == 'assistant':
         title = '[bold cyan]Assistant[/bold cyan]'
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
         border = 'cyan'
+        # If no visible content but tool_calls/reasoning exist, render a helpful summary
+        if not content:
+            pieces: List[str] = []
+            reas = m.get('reasoning') or m.get('reasoning_content')
+            if isinstance(reas, str) and reas.strip():
+                pieces.append("Reasoning:\n" + reas.strip())
+            tcs = m.get('tool_calls')
+            if isinstance(tcs, list) and tcs:
+                lines: List[str] = []
+                for tc in tcs:
+                    f = (tc or {}).get('function') or {}
+                    name = f.get('name') or (tc or {}).get('name') or 'function'
+                    args = f.get('arguments') or (tc or {}).get('arguments')
+                    if isinstance(args, (dict, list)):
+                        try:
+                            import json as _json
+                            args_str = _json.dumps(args, ensure_ascii=False)
+                        except Exception:
+                            args_str = str(args)
+                    else:
+                        args_str = str(args or '')
+                    if len(args_str) > 160:
+                        args_str = args_str[:160] + '…'
+                    lines.append(f"- {name}({args_str})")
+                if lines:
+                    pieces.append("Tool calls:\n" + "\n".join(lines))
+            if not pieces:
+                return None
+            content = "\n\n".join(pieces)
         # Markdown for assistant if it looks like markdown
         if _looks_markdown(content):
             renderable = Markdown(content)
         else:
             renderable = Text(content, no_wrap=False, overflow='fold')
+
     elif role == 'tool':
         name = m.get('name') or 'Tool'
         title = f'[bold yellow]{name}[/bold yellow]'
@@ -170,12 +202,14 @@ def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
             title += f" [dim](model: {model_key})[/dim]"
         border = 'yellow'
         renderable = Text(content, no_wrap=False, overflow='fold')
+
     else:
         title = role or 'Message'
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
         border = 'blue'
         renderable = Text(content, no_wrap=False, overflow='fold')
+
     return Panel(renderable, title=title, border_style=border)
 
 
@@ -233,7 +267,8 @@ def _render_static_view(db: ThreadsDB, thread_id: str) -> None:
     if not msgs:
         console.print(Panel('[dim]No messages yet[/dim]', border_style='blue'))
         return
-    for m in msgs[-5:]:
+    # Show a generous slice of recent history so switching threads gives context
+    for m in msgs[-50:]:
         panel = _render_message_panel(m)
         if panel:
             console.print(panel)
@@ -517,7 +552,7 @@ async def run_cli():
             cmd = parts[0]
             arg = parts[1] if len(parts) > 1 else ''
             if cmd == 'help':
-                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /quit')
+                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /quit')
             elif cmd == 'model':
                 if arg:
                     db.append_event(event_id=os.urandom(10).hex(), thread_id=current_thread, type_='msg.create',
@@ -552,6 +587,7 @@ async def run_cli():
                 append_message(db, child, 'system', system_content)
                 append_message(db, child, 'user', arg or 'Spawned task')
                 create_snapshot(db, child)
+                console.print(Panel(f"Spawned thread: {child}", border_style='green'))
             elif cmd == 'child':
                 patt = (arg or '').lower()
                 cur = db.conn.execute(
@@ -589,6 +625,71 @@ async def run_cli():
                         console.print(f'{tid}: {status} - {recap}  [model: {mk}]')
                 else:
                     console.print('No subthreads.')
+            elif cmd == 'threads':
+                try:
+                    cur = db.conn.execute("SELECT thread_id, name, short_recap, status, depth FROM threads ORDER BY created_at ASC")
+                    rows = cur.fetchall()
+                    if not rows:
+                        console.print('No threads found.')
+                    else:
+                        console.print('[bold]Threads:[/bold]')
+                        for r in rows:
+                            tid, name, recap, status, depth = r[0], (r[1] or ''), (r[2] or ''), (r[3] or 'active'), int(r[4] or 0)
+                            mk = _current_model_for_thread(tid) or 'default'
+                            label = name or recap or 'Untitled'
+                            console.print(f"{tid}  depth={depth}  status={status}  [model: {mk}]  name='{label}'")
+                except Exception as e:
+                    console.print(f"Error listing threads: {e}")
+            elif cmd == 'thread':
+                sel = (arg or '').strip()
+                if not sel:
+                    th = db.get_thread(current_thread)
+                    console.print(f"Current thread: {current_thread} name='{(th.name if th else '') or ''}'")
+                else:
+                    try:
+                        # Load all threads to robustly match selector
+                        cur = db.conn.execute("SELECT thread_id, name, short_recap, created_at FROM threads")
+                        matches: List[str] = []
+                        sel_l = sel.lower()
+                        rows = cur.fetchall()
+                        # Priority 1: exact id
+                        for r in rows:
+                            if r[0] == sel:
+                                matches = [r[0]]
+                                break
+                        if not matches:
+                            # Priority 2: endswith id suffix
+                            suf = [r[0] for r in rows if r[0].lower().endswith(sel_l)]
+                            if suf:
+                                matches = suf
+                        if not matches:
+                            # Priority 3: id contains
+                            cont = [r[0] for r in rows if sel_l in r[0].lower()]
+                            if cont:
+                                matches = cont
+                        if not matches:
+                            # Priority 4: name contains
+                            name_matches = [r[0] for r in rows if isinstance(r[1], str) and sel_l in r[1].lower()]
+                            if name_matches:
+                                matches = name_matches
+                        if not matches:
+                            # Priority 5: recap contains
+                            recap_matches = [r[0] for r in rows if isinstance(r[2], str) and sel_l in r[2].lower()]
+                            if recap_matches:
+                                matches = recap_matches
+                        if not matches:
+                            console.print(f"No thread matches selector: {sel}")
+                        else:
+                            # If ambiguous, choose most recent by created_at
+                            if len(matches) > 1:
+                                # Map id->created_at and pick max
+                                ca = {r[0]: r[3] for r in rows}
+                                matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
+                                console.print(f"Multiple matches, switching to most recent. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}")
+                            current_thread = matches[0]
+                            await _show_thread_ui(db, current_thread)
+                    except Exception as e:
+                        console.print(f"Error switching thread: {e}")
             elif cmd == 'updateAllModels':
                 provider = (arg or '').strip()
                 if not provider:
