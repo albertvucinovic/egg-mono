@@ -793,6 +793,11 @@ async def run_cli():
                 prompted_roots.add(root_tid)
         finally:
             is_prompting_scheduler = False
+            # Clear the screen to avoid leaving the prompt line lingering
+            try:
+                console.clear()
+            except Exception:
+                pass
 
     def prompt_message():
         mk = _current_model_for_thread(current_thread) or 'default'
@@ -870,9 +875,31 @@ async def run_cli():
             elif cmd == 'resume':
                 resume_thread(db, current_thread)
             elif cmd == 'spawn':
-                child = create_child_thread(db, current_thread, name='spawn')
+                # Determine current model to propagate
+                def _latest_model_for_thread(tid: str) -> Optional[str]:
+                    try:
+                        rows = db.conn.execute(
+                            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
+                            (tid,)
+                        ).fetchall()
+                        for r in rows:
+                            pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
+                            mk = pj.get('model_key')
+                            if isinstance(mk, str) and mk.strip():
+                                return mk.strip()
+                    except Exception:
+                        pass
+                    th = db.get_thread(tid)
+                    return th.initial_model_key if th else None
+
+                cur_model = _latest_model_for_thread(current_thread)
+                child = create_child_thread(db, current_thread, name='spawn', initial_model_key=cur_model)
                 append_message(db, child, 'system', system_content)
                 append_message(db, child, 'user', arg or 'Spawned task')
+                if cur_model:
+                    # Also record the model selection in the child so tooling picks it up
+                    db.append_event(event_id=os.urandom(10).hex(), thread_id=child, type_='msg.create',
+                                    msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model}]', 'model_key': cur_model})
                 create_snapshot(db, child)
                 console.print(Panel(f"Spawned thread: {child}", border_style='green'))
                 # Ensure a scheduler exists for the root of the new child
@@ -1009,7 +1036,7 @@ async def run_cli():
                         console.print(Panel(res, border_style='cyan', title='Update All Models'))
                     except Exception as e:
                         console.print(Panel(f'Error: {e}', border_style='red', title='Update All Models'))
-            elif cmd in ('schedulers', 'schedulars'):
+            elif cmd == 'schedulers':
                 if not active_schedulers:
                     console.print('No active schedulers in this session.')
                 else:
