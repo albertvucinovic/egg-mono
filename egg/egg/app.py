@@ -239,6 +239,46 @@ def _render_static_view(db: ThreadsDB, thread_id: str) -> None:
             console.print(panel)
 
 
+
+
+async def _show_thread_ui(db: ThreadsDB, thread_id: str) -> None:
+    """Render the selected thread and, if a live stream is active, attach to it.
+
+    - Prints a static view of the latest messages for quick context
+    - If open_streams has an active invoke for this thread, attaches to
+      the stream to show live deltas until it closes.
+    """
+    console = Console()
+    console.clear()
+    # Freshen snapshot before rendering to make sure we start watching from
+    # the latest persisted state.
+    try:
+        create_snapshot(db, thread_id)
+    except Exception:
+        pass
+    console.print(Panel(f'Switched to thread: {thread_id}', border_style='blue'))
+    _render_static_view(db, thread_id)
+    # Attach to ongoing stream if present, or briefly wait for one to start
+    row = None
+    try:
+        row = db.current_open(thread_id)
+    except Exception:
+        row = None
+    if row is None:
+        # Poll briefly in case a scheduler is about to start streaming
+        import asyncio as _asyncio
+        for _ in range(20):  # ~1s @ 50ms
+            try:
+                row = db.current_open(thread_id)
+            except Exception:
+                row = None
+            if row is not None:
+                break
+            await _asyncio.sleep(0.05)
+    if row is not None:
+        console.print(Panel('[dim]Attaching to live stream...[/dim]', border_style='cyan'))
+        await _stream_thread(db, thread_id)
+
 async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
     console = Console()
     # Start watching from last persisted snapshot event to capture the new turn's stream.open and deltas
@@ -248,9 +288,25 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
     except Exception:
         start_after = -1
     ew = EventWatcher(db, thread_id, after_seq=start_after, poll_sec=0.05)
+
+    # Track the currently active invoke, if any, so we can attach mid-stream
+    active_invoke: Optional[str] = None
+    try:
+        row_open = db.current_open(thread_id)
+    except Exception:
+        row_open = None
+    if row_open is not None and not active_invoke:
+        try:
+            active_invoke = row_open["invoke_id"] if isinstance(row_open, dict) else row_open["invoke_id"]
+        except Exception:
+            try:
+                # sqlite3.Row supports key access
+                active_invoke = row_open["invoke_id"]
+            except Exception:
+                active_invoke = None
+
     live_content = ''
     live_reason = ''
-    active_invoke: Optional[str] = None
     # tool streaming buffers: name -> text
     tool_stream: Dict[str, str] = {}
     # tool-call args streaming panels: maintain ordered panels to avoid reusing old panel
@@ -258,6 +314,9 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
     tc_text: Dict[str, str] = {}     # panel_key -> accumulated text
     tc_map: Dict[str, List[str]] = {}  # raw_key (id or name) -> list of panel_keys created for that key
     # any tool_call or tool output seen in this invoke (debug) – removed (unused)
+
+    # Keep a reference to the latest polled batch for model label detection
+    batch: List[Dict[str, Any]] = []
 
     def _live_group() -> Group:
         panels = []
@@ -506,12 +565,16 @@ async def run_cli():
                         candidates.append(r[0])
                 if candidates:
                     current_thread = candidates[0]
+                    # Show the newly selected child's conversation (and live stream if any)
+                    await _show_thread_ui(db, current_thread)
                 else:
                     console.print('No matching child.')
             elif cmd == 'parent':
                 row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (current_thread,)).fetchone()
                 if row and row[0]:
                     current_thread = row[0]
+                    # Show the parent's conversation (and live stream if any)
+                    await _show_thread_ui(db, current_thread)
                 else:
                     console.print('Already at root or no parent found.')
             elif cmd == 'children':
