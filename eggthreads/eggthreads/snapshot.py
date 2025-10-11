@@ -20,6 +20,8 @@ class SnapshotBuilder:
         messages: List[Dict[str, Any]] = []
         # Very lightweight: just fold msg.create and stream content deltas into assistant messages.
         assistant_buf: Dict[str, List[str]] = {}
+        # Maintain per-invoke ordered stream sequence to honor streaming order in UIs
+        assistant_seq: Dict[str, List[Dict[str, Any]]] = {}
         # Track event_seq for ordering and later de-duplication
         def _get(row, key):
             if isinstance(row, dict):
@@ -59,7 +61,7 @@ class SnapshotBuilder:
                         msg["reasoning"] = payload.get("reasoning")
                     # If we have a pending streaming assistant from the previous invoke,
                     # and the completed assistant message has the same content/reasoning,
-                    # drop the streaming one to avoid duplication.
+                    # drop the streaming one to avoid duplication, but preserve the stream order metadata.
                     if pending_stream_assistant is not None:
                         ps = pending_stream_assistant
                         def _norm(v: Optional[str]) -> str:
@@ -67,7 +69,9 @@ class SnapshotBuilder:
                         same_content = _norm(ps.get("content")) == _norm(msg.get("content"))
                         same_reason = _norm(ps.get("reasoning")) == _norm(msg.get("reasoning"))
                         if same_content and same_reason:
-                            # discard streaming version
+                            # attach the streaming order to the completed message
+                            if ps.get("stream_sequence"):
+                                msg["stream_sequence"] = ps.get("stream_sequence")
                             pending_stream_assistant = None
                             pending_stream_seq = None
                         else:
@@ -90,18 +94,18 @@ class SnapshotBuilder:
                     pending_stream_seq = None
                 inv = _get(e, "invoke_id")
                 assistant_buf[inv] = []
+                assistant_seq[inv] = []
 
             elif t == 'stream.delta':
                 inv = _get(e, "invoke_id")
                 if inv in assistant_buf:
                     # Accept both content/delta text and reasoning text under 'reason'
                     d = payload.get("text") or payload.get("content") or payload.get("delta") or ""
-                    if isinstance(d, str):
-                        assistant_buf[inv].append(d)
-                    # Reasoning is kept separate; attach as metadata to the assistant message buffer
+                    # Reasoning (keep in both buffer and ordered sequence)
                     r = payload.get("reason")
                     if isinstance(r, str) and r:
                         assistant_buf.setdefault(inv + "::reason", []).append(r)
+                        assistant_seq.setdefault(inv, []).append({"type": "reason", "text": r})
                     # Tool streaming payloads: {"tool": {"name":..., "text":...}}
                     tl = payload.get("tool")
                     if isinstance(tl, dict):
@@ -109,6 +113,7 @@ class SnapshotBuilder:
                         txt = tl.get("text") or ""
                         assistant_buf.setdefault(inv + "::tool::" + name, [])
                         assistant_buf[inv + "::tool::" + name].append(str(txt))
+                        assistant_seq.setdefault(inv, []).append({"type": "tool_output", "name": name, "text": str(txt)})
                     # Tool-call arguments streaming: {"tool_call": {"name":..., "text":...}}
                     tcd = payload.get("tool_call")
                     if isinstance(tcd, dict):
@@ -116,6 +121,11 @@ class SnapshotBuilder:
                         txt = tcd.get("text") or ""
                         assistant_buf.setdefault(inv + "::toolcall::" + name, [])
                         assistant_buf[inv + "::toolcall::" + name].append(str(txt))
+                        assistant_seq.setdefault(inv, []).append({"type": "tool_call_args", "name": name, "text": str(txt)})
+                    # Content last, to respect the emitted order for this delta
+                    if isinstance(d, str) and d:
+                        assistant_buf[inv].append(d)
+                        assistant_seq.setdefault(inv, []).append({"type": "content", "text": d})
 
             elif t == 'stream.close':
                 inv = _get(e, "invoke_id")
@@ -147,6 +157,9 @@ class SnapshotBuilder:
                             name = tk.split("::tool::", 1)[1]
                             chunks = assistant_buf.pop(tk, [])
                             stream_msg["tool_stream"][name] = "".join(chunks)
+                    # Attach ordered stream sequence if collected
+                    if inv in assistant_seq:
+                        stream_msg["stream_sequence"] = assistant_seq.pop(inv, [])
                     # Do not append immediately; keep pending until we see whether a completed
                     # assistant msg occurs next. Record the close event seq for ordering if needed.
                     pending_stream_assistant = stream_msg
@@ -180,6 +193,9 @@ class SnapshotBuilder:
                     same_content = _norm(m.get("content")) == _norm(next_assistant.get("content"))
                     same_reason = _norm(m.get("reasoning")) == _norm(next_assistant.get("reasoning"))
                     if same_content and same_reason:
+                        # If the streaming had a stream_sequence and the completed one doesn't, attach it
+                        if m.get("stream_sequence") and not next_assistant.get("stream_sequence"):
+                            next_assistant["stream_sequence"] = m.get("stream_sequence")
                         # skip streaming duplicate
                         i += 1
                         continue
