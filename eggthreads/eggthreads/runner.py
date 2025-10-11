@@ -513,7 +513,7 @@ class ThreadRunner:
                 def _extract_short(text: str) -> Optional[str]:
                     if not isinstance(text, str):
                         return None
-                    end = text.rfind('</short_recap')
+                    end = text.rfind('</short_recap>')
                     if end == -1:
                       return None
                     start = text.rfind('<short_recap>', 0, end)

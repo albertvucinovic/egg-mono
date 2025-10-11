@@ -56,15 +56,15 @@ def load_system_prompt() -> str:
                 return txt
         except Exception:
             pass
-    for cand in ("egg/systemPrompt", "systemPrompt"):
-        if os.path.exists(cand):
-            try:
-                with open(cand, "r", encoding="utf-8") as f:
-                    txt = f.read().strip()
-                if txt:
-                    return txt
-            except Exception:
-                pass
+    promptPath = f"{os.getcwd()}/systemPrompt"
+    if os.path.exists(promptPath):
+        try:
+            with open(promptPath, "r", encoding="utf-8") as f:
+                txt = f.read().strip()
+            if txt:
+                return txt
+        except Exception:
+            pass
     return SYSTEM_PROMPT_DEFAULT
 
 
@@ -329,6 +329,8 @@ async def main():
     db.init_schema()
 
     system_prompt = load_system_prompt()
+    print("System prompt:")
+    print(system_prompt)
     models_path = _env_path("EGG_MODELS_PATH", "models.json")
     all_models_path = _env_path("EGG_ALL_MODELS_PATH", "all-models.json")
     print(f"models_path={models_path}")
@@ -336,7 +338,7 @@ async def main():
     # Create root and 10 children with tasks
     root_id = create_root_thread(db, name="Batch Root")
     num_tasks=20
-    tasks = [f"Write a story named story_#{i} into a file story_#{i}.md and include <short_recap>...</short_recap>." for i in range(1, num_tasks)]
+    tasks = [f"Write a story named story_#{i} into a file story_#{i}.md ." for i in range(1, num_tasks)]
 
     for i, task in enumerate(tasks, start=1):
         child = create_child_thread(db, root_id, name=f"agent-{i:03d}", initial_model_key = "openrouter:openai 120B")
