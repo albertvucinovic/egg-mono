@@ -413,6 +413,7 @@ async def _show_thread_ui(db: ThreadsDB, thread_id: str) -> None:
             if row is not None:
                 break
             await _asyncio.sleep(0.05)
+    # Only attach if the thread is runnable or is already streaming
     if row is not None:
         console.print(Panel('[dim]Attaching to live stream...[/dim]', border_style='cyan'))
         await _stream_thread(db, thread_id)
@@ -681,6 +682,8 @@ async def run_cli():
     active_schedulers: Dict[str, Dict[str, Any]] = {}
     # Track roots we already prompted user about (to avoid repeated prompts)
     prompted_roots: set[str] = set()
+    # Guard to avoid concurrent/re-entrant prompting
+    is_prompting_scheduler: bool = False
 
     # Helper to start a scheduler for a given root thread
     def _start_scheduler(root_tid: str) -> None:
@@ -689,9 +692,6 @@ async def run_cli():
         sched = SubtreeScheduler(db, root_thread_id=root_tid, models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
         task = asyncio.create_task(sched.run_forever())
         active_schedulers[root_tid] = {"scheduler": sched, "task": task}
-        # If the root had been marked as prompted, clear it now since it's active
-        if root_tid in prompted_roots:
-            prompted_roots.discard(root_tid)
 
     # Start default scheduler on the initial root immediately
     _start_scheduler(root)
@@ -765,26 +765,34 @@ async def run_cli():
             _render_tree(cid, prefix + indent_next, last)
 
     async def _ensure_scheduler_for_thread(tid: str) -> None:
-        nonlocal active_schedulers, prompted_roots
+        nonlocal active_schedulers, prompted_roots, is_prompting_scheduler
         root_tid = _thread_root_id(tid)
         if root_tid in active_schedulers:
             return
         # If we already prompted for this root during this session, do not prompt again.
         if root_tid in prompted_roots:
             return
-        console.print(Panel(f"No scheduler is running for root [bold]{root_tid}[/bold]. Proposed subtree:", border_style='blue'))
-        _render_tree(root_tid)
-        # Ask user for confirmation
+        # Avoid re-entrant prompts (e.g., triggered during live streaming side-effects)
+        if is_prompting_scheduler:
+            return
+        is_prompting_scheduler = True
         try:
-            ans = (await session.prompt_async(message="Start scheduler for this subtree? [y/N] ")).strip().lower()
-        except Exception:
-            ans = 'n'
-        if ans in ('y', 'yes'):
-            _start_scheduler(root_tid)
-            console.print(Panel(f"Started scheduler for root {root_tid}", border_style='green'))
-        else:
-            console.print(Panel("Skipped starting scheduler.", border_style='yellow'))
-            prompted_roots.add(root_tid)
+            console.print(Panel(f"No scheduler is running for root [bold]{root_tid}[/bold]. Proposed subtree:", border_style='blue'))
+            _render_tree(root_tid)
+            # Ask user for confirmation
+            try:
+                ans = (await session.prompt_async(message="Start scheduler for this subtree? [y/N] ")).strip().lower()
+            except Exception:
+                ans = 'n'
+            if ans in ('y', 'yes'):
+                _start_scheduler(root_tid)
+                console.print(Panel(f"Started scheduler for root {root_tid}", border_style='green'))
+                prompted_roots.add(root_tid)
+            else:
+                console.print(Panel("Skipped starting scheduler.", border_style='yellow'))
+                prompted_roots.add(root_tid)
+        finally:
+            is_prompting_scheduler = False
 
     def prompt_message():
         mk = _current_model_for_thread(current_thread) or 'default'
@@ -883,9 +891,13 @@ async def run_cli():
                 if candidates:
                     # Ensure scheduler for the child's root before switching
                     await _ensure_scheduler_for_thread(candidates[0])
-                    current_thread = candidates[0]
-                    # Show the newly selected child's conversation (and live stream if any)
-                    await _show_thread_ui(db, current_thread)
+                    root_new = _thread_root_id(candidates[0])
+                    if root_new not in active_schedulers and root_new in prompted_roots:
+                        console.print(Panel("Scheduler not started for that subtree; staying on current thread.", border_style='yellow'))
+                    else:
+                        current_thread = candidates[0]
+                        # Show the newly selected child's conversation (and live stream if any)
+                        await _show_thread_ui(db, current_thread)
                 else:
                     console.print('No matching child.')
             elif cmd == 'parent':
@@ -978,6 +990,7 @@ async def run_cli():
                             new_tid = matches[0]
                             # Ensure a scheduler exists for the root of the new thread if it's outside current schedulers
                             await _ensure_scheduler_for_thread(new_tid)
+                            #Even if no scheduler, we can see thread content (it will not run though)
                             current_thread = new_tid
                             await _show_thread_ui(db, current_thread)
                     except Exception as e:
@@ -1013,8 +1026,37 @@ async def run_cli():
         # Normal user message
         append_message(db, current_thread, 'user', user_input)
         create_snapshot(db, current_thread)
-        # Stream response synchronously, continuing until no more pending tool continuations
+        # Stream response synchronously only if last trigger is runnable
         while True:
+            # Check runnable before streaming (avoid running on assistant-only tail)
+            try:
+                row_close = db.conn.execute(
+                    "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='stream.close'",
+                    (current_thread,)
+                ).fetchone()
+                last_close_seq = int(row_close[0]) if row_close and row_close[0] is not None else -1
+                row = db.conn.execute(
+                    """
+                    SELECT 1 FROM events e
+                     WHERE e.thread_id=?
+                       AND e.event_seq>?
+                       AND e.type='msg.create'
+                       AND (
+                            json_extract(e.payload_json,'$.role') IN ('user','tool')
+                         OR (
+                              json_extract(e.payload_json,'$.role')='assistant'
+                          AND json_extract(e.payload_json,'$.tool_calls') IS NOT NULL
+                            )
+                       )
+                     ORDER BY e.event_seq ASC LIMIT 1
+                    """,
+                    (current_thread, last_close_seq)
+                ).fetchone()
+                runnable = bool(row)
+            except Exception:
+                runnable = True
+            if not runnable:
+                break
             try:
                 await _stream_thread(db, current_thread)
             except KeyboardInterrupt:
