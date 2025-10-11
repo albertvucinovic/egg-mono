@@ -339,7 +339,7 @@ async def main():
     tasks = [f"Write a story named story_#{i} into a file story_#{i}.md and include <short_recap>...</short_recap>." for i in range(1, num_tasks)]
 
     for i, task in enumerate(tasks, start=1):
-        child = create_child_thread(db, root_id, name=f"agent-{i:03d}")
+        child = create_child_thread(db, root_id, name=f"agent-{i:03d}", initial_model_key = "openrouter:openai 120B")
         append_message(db, child, "system", system_prompt)
         append_message(db, child, "user", task)
         create_snapshot(db, child)

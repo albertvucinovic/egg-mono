@@ -133,6 +133,10 @@ class ThreadRunner:
                 base_messages.append({"role": "user", "content": user_content})
 
         # Apply last requested model change (tracked via msg.create with payload.model_key)
+        # Precedence:
+        #  1) explicit per-message override (payload.model_key of latest msg.create)
+        #  2) thread.initial_model_key if set
+        #  3) keep LLMClient's current selection (env/default)
         try:
             curm = self.db.conn.execute(
                 "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
@@ -151,6 +155,18 @@ class ThreadRunner:
             if model_key:
                 try:
                     self.llm.set_model(model_key)
+                except Exception:
+                    pass
+            else:
+                # Fall back to thread.initial_model_key
+                try:
+                    th2 = self.db.get_thread(self.thread_id)
+                    imk = getattr(th2, 'initial_model_key', None) if th2 else None
+                    if isinstance(imk, str) and imk.strip():
+                        try:
+                            self.llm.set_model(imk.strip())
+                        except Exception:
+                            pass
                 except Exception:
                     pass
         except Exception:
