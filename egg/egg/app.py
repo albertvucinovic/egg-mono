@@ -420,6 +420,7 @@ async def _show_thread_ui(db: ThreadsDB, thread_id: str) -> None:
 
 async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
     console = Console(force_terminal=True, color_system='auto')
+
     # Start watching from last persisted snapshot event to capture the new turn's stream.open and deltas
     try:
         th = db.get_thread(thread_id)
