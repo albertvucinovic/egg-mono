@@ -501,8 +501,8 @@ async def run_cli():
                 )
                 candidates: List[str] = []
                 for r in cur.fetchall():
-                    name, recap = (r[1] or ''), (r[2] or '')
-                    if not patt or patt in (name + ' ' + recap).lower():
+                    child_id, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                    if not patt or patt in (name + ' ' + recap + ' ' + child_id).lower():
                         candidates.append(r[0])
                 if candidates:
                     current_thread = candidates[0]
@@ -523,7 +523,7 @@ async def run_cli():
                         recap = th.short_recap if th and th.short_recap else 'No recap'
                         # show last known model for each thread
                         mk = _current_model_for_thread(tid) or 'default'
-                        console.print(f'{tid[:8]}: {status} - {recap}  [model: {mk}]')
+                        console.print(f'{tid}: {status} - {recap}  [model: {mk}]')
                 else:
                     console.print('No subthreads.')
             elif cmd == 'updateAllModels':
