@@ -442,7 +442,23 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
             except Exception:
                 active_target = None
 
-    # If there are any events after the snapshot boundary for the active invoke,
+    # If a stream is open, and the stream.open happened before the snapshot,
+    # attach from the stream.open (so we don't miss the beginning of the turn).
+    attach_after_seq = start_after
+    if active_target:
+        try:
+            row_open_seq = db.conn.execute(
+                "SELECT MIN(event_seq) FROM events WHERE invoke_id=? AND type='stream.open'",
+                (active_target,)
+            ).fetchone()
+            open_seq = int(row_open_seq[0]) if row_open_seq and row_open_seq[0] is not None else None
+            if open_seq is not None:
+                # Watch from just before stream.open to include it in the stream
+                attach_after_seq = min(start_after, open_seq - 1) if start_after >= 0 else (open_seq - 1)
+        except Exception:
+            pass
+
+    # If there are any events after the chosen boundary for the active invoke,
     # pre-load them into the live buffers so that attaching mid-stream shows the
     # full live message (reasoning, tool args/output, content) seamlessly.
     def _preload_existing(after_seq: int, target_invoke: Optional[str]):
@@ -531,10 +547,10 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
             'active_invoke': target_invoke,
         }
 
-    preload = _preload_existing(start_after, active_target)
+    preload = _preload_existing(attach_after_seq, active_target)
 
     # Use the last preloaded event as the starting point for live watching
-    after_for_watch = preload.get('last_seq', start_after) if isinstance(preload, dict) else start_after
+    after_for_watch = preload.get('last_seq', attach_after_seq) if isinstance(preload, dict) else attach_after_seq
     ew = EventWatcher(db, thread_id, after_seq=after_for_watch, poll_sec=0.05)
 
     # Track the currently active invoke, if any, so we can attach mid-stream
