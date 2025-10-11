@@ -779,9 +779,10 @@ async def run_cli():
         try:
             console.print(Panel(f"No scheduler is running for root [bold]{root_tid}[/bold]. Proposed subtree:", border_style='blue'))
             _render_tree(root_tid)
-            # Ask user for confirmation
+            # Ask user for confirmation using a separate, short-lived PromptSession
             try:
-                ans = (await session.prompt_async(message="Start scheduler for this subtree? [y/N] ")).strip().lower()
+                confirm_session = PromptSession(message="Start scheduler for this subtree? [y/N] ")
+                ans = (await confirm_session.prompt_async()).strip().lower()
             except Exception:
                 ans = 'n'
             if ans in ('y', 'yes'):
@@ -793,11 +794,6 @@ async def run_cli():
                 prompted_roots.add(root_tid)
         finally:
             is_prompting_scheduler = False
-            # Clear the screen to avoid leaving the prompt line lingering
-            try:
-                console.clear()
-            except Exception:
-                pass
 
     def prompt_message():
         mk = _current_model_for_thread(current_thread) or 'default'
