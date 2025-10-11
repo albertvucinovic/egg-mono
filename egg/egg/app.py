@@ -146,14 +146,14 @@ def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
         title = '[bold red]Error[/bold red]'
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
-        return Panel(Text(content, no_wrap=False, overflow='fold'), title=title, border_style='red')
+        return Panel(Text(content, no_wrap=False, overflow='fold', style='red'), title=title, border_style='red')
 
     if role == 'user':
         title = "[bold green]User[/bold green]"
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
         body = content if content else ''
-        return Panel(Text(body, no_wrap=False, overflow='fold'), title=title, border_style='green')
+        return Panel(Text(body, no_wrap=False, overflow='fold', style='green'), title=title, border_style='green')
 
     elif role == 'assistant':
         title = '[bold cyan]Assistant[/bold cyan]'
@@ -193,7 +193,7 @@ def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
         if _looks_markdown(content):
             renderable = Markdown(content)
         else:
-            renderable = Text(content, no_wrap=False, overflow='fold')
+            renderable = Text(content, no_wrap=False, overflow='fold', style='cyan')
 
     elif role == 'tool':
         name = m.get('name') or 'Tool'
@@ -201,14 +201,14 @@ def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
         border = 'yellow'
-        renderable = Text(content, no_wrap=False, overflow='fold')
+        renderable = Text(content, no_wrap=False, overflow='fold', style='yellow')
 
     else:
         title = role or 'Message'
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
         border = 'blue'
-        renderable = Text(content, no_wrap=False, overflow='fold')
+        renderable = Text(content, no_wrap=False, overflow='fold', style='blue')
 
     return Panel(renderable, title=title, border_style=border)
 
@@ -262,19 +262,76 @@ def _get_subtree(db: ThreadsDB, root_id: str) -> List[str]:
 
 
 def _render_static_view(db: ThreadsDB, thread_id: str) -> None:
-    console = Console()
+    console = Console(force_terminal=True, color_system='auto', no_color=False)
     msgs = _snapshot_messages(db, thread_id)
     if not msgs:
         console.print(Panel('[dim]No messages yet[/dim]', border_style='blue'))
         return
     # Show a generous slice of recent history so switching threads gives context
     for m in msgs[-50:]:
-        panel = _render_message_panel(m)
-        if panel:
-            console.print(panel)
-        # If the assistant message has streamed-only metadata, show those too
+        # If assistant has stream_sequence, honor streaming order when rendering
+        if isinstance(m, dict) and m.get('role') == 'assistant' and isinstance(m.get('stream_sequence'), list) and m.get('stream_sequence'):
+            seq = m.get('stream_sequence') or []
+            # Group adjacent same-type (and same-name for tool entries)
+            grouped = []
+            for item in seq:
+                t = (item or {}).get('type')
+                txt = (item or {}).get('text') or ''
+                name = (item or {}).get('name')
+                if not isinstance(txt, str) or not txt:
+                    continue
+                if grouped and grouped[-1]['type'] == t and ((t in ('tool_output', 'tool_call_args') and grouped[-1].get('name') == name) or (t in ('content', 'reason'))):
+                    grouped[-1]['text'] += txt
+                else:
+                    grouped.append({'type': t, 'text': txt, 'name': name})
+            # Render in grouped streaming order
+            for g in grouped:
+                gtype = g.get('type')
+                if gtype == 'reason':
+                    console.print(Panel(Text(g.get('text',''), no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
+                elif gtype == 'tool_call_args':
+                    nm = g.get('name') or 'tool'
+                    console.print(Panel(Text(g.get('text',''), no_wrap=False, overflow='fold'), title=f'Tool Call Args: {nm}', border_style='yellow'))
+                elif gtype == 'tool_output':
+                    nm = g.get('name') or 'tool'
+                    console.print(Panel(Text(g.get('text',''), no_wrap=False, overflow='fold'), title=f'Tool: {nm}', border_style='yellow'))
+                elif gtype == 'content':
+                    m2 = dict(m)
+                    m2['content'] = g.get('text','')
+                    panel = _render_message_panel(m2)
+                    if panel:
+                        console.print(panel)
+            # After rendering by sequence, still show final tool_calls summary if present
+            tcs = m.get('tool_calls')
+            if isinstance(tcs, list) and tcs:
+                out_lines = []
+                for tc in tcs:
+                    f = (tc or {}).get('function') or {}
+                    name = f.get('name') or (tc or {}).get('name') or 'function'
+                    args = f.get('arguments') or (tc or {}).get('arguments')
+                    if isinstance(args, (dict, list)):
+                        try:
+                            import json as _json
+                            args_str = _json.dumps(args, ensure_ascii=False)
+                        except Exception:
+                            args_str = str(args)
+                    else:
+                        args_str = str(args or '')
+                    out_lines.append(f"{name}({args_str})")
+                if out_lines:
+                    console.print(Panel(Text("\n".join(out_lines), no_wrap=False, overflow='fold'), title='Tool Calls', border_style='yellow'))
+            continue
+
+        # For assistant messages without explicit stream_sequence, prefer rendering Reasoning before content
         if isinstance(m, dict) and m.get('role') == 'assistant':
-            # Reasoning already attached via _render_message_panel summary when content missing
+            reas = m.get('reasoning') or m.get('reasoning_content')
+            has_content = bool((m.get('content') or '').strip())
+            if has_content and isinstance(reas, str) and reas.strip():
+                console.print(Panel(Text(reas, no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
+            panel = _render_message_panel(m)
+            if panel:
+                console.print(panel)
+            # If the assistant message has streamed-only metadata, show those too
             # Show tool_calls if present
             tcs = m.get('tool_calls')
             if isinstance(tcs, list) and tcs:
@@ -306,11 +363,10 @@ def _render_static_view(db: ThreadsDB, thread_id: str) -> None:
                 for nm, txt in tc_stream.items():
                     if txt:
                         console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Call Args (streamed): {nm}', border_style='yellow'))
-            # Reasoning panel (if assistant content exists; otherwise summarized in assistant panel)
-            has_content = bool((m.get('content') or '').strip())
-            reas = m.get('reasoning') or m.get('reasoning_content')
-            if has_content and isinstance(reas, str) and reas.strip():
-                console.print(Panel(Text(reas, no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
+        else:
+            panel = _render_message_panel(m)
+            if panel:
+                console.print(panel)
 
 
 
@@ -322,7 +378,7 @@ async def _show_thread_ui(db: ThreadsDB, thread_id: str) -> None:
     - If open_streams has an active invoke for this thread, attaches to
       the stream to show live deltas until it closes.
     """
-    console = Console()
+    console = Console(force_terminal=True, color_system='auto')
     console.clear()
     # Freshen snapshot before rendering to make sure we start watching from
     # the latest persisted state.
@@ -354,7 +410,7 @@ async def _show_thread_ui(db: ThreadsDB, thread_id: str) -> None:
         await _stream_thread(db, thread_id)
 
 async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
-    console = Console()
+    console = Console(force_terminal=True, color_system='auto')
     # Start watching from last persisted snapshot event to capture the new turn's stream.open and deltas
     try:
         th = db.get_thread(thread_id)
@@ -507,7 +563,7 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
 
 
 async def run_cli():
-    console = Console()
+    console = Console(force_terminal=True, color_system='auto', no_color=False)
     db = ThreadsDB()
     db.init_schema()
 
@@ -661,7 +717,18 @@ async def run_cli():
                         recap = th.short_recap if th and th.short_recap else 'No recap'
                         # show last known model for each thread
                         mk = _current_model_for_thread(tid) or 'default'
-                        console.print(f'{tid}: {status} - {recap}  [model: {mk}]')
+                        # indicate if streaming
+                        try:
+                            is_streaming = db.current_open(tid) is not None
+                        except Exception:
+                            is_streaming = False
+                        stream_tag = 'STREAMING ' if is_streaming else ''
+                        # compute subtree size (number of descendants)
+                        try:
+                            subtree_size = len(_get_subtree(db, tid))
+                        except Exception:
+                            subtree_size = 0
+                        console.print(f'{tid}: {stream_tag}{status} - {recap}  (subtree={subtree_size})  [model: {mk}]')
                 else:
                     console.print('No subthreads.')
             elif cmd == 'threads':
