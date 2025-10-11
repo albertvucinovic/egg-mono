@@ -272,6 +272,45 @@ def _render_static_view(db: ThreadsDB, thread_id: str) -> None:
         panel = _render_message_panel(m)
         if panel:
             console.print(panel)
+        # If the assistant message has streamed-only metadata, show those too
+        if isinstance(m, dict) and m.get('role') == 'assistant':
+            # Reasoning already attached via _render_message_panel summary when content missing
+            # Show tool_calls if present
+            tcs = m.get('tool_calls')
+            if isinstance(tcs, list) and tcs:
+                out_lines = []
+                for tc in tcs:
+                    f = (tc or {}).get('function') or {}
+                    name = f.get('name') or (tc or {}).get('name') or 'function'
+                    args = f.get('arguments') or (tc or {}).get('arguments')
+                    if isinstance(args, (dict, list)):
+                        try:
+                            import json as _json
+                            args_str = _json.dumps(args, ensure_ascii=False)
+                        except Exception:
+                            args_str = str(args)
+                    else:
+                        args_str = str(args or '')
+                    out_lines.append(f"{name}({args_str})")
+                if out_lines:
+                    console.print(Panel(Text("\n".join(out_lines), no_wrap=False, overflow='fold'), title='Tool Calls', border_style='yellow'))
+            # Show tool outputs if we captured their stream in snapshot metadata
+            tstream = m.get('tool_stream') or {}
+            if isinstance(tstream, dict) and tstream:
+                for nm, txt in tstream.items():
+                    if txt:
+                        console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Output: {nm}', border_style='yellow'))
+            # Show streamed tool-call arguments if captured
+            tc_stream = m.get('tool_calls_stream') or {}
+            if isinstance(tc_stream, dict) and tc_stream:
+                for nm, txt in tc_stream.items():
+                    if txt:
+                        console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Call Args (streamed): {nm}', border_style='yellow'))
+            # Reasoning panel (if assistant content exists; otherwise summarized in assistant panel)
+            has_content = bool((m.get('content') or '').strip())
+            reas = m.get('reasoning') or m.get('reasoning_content')
+            if has_content and isinstance(reas, str) and reas.strip():
+                console.print(Panel(Text(reas, no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
 
 
 
