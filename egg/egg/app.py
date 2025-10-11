@@ -679,6 +679,8 @@ async def run_cli():
 
     # Track active subtree schedulers (root_thread_id -> {scheduler, task})
     active_schedulers: Dict[str, Dict[str, Any]] = {}
+    # Track roots we already prompted user about (to avoid repeated prompts)
+    prompted_roots: set[str] = set()
 
     # Helper to start a scheduler for a given root thread
     def _start_scheduler(root_tid: str) -> None:
@@ -687,6 +689,9 @@ async def run_cli():
         sched = SubtreeScheduler(db, root_thread_id=root_tid, models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
         task = asyncio.create_task(sched.run_forever())
         active_schedulers[root_tid] = {"scheduler": sched, "task": task}
+        # If the root had been marked as prompted, clear it now since it's active
+        if root_tid in prompted_roots:
+            prompted_roots.discard(root_tid)
 
     # Start default scheduler on the initial root immediately
     _start_scheduler(root)
@@ -760,9 +765,12 @@ async def run_cli():
             _render_tree(cid, prefix + indent_next, last)
 
     async def _ensure_scheduler_for_thread(tid: str) -> None:
-        nonlocal active_schedulers
+        nonlocal active_schedulers, prompted_roots
         root_tid = _thread_root_id(tid)
         if root_tid in active_schedulers:
+            return
+        # If we already prompted for this root during this session, do not prompt again.
+        if root_tid in prompted_roots:
             return
         console.print(Panel(f"No scheduler is running for root [bold]{root_tid}[/bold]. Proposed subtree:", border_style='blue'))
         _render_tree(root_tid)
@@ -776,6 +784,7 @@ async def run_cli():
             console.print(Panel(f"Started scheduler for root {root_tid}", border_style='green'))
         else:
             console.print(Panel("Skipped starting scheduler.", border_style='yellow'))
+            prompted_roots.add(root_tid)
 
     def prompt_message():
         mk = _current_model_for_thread(current_thread) or 'default'
@@ -872,6 +881,8 @@ async def run_cli():
                     if not patt or patt in (name + ' ' + recap + ' ' + child_id).lower():
                         candidates.append(r[0])
                 if candidates:
+                    # Ensure scheduler for the child's root before switching
+                    await _ensure_scheduler_for_thread(candidates[0])
                     current_thread = candidates[0]
                     # Show the newly selected child's conversation (and live stream if any)
                     await _show_thread_ui(db, current_thread)
