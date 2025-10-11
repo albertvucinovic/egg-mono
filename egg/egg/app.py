@@ -732,6 +732,20 @@ async def run_cli():
         except Exception:
             return False
 
+    def _is_root_thread(tid: str) -> bool:
+        try:
+            row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (tid,)).fetchone()
+            return not (row and row[0])
+        except Exception:
+            return False
+
+    def _root_has_scheduler(tid: str) -> bool:
+        try:
+            rid = _thread_root_id(tid)
+            return rid in active_schedulers
+        except Exception:
+            return False
+
     def _format_thread_line(tid: str) -> str:
         th = db.get_thread(tid)
         status = th.status if th else 'unknown'
@@ -745,7 +759,9 @@ async def run_cli():
         label = th.name if th and th.name else ''
         id_short = tid[-8:]
         sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
-        return f"{sflag}[dim]{id_short}[/dim] {status} - {recap} (subtree={subtree_size}) [dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
+        cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == current_thread else ''
+        sched_tag = '[bold cyan][SCHED][/bold cyan] ' if _is_root_thread(tid) and _root_has_scheduler(tid) else ''
+        return f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status} - {recap} (subtree={subtree_size}) [dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
 
     def _render_tree(root_tid: str, prefix: str = '', is_last: bool = True) -> None:
         connector = '└─ ' if is_last else '├─ '
@@ -959,6 +975,7 @@ async def run_cli():
                         console.print('No threads found.')
                     else:
                         console.print('[bold]Threads (by subtree):[/bold]')
+                        console.print('[dim]Legend: [CUR]=current thread  [SCHED]=local scheduler running  STREAMING=has open stream[/dim]')
                         for i, rid in enumerate(roots):
                             last = (i == len(roots) - 1)
                             _render_tree(rid, prefix='', is_last=last)
