@@ -677,8 +677,19 @@ async def run_cli():
     create_snapshot(db, root)
     current_thread = root
 
-    # local scheduler (start after first prompt to avoid race with initial render)
-    scheduler = SubtreeScheduler(db, root_thread_id=root, models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
+    # Track active subtree schedulers (root_thread_id -> {scheduler, task})
+    active_schedulers: Dict[str, Dict[str, Any]] = {}
+
+    # Helper to start a scheduler for a given root thread
+    def _start_scheduler(root_tid: str) -> None:
+        if root_tid in active_schedulers:
+            return
+        sched = SubtreeScheduler(db, root_thread_id=root_tid, models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
+        task = asyncio.create_task(sched.run_forever())
+        active_schedulers[root_tid] = {"scheduler": sched, "task": task}
+
+    # Start default scheduler on the initial root immediately
+    _start_scheduler(root)
 
     # prompt
     def _current_model_for_thread(tid: str) -> Optional[str]:
@@ -700,6 +711,71 @@ async def run_cli():
             pass
         th = db.get_thread(tid)
         return th.initial_model_key if th else None
+
+    # Helper functions for thread roots, tree rendering, and ensuring schedulers
+    def _thread_root_id(tid: str) -> str:
+        cur_id = tid
+        while True:
+            row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (cur_id,)).fetchone()
+            if not row or not row[0]:
+                return cur_id
+            cur_id = row[0]
+
+    def _is_streaming(tid: str) -> bool:
+        try:
+            return db.current_open(tid) is not None
+        except Exception:
+            return False
+
+    def _format_thread_line(tid: str) -> str:
+        th = db.get_thread(tid)
+        status = th.status if th else 'unknown'
+        recap = (th.short_recap if th and th.short_recap else 'No recap').strip()
+        mk = _current_model_for_thread(tid) or 'default'
+        streaming = _is_streaming(tid)
+        try:
+            subtree_size = len(_get_subtree(db, tid))
+        except Exception:
+            subtree_size = 0
+        label = th.name if th and th.name else ''
+        id_short = tid[-8:]
+        sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
+        return f"{sflag}[dim]{id_short}[/dim] {status} - {recap} (subtree={subtree_size}) [dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
+
+    def _render_tree(root_tid: str, prefix: str = '', is_last: bool = True) -> None:
+        connector = '└─ ' if is_last else '├─ '
+        indent_next = '   ' if is_last else '│  '
+        console.print(prefix + connector + _format_thread_line(root_tid))
+        # List children ordered by created_at for readability
+        try:
+            cur = db.conn.execute(
+                "SELECT c.child_id, t.created_at FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=? ORDER BY t.created_at ASC",
+                (root_tid,)
+            )
+            kids = [r[0] for r in cur.fetchall()]
+        except Exception:
+            kids = []
+        for i, cid in enumerate(kids):
+            last = (i == len(kids) - 1)
+            _render_tree(cid, prefix + indent_next, last)
+
+    async def _ensure_scheduler_for_thread(tid: str) -> None:
+        nonlocal active_schedulers
+        root_tid = _thread_root_id(tid)
+        if root_tid in active_schedulers:
+            return
+        console.print(Panel(f"No scheduler is running for root [bold]{root_tid}[/bold]. Proposed subtree:", border_style='blue'))
+        _render_tree(root_tid)
+        # Ask user for confirmation
+        try:
+            ans = (await session.prompt_async(message="Start scheduler for this subtree? [y/N] ")).strip().lower()
+        except Exception:
+            ans = 'n'
+        if ans in ('y', 'yes'):
+            _start_scheduler(root_tid)
+            console.print(Panel(f"Started scheduler for root {root_tid}", border_style='green'))
+        else:
+            console.print(Panel("Skipped starting scheduler.", border_style='yellow'))
 
     def prompt_message():
         mk = _current_model_for_thread(current_thread) or 'default'
@@ -730,11 +806,7 @@ async def run_cli():
     console.print(Panel('Started chat. Type /help for commands.', border_style='blue'))
 
     while True:
-        # Start scheduler lazily on first loop iteration (guard with attribute)
-        if not getattr(run_cli, '_sched_started', False):
-            asyncio.create_task(scheduler.run_forever())
-            setattr(run_cli, '_sched_started', True)
-
+        # Schedulers are managed per-root via active_schedulers; initial root already started.
         try:
             user_input = (await session.prompt_async()).strip()
         except KeyboardInterrupt:
@@ -750,7 +822,7 @@ async def run_cli():
             cmd = parts[0]
             arg = parts[1] if len(parts) > 1 else ''
             if cmd == 'help':
-                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /quit')
+                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /schedulers, /quit')
             elif cmd == 'model':
                 if arg:
                     db.append_event(event_id=os.urandom(10).hex(), thread_id=current_thread, type_='msg.create',
@@ -786,6 +858,8 @@ async def run_cli():
                 append_message(db, child, 'user', arg or 'Spawned task')
                 create_snapshot(db, child)
                 console.print(Panel(f"Spawned thread: {child}", border_style='green'))
+                # Ensure a scheduler exists for the root of the new child
+                await _ensure_scheduler_for_thread(child)
             elif cmd == 'child':
                 patt = (arg or '').lower()
                 cur = db.conn.execute(
@@ -814,40 +888,34 @@ async def run_cli():
             elif cmd == 'children':
                 sub = _get_subtree(db, current_thread)
                 if sub:
-                    for tid in sub:
-                        th = db.get_thread(tid)
-                        status = th.status if th else 'unknown'
-                        recap = th.short_recap if th and th.short_recap else 'No recap'
-                        # show last known model for each thread
-                        mk = _current_model_for_thread(tid) or 'default'
-                        # indicate if streaming
-                        try:
-                            is_streaming = db.current_open(tid) is not None
-                        except Exception:
-                            is_streaming = False
-                        stream_tag = 'STREAMING ' if is_streaming else ''
-                        # compute subtree size (number of descendants)
-                        try:
-                            subtree_size = len(_get_subtree(db, tid))
-                        except Exception:
-                            subtree_size = 0
-                        console.print(f'{tid}: {stream_tag}{status} - {recap}  (subtree={subtree_size})  [model: {mk}]')
+                    # Render as a tree for each direct child
+                    try:
+                        cur = db.conn.execute("SELECT c.child_id, t.created_at FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=? ORDER BY t.created_at ASC", (current_thread,))
+                        direct = [r[0] for r in cur.fetchall()]
+                    except Exception:
+                        direct = []
+                    if not direct:
+                        # fallback to flat
+                        for tid in sub:
+                            console.print(_format_thread_line(tid))
+                    else:
+                        for i, cid in enumerate(direct):
+                            last = (i == len(direct) - 1)
+                            _render_tree(cid, prefix='', is_last=last)
                 else:
                     console.print('No subthreads.')
             elif cmd == 'threads':
                 try:
-                    cur = db.conn.execute("SELECT thread_id, name, short_recap, status, depth FROM threads ORDER BY created_at ASC")
-                    rows = cur.fetchall()
-                    if not rows:
+                    # Find all roots (threads that are not children)
+                    cur = db.conn.execute("SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children)")
+                    roots = [r[0] for r in cur.fetchall()]
+                    if not roots:
                         console.print('No threads found.')
                     else:
-                        console.print('[bold]Threads:[/bold]')
-                        for r in rows:
-                            tid, name, recap, status, depth = r[0], (r[1] or ''), (r[2] or ''), (r[3] or 'active'), int(r[4] or 0)
-                            mk = _current_model_for_thread(tid) or 'default'
-                            label = name or '(unnamed)'
-                            srec = recap or '(no recap)'
-                            console.print(f"{tid}  depth={depth}  status={status}  [model: {mk}]  name='{label}'  recap='{srec}'")
+                        console.print('[bold]Threads (by subtree):[/bold]')
+                        for i, rid in enumerate(roots):
+                            last = (i == len(roots) - 1)
+                            _render_tree(rid, prefix='', is_last=last)
                 except Exception as e:
                     console.print(f"Error listing threads: {e}")
             elif cmd == 'thread':
@@ -896,7 +964,10 @@ async def run_cli():
                                 ca = {r[0]: r[3] for r in rows}
                                 matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
                                 console.print(f"Multiple matches, switching to most recent. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}")
-                            current_thread = matches[0]
+                            new_tid = matches[0]
+                            # Ensure a scheduler exists for the root of the new thread if it's outside current schedulers
+                            await _ensure_scheduler_for_thread(new_tid)
+                            current_thread = new_tid
                             await _show_thread_ui(db, current_thread)
                     except Exception as e:
                         console.print(f"Error switching thread: {e}")
@@ -914,6 +985,14 @@ async def run_cli():
                         console.print(Panel(res, border_style='cyan', title='Update All Models'))
                     except Exception as e:
                         console.print(Panel(f'Error: {e}', border_style='red', title='Update All Models'))
+            elif cmd in ('schedulers', 'schedulars'):
+                if not active_schedulers:
+                    console.print('No active schedulers in this session.')
+                else:
+                    console.print('[bold]Active SubtreeSchedulers:[/bold]')
+                    for rid, ent in active_schedulers.items():
+                        console.print(f"- root {rid}:")
+                        _render_tree(rid, prefix='   ', is_last=True)
             elif cmd == 'quit':
                 break
             else:
