@@ -675,8 +675,9 @@ async def run_cli():
                         for r in rows:
                             tid, name, recap, status, depth = r[0], (r[1] or ''), (r[2] or ''), (r[3] or 'active'), int(r[4] or 0)
                             mk = _current_model_for_thread(tid) or 'default'
-                            label = name or recap or 'Untitled'
-                            console.print(f"{tid}  depth={depth}  status={status}  [model: {mk}]  name='{label}'")
+                            label = name or '(unnamed)'
+                            srec = recap or '(no recap)'
+                            console.print(f"{tid}  depth={depth}  status={status}  [model: {mk}]  name='{label}'  recap='{srec}'")
                 except Exception as e:
                     console.print(f"Error listing threads: {e}")
             elif cmd == 'thread':
