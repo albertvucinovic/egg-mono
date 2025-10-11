@@ -426,18 +426,33 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
     except Exception:
         start_after = -1
 
-    # If there are any events after the snapshot boundary, pre-load them into
-    # the live buffers so that attaching mid-stream shows the full live message
-    # (reasoning, tool args/output, content) seamlessly.
-    def _preload_existing(after_seq: int):
-        nonlocal start_after
+    # Determine current open invoke, if any
+    active_target: Optional[str] = None
+    try:
+        row_open = db.current_open(thread_id)
+    except Exception:
+        row_open = None
+    if row_open is not None:
+        try:
+            active_target = row_open["invoke_id"] if isinstance(row_open, dict) else row_open["invoke_id"]
+        except Exception:
+            try:
+                active_target = row_open["invoke_id"]
+            except Exception:
+                active_target = None
+
+    # If there are any events after the snapshot boundary for the active invoke,
+    # pre-load them into the live buffers so that attaching mid-stream shows the
+    # full live message (reasoning, tool args/output, content) seamlessly.
+    def _preload_existing(after_seq: int, target_invoke: Optional[str]):
+        last_seq = after_seq
         live_content_local = ''
         live_reason_local = ''
         tool_stream_local: Dict[str, str] = {}
         tc_panels_order_local: List[str] = []
         tc_text_local: Dict[str, str] = {}
         tc_map_local: Dict[str, List[str]] = {}
-        active_inv: Optional[str] = None
+        seen_open = False
         try:
             cur = db.conn.execute(
                 "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
@@ -448,9 +463,22 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
             rows = []
         for e in rows:
             t = e['type']
+            inv = e['invoke_id']
+            if e['event_seq'] is not None:
+                last_seq = e['event_seq']
+            # If we know the active target, only preload for that invoke
+            if target_invoke is not None and inv != target_invoke:
+                continue
             if t == 'stream.open':
-                active_inv = e['invoke_id']
-            elif t == 'stream.delta' and active_inv and e['invoke_id'] == active_inv:
+                # Start fresh for the target invoke
+                seen_open = True
+                live_content_local = ''
+                live_reason_local = ''
+                tool_stream_local.clear()
+                tc_panels_order_local.clear()
+                tc_text_local.clear()
+                tc_map_local.clear()
+            elif t == 'stream.delta' and (seen_open or target_invoke):
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
                 txt = payload.get('text') or payload.get('delta') or payload.get('content')
                 if isinstance(txt, str) and txt:
@@ -478,38 +506,38 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
                             tc_map_local.setdefault(raw_key, []).append(new_pkey)
                             current_pkey = new_pkey
                         tc_text_local[current_pkey] += frag
-            elif t == 'stream.close' and active_inv and e['invoke_id'] == active_inv:
-                # stop at first close (should hand over to live loop afterwards)
-                break
+            elif t == 'stream.close':
+                # If the active invoke closed, stop preloading here
+                if (target_invoke is None) or (inv == target_invoke):
+                    return {
+                        'last_seq': last_seq,
+                        'content': live_content_local,
+                        'reason': live_reason_local,
+                        'tool_stream': tool_stream_local,
+                        'tc_panels_order': tc_panels_order_local,
+                        'tc_text': tc_text_local,
+                        'tc_map': tc_map_local,
+                        'active_invoke': None,
+                    }
         return {
+            'last_seq': last_seq,
             'content': live_content_local,
             'reason': live_reason_local,
             'tool_stream': tool_stream_local,
             'tc_panels_order': tc_panels_order_local,
             'tc_text': tc_text_local,
             'tc_map': tc_map_local,
-            'active_invoke': active_inv,
+            'active_invoke': target_invoke,
         }
 
-    preload = _preload_existing(start_after)
+    preload = _preload_existing(start_after, active_target)
 
-    ew = EventWatcher(db, thread_id, after_seq=start_after, poll_sec=0.05)
+    # Use the last preloaded event as the starting point for live watching
+    after_for_watch = preload.get('last_seq', start_after) if isinstance(preload, dict) else start_after
+    ew = EventWatcher(db, thread_id, after_seq=after_for_watch, poll_sec=0.05)
 
     # Track the currently active invoke, if any, so we can attach mid-stream
-    active_invoke: Optional[str] = preload.get('active_invoke')
-    try:
-        row_open = db.current_open(thread_id)
-    except Exception:
-        row_open = None
-    if row_open is not None and not active_invoke:
-        try:
-            active_invoke = row_open["invoke_id"] if isinstance(row_open, dict) else row_open["invoke_id"]
-        except Exception:
-            try:
-                # sqlite3.Row supports key access
-                active_invoke = row_open["invoke_id"]
-            except Exception:
-                active_invoke = None
+    active_invoke: Optional[str] = preload.get('active_invoke') if isinstance(preload, dict) else None
 
     live_content = preload.get('content', '') if isinstance(preload, dict) else ''
     live_reason = preload.get('reason', '') if isinstance(preload, dict) else ''
@@ -570,6 +598,7 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
 
     # In-place streaming
     with Live(console=console, auto_refresh=False, vertical_overflow='visible') as live:
+        # Initial paint reflects any preloaded deltas
         live.update(_live_group(), refresh=True)
         while True:
             updated = False
@@ -635,7 +664,6 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
             # If no new events, sleep briefly before next poll
             if not batch:
                 await asyncio.sleep(0.05)
-
 
 async def run_cli():
     console = Console(force_terminal=True, color_system='auto', no_color=False)
