@@ -201,52 +201,66 @@ class MessageView(Widget):
             pass
 
     # Streaming helpers: update in-place by key
-    def _get_or_create_stream_widget(self, key: str, title: str, border: str) -> Static:
+    async def _get_or_create_stream_widget(self, key: str, title: str, border: str) -> Static:
         wid = getattr(self, f"_stream_{key}", None)
-        if wid is None or wid.is_destroyed:
+        # Some Textual versions don't expose is_destroyed; rely on parent/children presence
+        needs_create = False
+        if wid is None:
+            needs_create = True
+        else:
+            try:
+                # If widget has no parent or is not in our container, recreate/mount
+                if getattr(wid, 'parent', None) is None or wid not in list(self.container.children):
+                    needs_create = True
+            except Exception:
+                needs_create = True
+        if needs_create:
             wid = Static(Panel(Text(""), title=title, border_style=border))
             setattr(self, f"_stream_{key}", wid)
-            self.call_from_thread(self.container.mount, wid)
+            await self.container.mount(wid)
         return wid
 
-    def _remove_stream_widgets(self):
+    async def _remove_stream_widgets(self):
         for name in list(vars(self).keys()):
             if name.startswith('_stream_'):
                 wid: Static = getattr(self, name)
                 try:
-                    self.call_from_thread(wid.remove)
+                    await wid.remove()
                 except Exception:
-                    pass
+                    try:
+                        self.container.remove(wid)
+                    except Exception:
+                        pass
                 delattr(self, name)
 
-    def update_stream_reason(self, text: str):
-        wid = self._get_or_create_stream_widget('reason', 'Reasoning (streaming)', 'magenta')
+    async def update_stream_reason(self, text: str):
+        wid = await self._get_or_create_stream_widget('reason', 'Reasoning (streaming)', 'magenta')
         wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title='Reasoning (streaming)', border_style='magenta'))
         if self.follow:
             self.call_after_refresh(self.scroll_end)
 
-    def update_stream_tool_args(self, name: str, text: str):
+    async def update_stream_tool_args(self, name: str, text: str):
         key = f"toolargs_{name}"
-        wid = self._get_or_create_stream_widget(key, f'Tool Call Args: {name}', 'yellow')
+        wid = await self._get_or_create_stream_widget(key, f'Tool Call Args: {name}', 'yellow')
         wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title=f'Tool Call Args: {name}', border_style='yellow'))
         if self.follow:
             self.call_after_refresh(self.scroll_end)
 
-    def update_stream_tool_output(self, name: str, text: str):
+    async def update_stream_tool_output(self, name: str, text: str):
         key = f"toolout_{name}"
-        wid = self._get_or_create_stream_widget(key, f'Tool: {name}', 'yellow')
+        wid = await self._get_or_create_stream_widget(key, f'Tool: {name}', 'yellow')
         wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title=f'Tool: {name}', border_style='yellow'))
         if self.follow:
             self.call_after_refresh(self.scroll_end)
 
-    def update_stream_content(self, text: str):
-        wid = self._get_or_create_stream_widget('assistant', 'Assistant (streaming)', 'cyan')
+    async def update_stream_content(self, text: str):
+        wid = await self._get_or_create_stream_widget('assistant', 'Assistant (streaming)', 'cyan')
         wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title='Assistant (streaming)', border_style='cyan'))
         if self.follow:
             self.call_after_refresh(self.scroll_end)
 
-    def clear_streaming(self):
-        self._remove_stream_widgets()
+    async def clear_streaming(self):
+        await self._remove_stream_widgets()
 
 
 class ThreadsTree(Tree[str]):
@@ -290,6 +304,8 @@ class EggTextual(App):
 
         # streaming task handle
         self._stream_task: Optional[asyncio.Task] = None
+        self._stream_worker = None
+        self._attached_invoke: Optional[str] = None
 
     # Utilities ----------------------------------------------------------------
     def _current_model_for_thread(self, tid: str) -> Optional[str]:
@@ -364,6 +380,13 @@ class EggTextual(App):
         if getattr(self, '_start_default_scheduler', False):
             self._start_scheduler(self.root_thread)
             self._start_default_scheduler = False
+        # Also, if current thread is already streaming, attach immediately
+        await self._attach_stream(self.current_thread)
+        # And keep the tree up to date initially
+        try:
+            await self._refresh_tree()
+        except Exception:
+            pass
 
     # Tree ---------------------------------------------------------------------
     async def _refresh_tree(self):
@@ -492,6 +515,18 @@ class EggTextual(App):
 
         # Attach to live stream (if any)
         await self._attach_stream(thread_id)
+        # Important: don't block UI thread; schedule periodic pump to recheck events for this thread
+        self.set_interval(0.2, lambda: asyncio.create_task(self._poll_once(thread_id)), name=f"poll-{thread_id[-8:]}")
+        # Focus input to keep typing
+        try:
+            await self.set_focus(self.input)
+        except Exception:
+            pass
+        # Refresh the left tree to reflect STREAMING flag changes
+        try:
+            await self._refresh_tree()
+        except Exception:
+            pass
 
     async def _attach_stream(self, thread_id: str) -> None:
         # Cancel previous stream task if any
@@ -506,8 +541,81 @@ class EggTextual(App):
                 pass
             except Exception:
                 pass
-        # Start a new task
+        # Start a new UI-worker task via Textual (ensures UI-thread marshalling)
+        # Cancel any previous worker/task
+        try:
+            if self._stream_worker and not self._stream_worker.done:
+                self._stream_worker.cancel()
+        except Exception:
+            pass
+        if self._stream_task and not self._stream_task.done():
+            self._stream_task.cancel()
+            try:
+                await self._stream_task
+            except Exception:
+                pass
+        # Start a new task on the main event loop (same thread as DB)
         self._stream_task = asyncio.create_task(self._stream_thread_task(thread_id))
+        self._stream_worker = None
+        # Announce streaming attach
+        await self.msg_view.add_panel(Panel(Text(f"[dim]Attaching to live stream for {thread_id[-8:]}[/dim]"), border_style='cyan'))
+        # Debug: show current open invoke and last snapshot seq
+        try:
+            row_open = self.db.current_open(thread_id)
+            if row_open is not None:
+                inv = row_open['invoke_id']
+                await self.msg_view.add_panel(Panel(Text(f"[dim]open_streams.invoke_id={inv[-8:]}[/dim]"), border_style='blue'))
+        except Exception:
+            pass
+
+    async def _poll_once(self, thread_id: str) -> None:
+        """Lightweight poller to fetch and render any events after the last snapshot.
+        This supplements the EventWatcher in case async scheduling misses callbacks.
+        """
+        try:
+            th = self.db.get_thread(thread_id)
+            after = int(th.snapshot_last_event_seq) if th and isinstance(th.snapshot_last_event_seq, int) else -1
+        except Exception:
+            after = -1
+        try:
+            cur = self.db.conn.execute(
+                "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
+                (thread_id, after)
+            )
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        any_delta = False
+        for e in rows:
+            t = e['type']
+            if t == 'stream.delta':
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+                txt = payload.get('text') or payload.get('delta') or payload.get('content') or ''
+                rs = payload.get('reason') or ''
+                tl = payload.get('tool') or {}
+                tc = payload.get('tool_call') or {}
+                if rs:
+                    await self.msg_view.update_stream_reason(str(rs))
+                if isinstance(tl, dict) and tl.get('text'):
+                    await self.msg_view.update_stream_tool_output(tl.get('name') or 'tool', str(tl.get('text')))
+                if isinstance(tc, dict) and tc.get('text'):
+                    await self.msg_view.update_stream_tool_args(tc.get('name') or 'tool', str(tc.get('text')))
+                if txt:
+                    await self.msg_view.update_stream_content(str(txt))
+                any_delta = True
+            elif t == 'stream.close':
+                try:
+                    create_snapshot(self.db, thread_id)
+                except Exception:
+                    pass
+                await self._render_thread(thread_id)
+                return
+        # If we saw deltas, bump snapshot seq to avoid reprocessing
+        if any_delta:
+            try:
+                create_snapshot(self.db, thread_id)
+            except Exception:
+                pass
 
     async def _stream_thread_task(self, thread_id: str) -> None:
         # Determine start boundary (rewind to stream.open)
@@ -550,6 +658,7 @@ class EggTextual(App):
             tool_stream: Dict[str, str] = {}
             tool_call_text: Dict[str, str] = {}
             seen_open = False
+            current_inv: Optional[str] = None
             try:
                 cur = self.db.conn.execute(
                     "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
@@ -563,10 +672,12 @@ class EggTextual(App):
                 inv = e['invoke_id']
                 if e['event_seq'] is not None:
                     last_seq = e['event_seq']
+                # If a target_invoke is specified, only collect for that
                 if target_invoke is not None and inv != target_invoke:
                     continue
                 if t == 'stream.open':
                     seen_open = True
+                    current_inv = inv
                     live_content = ''
                     live_reason = ''
                     tool_stream.clear()
@@ -590,40 +701,76 @@ class EggTextual(App):
                         if frag:
                             tool_call_text[nm] = tool_call_text.get(nm, '') + str(frag)
                 elif t == 'stream.close':
+                    # If a target was specified, stop at its close; else stop at first close
                     if (target_invoke is None) or (inv == target_invoke):
                         break
-            return last_seq, live_content, live_reason, tool_stream, tool_call_text
+            return last_seq, live_content, live_reason, tool_stream, tool_call_text, current_inv
 
-        last_seq, live_content, live_reason, tool_stream, tool_call_text = _preload(attach_after_seq, active_target)
+        last_seq, live_content, live_reason, tool_stream, tool_call_text, pre_inv = _preload(attach_after_seq, active_target)
+
+        # Determine active invoke id (from open row or preloaded stream.open)
+        active_invoke = active_target or pre_inv
 
         # Initialize streaming panels with preloaded content (if any)
         if live_reason:
-            self.msg_view.update_stream_reason(live_reason)
+            await self.msg_view.update_stream_reason(live_reason)
         for nm, txt in tool_call_text.items():
-            self.msg_view.update_stream_tool_args(nm, txt)
+            await self.msg_view.update_stream_tool_args(nm, txt)
         for nm, txt in tool_stream.items():
-            self.msg_view.update_stream_tool_output(nm, txt)
+            await self.msg_view.update_stream_tool_output(nm, txt)
         if live_content:
-            self.msg_view.update_stream_content(live_content)
+            await self.msg_view.update_stream_content(live_content)
 
         # Watch for new events
         ew = EventWatcher(self.db, thread_id, after_seq=last_seq, poll_sec=0.05)
-        active_invoke = active_target
+        # Debug: show watcher start
+        await self.msg_view.add_panel(Panel(Text(f"[dim]watch after_seq={last_seq} (attaching)\nactive_invoke={active_invoke}[/dim]"), border_style='blue'))
         async for batch in ew.aiter():
+            # Debug: batch size
+            await self.msg_view.add_panel(Panel(Text(f"[dim]batch {len(batch)} events[/dim]"), border_style='blue'))
+            # If we see a stream.open but active_invoke is None, set it and continue
+            if batch and not active_invoke:
+                for ev in batch:
+                    try:
+                        ev_type = ev["type"]
+                    except Exception:
+                        ev_type = None
+                    if ev_type == 'stream.open':
+                        try:
+                            active_invoke = ev["invoke_id"]
+                        except Exception:
+                            active_invoke = None
+                        await self.msg_view.add_panel(Panel(Text(f"[dim]adopt active_invoke={str(active_invoke)[-8:] if active_invoke else 'None'}[/dim]"), border_style='blue'))
+                        break
             for e in batch:
                 t = e['type']
                 if t == 'stream.open':
                     active_invoke = e['invoke_id']
-                    self.msg_view.clear_streaming()
-                elif t == 'stream.delta' and active_invoke and e['invoke_id'] == active_invoke:
+                    await self.msg_view.add_panel(Panel(Text(f"[dim]event: stream.open {active_invoke[-8:]}[/dim]"), border_style='blue'))
+                    await self.msg_view.clear_streaming()
+                    # Reset accumulators when a new invoke starts
+                    live_content = ''
+                    live_reason = ''
+                    tool_stream.clear()
+                    tool_call_text.clear()
+                elif t == 'stream.delta':
+                    # Debug: show delta regardless of invoke_id to diagnose filtering
+                    inv_id = ''
+                    try:
+                        inv_id = (e['invoke_id'] or '')
+                    except Exception:
+                        inv_id = ''
+                    await self.msg_view.add_panel(Panel(Text(f"[dim]event: stream.delta (invoke={str(inv_id)[-8:]})[/dim]"), border_style='blue'))
+                    if not (active_invoke and e['invoke_id'] == active_invoke):
+                        continue
                     payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
                     txt = payload.get('text') or payload.get('delta') or payload.get('content')
                     if isinstance(txt, str) and txt:
-                        self.msg_view.update_stream_content(txt if not live_content else live_content + txt)
+                        await self.msg_view.update_stream_content(txt if not live_content else live_content + txt)
                         live_content = (live_content or '') + txt
                     rs = payload.get('reason')
                     if isinstance(rs, str) and rs:
-                        self.msg_view.update_stream_reason(rs if not live_reason else live_reason + rs)
+                        await self.msg_view.update_stream_reason(rs if not live_reason else live_reason + rs)
                         live_reason = (live_reason or '') + rs
                     tl = payload.get('tool')
                     if isinstance(tl, dict):
@@ -631,7 +778,7 @@ class EggTextual(App):
                         prev = tool_stream.get(nm, '')
                         now = prev + (tl.get('text') or '')
                         tool_stream[nm] = now
-                        self.msg_view.update_stream_tool_output(nm, now)
+                        await self.msg_view.update_stream_tool_output(nm, now)
                     tcd = payload.get('tool_call')
                     if isinstance(tcd, dict):
                         nm = str(tcd.get('name') or tcd.get('id') or 'tool')
@@ -640,16 +787,20 @@ class EggTextual(App):
                         if frag:
                             now = prev + str(frag)
                             tool_call_text[nm] = now
-                            self.msg_view.update_stream_tool_args(nm, now)
+                            await self.msg_view.update_stream_tool_args(nm, now)
                 elif t == 'stream.close' and active_invoke and e['invoke_id'] == active_invoke:
                     # Clear streaming panels and re-render snapshot for final messages
-                    self.msg_view.clear_streaming()
+                    self.call_from_thread(self.msg_view.clear_streaming)
                     try:
                         create_snapshot(self.db, thread_id)
                     except Exception:
                         pass
-                    # Avoid recursive re-entry if our parent caller is _render_thread
-                    # Simply break out of the watcher to end the task; next render will pick up
+                    # Trigger a re-render of the thread to display the completed messages
+                    try:
+                        self.call_from_thread(lambda: asyncio.create_task(self._render_thread(thread_id)))
+                    except Exception:
+                        pass
+                    # End the stream task
                     return
 
     # Commands -----------------------------------------------------------------
@@ -664,6 +815,9 @@ class EggTextual(App):
             # normal user message
             append_message(self.db, self.current_thread, 'user', text)
             create_snapshot(self.db, self.current_thread)
+            # Immediately attach to stream to see live output
+            await self._attach_stream(self.current_thread)
+            # Render baseline snapshot now (pre-stream) so history shows while streaming starts
             await self._render_thread(self.current_thread)
 
     async def _handle_command(self, cmdline: str) -> None:
