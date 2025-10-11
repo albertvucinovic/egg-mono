@@ -84,7 +84,7 @@ class SnapshotBuilder:
                         "content": "".join(parts),
                         "invoke_id": inv,
                     }
-                    # Attach reasoning if any
+                    # Attach reasoning if any (from streaming)
                     rparts = assistant_buf.pop(inv + "::reason", None)
                     if rparts:
                         last_assistant["reasoning"] = "".join(rparts)
@@ -96,5 +96,13 @@ class SnapshotBuilder:
                             name = tk.split("::toolcall::",1)[1]
                             chunks = assistant_buf.pop(tk, [])
                             last_assistant["tool_calls_stream"][name] = "".join(chunks)
+                    # Attach tool output streaming if any (metadata)
+                    tool_keys = [k for k in list(assistant_buf.keys()) if isinstance(k, str) and k.startswith(inv + "::tool::")]
+                    if tool_keys:
+                        last_assistant.setdefault("tool_stream", {})
+                        for tk in tool_keys:
+                            name = tk.split("::tool::",1)[1]
+                            chunks = assistant_buf.pop(tk, [])
+                            last_assistant["tool_stream"][name] = "".join(chunks)
                     messages.append(last_assistant)
         return {"messages": messages}
