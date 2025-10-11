@@ -380,20 +380,28 @@ async def _show_thread_ui(db: ThreadsDB, thread_id: str) -> None:
     """
     console = Console(force_terminal=True, color_system='auto')
     console.clear()
-    # Freshen snapshot before rendering to make sure we start watching from
-    # the latest persisted state.
+
+    # Check if a live stream is already open BEFORE snapshotting.
+    # If a stream is active, do not refresh the snapshot so that all
+    # post-snapshot events are processed as part of the streaming view.
+    row_open = None
     try:
-        create_snapshot(db, thread_id)
+        row_open = db.current_open(thread_id)
     except Exception:
-        pass
+        row_open = None
+
+    if row_open is None:
+        # Freshen snapshot only when not streaming
+        try:
+            create_snapshot(db, thread_id)
+        except Exception:
+            pass
+
     console.print(Panel(f'Switched to thread: {thread_id}', border_style='blue'))
     _render_static_view(db, thread_id)
+
     # Attach to ongoing stream if present, or briefly wait for one to start
-    row = None
-    try:
-        row = db.current_open(thread_id)
-    except Exception:
-        row = None
+    row = row_open
     if row is None:
         # Poll briefly in case a scheduler is about to start streaming
         import asyncio as _asyncio
@@ -417,10 +425,78 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
         start_after = int(th.snapshot_last_event_seq) if th and isinstance(th.snapshot_last_event_seq, int) else -1
     except Exception:
         start_after = -1
+
+    # If there are any events after the snapshot boundary, pre-load them into
+    # the live buffers so that attaching mid-stream shows the full live message
+    # (reasoning, tool args/output, content) seamlessly.
+    def _preload_existing(after_seq: int):
+        nonlocal start_after
+        live_content_local = ''
+        live_reason_local = ''
+        tool_stream_local: Dict[str, str] = {}
+        tc_panels_order_local: List[str] = []
+        tc_text_local: Dict[str, str] = {}
+        tc_map_local: Dict[str, List[str]] = {}
+        active_inv: Optional[str] = None
+        try:
+            cur = db.conn.execute(
+                "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
+                (thread_id, after_seq)
+            )
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        for e in rows:
+            t = e['type']
+            if t == 'stream.open':
+                active_inv = e['invoke_id']
+            elif t == 'stream.delta' and active_inv and e['invoke_id'] == active_inv:
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+                txt = payload.get('text') or payload.get('delta') or payload.get('content')
+                if isinstance(txt, str) and txt:
+                    live_content_local += txt
+                rs = payload.get('reason')
+                if isinstance(rs, str) and rs:
+                    live_reason_local += rs
+                tl = payload.get('tool')
+                if isinstance(tl, dict):
+                    nm = tl.get('name') or 'tool'
+                    tool_stream_local[nm] = tool_stream_local.get(nm, '') + (tl.get('text') or '')
+                tcd = payload.get('tool_call')
+                if isinstance(tcd, dict):
+                    raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
+                    frag = tcd.get('text') or tcd.get('arguments_delta') or ''
+                    if frag is None:
+                        frag = ''
+                    if isinstance(frag, str) and frag:
+                        existing_keys = tc_map_local.get(raw_key, [])
+                        current_pkey = existing_keys[-1] if existing_keys else None
+                        if not current_pkey:
+                            new_pkey = f"{raw_key}-{len(tc_panels_order_local)}"
+                            tc_panels_order_local.append(new_pkey)
+                            tc_text_local[new_pkey] = ''
+                            tc_map_local.setdefault(raw_key, []).append(new_pkey)
+                            current_pkey = new_pkey
+                        tc_text_local[current_pkey] += frag
+            elif t == 'stream.close' and active_inv and e['invoke_id'] == active_inv:
+                # stop at first close (should hand over to live loop afterwards)
+                break
+        return {
+            'content': live_content_local,
+            'reason': live_reason_local,
+            'tool_stream': tool_stream_local,
+            'tc_panels_order': tc_panels_order_local,
+            'tc_text': tc_text_local,
+            'tc_map': tc_map_local,
+            'active_invoke': active_inv,
+        }
+
+    preload = _preload_existing(start_after)
+
     ew = EventWatcher(db, thread_id, after_seq=start_after, poll_sec=0.05)
 
     # Track the currently active invoke, if any, so we can attach mid-stream
-    active_invoke: Optional[str] = None
+    active_invoke: Optional[str] = preload.get('active_invoke')
     try:
         row_open = db.current_open(thread_id)
     except Exception:
@@ -435,15 +511,14 @@ async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
             except Exception:
                 active_invoke = None
 
-    live_content = ''
-    live_reason = ''
+    live_content = preload.get('content', '') if isinstance(preload, dict) else ''
+    live_reason = preload.get('reason', '') if isinstance(preload, dict) else ''
     # tool streaming buffers: name -> text
-    tool_stream: Dict[str, str] = {}
+    tool_stream: Dict[str, str] = preload.get('tool_stream', {}) if isinstance(preload, dict) else {}
     # tool-call args streaming panels: maintain ordered panels to avoid reusing old panel
-    tc_panels_order: List[str] = []  # ordered panel keys
-    tc_text: Dict[str, str] = {}     # panel_key -> accumulated text
-    tc_map: Dict[str, List[str]] = {}  # raw_key (id or name) -> list of panel_keys created for that key
-    # any tool_call or tool output seen in this invoke (debug) – removed (unused)
+    tc_panels_order: List[str] = preload.get('tc_panels_order', []) if isinstance(preload, dict) else []
+    tc_text: Dict[str, str] = preload.get('tc_text', {}) if isinstance(preload, dict) else {}
+    tc_map: Dict[str, List[str]] = preload.get('tc_map', {}) if isinstance(preload, dict) else {}
 
     # Keep a reference to the latest polled batch for model label detection
     batch: List[Dict[str, Any]] = []
