@@ -136,6 +136,166 @@ class _ModelCompleter(Completer):
                 pass
 
 
+class _EggCompleter(Completer):
+    """A prompt_toolkit Completer that preserves existing /model completion
+    and adds user-text completions similar to ../chat.sh/:
+      - Filesystem paths (supports ~, adds trailing '/' for dirs)
+      - Words from recent conversation history (deduplicated)
+      - '/updateAllModels ' provider completion if LLM client is available
+      - '/spawn ' path + conversation words completion
+
+    Note: chat.sh also supports a 'global/' path namespace; this project
+    intentionally omits that and only completes regular filesystem paths.
+    """
+
+    def __init__(self, db: ThreadsDB, get_current_thread, llm: "LLMClient | None"):
+        self.db = db
+        self.get_current_thread = get_current_thread
+        self.llm = llm
+        self.model_completer = _ModelCompleter(llm)
+
+        # No global/ path support here (chat.sh-specific)
+
+    # ---- Helpers --------------------------------------------------------
+    def _get_filesystem_suggestions(self, prefix: str):
+        import glob as _glob
+        import os as _os
+        try:
+            expanded = _os.path.expanduser(prefix)
+            escaped = _glob.escape(expanded)
+            matches = _glob.glob(escaped + '*')
+            out = []
+            for m in matches:
+                m2 = m.replace('\\', '/')
+                if _os.path.isdir(m2):
+                    out.append(m2 + '/')
+                else:
+                    out.append(m2)
+            return out
+        except Exception:
+            return []
+
+    def _recent_words(self, tid: str, limit_msgs: int = 200):
+        # Extract recent words from snapshot messages for this thread
+        words: list[str] = []
+        try:
+            th = self.db.get_thread(tid)
+            if not th or not th.snapshot_json:
+                return words
+            import json as _json
+            snap = _json.loads(th.snapshot_json)
+            msgs = snap.get('messages', []) or []
+            # consider only recent slice
+            for m in msgs[-limit_msgs:]:
+                try:
+                    role = (m or {}).get('role')
+                    if role not in ('user', 'assistant', 'system', 'tool'):
+                        continue
+                    txt = (m or {}).get('content') or ''
+                    if not isinstance(txt, str) or not txt:
+                        continue
+                    # tokenize by words; keep 3+ char tokens
+                    import re as _re
+                    for w in _re.findall(r"[A-Za-z0-9_]{3,}", txt):
+                        words.append(w)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return words
+
+    def _conversation_word_matches(self, fragment: str, tid: str) -> list[str]:
+        if not fragment:
+            return []
+        recent = self._recent_words(tid)
+        seen: set[str] = set()
+        out: list[str] = []
+        fl = fragment.lower()
+        for w in reversed(recent):  # prefer more recent tokens
+            wl = w.lower()
+            if wl.startswith(fl) and wl not in seen:
+                seen.add(wl)
+                out.append(w)
+        return out
+
+    # ---- Completion routing --------------------------------------------
+    def get_completions(self, document, complete_event):  # type: ignore
+        text = getattr(document, 'text_before_cursor', '') or ''
+        tid = None
+        try:
+            tid = self.get_current_thread()
+        except Exception:
+            pass
+
+        # 1) Delegate /model completion to the original completer
+        if text.startswith('/model '):
+            yield from self.model_completer.get_completions(document, complete_event)
+            return
+
+        # 2) Providers for /updateAllModels
+        if text.startswith('/updateAllModels '):
+            prefix = text[len('/updateAllModels '):]
+            try:
+                if self.llm:
+                    provs = sorted(self.llm.get_providers() or [])
+                else:
+                    provs = []
+            except Exception:
+                provs = []
+            for p in provs:
+                if p.startswith(prefix):
+                    yield Completion(p, start_position=-len(prefix))
+            return
+
+        # 3) /spawn: support filesystem paths and conversation words
+        if text.startswith('/spawn'):
+            input_after = text[len('/spawn'):].lstrip()
+            # current fragment according to prompt_toolkit WORD chars
+            try:
+                current_fragment = document.get_word_before_cursor(WORD=True)
+            except Exception:
+                current_fragment = ''
+
+            # normal filesystem suggestions relative to cwd
+            suggestions = self._get_filesystem_suggestions(current_fragment)
+            for s in suggestions:
+                yield Completion(s, start_position=-len(current_fragment))
+            if suggestions:
+                return
+
+            # If we didn't yield any path suggestions, propose conversation words
+            if tid:
+                matches = self._conversation_word_matches(current_fragment, tid)
+                for w in matches:
+                    yield Completion(w, start_position=-len(current_fragment))
+            return
+
+        # 4) Generic filename completion for the last token when not a recognized command
+        if text and not text.startswith('/'):
+            parts = text.split()
+            if parts and not text.endswith(' '):
+                prefix_to_complete = parts[-1]
+                suggestions = self._get_filesystem_suggestions(prefix_to_complete)
+                if len(suggestions) == 1 and suggestions[0].lower() == prefix_to_complete.lower():
+                    # exact match, don't spam completions
+                    pass
+                else:
+                    for s in suggestions:
+                        yield Completion(s, start_position=-len(prefix_to_complete))
+                    if suggestions:
+                        return
+
+        # 5) Fallback: words from conversation for user text (not commands)
+        if text and not text.strip().startswith('/'):
+            import re as _re
+            m = _re.search(r'(\w{3,})$', text)
+            if m and tid:
+                fragment = m.group(1)
+                for w in self._conversation_word_matches(fragment, tid):
+                    yield Completion(w, start_position=-len(fragment))
+            return
+
+
 def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
     role = m.get('role')
     content = (m.get('content') or '').strip()
@@ -837,10 +997,14 @@ async def run_cli():
     except Exception:
         llm_for_completion = None
 
+    # Unified completer: preserve /model behavior and add user text/file completions
+    def _get_current_thread():
+        return current_thread
+
     session = PromptSession(
         message=prompt_message,
         auto_suggest=AutoSuggestFromHistory(),
-        completer=_ModelCompleter(llm_for_completion),
+        completer=_EggCompleter(db, _get_current_thread, llm_for_completion),
     )
     kb = KeyBindings()
 
