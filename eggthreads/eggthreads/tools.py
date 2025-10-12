@@ -216,6 +216,45 @@ def create_default_tools() -> ToolRegistry:
         impl=_replace_between,
     )
 
+    # search_tavily (simple wrapper; requires TAVILY_API_KEY env var)
+    def _search_tavily(args: Dict[str, Any]):
+        import os as _os, requests as _requests
+        query = args.get('query', '')
+        api_key = _os.environ.get('TAVILY_API_KEY')
+        if not api_key:
+            return 'Error: TAVILY_API_KEY not set in environment.'
+        try:
+            resp = _requests.post(
+                'https://api.tavily.com/search',
+                json={'query': query, 'max_results': 5, 'include_answer': False, 'search_depth': 'basic'},
+                headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                return f"Error: Tavily API status {resp.status_code}: {resp.text[:400]}"
+            data = resp.json()
+            results = data.get('results') or data.get('data') or []
+            lines = []
+            for r in results[:5]:
+                title = (r.get('title') or '').strip()
+                url = (r.get('url') or r.get('link') or '').strip()
+                if title or url:
+                    lines.append(f"- {title}  {url}")
+            return "\n".join(lines) or "No results."
+        except Exception as e:
+            return f"Error: Tavily request failed: {e}"
+
+    reg.register(
+        name='search_tavily',
+        description='Perform a web search (using Tavily) and return up to 5 results with titles and URLs.',
+        parameters_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        impl=_search_tavily,
+    )
+
     # Note: agent-oriented tools like popContext/spawn_agent are excluded from default registry
     # to prevent unintended tool calls in basic chats. The UI layer can register them explicitly.
 
