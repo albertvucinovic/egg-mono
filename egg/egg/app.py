@@ -30,6 +30,12 @@ from eggthreads import (
     append_message,
     delete_thread,
     is_thread_runnable,
+    list_threads,
+    list_root_threads,
+    get_parent,
+    list_children_with_meta,
+    list_children_ids,
+    current_open_invoke,
     create_snapshot,
     interrupt_thread,
     pause_thread,
@@ -173,8 +179,11 @@ def _get_subtree(db: ThreadsDB, root_id: str) -> List[str]:
             continue
         seen.add(t)
         out.append(t)
-        for row in db.conn.execute("SELECT child_id FROM children WHERE parent_id=?", (t,)):
-            q.append(row[0])
+        try:
+            for cid in list_children_ids(db, t):
+                q.append(cid)
+        except Exception:
+            pass
     return out[1:]  # exclude root
 
 
@@ -703,11 +712,7 @@ async def run_cli():
         console.print(prefix + connector + _format_thread_line(root_tid))
         # List children ordered by created_at for readability
         try:
-            cur = db.conn.execute(
-                "SELECT c.child_id, t.created_at FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=? ORDER BY t.created_at ASC",
-                (root_tid,)
-            )
-            kids = [r[0] for r in cur.fetchall()]
+            kids = [cid for cid, _n, _r, _c in list_children_with_meta(db, root_tid)]
         except Exception:
             kids = []
         for i, cid in enumerate(kids):
@@ -753,35 +758,34 @@ async def run_cli():
         Result preserves DB scan order; caller can re-sort by created_at if needed.
         """
         try:
-            cur = db.conn.execute("SELECT thread_id, name, short_recap, created_at FROM threads")
-            rows = cur.fetchall()
+            rows = list_threads(db)
         except Exception:
             rows = []
         sel_l = (selector or '').lower()
         matches: List[str] = []
         # Priority 1: exact id
         for r in rows:
-            if r[0] == selector:
-                matches = [r[0]]
+            if r.thread_id == selector:
+                matches = [r.thread_id]
                 break
         if not matches and sel_l:
             # Priority 2: endswith id suffix
-            suf = [r[0] for r in rows if r[0].lower().endswith(sel_l)]
+            suf = [r.thread_id for r in rows if r.thread_id.lower().endswith(sel_l)]
             if suf:
                 matches = suf
         if not matches and sel_l:
             # Priority 3: id contains
-            cont = [r[0] for r in rows if sel_l in r[0].lower()]
+            cont = [r.thread_id for r in rows if sel_l in r.thread_id.lower()]
             if cont:
                 matches = cont
         if not matches and sel_l:
             # Priority 4: name contains
-            name_matches = [r[0] for r in rows if isinstance(r[1], str) and sel_l in r[1].lower()]
+            name_matches = [r.thread_id for r in rows if isinstance(r.name, str) and sel_l in r.name.lower()]
             if name_matches:
                 matches = name_matches
         if not matches and sel_l:
             # Priority 5: recap contains
-            recap_matches = [r[0] for r in rows if isinstance(r[2], str) and sel_l in r[2].lower()]
+            recap_matches = [r.thread_id for r in rows if isinstance(r.short_recap, str) and sel_l in r.short_recap.lower()]
             if recap_matches:
                 matches = recap_matches
         return matches
@@ -996,6 +1000,19 @@ async def run_cli():
                     continue
                 # Resolve selector using same logic as /thread
                 matches = _select_threads_by_selector(selector)
+                # If nothing matched, try parsing first token (in case UI inserted display text)
+                if not matches and ' ' in selector:
+                    sel_first = selector.split()[0]
+                    if sel_first:
+                        matches = _select_threads_by_selector(sel_first)
+                # If still nothing, try suffix match against all threads as a last resort
+                if not matches:
+                    try:
+                        rows_all = list_threads(db)
+                        suf = selector.lower()
+                        matches = [r.thread_id for r in rows_all if r.thread_id.lower().endswith(suf)]
+                    except Exception:
+                        matches = []
                 # Exclude current thread from deletable candidates
                 matches = [m for m in matches if m != current_thread]
                 if not matches:
@@ -1004,9 +1021,11 @@ async def run_cli():
                 # If ambiguous, pick most recent by created_at
                 if len(matches) > 1:
                     # Map id->created_at and pick max
-                    cur = db.conn.execute("SELECT thread_id, created_at FROM threads")
-                    rows = cur.fetchall()
-                    ca = {r[0]: r[1] for r in rows}
+                    try:
+                        rows = list_threads(db)
+                        ca = {r.thread_id: r.created_at for r in rows}
+                    except Exception:
+                        ca = {}
                     matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
                     console.print(Panel(f"Multiple matches, deleting most recent candidate. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}", border_style='yellow'))
                 target_tid = matches[0]
@@ -1028,15 +1047,11 @@ async def run_cli():
                 console.print(Panel(f'Thread {target_tid[-8:]} deleted.', border_style='green'))
             elif cmd == 'child':
                 patt = (arg or '').lower()
-                cur = db.conn.execute(
-                    "SELECT c.child_id, t.name, t.short_recap FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=?",
-                    (current_thread,)
-                )
+                rows = list_children_with_meta(db, current_thread)
                 candidates: List[str] = []
-                for r in cur.fetchall():
-                    child_id, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                for child_id, name, recap, _created in rows:
                     if not patt or patt in (name + ' ' + recap + ' ' + child_id).lower():
-                        candidates.append(r[0])
+                        candidates.append(child_id)
                 if candidates:
                     # Ensure scheduler for the child's root before switching
                     await _ensure_scheduler_for_thread(candidates[0])
@@ -1050,9 +1065,9 @@ async def run_cli():
                 else:
                     console.print('No matching child.')
             elif cmd == 'parent':
-                row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (current_thread,)).fetchone()
-                if row and row[0]:
-                    current_thread = row[0]
+                pid = get_parent(db, current_thread)
+                if pid:
+                    current_thread = pid
                     # Show the parent's conversation (and live stream if any)
                     await _show_thread_ui(db, current_thread)
                 else:
@@ -1062,8 +1077,7 @@ async def run_cli():
                 if sub:
                     # Render as a tree for each direct child
                     try:
-                        cur = db.conn.execute("SELECT c.child_id, t.created_at FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=? ORDER BY t.created_at ASC", (current_thread,))
-                        direct = [r[0] for r in cur.fetchall()]
+                        direct = [cid for cid, _n, _r, _c in list_children_with_meta(db, current_thread)]
                     except Exception:
                         direct = []
                     if not direct:
@@ -1079,8 +1093,7 @@ async def run_cli():
             elif cmd == 'threads':
                 try:
                     # Find all roots (threads that are not children)
-                    cur = db.conn.execute("SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children)")
-                    roots = [r[0] for r in cur.fetchall()]
+                    roots = list_root_threads(db)
                     if not roots:
                         console.print('No threads found.')
                     else:
@@ -1099,15 +1112,28 @@ async def run_cli():
                 else:
                     try:
                         matches = _select_threads_by_selector(sel)
+                        if not matches and ' ' in sel:
+                            sel_first = sel.split()[0]
+                            if sel_first:
+                                matches = _select_threads_by_selector(sel_first)
+                        if not matches:
+                            try:
+                                rows_all = list_threads(db)
+                                suf = sel.lower()
+                                matches = [r.thread_id for r in rows_all if r.thread_id.lower().endswith(suf)]
+                            except Exception:
+                                matches = []
                         if not matches:
                             console.print(f"No thread matches selector: {sel}")
                         else:
                             # If ambiguous, choose most recent by created_at
                             if len(matches) > 1:
                                 # Map id->created_at and pick max
-                                cur = db.conn.execute("SELECT thread_id, created_at FROM threads")
-                                rows = cur.fetchall()
-                                ca = {r[0]: r[1] for r in rows}
+                                try:
+                                    rows = list_threads(db)
+                                    ca = {r.thread_id: r.created_at for r in rows}
+                                except Exception:
+                                    ca = {}
                                 matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
                                 console.print(f"Multiple matches, switching to most recent. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}")
                             new_tid = matches[0]
