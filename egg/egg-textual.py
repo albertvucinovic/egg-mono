@@ -12,10 +12,12 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.console import Group
+from rich.segment import Segment
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, ScrollableContainer
-from textual.widgets import Header, Footer, Input, Static, Tree, Label
+from textual.containers import Vertical, ScrollableContainer
+from textual.widgets import Header, Footer, Input, Static
+from textual.scroll_view import ScrollView
 from textual.widget import Widget
 from textual.reactive import reactive
 from textual import events
@@ -166,114 +168,164 @@ def _get_subtree(db: ThreadsDB, root_id: str) -> List[str]:
 # Textual Widgets
 # ----------------------------------------------------------------------------
 
-class MessageView(Widget):
-    follow = reactive(True)  # auto scroll to end on updates
+class MessageView(ScrollView):
+    """Line-API message log with reliable scrolling and word-wrapping.
 
-    def compose(self) -> ComposeResult:
-        self.container = Vertical()
-        yield self.container
+    - Maintains logical lines in self._lines
+    - Reflows to visual lines (self._vis) based on current width
+    - Implements render_line using scroll_offset and visual buffer
+    """
+    follow = reactive(True)
+
+    def __init__(self):
+        super().__init__()
+        self._lines: list[str] = []
+        self._vis: list[str] = []
+        self._stream_idx: Dict[str, int] = {}
+        self._reflow()
+
+    def _reflow(self) -> None:
+        # Build visual lines from logical lines, wrapping to current width
+        from textual.geometry import Size
+        import textwrap
+        width = max(self.size.width or 0, 1)
+        vis: list[str] = []
+        for ln in self._lines:
+            s = ln if isinstance(ln, str) else str(ln)
+            if not s:
+                vis.append("")
+                continue
+            # Wrap on spaces; break long words if necessary
+            wrapped = textwrap.wrap(
+                s,
+                width=width,
+                replace_whitespace=False,
+                drop_whitespace=False,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]
+            vis.extend(wrapped)
+        self._vis = vis
+        # Set virtual size to current viewport width and number of visual lines
+        self.virtual_size = Size(width, max(len(self._vis), 1))
+        self.refresh()
+
+    def on_resize(self, event) -> None:
+        # Reflow on width changes
+        self._reflow()
 
     async def clear_messages(self):
-        # Remove children one by one for compatibility across Textual versions
-        for child in list(self.container.children):
-            try:
-                await child.remove()
-            except Exception:
-                try:
-                    self.container.remove(child)
-                except Exception:
-                    pass
+        self._lines.clear()
+        self._vis.clear()
+        self._stream_idx.clear()
+        self._reflow()
 
     async def add_panel(self, panel: Panel):
-        await self.container.mount(Static(panel))
+        # Flatten panel into text lines: title then content
+        title = getattr(panel, 'title', None)
+        if isinstance(title, str) and title.strip():
+            self._lines.append(f"[{title}]")
+        body = getattr(panel, 'renderable', None)
+        txt = body.plain if hasattr(body, 'plain') else (str(body) if body is not None else '')
+        self._lines.extend((txt or '').splitlines() or [''])
+        self._reflow()
         if self.follow:
-            self.call_after_refresh(self.scroll_end)
+            try:
+                super().scroll_end(animate=False)
+            except Exception:
+                pass
 
     async def add_text(self, txt: str):
-        await self.container.mount(Static(Text(txt)))
+        self._lines.extend((txt or '').splitlines() or [''])
+        self._reflow()
         if self.follow:
-            self.call_after_refresh(self.scroll_end)
-
-    def scroll_end(self):
-        try:
-            self.scroll_visible(self.container.children[-1])
-        except Exception:
-            pass
-
-    # Streaming helpers: update in-place by key
-    async def _get_or_create_stream_widget(self, key: str, title: str, border: str) -> Static:
-        wid = getattr(self, f"_stream_{key}", None)
-        # Some Textual versions don't expose is_destroyed; rely on parent/children presence
-        needs_create = False
-        if wid is None:
-            needs_create = True
-        else:
             try:
-                # If widget has no parent or is not in our container, recreate/mount
-                if getattr(wid, 'parent', None) is None or wid not in list(self.container.children):
-                    needs_create = True
+                super().scroll_end(animate=False)
             except Exception:
-                needs_create = True
-        if needs_create:
-            wid = Static(Panel(Text(""), title=title, border_style=border))
-            setattr(self, f"_stream_{key}", wid)
-            await self.container.mount(wid)
-        return wid
+                pass
 
-    async def _remove_stream_widgets(self):
-        for name in list(vars(self).keys()):
-            if name.startswith('_stream_'):
-                wid: Static = getattr(self, name)
-                try:
-                    await wid.remove()
-                except Exception:
-                    try:
-                        self.container.remove(wid)
-                    except Exception:
-                        pass
-                delattr(self, name)
-
+    # Streaming helpers: append to a single logical line per stream category
     async def update_stream_reason(self, text: str):
-        wid = await self._get_or_create_stream_widget('reason', 'Reasoning (streaming)', 'magenta')
-        wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title='Reasoning (streaming)', border_style='magenta'))
-        if self.follow:
-            self.call_after_refresh(self.scroll_end)
+        key = '__reason__'
+        idx = self._stream_idx.get(key)
+        if idx is None:
+            await self.add_panel(Panel(Text(text or ''), title='Reasoning (streaming)', border_style='magenta'))
+            self._stream_idx[key] = len(self._lines) - 1
+        else:
+            self._lines[idx] += str(text or '')
+            self._reflow()
 
     async def update_stream_tool_args(self, name: str, text: str):
-        key = f"toolargs_{name}"
-        wid = await self._get_or_create_stream_widget(key, f'Tool Call Args: {name}', 'yellow')
-        wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title=f'Tool Call Args: {name}', border_style='yellow'))
-        if self.follow:
-            self.call_after_refresh(self.scroll_end)
+        nm = name or 'tool'
+        key = f'__toolargs__:{nm}'
+        idx = self._stream_idx.get(key)
+        if idx is None:
+            await self.add_panel(Panel(Text(text or ''), title=f'Tool Call Args: {nm}', border_style='yellow'))
+            self._stream_idx[key] = len(self._lines) - 1
+        else:
+            self._lines[idx] += str(text or '')
+            self._reflow()
 
     async def update_stream_tool_output(self, name: str, text: str):
-        key = f"toolout_{name}"
-        wid = await self._get_or_create_stream_widget(key, f'Tool: {name}', 'yellow')
-        wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title=f'Tool: {name}', border_style='yellow'))
-        if self.follow:
-            self.call_after_refresh(self.scroll_end)
+        nm = name or 'tool'
+        key = f'__toolout__:{nm}'
+        idx = self._stream_idx.get(key)
+        if idx is None:
+            await self.add_panel(Panel(Text(text or ''), title=f'Tool: {nm}', border_style='yellow'))
+            self._stream_idx[key] = len(self._lines) - 1
+        else:
+            self._lines[idx] += str(text or '')
+            self._reflow()
 
     async def update_stream_content(self, text: str):
-        wid = await self._get_or_create_stream_widget('assistant', 'Assistant (streaming)', 'cyan')
-        wid.update(Panel(Text(text, no_wrap=False, overflow='fold'), title='Assistant (streaming)', border_style='cyan'))
-        if self.follow:
-            self.call_after_refresh(self.scroll_end)
+        key = '__assistant__'
+        idx = self._stream_idx.get(key)
+        if idx is None:
+            await self.add_panel(Panel(Text(text or ''), title='Assistant (streaming)', border_style='cyan'))
+            self._stream_idx[key] = len(self._lines) - 1
+        else:
+            self._lines[idx] += str(text or '')
+            self._reflow()
 
-    async def clear_streaming(self):
-        await self._remove_stream_widgets()
-
-
-class ThreadsTree(Tree[str]):
-    pass
+    # Line API: render visible line using virtual buffer
+    def render_line(self, y: int):
+        from textual.strip import Strip
+        from rich.segment import Segment
+        scroll_x, scroll_y = self.scroll_offset
+        y += scroll_y
+        if y < 0 or y >= len(self._vis):
+            return Strip.blank(self.size.width)
+        src = self._vis[y]
+        # Crop horizontally according to scroll_x
+        start = max(scroll_x, 0)
+        end = start + max(self.size.width, 1)
+        visible = src[start:end]
+        if len(visible) < max(self.size.width, 1):
+            visible = visible.ljust(max(self.size.width, 1))
+        return Strip([Segment(visible)])
 
 # ----------------------------------------------------------------------------
 # Main App
 # ----------------------------------------------------------------------------
 
 class EggTextual(App):
-    CSS_PATH = None
+    CSS = """
+    #messages {
+        height: 1fr;
+        overflow-y: auto;
+    }
+    #input {
+        height: 3;
+    }
+    """
     BINDINGS = [
         ("f", "toggle_follow", "Follow"),
+        ("pageup", "scroll_up_page", "PgUp"),
+        ("pagedown", "scroll_down_page", "PgDn"),
+        ("home", "scroll_home", "Home"),
+        ("end", "scroll_end", "End"),
+        ("up", "scroll_up", "Up"),
+        ("down", "scroll_down", "Down"),
         ("q", "quit", "Quit"),
     ]
 
@@ -306,6 +358,8 @@ class EggTextual(App):
         self._stream_task: Optional[asyncio.Task] = None
         self._stream_worker = None
         self._attached_invoke: Optional[str] = None
+        # virtual scroll offset (lines/pages proxy)
+        self.view_offset: int = 0
 
     # Utilities ----------------------------------------------------------------
     def _current_model_for_thread(self, tid: str) -> Optional[str]:
@@ -358,14 +412,15 @@ class EggTextual(App):
     # UI composition ------------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Horizontal():
-            self.threads_tree = ThreadsTree("Threads")
-            yield self.threads_tree
-            with Vertical():
-                self.msg_view = MessageView()
-                yield ScrollableContainer(self.msg_view, id='messages')
-                self.input = Input(placeholder="Type a message or /command ...", id='input')
-                yield self.input
+        # Single-column layout: message view + input (no left tree)
+        with Vertical():
+            # Use a ScrollableContainer to host the MessageView for reliable scrolling
+            self.msg_view = MessageView()
+            # Scrollable with id=messages; input below
+            self.scroll = ScrollableContainer(self.msg_view, id='messages')
+            yield self.scroll
+            self.input = Input(placeholder="Type a message or /command ...", id='input')
+            yield self.input
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -390,15 +445,8 @@ class EggTextual(App):
 
     # Tree ---------------------------------------------------------------------
     async def _refresh_tree(self):
-        self.threads_tree.clear()
-        # roots: threads not in children table
-        roots = [r[0] for r in self.db.conn.execute("SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children)").fetchall()]
-        for rid in roots:
-            label = self._format_thread_line(rid)
-            node = self.threads_tree.root.add(label, data=rid, expand=True)
-            await self._populate_children(node, rid)
-        self.threads_tree.root.expand()
-        self.threads_tree.refresh(layout=True)
+        # No-op in single-pane mode; kept for command compatibility
+        return
 
     async def _populate_children(self, node, tid: str):
         # order by created_at for readability
@@ -429,15 +477,6 @@ class EggTextual(App):
         sched_tag = '[cyan][SCHED][/] ' if self._root_has_scheduler(tid) and self._thread_root_id(tid) == tid else ''
         extra = f"  [dim]{label}[/dim]" if label else ''
         return f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status} - {recap} (subtree={subtree_size}) [dim][model: {mk}][/dim]{extra}"
-
-    async def on_tree_node_selected(self, event: ThreadsTree.NodeSelected) -> None:
-        # Only respond to selections from our threads_tree
-        src = getattr(event, 'control', None) or getattr(event, 'sender', None)
-        if src is not self.threads_tree:
-            return
-        tid = getattr(event.node, 'data', None)
-        if isinstance(tid, str):
-            await self._switch_thread(tid)
 
     # Rendering ----------------------------------------------------------------
     async def _render_thread(self, thread_id: str) -> None:
@@ -522,6 +561,11 @@ class EggTextual(App):
             await self.set_focus(self.input)
         except Exception:
             pass
+        # Ensure messages container is scrollable and can receive scroll events
+        try:
+            self.scroll.can_focus = True
+        except Exception:
+            pass
         # Refresh the left tree to reflect STREAMING flag changes
         try:
             await self._refresh_tree()
@@ -557,16 +601,8 @@ class EggTextual(App):
         # Start a new task on the main event loop (same thread as DB)
         self._stream_task = asyncio.create_task(self._stream_thread_task(thread_id))
         self._stream_worker = None
-        # Announce streaming attach
+        # Announce streaming attach (no debug)
         await self.msg_view.add_panel(Panel(Text(f"[dim]Attaching to live stream for {thread_id[-8:]}[/dim]"), border_style='cyan'))
-        # Debug: show current open invoke and last snapshot seq
-        try:
-            row_open = self.db.current_open(thread_id)
-            if row_open is not None:
-                inv = row_open['invoke_id']
-                await self.msg_view.add_panel(Panel(Text(f"[dim]open_streams.invoke_id={inv[-8:]}[/dim]"), border_style='blue'))
-        except Exception:
-            pass
 
     async def _poll_once(self, thread_id: str) -> None:
         """Lightweight poller to fetch and render any events after the last snapshot.
@@ -723,30 +759,12 @@ class EggTextual(App):
 
         # Watch for new events
         ew = EventWatcher(self.db, thread_id, after_seq=last_seq, poll_sec=0.05)
-        # Debug: show watcher start
-        await self.msg_view.add_panel(Panel(Text(f"[dim]watch after_seq={last_seq} (attaching)\nactive_invoke={active_invoke}[/dim]"), border_style='blue'))
+        active_invoke = active_target or pre_inv
         async for batch in ew.aiter():
-            # Debug: batch size
-            await self.msg_view.add_panel(Panel(Text(f"[dim]batch {len(batch)} events[/dim]"), border_style='blue'))
-            # If we see a stream.open but active_invoke is None, set it and continue
-            if batch and not active_invoke:
-                for ev in batch:
-                    try:
-                        ev_type = ev["type"]
-                    except Exception:
-                        ev_type = None
-                    if ev_type == 'stream.open':
-                        try:
-                            active_invoke = ev["invoke_id"]
-                        except Exception:
-                            active_invoke = None
-                        await self.msg_view.add_panel(Panel(Text(f"[dim]adopt active_invoke={str(active_invoke)[-8:] if active_invoke else 'None'}[/dim]"), border_style='blue'))
-                        break
             for e in batch:
                 t = e['type']
                 if t == 'stream.open':
                     active_invoke = e['invoke_id']
-                    await self.msg_view.add_panel(Panel(Text(f"[dim]event: stream.open {active_invoke[-8:]}[/dim]"), border_style='blue'))
                     await self.msg_view.clear_streaming()
                     # Reset accumulators when a new invoke starts
                     live_content = ''
@@ -754,13 +772,6 @@ class EggTextual(App):
                     tool_stream.clear()
                     tool_call_text.clear()
                 elif t == 'stream.delta':
-                    # Debug: show delta regardless of invoke_id to diagnose filtering
-                    inv_id = ''
-                    try:
-                        inv_id = (e['invoke_id'] or '')
-                    except Exception:
-                        inv_id = ''
-                    await self.msg_view.add_panel(Panel(Text(f"[dim]event: stream.delta (invoke={str(inv_id)[-8:]})[/dim]"), border_style='blue'))
                     if not (active_invoke and e['invoke_id'] == active_invoke):
                         continue
                     payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
@@ -790,16 +801,13 @@ class EggTextual(App):
                             await self.msg_view.update_stream_tool_args(nm, now)
                 elif t == 'stream.close' and active_invoke and e['invoke_id'] == active_invoke:
                     # Clear streaming panels and re-render snapshot for final messages
-                    self.call_from_thread(self.msg_view.clear_streaming)
+                    await self.msg_view.clear_streaming()
                     try:
                         create_snapshot(self.db, thread_id)
                     except Exception:
                         pass
                     # Trigger a re-render of the thread to display the completed messages
-                    try:
-                        self.call_from_thread(lambda: asyncio.create_task(self._render_thread(thread_id)))
-                    except Exception:
-                        pass
+                    await self._render_thread(thread_id)
                     # End the stream task
                     return
 
@@ -1016,6 +1024,28 @@ class EggTextual(App):
     async def action_toggle_follow(self) -> None:
         self.msg_view.follow = not self.msg_view.follow
         await self.msg_view.add_panel(Panel(f"Follow: {'ON' if self.msg_view.follow else 'OFF'}", border_style='blue'))
+
+    # Scrolling actions for messages container (manual)
+    async def action_scroll_up(self) -> None:
+        # For now, no-op because we trim old messages; could implement virtual offset if needed
+        pass
+
+    async def action_scroll_down(self) -> None:
+        pass
+
+    async def action_scroll_up_page(self) -> None:
+        pass
+
+    async def action_scroll_down_page(self) -> None:
+        pass
+
+    async def action_scroll_home(self) -> None:
+        # No-op: we keep only the recent window
+        pass
+
+    async def action_scroll_end(self) -> None:
+        # No-op: end is always visible
+        pass
 
     # Intercept simple yes/no input when awaiting scheduler confirmation
     async def on_key(self, event: events.Key) -> None:
