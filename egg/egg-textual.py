@@ -169,65 +169,65 @@ def _get_subtree(db: ThreadsDB, root_id: str) -> List[str]:
 # ----------------------------------------------------------------------------
 
 class MessageView(ScrollView):
-    """Line-API message log with reliable scrolling and word-wrapping.
-
-    - Maintains logical lines in self._lines
-    - Reflows to visual lines (self._vis) based on current width
-    - Implements render_line using scroll_offset and visual buffer
-    """
+    """Line-API message log with reliable scrolling, wrapping, and boxed headers."""
     follow = reactive(True)
 
     def __init__(self):
         super().__init__()
-        self._lines: list[str] = []
-        self._vis: list[str] = []
-        self._stream_idx: Dict[str, int] = {}
+        self._blocks: List[Dict[str, Any]] = []  # each: {title:str|None, body:str, key:str|None}
+        self._vis: list[str] = []                # reflowed visual lines
         self._reflow()
 
-    def _reflow(self) -> None:
-        # Build visual lines from logical lines, wrapping to current width
-        from textual.geometry import Size
+    # Internal helpers -------------------------------------------------
+    def _box_lines(self, title: Optional[str], body: str, width: int) -> List[str]:
         import textwrap
+        w = max(width, 10)
+        inner = max(w - 2, 1)
+        # Top
+        if title and title.strip():
+            bar = " " + title.strip() + " "
+            trimmed = bar[:inner]
+            top = "┌" + trimmed + ("─" * max(inner - len(trimmed), 0)) + "┐"
+        else:
+            top = "┌" + ("─" * inner) + "┐"
+        # Body wrapped
+        wrapped = textwrap.wrap(
+            body or "",
+            width=inner,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""]
+        mid = ["│" + line.ljust(inner) + "│" for line in wrapped]
+        # Bottom
+        bot = "└" + ("─" * inner) + "┘"
+        return [top, *mid, bot]
+
+    def _reflow(self) -> None:
+        from textual.geometry import Size
         width = max(self.size.width or 0, 1)
         vis: list[str] = []
-        for ln in self._lines:
-            s = ln if isinstance(ln, str) else str(ln)
-            if not s:
-                vis.append("")
-                continue
-            # Wrap on spaces; break long words if necessary
-            wrapped = textwrap.wrap(
-                s,
-                width=width,
-                replace_whitespace=False,
-                drop_whitespace=False,
-                break_long_words=True,
-                break_on_hyphens=False,
-            ) or [""]
-            vis.extend(wrapped)
+        for blk in self._blocks:
+            vis.extend(self._box_lines(blk.get('title'), blk.get('body') or '', width))
         self._vis = vis
-        # Set virtual size to current viewport width and number of visual lines
         self.virtual_size = Size(width, max(len(self._vis), 1))
         self.refresh()
 
     def on_resize(self, event) -> None:
-        # Reflow on width changes
         self._reflow()
 
+    # Public API -------------------------------------------------------
     async def clear_messages(self):
-        self._lines.clear()
+        self._blocks.clear()
         self._vis.clear()
-        self._stream_idx.clear()
         self._reflow()
 
     async def add_panel(self, panel: Panel):
-        # Flatten panel into text lines: title then content
         title = getattr(panel, 'title', None)
-        if isinstance(title, str) and title.strip():
-            self._lines.append(f"[{title}]")
         body = getattr(panel, 'renderable', None)
         txt = body.plain if hasattr(body, 'plain') else (str(body) if body is not None else '')
-        self._lines.extend((txt or '').splitlines() or [''])
+        self._blocks.append({"title": title if isinstance(title, str) else None, "body": txt or '', "key": None})
         self._reflow()
         if self.follow:
             try:
@@ -236,7 +236,7 @@ class MessageView(ScrollView):
                 pass
 
     async def add_text(self, txt: str):
-        self._lines.extend((txt or '').splitlines() or [''])
+        self._blocks.append({"title": None, "body": txt or '', "key": None})
         self._reflow()
         if self.follow:
             try:
@@ -244,64 +244,64 @@ class MessageView(ScrollView):
             except Exception:
                 pass
 
-    # Streaming helpers: append to a single logical line per stream category
+    # Streaming helpers: append to single block per category
+    def _stream_update(self, key: str, title: str, text: str) -> None:
+        # Find or create block with matching key
+        for blk in self._blocks:
+            if blk.get('key') == key:
+                blk['body'] = (blk.get('body') or '') + (text or '')
+                self._reflow()
+                return
+        # Not found: create new
+        self._blocks.append({"title": title, "body": text or '', "key": key})
+        self._reflow()
+
     async def update_stream_reason(self, text: str):
-        key = '__reason__'
-        idx = self._stream_idx.get(key)
-        if idx is None:
-            await self.add_panel(Panel(Text(text or ''), title='Reasoning (streaming)', border_style='magenta'))
-            self._stream_idx[key] = len(self._lines) - 1
-        else:
-            self._lines[idx] += str(text or '')
-            self._reflow()
+        self._stream_update('__reason__', 'Reasoning (streaming)', text or '')
+        if self.follow:
+            try:
+                super().scroll_end(animate=False)
+            except Exception:
+                pass
 
     async def update_stream_tool_args(self, name: str, text: str):
         nm = name or 'tool'
-        key = f'__toolargs__:{nm}'
-        idx = self._stream_idx.get(key)
-        if idx is None:
-            await self.add_panel(Panel(Text(text or ''), title=f'Tool Call Args: {nm}', border_style='yellow'))
-            self._stream_idx[key] = len(self._lines) - 1
-        else:
-            self._lines[idx] += str(text or '')
-            self._reflow()
+        self._stream_update(f'__toolargs__:{nm}', f'Tool Call Args: {nm}', text or '')
+        if self.follow:
+            try:
+                super().scroll_end(animate=False)
+            except Exception:
+                pass
 
     async def update_stream_tool_output(self, name: str, text: str):
         nm = name or 'tool'
-        key = f'__toolout__:{nm}'
-        idx = self._stream_idx.get(key)
-        if idx is None:
-            await self.add_panel(Panel(Text(text or ''), title=f'Tool: {nm}', border_style='yellow'))
-            self._stream_idx[key] = len(self._lines) - 1
-        else:
-            self._lines[idx] += str(text or '')
-            self._reflow()
+        self._stream_update(f'__toolout__:{nm}', f'Tool: {nm}', text or '')
+        if self.follow:
+            try:
+                super().scroll_end(animate=False)
+            except Exception:
+                pass
 
     async def update_stream_content(self, text: str):
-        key = '__assistant__'
-        idx = self._stream_idx.get(key)
-        if idx is None:
-            await self.add_panel(Panel(Text(text or ''), title='Assistant (streaming)', border_style='cyan'))
-            self._stream_idx[key] = len(self._lines) - 1
-        else:
-            self._lines[idx] += str(text or '')
-            self._reflow()
+        self._stream_update('__assistant__', 'Assistant (streaming)', text or '')
+        if self.follow:
+            try:
+                super().scroll_end(animate=False)
+            except Exception:
+                pass
 
-    # Line API: render visible line using virtual buffer
+    # Line API: render visible line
     def render_line(self, y: int):
         from textual.strip import Strip
         from rich.segment import Segment
-        scroll_x, scroll_y = self.scroll_offset
+        _, scroll_y = self.scroll_offset
         y += scroll_y
         if y < 0 or y >= len(self._vis):
             return Strip.blank(self.size.width)
         src = self._vis[y]
-        # Crop horizontally according to scroll_x
-        start = max(scroll_x, 0)
-        end = start + max(self.size.width, 1)
-        visible = src[start:end]
-        if len(visible) < max(self.size.width, 1):
-            visible = visible.ljust(max(self.size.width, 1))
+        # Clip to width (no horizontal scrolling)
+        width = max(self.size.width, 1)
+        visible = (src or '')[:width].ljust(width)
         return Strip([Segment(visible)])
 
 # ----------------------------------------------------------------------------
