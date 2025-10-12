@@ -828,6 +828,15 @@ async def run_cli():
             pass
         event.app.invalidate()
 
+    # Multiline input support: Ctrl-J (and Alt-Enter) insert a newline without sending
+    @kb.add('c-j')
+    def _(event):
+        event.current_buffer.insert_text('\n')
+
+    @kb.add('escape', 'enter')
+    def _(event):
+        event.current_buffer.insert_text('\n')
+
     session.key_bindings = kb
 
     console.print(Panel('Started chat. Type /help for commands.', border_style='blue'))
@@ -835,13 +844,14 @@ async def run_cli():
     while True:
         # Schedulers are managed per-root via active_schedulers; initial root already started.
         try:
-            user_input = (await session.prompt_async()).strip()
+            # Accept multiline pastes and allow Ctrl-J / Alt-Enter to insert newlines
+            user_input = (await session.prompt_async())
         except KeyboardInterrupt:
             break
         except EOFError:
             break
 
-        if not user_input:
+        if not user_input.strip():
             continue
 
         # Handle $$ command first (hidden from API)
