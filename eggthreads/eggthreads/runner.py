@@ -630,6 +630,7 @@ class SubtreeScheduler:
                   AND json_extract(e.payload_json,'$.tool_calls') IS NOT NULL
                     )
                )
+               AND json_extract(e.payload_json,'$.keep_user_turn') IS NULL
              LIMIT 1
             """,
             (tid, last_close_seq)
