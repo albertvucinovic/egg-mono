@@ -414,11 +414,9 @@ class EggTextual(App):
         yield Header(show_clock=True)
         # Single-column layout: message view + input (no left tree)
         with Vertical():
-            # Use a ScrollableContainer to host the MessageView for reliable scrolling
+            # MessageView is a ScrollView-based widget; no need for ScrollableContainer
             self.msg_view = MessageView()
-            # Scrollable with id=messages; input below
-            self.scroll = ScrollableContainer(self.msg_view, id='messages')
-            yield self.scroll
+            yield self.msg_view
             self.input = Input(placeholder="Type a message or /command ...", id='input')
             yield self.input
         yield Footer()
