@@ -233,7 +233,35 @@ class EggCompleter(Completer):
                     yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
             return
 
-        # 4) /child: suggest direct children of current thread (ids with name/recap meta)
+        # 4) /delete: suggest thread ids to delete (exclude current thread)
+        if text.startswith('/delete '):
+            prefix = text[len('/delete '):]
+            try:
+                rows = self.db.conn.execute(
+                    "SELECT thread_id, name, short_recap, created_at FROM threads ORDER BY created_at DESC"
+                ).fetchall()
+            except Exception:
+                rows = []
+            cur_id = None
+            try:
+                cur_id = self.get_current_thread()
+            except Exception:
+                cur_id = None
+            pref_l = prefix.lower()
+            for r in rows:
+                tid2, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                if cur_id and tid2 == cur_id:
+                    continue
+                if (not prefix or
+                    tid2.lower().startswith(pref_l) or tid2.lower().endswith(pref_l) or pref_l in tid2.lower() or
+                    (isinstance(name, str) and pref_l in name.lower()) or
+                    (isinstance(recap, str) and pref_l in recap.lower())):
+                    disp = f"{tid2[-8:]}  {name}" if name else tid2[-8:]
+                    meta = recap if isinstance(recap, str) else ''
+                    yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
+            return
+
+        # 5) /child: suggest direct children of current thread (ids with name/recap meta)
         if text.startswith('/child'):
             if text == '/child':
                 return
@@ -266,7 +294,7 @@ class EggCompleter(Completer):
                         yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
                 return
 
-        # 5) /spawn: support filesystem paths and conversation words
+        # 6) /spawn: support filesystem paths and conversation words
         if text.startswith('/spawn'):
             input_after = text[len('/spawn'):].lstrip()
             # current fragment according to prompt_toolkit WORD chars
@@ -289,7 +317,7 @@ class EggCompleter(Completer):
                     yield Completion(w, start_position=-len(current_fragment))
             return
 
-        # 6) Generic filename completion for the last token when not a recognized command
+        # 7) Generic filename completion for the last token when not a recognized command
         if text and not text.startswith('/'):
             parts = text.split()
             if parts and not text.endswith(' '):
@@ -304,7 +332,7 @@ class EggCompleter(Completer):
                     if suggestions:
                         return
 
-        # 7) Fallback: words from conversation for user text (not commands)
+        # 8) Fallback: words from conversation for user text (not commands)
         if text and not text.strip().startswith('/'):
             m = re.search(r'(\w{3,})$', text)
             if m and tid:
