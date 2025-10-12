@@ -49,6 +49,12 @@ class SnapshotBuilder:
                 # Copy common fields if present
                 if "content" in payload:
                     msg["content"] = payload.get("content")
+                # Preserve special flags for API filtering and turn management
+                if isinstance(payload, dict):
+                    if payload.get("no_api"):
+                        msg["no_api"] = payload.get("no_api")
+                    if payload.get("keep_user_turn"):
+                        msg["keep_user_turn"] = payload.get("keep_user_turn")
                 if payload.get("role") == 'tool':
                     if payload.get("name"):
                         msg["name"] = payload.get("name")

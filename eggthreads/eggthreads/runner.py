@@ -97,6 +97,10 @@ class ThreadRunner:
             try:
                 snap = json.loads(th.snapshot_json)
                 for m in snap.get("messages", []):
+                    # Skip messages marked with no_api flag
+                    if m.get("no_api"):
+                        continue
+                    
                     role = m.get("role")
                     content = m.get("content", "")
                     if role == "assistant" and m.get("tool_calls"):
@@ -120,7 +124,10 @@ class ThreadRunner:
         except Exception:
             snap_has_last = False
         if not snap_has_last:
-            if role_of_trigger == "assistant" and isinstance(pl.get("tool_calls"), list):
+            # Skip trigger message if marked with no_api flag
+            if pl.get("no_api"):
+                pass  # Don't add this message to API call
+            elif role_of_trigger == "assistant" and isinstance(pl.get("tool_calls"), list):
                 base_messages.append({"role": "assistant", "tool_calls": pl.get("tool_calls")})
             elif role_of_trigger == "tool":
                 obj = {"role": "tool", "content": user_content}
