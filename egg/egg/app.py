@@ -744,6 +744,55 @@ async def run_cli():
         finally:
             is_prompting_scheduler = False
 
+    # ---- Common helpers (DRY) ----------------------------------------------
+    def _select_threads_by_selector(selector: str) -> List[str]:
+        """Return thread IDs matching selector using the same logic as /thread.
+
+        Order: exact id > id endswith suffix > id contains > name contains > recap contains.
+        Result preserves DB scan order; caller can re-sort by created_at if needed.
+        """
+        try:
+            cur = db.conn.execute("SELECT thread_id, name, short_recap, created_at FROM threads")
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+        sel_l = (selector or '').lower()
+        matches: List[str] = []
+        # Priority 1: exact id
+        for r in rows:
+            if r[0] == selector:
+                matches = [r[0]]
+                break
+        if not matches and sel_l:
+            # Priority 2: endswith id suffix
+            suf = [r[0] for r in rows if r[0].lower().endswith(sel_l)]
+            if suf:
+                matches = suf
+        if not matches and sel_l:
+            # Priority 3: id contains
+            cont = [r[0] for r in rows if sel_l in r[0].lower()]
+            if cont:
+                matches = cont
+        if not matches and sel_l:
+            # Priority 4: name contains
+            name_matches = [r[0] for r in rows if isinstance(r[1], str) and sel_l in r[1].lower()]
+            if name_matches:
+                matches = name_matches
+        if not matches and sel_l:
+            # Priority 5: recap contains
+            recap_matches = [r[0] for r in rows if isinstance(r[2], str) and sel_l in r[2].lower()]
+            if recap_matches:
+                matches = recap_matches
+        return matches
+
+    def _most_recent_root_thread() -> Optional[str]:
+        try:
+            row2 = db.conn.execute(
+                "SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children) ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            return row2[0] if row2 else None
+        except Exception:
+            return None
     def prompt_message():
         mk = _current_model_for_thread(current_thread) or 'default'
         return f"You & {mk}: "
@@ -945,38 +994,7 @@ async def run_cli():
                     console.print(Panel('Usage: /delete <thread-id|suffix|name|recap-fragment>', border_style='yellow'))
                     continue
                 # Resolve selector using same logic as /thread
-                try:
-                    cur = db.conn.execute("SELECT thread_id, name, short_recap, created_at FROM threads")
-                    matches: List[str] = []
-                    sel_l = selector.lower()
-                    rows = cur.fetchall()
-                    # Priority 1: exact id
-                    for r in rows:
-                        if r[0] == selector:
-                            matches = [r[0]]
-                            break
-                    if not matches:
-                        # Priority 2: endswith id suffix
-                        suf = [r[0] for r in rows if r[0].lower().endswith(sel_l)]
-                        if suf:
-                            matches = suf
-                    if not matches:
-                        # Priority 3: id contains
-                        cont = [r[0] for r in rows if sel_l in r[0].lower()]
-                        if cont:
-                            matches = cont
-                    if not matches:
-                        # Priority 4: name contains
-                        name_matches = [r[0] for r in rows if isinstance(r[1], str) and sel_l in r[1].lower()]
-                        if name_matches:
-                            matches = name_matches
-                    if not matches:
-                        # Priority 5: recap contains
-                        recap_matches = [r[0] for r in rows if isinstance(r[2], str) and sel_l in r[2].lower()]
-                        if recap_matches:
-                            matches = recap_matches
-                except Exception:
-                    matches = []
+                matches = _select_threads_by_selector(selector)
                 # Exclude current thread from deletable candidates
                 matches = [m for m in matches if m != current_thread]
                 if not matches:
@@ -985,7 +1003,9 @@ async def run_cli():
                 # If ambiguous, pick most recent by created_at
                 if len(matches) > 1:
                     # Map id->created_at and pick max
-                    ca = {r[0]: r[3] for r in rows}
+                    cur = db.conn.execute("SELECT thread_id, created_at FROM threads")
+                    rows = cur.fetchall()
+                    ca = {r[0]: r[1] for r in rows}
                     matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
                     console.print(Panel(f"Multiple matches, deleting most recent candidate. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}", border_style='yellow'))
                 target_tid = matches[0]
@@ -1077,43 +1097,16 @@ async def run_cli():
                     console.print(f"Current thread: {current_thread} name='{(th.name if th else '') or ''}'")
                 else:
                     try:
-                        # Load all threads to robustly match selector
-                        cur = db.conn.execute("SELECT thread_id, name, short_recap, created_at FROM threads")
-                        matches: List[str] = []
-                        sel_l = sel.lower()
-                        rows = cur.fetchall()
-                        # Priority 1: exact id
-                        for r in rows:
-                            if r[0] == sel:
-                                matches = [r[0]]
-                                break
-                        if not matches:
-                            # Priority 2: endswith id suffix
-                            suf = [r[0] for r in rows if r[0].lower().endswith(sel_l)]
-                            if suf:
-                                matches = suf
-                        if not matches:
-                            # Priority 3: id contains
-                            cont = [r[0] for r in rows if sel_l in r[0].lower()]
-                            if cont:
-                                matches = cont
-                        if not matches:
-                            # Priority 4: name contains
-                            name_matches = [r[0] for r in rows if isinstance(r[1], str) and sel_l in r[1].lower()]
-                            if name_matches:
-                                matches = name_matches
-                        if not matches:
-                            # Priority 5: recap contains
-                            recap_matches = [r[0] for r in rows if isinstance(r[2], str) and sel_l in r[2].lower()]
-                            if recap_matches:
-                                matches = recap_matches
+                        matches = _select_threads_by_selector(sel)
                         if not matches:
                             console.print(f"No thread matches selector: {sel}")
                         else:
                             # If ambiguous, choose most recent by created_at
                             if len(matches) > 1:
                                 # Map id->created_at and pick max
-                                ca = {r[0]: r[3] for r in rows}
+                                cur = db.conn.execute("SELECT thread_id, created_at FROM threads")
+                                rows = cur.fetchall()
+                                ca = {r[0]: r[1] for r in rows}
                                 matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
                                 console.print(f"Multiple matches, switching to most recent. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}")
                             new_tid = matches[0]
