@@ -29,6 +29,7 @@ from eggthreads import (
     create_child_thread,
     append_message,
     delete_thread,
+    is_thread_runnable,
     create_snapshot,
     interrupt_thread,
     pause_thread,
@@ -1152,29 +1153,7 @@ async def run_cli():
         while True:
             # Check runnable before streaming (avoid running on assistant-only tail)
             try:
-                row_close = db.conn.execute(
-                    "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='stream.close'",
-                    (current_thread,)
-                ).fetchone()
-                last_close_seq = int(row_close[0]) if row_close and row_close[0] is not None else -1
-                row = db.conn.execute(
-                    """
-                    SELECT 1 FROM events e
-                     WHERE e.thread_id=?
-                       AND e.event_seq>?
-                       AND e.type='msg.create'
-                       AND (
-                            json_extract(e.payload_json,'$.role') IN ('user','tool')
-                         OR (
-                              json_extract(e.payload_json,'$.role')='assistant'
-                          AND json_extract(e.payload_json,'$.tool_calls') IS NOT NULL
-                            )
-                       )
-                     ORDER BY e.event_seq ASC LIMIT 1
-                    """,
-                    (current_thread, last_close_seq)
-                ).fetchone()
-                runnable = bool(row)
+                runnable = is_thread_runnable(db, current_thread)
             except Exception:
                 runnable = True
             if not runnable:
