@@ -247,7 +247,62 @@ class _EggCompleter(Completer):
                     yield Completion(p, start_position=-len(prefix))
             return
 
-        # 3) /spawn: support filesystem paths and conversation words
+        # 3) /thread: suggest thread ids (with name/recap meta)
+        if text.startswith('/thread '):
+            prefix = text[len('/thread '):]
+            try:
+                rows = self.db.conn.execute(
+                    "SELECT thread_id, name, short_recap, created_at FROM threads ORDER BY created_at DESC"
+                ).fetchall()
+            except Exception:
+                rows = []
+            pref_l = prefix.lower()
+            for r in rows:
+                tid, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                if (not prefix or
+                    tid.lower().startswith(pref_l) or tid.lower().endswith(pref_l) or pref_l in tid.lower() or
+                    (isinstance(name, str) and pref_l in name.lower()) or
+                    (isinstance(recap, str) and pref_l in recap.lower())):
+                    disp = f"{tid[-8:]}  {name}" if name else tid[-8:]
+                    meta = recap if isinstance(recap, str) else ''
+                    yield Completion(tid, start_position=-len(prefix), display=disp, display_meta=meta)
+            return
+
+        # 4) /child: suggest direct children of current thread (ids with name/recap meta)
+        if text.startswith('/child'):
+            # Only complete after space; list all if prefix empty
+            if text == '/child':
+                return
+            if text.startswith('/child '):
+                prefix = text[len('/child '):]
+                cid = None
+                try:
+                    cid = self.get_current_thread()
+                except Exception:
+                    cid = None
+                rows = []
+                if cid:
+                    try:
+                        cur = self.db.conn.execute(
+                            "SELECT c.child_id, t.name, t.short_recap FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=?",
+                            (cid,)
+                        )
+                        rows = cur.fetchall()
+                    except Exception:
+                        rows = []
+                pref_l = prefix.lower()
+                for r in rows:
+                    tid, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                    if (not prefix or
+                        tid.lower().startswith(pref_l) or tid.lower().endswith(pref_l) or pref_l in tid.lower() or
+                        (isinstance(name, str) and pref_l in name.lower()) or
+                        (isinstance(recap, str) and pref_l in recap.lower())):
+                        disp = f"{tid[-8:]}  {name}" if name else tid[-8:]
+                        meta = recap if isinstance(recap, str) else ''
+                        yield Completion(tid, start_position=-len(prefix), display=disp, display_meta=meta)
+                return
+
+        # 5) /spawn: support filesystem paths and conversation words
         if text.startswith('/spawn'):
             input_after = text[len('/spawn'):].lstrip()
             # current fragment according to prompt_toolkit WORD chars
@@ -270,7 +325,7 @@ class _EggCompleter(Completer):
                     yield Completion(w, start_position=-len(current_fragment))
             return
 
-        # 4) Generic filename completion for the last token when not a recognized command
+        # 6) Generic filename completion for the last token when not a recognized command
         if text and not text.startswith('/'):
             parts = text.split()
             if parts and not text.endswith(' '):
@@ -285,7 +340,7 @@ class _EggCompleter(Completer):
                     if suggestions:
                         return
 
-        # 5) Fallback: words from conversation for user text (not commands)
+        # 7) Fallback: words from conversation for user text (not commands)
         if text and not text.strip().startswith('/'):
             import re as _re
             m = _re.search(r'(\w{3,})$', text)
