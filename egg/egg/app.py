@@ -759,7 +759,7 @@ async def run_cli():
     session = PromptSession(
         message=prompt_message,
         auto_suggest=AutoSuggestFromHistory(),
-        completer=_EggCompleter(db, _get_current_thread, llm_for_completion),
+        completer=EggCompleter(db, _get_current_thread, llm_for_completion),
     )
     kb = KeyBindings()
 
