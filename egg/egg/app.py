@@ -868,8 +868,38 @@ async def run_cli():
         if not user_input:
             continue
 
-        # Handle $ and $$ commands for bash execution
-        if user_input.startswith('$') and len(user_input) > 1:
+        # Handle $$ command first (hidden from API)
+        if user_input.startswith('$$') and len(user_input) > 2:
+            bash_command = user_input[2:].strip()
+            
+            # Execute the bash command
+            import subprocess
+            try:
+                result = subprocess.run(bash_command, shell=True, capture_output=True, text=True, cwd=os.getcwd())
+                output = result.stdout
+                if result.stderr:
+                    output += f"\nSTDERR:\n{result.stderr}"
+                if result.returncode != 0:
+                    output += f"\nReturn code: {result.returncode}"
+                
+                # Create message content with command and output
+                message_content = f"Command: {bash_command}\n\nOutput:\n{output}"
+                
+                console.print(f"[bold yellow]Executing (hidden from API):[/bold yellow] {bash_command}")
+                console.print(f"[bold yellow]Output:[/bold yellow]\n{output}")
+                # Save with both flags to prevent sending to API and LLM response
+                append_message(db, current_thread, 'user', message_content, extra={'no_api': True, 'keep_user_turn': True})
+                create_snapshot(db, current_thread)
+                
+            except Exception as e:
+                error_msg = f"Error executing command: {e}"
+                console.print(f"[bold red]{error_msg}[/bold red]")
+                append_message(db, current_thread, 'user', f"Command: {bash_command}\n\nError: {error_msg}", extra={'no_api': True, 'keep_user_turn': True})
+                create_snapshot(db, current_thread)
+            continue
+
+        # Handle $ command (visible to LLM but keeps user turn)
+        elif user_input.startswith('$') and len(user_input) > 1:
             bash_command = user_input[1:].strip()
             
             # Execute the bash command
@@ -885,28 +915,16 @@ async def run_cli():
                 # Create message content with command and output
                 message_content = f"Command: {bash_command}\n\nOutput:\n{output}"
                 
-                # For $ command: show to LLM and user, save normally
-                if user_input.startswith('$ ') and not user_input.startswith('$$'):
-                    console.print(f"[bold cyan]Executing:[/bold cyan] {bash_command}")
-                    console.print(f"[bold cyan]Output:[/bold cyan]\n{output}")
-                    append_message(db, current_thread, 'user', message_content)
-                    create_snapshot(db, current_thread)
-                
-                # For $$ command: show only to user, save with no_api flag
-                elif user_input.startswith('$$'):
-                    console.print(f"[bold yellow]Executing (hidden from API):[/bold yellow] {bash_command}")
-                    console.print(f"[bold yellow]Output:[/bold yellow]\n{output}")
-                    # Save with no_api flag to prevent sending to API
-                    append_message(db, current_thread, 'user', message_content, extra={'no_api': True})
-                    create_snapshot(db, current_thread)
+                console.print(f"[bold cyan]Executing:[/bold cyan] {bash_command}")
+                console.print(f"[bold cyan]Output:[/bold cyan]\n{output}")
+                # Save with keep_user_turn flag to prevent LLM response
+                append_message(db, current_thread, 'user', message_content, extra={'keep_user_turn': True})
+                create_snapshot(db, current_thread)
                 
             except Exception as e:
                 error_msg = f"Error executing command: {e}"
                 console.print(f"[bold red]{error_msg}[/bold red]")
-                if user_input.startswith('$ ') and not user_input.startswith('$$'):
-                    append_message(db, current_thread, 'user', f"Command: {bash_command}\n\nError: {error_msg}")
-                elif user_input.startswith('$$'):
-                    append_message(db, current_thread, 'user', f"Command: {bash_command}\n\nError: {error_msg}", extra={'no_api': True})
+                append_message(db, current_thread, 'user', f"Command: {bash_command}\n\nError: {error_msg}", extra={'keep_user_turn': True})
                 create_snapshot(db, current_thread)
             continue
 
@@ -916,8 +934,8 @@ async def run_cli():
             arg = parts[1] if len(parts) > 1 else ''
             if cmd == 'help':
                 console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /schedulers, /quit')
-                console.print('$ <command> - Execute bash command and show to LLM')
-                console.print('$$ <command> - Execute bash command but hide from LLM API')
+                console.print('$ <command> - Execute bash command (keeps user turn)')
+                console.print('$$ <command> - Execute bash command (hidden from API, keeps user turn)')
             elif cmd == 'model':
                 if arg:
                     db.append_event(event_id=os.urandom(10).hex(), thread_id=current_thread, type_='msg.create',
