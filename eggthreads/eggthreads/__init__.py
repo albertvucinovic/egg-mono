@@ -8,6 +8,8 @@ from .api import (
     append_message,
     edit_message,
     delete_message,
+    delete_thread,
+    is_thread_runnable,
     create_snapshot,
     interrupt_thread,
     pause_thread,
@@ -16,6 +18,6 @@ from .api import (
 
 __all__ = [
     'ThreadsDB', 'SubtreeScheduler', 'ThreadRunner', 'SnapshotBuilder',
-    'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message',
+    'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable',
     'create_snapshot', 'interrupt_thread', 'pause_thread', 'resume_thread'
 ]

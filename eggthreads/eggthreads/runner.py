@@ -610,36 +610,8 @@ class SubtreeScheduler:
                 if tid not in running_threads:
                     # Check if thread is actually runnable before creating task
                     # This avoids creating tasks for threads that don't need processing
-                    if self._is_thread_runnable(tid):
+                    from .api import is_thread_runnable
+                    if is_thread_runnable(self.db, tid):
                         running_threads.add(tid)
                         asyncio.create_task(drive(tid))
             await asyncio.sleep(poll_sec)
-
-    def _is_thread_runnable(self, tid: str) -> bool:
-        """Check if a thread is runnable (has pending messages after last stream.close)."""
-        # A thread is runnable if there is a msg.create (user/tool/assistant with tool_calls)
-        # strictly after the last stream.close.
-        row_close = self.db.conn.execute(
-            "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='stream.close'",
-            (tid,)
-        ).fetchone()
-        last_close_seq = int(row_close[0]) if row_close and row_close[0] is not None else -1
-        row = self.db.conn.execute(
-            """
-            SELECT 1 FROM events e
-             WHERE e.thread_id=?
-               AND e.event_seq>?
-               AND e.type='msg.create'
-               AND (
-                    json_extract(e.payload_json,'$.role') IN ('user','tool')
-                 OR (
-                      json_extract(e.payload_json,'$.role')='assistant'
-                  AND json_extract(e.payload_json,'$.tool_calls') IS NOT NULL
-                    )
-               )
-               AND json_extract(e.payload_json,'$.keep_user_turn') IS NULL
-             LIMIT 1
-            """,
-            (tid, last_close_seq)
-        ).fetchone()
-        return bool(row)

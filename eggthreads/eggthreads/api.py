@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 from .db import ThreadsDB
 from .snapshot import SnapshotBuilder
+from .runner import ThreadRunner, RunnerConfig
 
 
 def _ulid_like() -> str:
@@ -63,6 +64,50 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> None:
     last_seq = evs[-1]["event_seq"] if evs else -1
     db.conn.execute("UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?",
                     (json.dumps(snap), last_seq, thread_id))
+
+
+def delete_thread(db: ThreadsDB, thread_id: str) -> None:
+    """Delete a thread and cascade related rows via foreign keys.
+
+    Removes the thread from threads; ON DELETE CASCADE removes
+    - children rows that reference it (as parent or child)
+    - events rows for the thread
+    - open_streams row for the thread
+    """
+    db.conn.execute("DELETE FROM threads WHERE thread_id=?", (thread_id,))
+
+
+def is_thread_runnable(db: ThreadsDB, thread_id: str) -> bool:
+    """Public API to check if a thread is runnable.
+
+    Mirrors ThreadRunner._is_thread_runnable logic to provide a stable interface
+    without consumers importing internal runner details.
+    """
+    # Implement the same SQL check as in ThreadRunner._is_thread_runnable
+    row_close = db.conn.execute(
+        "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='stream.close'",
+        (thread_id,)
+    ).fetchone()
+    last_close_seq = int(row_close[0]) if row_close and row_close[0] is not None else -1
+    row = db.conn.execute(
+        """
+        SELECT 1 FROM events e
+         WHERE e.thread_id=?
+           AND e.event_seq>?
+           AND e.type='msg.create'
+           AND (
+                json_extract(e.payload_json,'$.role') IN ('user','tool')
+             OR (
+                  json_extract(e.payload_json,'$.role')='assistant'
+              AND json_extract(e.payload_json,'$.tool_calls') IS NOT NULL
+                )
+           )
+           AND json_extract(e.payload_json,'$.keep_user_turn') IS NULL
+         LIMIT 1
+        """,
+        (thread_id, last_close_seq)
+    ).fetchone()
+    return bool(row)
 
 
 def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Optional[str]:

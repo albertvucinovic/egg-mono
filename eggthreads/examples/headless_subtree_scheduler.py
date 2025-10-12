@@ -33,6 +33,7 @@ from eggthreads import (
     create_child_thread,
     append_message,
     create_snapshot,
+    is_thread_runnable,
 )
 
 SYSTEM_PROMPT_DEFAULT = "You are a helpful assistant."
@@ -84,32 +85,7 @@ def collect_subtree(db: ThreadsDB, root_id: str) -> List[str]:
     return out
 
 
-def is_thread_runnable(db: ThreadsDB, tid: str) -> bool:
-    # A thread is runnable if there is a msg.create (user/tool/assistant with tool_calls)
-    # strictly after the last stream.close.
-    row_close = db.conn.execute(
-        "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='stream.close'",
-        (tid,)
-    ).fetchone()
-    last_close_seq = int(row_close[0]) if row_close and row_close[0] is not None else -1
-    row = db.conn.execute(
-        """
-        SELECT 1 FROM events e
-         WHERE e.thread_id=?
-           AND e.event_seq>?
-           AND e.type='msg.create'
-           AND (
-                json_extract(e.payload_json,'$.role') IN ('user','tool')
-             OR (
-                  json_extract(e.payload_json,'$.role')='assistant'
-              AND json_extract(e.payload_json,'$.tool_calls') IS NOT NULL
-                )
-           )
-         LIMIT 1
-        """,
-        (tid, last_close_seq)
-    ).fetchone()
-    return bool(row)
+ # use API is_thread_runnable from eggthreads
 
 
 def word_count_from_snapshot(db: ThreadsDB, tid: str) -> int:
