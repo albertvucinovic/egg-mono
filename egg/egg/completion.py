@@ -7,6 +7,14 @@ import re
 
 from prompt_toolkit.completion import Completer, Completion
 
+# Import eggthreads API helpers through the app's sys.path. The CLI already
+# inserts eggthreads on sys.path, so this import should succeed at runtime.
+try:
+    from eggthreads import list_threads, list_children_with_meta
+except Exception:
+    list_threads = None  # type: ignore
+    list_children_with_meta = None  # type: ignore
+
 
 class ModelCompleter(Completer):
     """Completer for '/model ' values, leveraging an eggllm-like client if provided.
@@ -216,14 +224,17 @@ class EggCompleter(Completer):
         if text.startswith('/thread '):
             prefix = text[len('/thread '):]
             try:
-                rows = self.db.conn.execute(
-                    "SELECT thread_id, name, short_recap, created_at FROM threads ORDER BY created_at DESC"
-                ).fetchall()
+                rows = list_threads(self.db) if list_threads else []
             except Exception:
                 rows = []
             pref_l = prefix.lower()
+            # Sort newest-first by created_at
+            try:
+                rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
+            except Exception:
+                pass
             for r in rows:
-                tid2, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                tid2, name, recap = (getattr(r, 'thread_id', '') or ''), (getattr(r, 'name', '') or ''), (getattr(r, 'short_recap', '') or '')
                 if (not prefix or
                     tid2.lower().startswith(pref_l) or tid2.lower().endswith(pref_l) or pref_l in tid2.lower() or
                     (isinstance(name, str) and pref_l in name.lower()) or
@@ -237,9 +248,7 @@ class EggCompleter(Completer):
         if text.startswith('/delete '):
             prefix = text[len('/delete '):]
             try:
-                rows = self.db.conn.execute(
-                    "SELECT thread_id, name, short_recap, created_at FROM threads ORDER BY created_at DESC"
-                ).fetchall()
+                rows = list_threads(self.db) if list_threads else []
             except Exception:
                 rows = []
             cur_id = None
@@ -248,8 +257,13 @@ class EggCompleter(Completer):
             except Exception:
                 cur_id = None
             pref_l = prefix.lower()
+            # Sort newest-first by created_at
+            try:
+                rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
+            except Exception:
+                pass
             for r in rows:
-                tid2, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                tid2, name, recap = (getattr(r, 'thread_id', '') or ''), (getattr(r, 'name', '') or ''), (getattr(r, 'short_recap', '') or '')
                 if cur_id and tid2 == cur_id:
                     continue
                 if (not prefix or
@@ -273,18 +287,14 @@ class EggCompleter(Completer):
                 except Exception:
                     cur_id = None
                 rows = []
-                if cur_id:
+                if cur_id and list_children_with_meta:
                     try:
-                        cur = self.db.conn.execute(
-                            "SELECT c.child_id, t.name, t.short_recap FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=?",
-                            (cur_id,)
-                        )
-                        rows = cur.fetchall()
+                        rows = list_children_with_meta(self.db, cur_id)
                     except Exception:
                         rows = []
                 pref_l = prefix.lower()
                 for r in rows:
-                    tid2, name, recap = (r[0] or ''), (r[1] or ''), (r[2] or '')
+                    tid2, name, recap = (r[0] if isinstance(r, (list, tuple)) else getattr(r, 'thread_id', '')), (r[1] if isinstance(r, (list, tuple)) else getattr(r, 'name', '')), (r[2] if isinstance(r, (list, tuple)) else getattr(r, 'short_recap', ''))
                     if (not prefix or
                         tid2.lower().startswith(pref_l) or tid2.lower().endswith(pref_l) or pref_l in tid2.lower() or
                         (isinstance(name, str) and pref_l in name.lower()) or

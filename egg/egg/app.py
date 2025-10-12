@@ -16,7 +16,6 @@ from rich.live import Live
 # Prompt session for robust input while we use Rich for output/streaming
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from completion import EggCompleter
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 
@@ -41,6 +40,9 @@ from eggthreads import (
     pause_thread,
     resume_thread,
 )
+
+# Import completer after eggthreads path is on sys.path so completion can import eggthreads APIs
+from completion import EggCompleter
 from eggthreads.event_watcher import EventWatcher
 
 
