@@ -28,6 +28,7 @@ from eggthreads import (
     create_root_thread,
     create_child_thread,
     append_message,
+    delete_thread,
     create_snapshot,
     interrupt_thread,
     pause_thread,
@@ -852,7 +853,7 @@ async def run_cli():
             cmd = parts[0]
             arg = parts[1] if len(parts) > 1 else ''
             if cmd == 'help':
-                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /schedulers, /quit')
+                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /new <name>, /schedulers, /quit')
                 console.print('$ <command> - Execute bash command (keeps user turn)')
                 console.print('$$ <command> - Execute bash command (hidden from API, keeps user turn)')
             elif cmd == 'model':
@@ -914,6 +915,75 @@ async def run_cli():
                 console.print(Panel(f"Spawned thread: {child}", border_style='green'))
                 # Ensure a scheduler exists for the root of the new child
                 await _ensure_scheduler_for_thread(child)
+            elif cmd == 'new':
+                # Create a brand new root thread and switch to it
+                new_name = (arg or '').strip() or 'Root'
+                try:
+                    cur_model_key = _current_model_for_thread(current_thread) or None
+                except Exception:
+                    cur_model_key = None
+                new_root = create_root_thread(db, name=new_name, initial_model_key=cur_model_key)
+                # Seed with system prompt
+                append_message(db, new_root, 'system', system_content)
+                # Record model selection for tooling if we have one
+                if cur_model_key:
+                    try:
+                        db.append_event(event_id=os.urandom(10).hex(), thread_id=new_root, type_='msg.create',
+                                        msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model_key}]', 'model_key': cur_model_key})
+                    except Exception:
+                        pass
+                create_snapshot(db, new_root)
+                console.print(Panel(f"Created new root thread: {new_root}", border_style='green'))
+                # Ask to start scheduler for this subtree
+                await _ensure_scheduler_for_thread(new_root)
+                current_thread = new_root
+                await _show_thread_ui(db, current_thread)
+            elif cmd == 'delete':
+                # Ask for confirmation, then delete current thread and cascade to children
+                try:
+                    confirm_session = PromptSession(message=f"Delete current thread {current_thread[-8:]} (y/N)? ")
+                    ans = (await confirm_session.prompt_async()).strip().lower()
+                except Exception:
+                    ans = 'n'
+                if ans not in ('y', 'yes'):
+                    console.print(Panel('Delete cancelled.', border_style='yellow'))
+                    continue
+                # Determine parent before delete to choose where to land after
+                try:
+                    row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (current_thread,)).fetchone()
+                    parent_id = row[0] if row and row[0] else None
+                except Exception:
+                    parent_id = None
+                # Perform deletion; ON DELETE CASCADE will remove events, children, open_streams
+                try:
+                    delete_thread(db, current_thread)
+                except Exception as e:
+                    console.print(Panel(f'Error deleting thread: {e}', border_style='red'))
+                    continue
+                console.print(Panel('Thread deleted.', border_style='green'))
+                # Choose a reasonable thread to switch to
+                next_tid = None
+                if parent_id:
+                    next_tid = parent_id
+                else:
+                    # Switch to most recent remaining root thread if any
+                    try:
+                        row2 = db.conn.execute(
+                            "SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children) ORDER BY created_at DESC LIMIT 1"
+                        ).fetchone()
+                        next_tid = row2[0] if row2 else None
+                    except Exception:
+                        next_tid = None
+                if next_tid:
+                    current_thread = next_tid
+                    await _show_thread_ui(db, current_thread)
+                else:
+                    # No threads remain; create a fresh root so UI keeps working
+                    fresh = create_root_thread(db, name='Root')
+                    append_message(db, fresh, 'system', system_content)
+                    create_snapshot(db, fresh)
+                    current_thread = fresh
+                    await _show_thread_ui(db, current_thread)
             elif cmd == 'child':
                 patt = (arg or '').lower()
                 cur = db.conn.execute(
