@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
-from .db import ThreadsDB
+from .db import ThreadsDB, ThreadRow
 from .snapshot import SnapshotBuilder
 from .runner import ThreadRunner, RunnerConfig
 
@@ -108,6 +108,60 @@ def is_thread_runnable(db: ThreadsDB, thread_id: str) -> bool:
         (thread_id, last_close_seq)
     ).fetchone()
     return bool(row)
+
+
+# --------- Query helpers (expose common SQL as API) -------------------------
+def list_threads(db: ThreadsDB) -> list[ThreadRow]:
+    try:
+        cur = db.conn.execute("SELECT * FROM threads")
+        rows = [ThreadRow(**dict(r)) for r in cur.fetchall()]
+    except Exception:
+        rows = []
+    return rows
+
+
+def list_root_threads(db: ThreadsDB) -> list[str]:
+    try:
+        cur = db.conn.execute("SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children)")
+        return [r[0] for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def get_parent(db: ThreadsDB, child_id: str) -> Optional[str]:
+    try:
+        row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (child_id,)).fetchone()
+        return row[0] if row and row[0] else None
+    except Exception:
+        return None
+
+
+def list_children_with_meta(db: ThreadsDB, parent_id: str) -> list[tuple[str, str, str, str]]:
+    """Return list of (child_id, name, short_recap, created_at) for a parent."""
+    try:
+        cur = db.conn.execute(
+            "SELECT c.child_id, t.name, t.short_recap, t.created_at FROM children c JOIN threads t ON t.thread_id=c.child_id WHERE c.parent_id=? ORDER BY t.created_at ASC",
+            (parent_id,)
+        )
+        return [(r[0], r[1], r[2], r[3]) for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def list_children_ids(db: ThreadsDB, parent_id: str) -> list[str]:
+    try:
+        cur = db.conn.execute("SELECT child_id FROM children WHERE parent_id=?", (parent_id,))
+        return [r[0] for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def current_open_invoke(db: ThreadsDB, thread_id: str) -> Optional[str]:
+    try:
+        row = db.current_open(thread_id)
+        return row["invoke_id"] if row else None
+    except Exception:
+        return None
 
 
 def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Optional[str]:
