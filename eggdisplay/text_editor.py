@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.layout import Layout
 import threading
 import time
+import asyncio
 from dataclasses import dataclass
 
 
@@ -518,6 +519,156 @@ class RealTimeEditor:
             self.console.print("─" * 60)
             self.console.print(self.editor.get_text())
             self.console.print("─" * 60)
+
+
+class AsyncRealTimeEditor:
+    """
+    Async real-time interactive text editor with Live display.
+    
+    Uses asyncio for cleaner concurrency compared to threading.
+    """
+    
+    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
+        self.editor = TextEditor(initial_text=initial_text, width=width, height=height)
+        self.console = Console()
+        self.running = False
+        self.input_queue = asyncio.Queue()
+    
+    async def _input_reader(self):
+        """Async task that reads keyboard input."""
+        while self.running:
+            try:
+                # Use asyncio.to_thread to run blocking readchar in a thread
+                key = await asyncio.to_thread(readchar.readchar)
+                await self.input_queue.put(key)
+                
+                if key == readchar.key.CTRL_C:
+                    break
+                    
+            except (KeyboardInterrupt, Exception):
+                break
+    
+    def _render(self) -> Text:
+        """Render the editor display."""
+        text = Text()
+        
+        # Header
+        text.append(" Async Real-time Editor ", style="bold white on blue")
+        text.append("\n")
+        text.append("─" * 60 + "\n", style="blue")
+        
+        # Content with cursor
+        lines = self.editor.lines
+        cursor_row, cursor_col = self.editor.cursor.row, self.editor.cursor.col
+        
+        # Show visible area around cursor
+        start_line = max(0, cursor_row - 8)
+        end_line = min(len(lines), start_line + 16)
+        
+        for i in range(start_line, end_line):
+            line_num = f"{i+1:3d} │ "
+            
+            if i == cursor_row:
+                # Current line with cursor
+                text.append(line_num, style="bold green")
+                line_content = lines[i]
+                
+                before_cursor = line_content[:cursor_col]
+                cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
+                after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
+                
+                text.append(before_cursor)
+                text.append(cursor_char, style="black on white")
+                text.append(after_cursor)
+            else:
+                text.append(line_num, style="dim")
+                text.append(lines[i])
+            
+            text.append("\n")
+        
+        # Footer
+        text.append("─" * 60 + "\n", style="blue")
+        text.append(f" Line: {cursor_row + 1}, Column: {cursor_col + 1} ")
+        text.append(" │ ")
+        text.append(" Type directly! Ctrl+C to exit ", style="yellow")
+        
+        return text
+    
+    def _handle_key(self, key: str) -> bool:
+        """Handle a key press and return False if should quit."""
+        if key == readchar.key.CTRL_C:
+            return False
+        elif key == readchar.key.UP:
+            self.editor.handle_key('up')
+        elif key == readchar.key.DOWN:
+            self.editor.handle_key('down')
+        elif key == readchar.key.LEFT:
+            self.editor.handle_key('left')
+        elif key == readchar.key.RIGHT:
+            self.editor.handle_key('right')
+        elif key in (readchar.key.BACKSPACE, '\x7f', '\x08'):
+            self.editor.handle_key('backspace')
+        elif key == readchar.key.DELETE:
+            self.editor.handle_key('delete')
+        elif key in (readchar.key.ENTER, '\r', '\n'):
+            self.editor.handle_key('enter')
+        elif key == readchar.key.TAB:
+            self.editor.handle_key('tab')
+        elif len(key) == 1 and key.isprintable():
+            # Regular character
+            self.editor.handle_key(key)
+        
+        return True
+    
+    async def run_async(self):
+        """Run the editor using asyncio."""
+        self.running = True
+        
+        self.console.print("[green]Async Real-time Editor Started[/green]")
+        self.console.print("[dim]Start typing! Your keystrokes appear immediately. Ctrl+C to exit.[/dim]\n")
+        
+        try:
+            with Live(self._render(), refresh_per_second=30, screen=True) as live:
+                # Start input reader task
+                input_task = asyncio.create_task(self._input_reader())
+                
+                while self.running:
+                    # Wait for input with timeout
+                    try:
+                        key = await asyncio.wait_for(self.input_queue.get(), timeout=0.01)
+                        if not self._handle_key(key):
+                            self.running = False
+                            break
+                    except asyncio.TimeoutError:
+                        # No input, just continue
+                        pass
+                    
+                    # Update display
+                    live.update(self._render())
+                
+                # Cancel input task
+                input_task.cancel()
+                try:
+                    await input_task
+                except asyncio.CancelledError:
+                    pass
+                    
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.running = False
+            
+            # Show final result
+            self.console.clear()
+            self.console.print("[green]Editor session ended.[/green]")
+            self.console.print("\n[bold]Your text:[/bold]")
+            self.console.print("─" * 60)
+            self.console.print(self.editor.get_text())
+            self.console.print("─" * 60)
+    
+    def run(self):
+        """Synchronous wrapper for running the async editor."""
+        asyncio.run(self.run_async())
 
 
 def demo():
