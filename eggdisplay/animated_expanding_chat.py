@@ -54,8 +54,26 @@ class AnimatedExpandingChat:
     def _update_panel_sizes(self):
         """Update panel sizes based on content with smooth animation."""
         # Calculate target sizes
-        message_count = len([m for m in self.chat_history if m and not m.startswith("─")])
-        target_top_height = max(6, min(self.max_top_height, message_count * 2 + 4))
+        # Count all non-empty, non-separator lines in chat history
+        visible_messages = [m for m in self.chat_history if m and not m.startswith("─")]
+        
+        # Calculate total lines needed for output panel
+        # Each message takes at least 1 line, multi-line messages take more
+        total_output_lines = 0
+        for message in visible_messages:
+            if message.startswith("["):
+                # User message - count actual lines (may be multi-line)
+                message_content = message.split("] ", 1)[1] if "] " in message else message
+                message_lines = message_content.count('\n') + 1
+                total_output_lines += message_lines + 1  # +1 for the message header/bullet
+            else:
+                # System message - count as 1 line
+                total_output_lines += 1
+        
+        # Add space for headers and separators
+        total_output_lines += 4  # Header, separator, some padding
+        
+        target_top_height = max(6, min(self.max_top_height, total_output_lines))
         
         editor_lines = len(self.editor.editor.lines)
         target_bottom_height = max(4, min(8, editor_lines + 3))
@@ -124,55 +142,91 @@ class AnimatedExpandingChat:
         )
     
     def _render_bottom_panel(self) -> Panel:
-        """Render the compact bottom panel."""
-        # Create compact editor view
+        """Render the bottom panel with proper scrolling and visible footer."""
         editor_content = Text()
         lines = self.editor.editor.lines
         cursor_row, cursor_col = self.editor.editor.cursor.row, self.editor.editor.cursor.col
         
-        if lines and cursor_row < len(lines):
-            current_line = lines[cursor_row]
-            # Show compact line with cursor
-            max_width = 60
-            if len(current_line) > max_width:
-                # Show context around cursor
-                start = max(0, cursor_col - max_width // 2)
-                end = min(len(current_line), start + max_width)
-                visible_text = current_line[start:end]
-                
-                if start > 0:
-                    editor_content.append("…", style="dim")
-                
-                cursor_pos_in_visible = cursor_col - start
-                before_cursor = visible_text[:cursor_pos_in_visible]
-                cursor_char = visible_text[cursor_pos_in_visible:cursor_pos_in_visible+1] if cursor_pos_in_visible < len(visible_text) else "█"
-                after_cursor = visible_text[cursor_pos_in_visible+1:] if cursor_pos_in_visible < len(visible_text) else ""
-                
-                editor_content.append(before_cursor)
-                editor_content.append(cursor_char, style="black on white")
-                editor_content.append(after_cursor)
-                
-                if end < len(current_line):
-                    editor_content.append("…", style="dim")
-            else:
-                before_cursor = current_line[:cursor_col]
-                cursor_char = current_line[cursor_col:cursor_col+1] if cursor_col < len(current_line) else "█"
-                after_cursor = current_line[cursor_col+1:] if cursor_col < len(current_line) else ""
-                
-                editor_content.append(before_cursor)
-                editor_content.append(cursor_char, style="black on white")
-                editor_content.append(after_cursor)
-        else:
-            editor_content.append("✏️  Start typing...", style="dim")
+        # Panel height includes content + status line
+        panel_height = int(self.bottom_panel_height)
+        available_content_lines = panel_height - 1  # Reserve 1 line for status
         
-        # Status line
-        editor_content.append(f"\n[dim]Line {cursor_row + 1} | Press Ctrl+D to send[/dim]")
+        # Calculate viewport - show lines around cursor
+        viewport_size = available_content_lines
+        
+        # Center cursor in viewport if possible
+        viewport_start = max(0, cursor_row - viewport_size // 2)
+        viewport_end = min(len(lines), viewport_start + viewport_size)
+        
+        # Adjust if at boundaries
+        if viewport_end - viewport_start < viewport_size:
+            viewport_start = max(0, viewport_end - viewport_size)
+        
+        # Show lines in viewport
+        for i in range(viewport_start, viewport_end):
+            if i < len(lines):
+                if i == cursor_row:
+                    # Current line with cursor
+                    line_content = lines[i]
+                    
+                    # Handle long lines
+                    max_width = 65
+                    if len(line_content) > max_width:
+                        start = max(0, cursor_col - max_width // 2)
+                        end = min(len(line_content), start + max_width)
+                        visible_text = line_content[start:end]
+                        
+                        if start > 0:
+                            editor_content.append("…", style="dim")
+                        
+                        cursor_pos_in_visible = cursor_col - start
+                        before_cursor = visible_text[:cursor_pos_in_visible]
+                        cursor_char = visible_text[cursor_pos_in_visible:cursor_pos_in_visible+1] if cursor_pos_in_visible < len(visible_text) else "█"
+                        after_cursor = visible_text[cursor_pos_in_visible+1:] if cursor_pos_in_visible < len(visible_text) else ""
+                        
+                        editor_content.append("🎯 ", style="bold green")
+                        editor_content.append(before_cursor)
+                        editor_content.append(cursor_char, style="black on white")
+                        editor_content.append(after_cursor)
+                        
+                        if end < len(line_content):
+                            editor_content.append("…", style="dim")
+                    else:
+                        before_cursor = line_content[:cursor_col]
+                        cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
+                        after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
+                        
+                        editor_content.append("🎯 ", style="bold green")
+                        editor_content.append(before_cursor)
+                        editor_content.append(cursor_char, style="black on white")
+                        editor_content.append(after_cursor)
+                else:
+                    # Context lines
+                    line_content = lines[i]
+                    if len(line_content) > 60:
+                        editor_content.append("  …" + line_content[-57:])
+                    else:
+                        editor_content.append("  " + line_content)
+                
+                editor_content.append("\n")
+        
+        # Fill empty space
+        lines_shown = viewport_end - viewport_start
+        empty_lines_needed = int(available_content_lines - lines_shown)
+        for _ in range(empty_lines_needed):
+            editor_content.append("\n")
+        
+        # Status line - ALWAYS VISIBLE
+        total_lines = len(lines)
+        showing_range = f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > available_content_lines else f"{total_lines}"
+        
+        editor_content.append(f"[dim]📄 Lines: {showing_range} | Cursor: {cursor_row + 1}:{cursor_col + 1} | Ctrl+D to send[/dim]")
         
         return Panel(
             editor_content,
-            title="[bold]Input (Stays Compact)[/bold]",
+            title="[bold]Input Editor[/bold]",
             border_style="green",
-            height=int(self.bottom_panel_height)
+            height=panel_height
         )
     
     def _render_layout(self) -> Layout:
