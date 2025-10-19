@@ -19,8 +19,9 @@ pip install -e .
 
 ## Quick Start
 
+### Programmatic Usage (Recommended)
 ```python
-from rich_text_editor import TextEditor
+from text_editor import TextEditor
 
 # Create editor with initial text
 editor = TextEditor(
@@ -29,7 +30,23 @@ editor = TextEditor(
     height=20
 )
 
-# Run the editor
+# Use programmatically
+editor.insert_text(" - Edited")
+print(editor.get_text())
+
+# Or simulate key presses
+editor.handle_key("a")
+editor.handle_key("b")
+editor.handle_key("c")
+```
+
+### Interactive Usage
+```python
+from text_editor import TextEditor
+
+editor = TextEditor(initial_text="Hello, World!")
+
+# Start interactive mode (requires terminal support)
 editor.run()
 
 # Get the edited text
@@ -128,17 +145,27 @@ TextEditor(
 
 ## Demo
 
-Run the included demo:
-
+### Programmatic Demo (Works Everywhere)
 ```bash
-python text_editor.py
+python programmatic_demo.py
 ```
 
-This demonstrates:
+### Interactive Demo (Requires Terminal Support)
+```bash
+python interactive_demo.py
+```
+
+### Simple Tests
+```bash
+python simple_test.py
+```
+
+These demonstrate:
 - Basic text editing
-- Arrow key navigation
+- Arrow key navigation  
 - Autocomplete with Python keywords
 - Event listeners
+- Programmatic text manipulation
 
 ## License
 

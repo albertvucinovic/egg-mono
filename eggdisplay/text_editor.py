@@ -259,19 +259,59 @@ class TextEditor:
         
         This starts a rich.Live session for interactive editing.
         """
+        import sys
+        import tty
+        import termios
+        
         self._running = True
         
-        with Live(self._render(), refresh_per_second=10, screen=True) as live:
-            self._live = live
-            while self._running:
-                try:
-                    key = self._console.input("")
-                    if key == "ctrl+c":
+        # Save terminal settings
+        old_settings = termios.tcgetattr(sys.stdin)
+        
+        try:
+            # Set terminal to raw mode for immediate key capture
+            tty.setraw(sys.stdin.fileno())
+            
+            with Live(self._render(), refresh_per_second=10, screen=True) as live:
+                self._live = live
+                while self._running:
+                    try:
+                        # Read single character
+                        char = sys.stdin.read(1)
+                        
+                        # Handle special keys
+                        if char == '\x03':  # Ctrl+C
+                            break
+                        elif char == '\x1b':  # Escape sequence (arrows, etc.)
+                            # Read next characters to determine the key
+                            next_chars = sys.stdin.read(2)
+                            if next_chars == '[A':
+                                self.handle_key('up')
+                            elif next_chars == '[B':
+                                self.handle_key('down')
+                            elif next_chars == '[C':
+                                self.handle_key('right')
+                            elif next_chars == '[D':
+                                self.handle_key('left')
+                            elif next_chars == '[3':  # Delete
+                                sys.stdin.read(1)  # Read the ~
+                                self.handle_key('delete')
+                        elif char == '\x7f':  # Backspace
+                            self.handle_key('backspace')
+                        elif char == '\r':  # Enter/Return
+                            self.handle_key('enter')
+                        elif char == '\t':  # Tab
+                            self.handle_key('tab')
+                        elif char.isprintable():
+                            self.handle_key(char)
+                        
+                        live.update(self._render())
+                        
+                    except KeyboardInterrupt:
                         break
-                    self.handle_key(key)
-                    live.update(self._render())
-                except KeyboardInterrupt:
-                    break
+        finally:
+            # Restore terminal settings
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
     
     def stop(self) -> None:
         """Stop the editor."""
