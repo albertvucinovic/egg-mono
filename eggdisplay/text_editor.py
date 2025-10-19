@@ -393,10 +393,11 @@ class RealTimeEditor:
         """Worker that reads single characters using readchar."""
         while self.running:
             try:
-                char = readchar.readchar()
-                self.input_queue.put(char)
+                # Use readkey instead of readchar for better escape sequence handling
+                key = readchar.readkey()
+                self.input_queue.put(key)
                 
-                if char == readchar.key.CTRL_C:
+                if key == readchar.key.CTRL_C:
                     break
                     
             except KeyboardInterrupt:
@@ -453,6 +454,9 @@ class RealTimeEditor:
     
     def _handle_key(self, key: str) -> bool:
         """Handle a key press and return False if should quit."""
+        # Debug: uncomment to see what keys are being received
+        # print(f"DEBUG: Key received: {repr(key)}")
+        
         if key == readchar.key.CTRL_C:
             return False
         elif key == readchar.key.UP:
@@ -474,6 +478,21 @@ class RealTimeEditor:
         elif len(key) == 1 and key.isprintable():
             # Regular character
             self.editor.handle_key(key)
+        elif key.startswith('\x1b'):
+            # Handle escape sequences that might not be caught by readchar
+            if key == '\x1b[A':
+                self.editor.handle_key('up')
+            elif key == '\x1b[B':
+                self.editor.handle_key('down')
+            elif key == '\x1b[C':
+                self.editor.handle_key('right')
+            elif key == '\x1b[D':
+                self.editor.handle_key('left')
+            elif key == '\x1b[3~':
+                self.editor.handle_key('delete')
+            else:
+                # Unknown escape sequence - ignore it
+                pass
         
         return True
     
@@ -538,8 +557,8 @@ class AsyncRealTimeEditor:
         """Async task that reads keyboard input."""
         while self.running:
             try:
-                # Use asyncio.to_thread to run blocking readchar in a thread
-                key = await asyncio.to_thread(readchar.readchar)
+                # Use asyncio.to_thread to run blocking readkey in a thread
+                key = await asyncio.to_thread(readchar.readkey)
                 await self.input_queue.put(key)
                 
                 if key == readchar.key.CTRL_C:
@@ -596,6 +615,9 @@ class AsyncRealTimeEditor:
     
     def _handle_key(self, key: str) -> bool:
         """Handle a key press and return False if should quit."""
+        # Debug: uncomment to see what keys are being received
+        # print(f"DEBUG: Key received: {repr(key)}")
+        
         if key == readchar.key.CTRL_C:
             return False
         elif key == readchar.key.UP:
@@ -617,6 +639,21 @@ class AsyncRealTimeEditor:
         elif len(key) == 1 and key.isprintable():
             # Regular character
             self.editor.handle_key(key)
+        elif key.startswith('\x1b'):
+            # Handle escape sequences that might not be caught by readchar
+            if key == '\x1b[A':
+                self.editor.handle_key('up')
+            elif key == '\x1b[B':
+                self.editor.handle_key('down')
+            elif key == '\x1b[C':
+                self.editor.handle_key('right')
+            elif key == '\x1b[D':
+                self.editor.handle_key('left')
+            elif key == '\x1b[3~':
+                self.editor.handle_key('delete')
+            else:
+                # Unknown escape sequence - ignore it
+                pass
         
         return True
     
