@@ -357,6 +357,169 @@ class TextEditor:
         self._running = False
 
 
+# Real-time interactive editor components
+try:
+    import readchar
+except ImportError:
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "readchar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import readchar
+
+import threading
+import queue
+import time
+from rich.console import Console
+from rich.live import Live
+from rich.text import Text
+
+
+class RealTimeEditor:
+    """
+    Real-time interactive text editor with Live display.
+    
+    Provides Vim-like insert mode experience with real-time typing.
+    Uses threading and readchar for non-blocking input.
+    """
+    
+    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
+        self.editor = TextEditor(initial_text=initial_text, width=width, height=height)
+        self.console = Console()
+        self.input_queue = queue.Queue()
+        self.running = False
+    
+    def _input_worker(self):
+        """Worker that reads single characters using readchar."""
+        while self.running:
+            try:
+                char = readchar.readchar()
+                self.input_queue.put(char)
+                
+                if char == readchar.key.CTRL_C:
+                    break
+                    
+            except KeyboardInterrupt:
+                self.input_queue.put(readchar.key.CTRL_C)
+                break
+            except Exception:
+                break
+    
+    def _render(self) -> Text:
+        """Render the editor display."""
+        text = Text()
+        
+        # Header
+        text.append(" Real-time Text Editor ", style="bold white on blue")
+        text.append("\n")
+        text.append("─" * 60 + "\n", style="blue")
+        
+        # Content with cursor
+        lines = self.editor.lines
+        cursor_row, cursor_col = self.editor.cursor.row, self.editor.cursor.col
+        
+        # Show visible area around cursor
+        start_line = max(0, cursor_row - 8)
+        end_line = min(len(lines), start_line + 16)
+        
+        for i in range(start_line, end_line):
+            line_num = f"{i+1:3d} │ "
+            
+            if i == cursor_row:
+                # Current line with cursor
+                text.append(line_num, style="bold green")
+                line_content = lines[i]
+                
+                before_cursor = line_content[:cursor_col]
+                cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
+                after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
+                
+                text.append(before_cursor)
+                text.append(cursor_char, style="black on white")
+                text.append(after_cursor)
+            else:
+                text.append(line_num, style="dim")
+                text.append(lines[i])
+            
+            text.append("\n")
+        
+        # Footer
+        text.append("─" * 60 + "\n", style="blue")
+        text.append(f" Line: {cursor_row + 1}, Column: {cursor_col + 1} ")
+        text.append(" │ ")
+        text.append(" Type directly! Ctrl+C to exit ", style="yellow")
+        
+        return text
+    
+    def _handle_key(self, key: str) -> bool:
+        """Handle a key press and return False if should quit."""
+        if key == readchar.key.CTRL_C:
+            return False
+        elif key == readchar.key.UP:
+            self.editor.handle_key('up')
+        elif key == readchar.key.DOWN:
+            self.editor.handle_key('down')
+        elif key == readchar.key.LEFT:
+            self.editor.handle_key('left')
+        elif key == readchar.key.RIGHT:
+            self.editor.handle_key('right')
+        elif key in (readchar.key.BACKSPACE, '\x7f', '\x08'):
+            self.editor.handle_key('backspace')
+        elif key == readchar.key.DELETE:
+            self.editor.handle_key('delete')
+        elif key in (readchar.key.ENTER, '\r', '\n'):
+            self.editor.handle_key('enter')
+        elif key == readchar.key.TAB:
+            self.editor.handle_key('tab')
+        elif len(key) == 1 and key.isprintable():
+            # Regular character
+            self.editor.handle_key(key)
+        
+        return True
+    
+    def run(self):
+        """Run the real-time editor."""
+        self.running = True
+        
+        # Start input thread
+        input_thread = threading.Thread(target=self._input_worker, daemon=True)
+        input_thread.start()
+        
+        self.console.print("[green]Real-time Editor Started[/green]")
+        self.console.print("[dim]Start typing! Your keystrokes appear immediately. Ctrl+C to exit.[/dim]\n")
+        
+        try:
+            with Live(self._render(), refresh_per_second=30, screen=True) as live:
+                while self.running:
+                    # Process any pending input
+                    try:
+                        while True:
+                            key = self.input_queue.get_nowait()
+                            if not self._handle_key(key):
+                                self.running = False
+                                break
+                    except queue.Empty:
+                        pass
+                    
+                    # Update display
+                    live.update(self._render())
+                    
+                    # Small delay
+                    time.sleep(0.01)
+                    
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.running = False
+            
+            # Clear screen and show result
+            self.console.clear()
+            self.console.print("[green]Editor session ended.[/green]")
+            self.console.print("\n[bold]Your text:[/bold]")
+            self.console.print("─" * 60)
+            self.console.print(self.editor.get_text())
+            self.console.print("─" * 60)
+
+
 def demo():
     """Demo function to showcase the text editor."""
     

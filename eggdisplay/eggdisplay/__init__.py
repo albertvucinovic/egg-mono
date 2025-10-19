@@ -9,7 +9,7 @@ This package provides a multi-line text editor with support for:
 - Event listeners/hooks
 """
 
-from .text_editor import TextEditor, Cursor
+from .text_editor import TextEditor, Cursor, RealTimeEditor
 
-__all__ = ['TextEditor', 'Cursor']
+__all__ = ['TextEditor', 'Cursor', 'RealTimeEditor']
 __version__ = "0.1.0"
