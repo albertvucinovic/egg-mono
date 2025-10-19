@@ -98,7 +98,17 @@ class TextEditor:
         """Trigger all listeners for a specific event type."""
         for callback in self._event_listeners.get(event_type, []):
             try:
-                callback(*args, **kwargs)
+                # Ensure we pass the right number of arguments
+                import inspect
+                sig = inspect.signature(callback)
+                expected_args = len(sig.parameters)
+                
+                if len(args) >= expected_args:
+                    callback(*args[:expected_args])
+                else:
+                    # Pad with None for missing arguments
+                    padded_args = list(args) + [None] * (expected_args - len(args))
+                    callback(*padded_args)
             except Exception as e:
                 self._console.print(f"Error in event listener: {e}")
     
@@ -235,21 +245,37 @@ class TextEditor:
         """Render the editor content."""
         text = Text()
         
-        for i, line in enumerate(self.lines):
+        # Add some visual indicators
+        text.append(f"Rich Text Editor (Lines: {len(self.lines)}, Cursor: {self.cursor.row}:{self.cursor.col})\n", style="bold blue")
+        text.append("-" * min(60, self.width) + "\n")
+        
+        # Calculate visible lines (simple viewport)
+        start_line = max(0, self.cursor.row - self.height // 2)
+        end_line = min(len(self.lines), start_line + self.height - 3)  # Reserve space for header/footer
+        
+        for i in range(start_line, end_line):
+            line = self.lines[i]
+            line_num = f"{i+1:3d} | "
+            
             if i == self.cursor.row:
                 # Highlight current line with cursor
+                text.append(line_num, style="bold green")
                 before_cursor = line[:self.cursor.col]
                 at_cursor = line[self.cursor.col:self.cursor.col + 1] if self.cursor.col < len(line) else " "
                 after_cursor = line[self.cursor.col + 1:] if self.cursor.col < len(line) else ""
                 
                 text.append(before_cursor)
-                text.append(at_cursor, style="reverse")
+                text.append(at_cursor, style="black on white")
                 text.append(after_cursor)
             else:
+                text.append(line_num, style="dim")
                 text.append(line)
             
-            if i < len(self.lines) - 1:
-                text.append("\n")
+            text.append("\n")
+        
+        # Add footer with instructions
+        text.append("-" * min(60, self.width) + "\n", style="dim")
+        text.append("Ctrl+C to exit | Tab for autocomplete | Arrows to navigate", style="dim")
         
         return text
     
@@ -272,8 +298,15 @@ class TextEditor:
             # Set terminal to raw mode for immediate key capture
             tty.setraw(sys.stdin.fileno())
             
-            with Live(self._render(), refresh_per_second=10, screen=True) as live:
+            # Initial render to ensure display works
+            initial_render = self._render()
+            
+            with Live(initial_render, refresh_per_second=10, screen=True) as live:
                 self._live = live
+                
+                # Force initial display
+                live.update(initial_render, refresh=True)
+                
                 while self._running:
                     try:
                         # Read single character
@@ -305,9 +338,15 @@ class TextEditor:
                         elif char.isprintable():
                             self.handle_key(char)
                         
+                        # Update display
                         live.update(self._render())
                         
                     except KeyboardInterrupt:
+                        break
+                    except Exception as e:
+                        # If there's an error, try to restore terminal and exit
+                        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                        print(f"\nError in editor: {e}")
                         break
         finally:
             # Restore terminal settings
