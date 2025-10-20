@@ -409,8 +409,10 @@ class LiveEditorBase:
 
     LABEL: str = "Real-time Text Editor"
 
-    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
-        self.editor = TextEditor(initial_text=initial_text, width=width, height=height)
+    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24,
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
+        self.editor = TextEditor(initial_text=initial_text, width=width, height=height,
+                                 autocomplete_callback=autocomplete_callback)
         self.console = Console()
         self.running = False
 
@@ -510,8 +512,10 @@ class RealTimeEditor(LiveEditorBase):
 
     LABEL = " Real-time Text Editor "
 
-    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
-        super().__init__(initial_text=initial_text, width=width, height=height)
+    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24,
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
+        super().__init__(initial_text=initial_text, width=width, height=height,
+                         autocomplete_callback=autocomplete_callback)
         self.input_queue = queue.Queue()
 
     def _input_worker(self):
@@ -560,8 +564,10 @@ class AsyncRealTimeEditor(LiveEditorBase):
 
     LABEL = " Async Real-time Editor "
 
-    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
-        super().__init__(initial_text=initial_text, width=width, height=height)
+    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24,
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
+        super().__init__(initial_text=initial_text, width=width, height=height,
+                         autocomplete_callback=autocomplete_callback)
         self.input_queue: asyncio.Queue = asyncio.Queue()
 
     async def _input_reader(self):
@@ -752,7 +758,8 @@ class InputPanel:
 
     def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12,
                  style: Optional['InputPanel.PanelStyle'] = None,
-                 io_mode: str = "threaded"):
+                 io_mode: str = "threaded",
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
         """
         Initialize the input panel.
         
@@ -773,13 +780,15 @@ class InputPanel:
             self.editor = AsyncRealTimeEditor(
                 initial_text="",
                 width=80,
-                height=6
+                height=6,
+                autocomplete_callback=autocomplete_callback,
             )
         else:
             self.editor = RealTimeEditor(
                 initial_text="",
                 width=80,
-                height=6
+                height=6,
+                autocomplete_callback=autocomplete_callback,
             )
         self.message_count = 0
         self.style = style or InputPanel.PanelStyle()

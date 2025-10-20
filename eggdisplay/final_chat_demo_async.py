@@ -32,7 +32,36 @@ class FinalChatDemoAsync:
         chat_output_style = OutputPanel.PanelStyle(border_style="red", box=box.MINIMAL, show_header=False)
         self.chat_output = OutputPanel(title="Chat Messages", initial_height=8, max_height=20, style=chat_output_style)
         self.system_output = OutputPanel(title="System Messages", initial_height=6, max_height=15)
-        self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12)
+        # Provide autocomplete from app code (e.g., filesystem)
+        def file_autocomplete(line: str, row: int, col: int):
+            import os, re
+            prefix = line[:col]
+            m = re.search(r"([\w\-./~]+)$", prefix)
+            token = m.group(1) if m else ""
+            if not token:
+                return []
+            expanded = os.path.expanduser(token)
+            base_dir = expanded
+            needle = ""
+            if not os.path.isdir(expanded):
+                base_dir = os.path.dirname(expanded) or "."
+                needle = os.path.basename(expanded)
+            try:
+                entries = os.listdir(base_dir)
+            except Exception:
+                return []
+            results = []
+            for name in entries:
+                if needle and not name.startswith(needle):
+                    continue
+                path = os.path.join(base_dir, name)
+                suffix = "/" if os.path.isdir(path) else ""
+                results.append(name[len(needle):] + suffix)
+            results.sort(key=lambda s: (0 if s.endswith('/') else 1, s))
+            return results[:20]
+
+        self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12,
+                                      autocomplete_callback=file_autocomplete)
 
         # Variable output panels (top-to-bottom order by default)
         self.output_panels: List[OutputPanel] = [self.chat_output, self.system_output]
