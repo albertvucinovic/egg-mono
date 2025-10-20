@@ -373,6 +373,7 @@ import time
 from rich.console import Console
 from rich.live import Live
 from rich.text import Text
+from rich.panel import Panel
 
 
 class RealTimeEditor:
@@ -706,6 +707,191 @@ class AsyncRealTimeEditor:
     def run(self):
         """Synchronous wrapper for running the async editor."""
         asyncio.run(self.run_async())
+
+
+class OutputPanel:
+    """
+    Generic output panel for displaying multi-line strings.
+    
+    This panel is completely agnostic about the content - it just displays
+    multi-line text with automatic height adjustment.
+    """
+    
+    def __init__(self, title: str = "Output", initial_height: int = 8, max_height: int = 20):
+        """
+        Initialize the output panel.
+        
+        Args:
+            title: Panel title
+            initial_height: Initial panel height in lines
+            max_height: Maximum panel height in lines
+        """
+        self.title = title
+        self.current_height = initial_height
+        self.max_height = max_height
+        self.content = ""
+        
+    def set_content(self, content: str) -> None:
+        """Set the content to display."""
+        self.content = content
+        
+    def calculate_height(self) -> int:
+        """Calculate the optimal panel height based on content."""
+        if not self.content:
+            return self.current_height
+            
+        # Count lines in content
+        content_lines = self.content.count('\n') + 1
+        
+        # Add space for header and padding
+        total_lines_needed = content_lines + 3
+        
+        # Smooth animation towards target
+        target_height = max(8, min(self.max_height, total_lines_needed))
+        if self.current_height < target_height:
+            self.current_height = min(target_height, self.current_height + 0.5)
+        elif self.current_height > target_height:
+            self.current_height = max(target_height, self.current_height - 0.5)
+            
+        return int(self.current_height)
+    
+    def render(self) -> Panel:
+        """Render the panel."""
+        height = self.calculate_height()
+        
+        # Create content text
+        content_text = Text()
+        
+        # Add header with stats
+        content_lines = self.content.count('\n') + 1 if self.content else 0
+        content_text.append(f" {self.title} ", style="bold white on blue")
+        content_text.append(f" | Lines: {content_lines}")
+        content_text.append(f" | Height: {height}")
+        content_text.append("\n")
+        content_text.append("─" * 70 + "\n", style="blue")
+        
+        # Add the actual content
+        if self.content:
+            content_text.append(self.content)
+        else:
+            content_text.append("[dim]No content[/dim]")
+        
+        return Panel(
+            content_text,
+            title=f"[bold]{self.title}[/bold]",
+            border_style="blue",
+            height=height
+        )
+
+
+class InputPanel:
+    """
+    Generic input panel with text editing capabilities.
+    
+    This panel provides a text editor interface for user input.
+    """
+    
+    def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12):
+        """
+        Initialize the input panel.
+        
+        Args:
+            title: Panel title
+            initial_height: Initial panel height in lines
+            max_height: Maximum panel height in lines
+        """
+        self.title = title
+        self.current_height = initial_height
+        self.max_height = max_height
+        self.editor = RealTimeEditor(
+            initial_text="",
+            width=80,
+            height=6
+        )
+        self.message_count = 0
+        
+    def calculate_height(self) -> int:
+        """Calculate the optimal panel height based on editor content."""
+        editor_lines = len(self.editor.editor.lines)
+        target_height = max(6, min(self.max_height, editor_lines + 4))
+        if self.current_height < target_height:
+            self.current_height = min(target_height, self.current_height + 0.3)
+        elif self.current_height > target_height:
+            self.current_height = max(target_height, self.current_height - 0.3)
+            
+        return int(self.current_height)
+    
+    def get_text(self) -> str:
+        """Get the current text from the editor."""
+        return self.editor.editor.get_text().strip()
+    
+    def clear_text(self) -> None:
+        """Clear the editor text."""
+        self.editor.editor.set_text("")
+    
+    def increment_message_count(self) -> None:
+        """Increment the message counter."""
+        self.message_count += 1
+    
+    def render(self) -> Panel:
+        """Render the input panel."""
+        height = self.calculate_height()
+        
+        editor_content = Text()
+        lines = self.editor.editor.lines
+        cursor_row, cursor_col = self.editor.editor.cursor.row, self.editor.editor.cursor.col
+        
+        # Panel height includes content + status line
+        available_content_lines = height - 1
+        
+        # Calculate viewport
+        viewport_size = available_content_lines
+        viewport_start = max(0, cursor_row - viewport_size // 2)
+        viewport_end = min(len(lines), viewport_start + viewport_size)
+        
+        if viewport_end - viewport_start < viewport_size:
+            viewport_start = max(0, viewport_end - viewport_size)
+        
+        # Show lines in viewport
+        for i in range(viewport_start, viewport_end):
+            if i < len(lines):
+                line_num = f"{i+1:2d}: "
+                
+                if i == cursor_row:
+                    editor_content.append(line_num, style="bold green")
+                    line_content = lines[i]
+                    
+                    before_cursor = line_content[:cursor_col]
+                    cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
+                    after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
+                    
+                    editor_content.append(before_cursor)
+                    editor_content.append(cursor_char, style="black on white")
+                    editor_content.append(after_cursor)
+                else:
+                    editor_content.append(line_num, style="dim")
+                    editor_content.append(lines[i])
+                
+                editor_content.append("\n")
+        
+        # Fill empty space
+        lines_shown = viewport_end - viewport_start
+        empty_lines_needed = int(available_content_lines - lines_shown)
+        for _ in range(empty_lines_needed):
+            editor_content.append("\n")
+        
+        # Status line
+        total_lines = len(lines)
+        showing_range = f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > available_content_lines else f"{total_lines}"
+        
+        editor_content.append(f"[dim]📝 Lines: {showing_range} | Messages sent: {self.message_count} | Ctrl+D to send[/dim]")
+        
+        return Panel(
+            editor_content,
+            title=f"[bold]{self.title}[/bold]",
+            border_style="green",
+            height=height
+        )
 
 
 def demo():
