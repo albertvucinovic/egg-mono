@@ -11,10 +11,10 @@ import os
 import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from text_editor import OutputPanel, InputPanel
+from text_editor import OutputPanel, InputPanel, HStack, VStack
 from rich.console import Console, Group
 from rich.live import Live
-from typing import List
+from typing import List, Callable, Optional
 
 
 class FinalChatDemo:
@@ -49,6 +49,11 @@ class FinalChatDemo:
             self.chat_output,
             self.system_output,
         ]
+        
+        # Optional layout builder hook: users can supply a function that
+        # takes (console, output_panels, input_panel) and returns a Rich
+        # renderable (e.g., Group, Columns, Panel, HStack().render(), etc.).
+        self.layout_builder: Optional[Callable[[Console, List[OutputPanel], InputPanel], object]] = None
         
         # Chat history - application logic, not panel logic
         self.chat_messages = []
@@ -99,15 +104,44 @@ class FinalChatDemo:
     def _render_stack(self) -> Group:
         """Render a vertical stack (Group) of panels without using Layout.
 
-        Using Group lets the live region take only as many lines as needed,
-        rather than claiming the full terminal height like Layout does.
+        Demonstrates that library users could mix HStack and VStack to build
+        custom inline layouts, including side-by-side OutputPanels.
         """
         # Update panel content from current app state
         self._update_panel_content()
 
-        renderables = [p.render() for p in self.output_panels]
-        renderables.append(self.input_panel.render())
-        return Group(*renderables)
+        # If a custom builder is provided, use it
+        if self.layout_builder is not None:
+            custom = self.layout_builder(self.console, self.output_panels, self.input_panel)
+            # The builder can return either a renderable or a builder like HStack/VStack
+            if hasattr(custom, "render") and callable(getattr(custom, "render")) and not hasattr(custom, "__rich_console__"):
+                return Group(custom.render())  # builder-like object
+            # If it's already a renderable, wrap as needed
+            if isinstance(custom, Group):
+                return custom
+            return Group(custom)
+
+        # Default: first two output panels side-by-side if available; the rest stacked
+        rows = []
+        if len(self.output_panels) >= 2:
+            rows.append(HStack(self.output_panels[:2]).render())
+            for p in self.output_panels[2:]:
+                rows.append(p.render())
+        else:
+            for p in self.output_panels:
+                rows.append(p.render())
+
+        rows.append(self.input_panel.render())
+        return Group(*rows)
+
+    def set_layout_builder(self, builder: Callable[[Console, List[OutputPanel], InputPanel], object]):
+        """Allow users of the library to define custom inline layouts.
+
+        The builder receives (console, output_panels, input_panel) and should
+        return a Rich renderable (e.g., Group, Columns, Panel), or one of the
+        helper builders (HStack/VStack) which will be rendered.
+        """
+        self.layout_builder = builder
     
     def _handle_key(self, key: str) -> bool:
         """Handle keyboard input."""

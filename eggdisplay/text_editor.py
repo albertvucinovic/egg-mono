@@ -14,8 +14,9 @@ Features:
 from typing import List, Optional, Callable, Dict, Any
 from rich.live import Live
 from rich.text import Text
-from rich.console import Console
+from rich.console import Console, Group
 from rich.layout import Layout
+from rich.columns import Columns
 import threading
 import time
 import asyncio
@@ -925,6 +926,49 @@ class InputPanel:
             border_style="green",
             height=height
         )
+
+
+# Inline-friendly layout helpers (don't claim full-screen like Layout)
+class HStack:
+    """Horizontal stack of renderables using Columns.
+
+    Children may be OutputPanel/InputPanel instances (with a .render() method)
+    or any Rich renderable. The resulting row height equals the max height of
+    the children, so it plays well in a Live inline region.
+    """
+    def __init__(self, children, *, equal: bool = True, expand: bool = True, gap: int = 1):
+        self.children = list(children)
+        self.equal = equal
+        self.expand = expand
+        self.gap = gap
+
+    def render(self):
+        items = []
+        for child in self.children:
+            if hasattr(child, "render") and callable(getattr(child, "render")):
+                items.append(child.render())
+            else:
+                items.append(child)
+        # padding=(left_right_gap_left, left_right_gap_right) or single int
+        return Columns(items, equal=self.equal, expand=self.expand, padding=self.gap)
+
+
+class VStack:
+    """Vertical stack using Group.
+
+    Children may be OutputPanel/InputPanel instances or Rich renderables.
+    """
+    def __init__(self, children):
+        self.children = list(children)
+
+    def render(self):
+        items = []
+        for child in self.children:
+            if hasattr(child, "render") and callable(getattr(child, "render")):
+                items.append(child.render())
+            else:
+                items.append(child)
+        return Group(*items)
 
 
 def demo():

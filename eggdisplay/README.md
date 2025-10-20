@@ -11,6 +11,10 @@ A rich.Live-based text editor component with multi-line editing support.
 - **Event listeners/hooks** - Subscribe to key events, text changes, and cursor movements
 - **Initial text support** - Set initial content and modify text programmatically
 
+Inline layout helpers for Rich Live (non-fullscreen):
+- HStack: horizontal rows using rich.Columns
+- VStack: vertical stack using rich.console.Group
+
 ## Installation
 
 ```bash
@@ -52,6 +56,35 @@ editor.run()
 # Get the edited text
 final_text = editor.get_text()
 print(f"Final text: {final_text}")
+
+### Side-by-side Panels (Inline Live)
+
+You can arrange panels horizontally without using Rich Layout (which claims the whole screen) by using HStack and VStack.
+
+```python
+from rich.console import Console
+from text_editor import OutputPanel, InputPanel, HStack, VStack
+from rich.live import Live
+
+console = Console()
+
+left = OutputPanel(title="Left", initial_height=8, max_height=15)
+right = OutputPanel(title="Right", initial_height=8, max_height=15)
+input_panel = InputPanel(title="Input", initial_height=8, max_height=12)
+
+left.set_content("Left panel content\nMore lines...")
+right.set_content("Right panel content\nEven more lines...")
+
+layout = VStack([
+    HStack([left, right]).render(),
+    input_panel.render(),
+]).render()
+
+with Live(layout, refresh_per_second=20, screen=False, console=console) as live:
+    # Update your panels and rebuild the layout as needed
+    # live.update(VStack([...]).render())
+    pass
+```
 ```
 
 ## Advanced Usage
