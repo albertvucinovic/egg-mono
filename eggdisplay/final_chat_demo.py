@@ -12,9 +12,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from text_editor import OutputPanel, InputPanel
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
-from rich.layout import Layout
 from typing import List
 
 
@@ -97,23 +96,18 @@ class FinalChatDemo:
         self.chat_output.set_content(chat_content.strip())
         self.system_output.set_content(system_content.strip())
     
-    def _render_layout(self) -> Layout:
-        """Render the complete layout with a variable number of live panels."""
-        layout = Layout()
-        
-        # Update panel content
+    def _render_stack(self) -> Group:
+        """Render a vertical stack (Group) of panels without using Layout.
+
+        Using Group lets the live region take only as many lines as needed,
+        rather than claiming the full terminal height like Layout does.
+        """
+        # Update panel content from current app state
         self._update_panel_content()
-        
-        # Build children from all output panels plus the input panel at the end
-        children: List[Layout] = []
-        for idx, panel in enumerate(self.output_panels):
-            children.append(
-                Layout(panel.render(), name=f"out-{idx}", size=panel.calculate_height())
-            )
-        children.append(Layout(self.input_panel.render(), name="input", size=self.input_panel.calculate_height()))
-        
-        layout.split_column(*children)
-        return layout
+
+        renderables = [p.render() for p in self.output_panels]
+        renderables.append(self.input_panel.render())
+        return Group(*renderables)
     
     def _handle_key(self, key: str) -> bool:
         """Handle keyboard input."""
@@ -183,7 +177,7 @@ class FinalChatDemo:
         try:
             # Use screen=False to render inline with normal terminal scrolling.
             # Share the same Console so non-live prints appear above the live region.
-            with Live(self._render_layout(), refresh_per_second=30, screen=False, console=self.console) as live:
+            with Live(self._render_stack(), refresh_per_second=30, screen=False, console=self.console) as live:
                 # Start input handling
                 import threading
                 input_thread = threading.Thread(target=self.input_panel.editor._input_worker, daemon=True)
@@ -202,7 +196,7 @@ class FinalChatDemo:
                         pass
                     
                     # Update display
-                    live.update(self._render_layout())
+                    live.update(self._render_stack())
                     
                     time.sleep(0.033)
                     
