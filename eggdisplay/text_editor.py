@@ -17,6 +17,7 @@ from rich.text import Text
 from rich.console import Console, Group
 from rich.layout import Layout
 from rich.columns import Columns
+from rich import box as rich_box
 import threading
 import time
 import asyncio
@@ -734,7 +735,20 @@ class OutputPanel:
     multi-line text with automatic height adjustment.
     """
     
-    def __init__(self, title: str = "Output", initial_height: int = 8, max_height: int = 20):
+    @dataclass
+    class PanelStyle:
+        """Display options for OutputPanel."""
+        border_style: str = "blue"
+        box: Any = rich_box.SQUARE
+        title_style: str = "bold"
+        title_align: str = "left"
+        show_header: bool = True
+        header_style: str = "bold white on blue"
+        header_separator_char: str = "─"
+        header_separator_style: str = "blue"
+
+    def __init__(self, title: str = "Output", initial_height: int = 8, max_height: int = 20,
+                 style: Optional['OutputPanel.PanelStyle'] = None):
         """
         Initialize the output panel.
         
@@ -747,6 +761,7 @@ class OutputPanel:
         self.current_height = initial_height
         self.max_height = max_height
         self.content = ""
+        self.style = style or OutputPanel.PanelStyle()
         
     def set_content(self, content: str) -> None:
         """Set the content to display."""
@@ -772,6 +787,14 @@ class OutputPanel:
             
         return int(self.current_height)
     
+    def _resolve_box(self):
+        b = self.style.box
+        # Allow users to pass a string name or a rich.box object
+        if isinstance(b, str):
+            name = b.strip().upper()
+            return getattr(rich_box, name, rich_box.SQUARE)
+        return b or rich_box.SQUARE
+
     def render(self) -> Panel:
         """Render the panel, showing only the last lines that fit."""
         height = self.calculate_height()
@@ -779,16 +802,20 @@ class OutputPanel:
         # Create content text
         content_text = Text()
         
-        # Add header with stats
+        # Add optional header with stats inside content area
         content_lines = self.content.count('\n') + 1 if self.content else 0
-        content_text.append(f" {self.title} ", style="bold white on blue")
-        content_text.append(f" | Lines: {content_lines}")
-        content_text.append(f" | Height: {height}")
-        content_text.append("\n")
-        content_text.append("─" * 70 + "\n", style="blue")
+        header_lines = 0
+        if self.style.show_header:
+            content_text.append(f" {self.title} ", style=self.style.header_style)
+            content_text.append(f" | Lines: {content_lines}")
+            content_text.append(f" | Height: {height}")
+            content_text.append("\n")
+            sep = self.style.header_separator_char * 70
+            content_text.append(sep + "\n", style=self.style.header_separator_style)
+            header_lines = 2
         
         # Calculate available lines for content (after header)
-        available_content_lines = max(1, height - 4)  # Reserve space for header and padding
+        available_content_lines = max(1, height - (header_lines + 2))  # Reserve space for header and padding
         
         # Show only the last lines that fit
         if self.content:
@@ -810,10 +837,13 @@ class OutputPanel:
         else:
             content_text.append("[dim]No content[/dim]")
         
+        panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
         return Panel(
             content_text,
-            title=f"[bold]{self.title}[/bold]",
-            border_style="blue",
+            title=panel_title,
+            title_align=self.style.title_align,
+            border_style=self.style.border_style,
+            box=self._resolve_box(),
             height=height
         )
 
@@ -825,7 +855,24 @@ class InputPanel:
     This panel provides a text editor interface for user input.
     """
     
-    def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12):
+    @dataclass
+    class PanelStyle:
+        """Display options for InputPanel."""
+        border_style: str = "green"
+        box: Any = rich_box.SQUARE
+        title_style: str = "bold"
+        title_align: str = "left"
+        show_header: bool = False
+        header_style: str = "bold white on green"
+        header_separator_char: str = "─"
+        header_separator_style: str = "green"
+        status_style: str = "dim"
+        cursor_style: str = "black on white"
+        line_num_style: str = "dim"
+        current_line_num_style: str = "bold green"
+
+    def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12,
+                 style: Optional['InputPanel.PanelStyle'] = None):
         """
         Initialize the input panel.
         
@@ -843,6 +890,7 @@ class InputPanel:
             height=6
         )
         self.message_count = 0
+        self.style = style or InputPanel.PanelStyle()
         
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on editor content."""
@@ -867,6 +915,13 @@ class InputPanel:
         """Increment the message counter."""
         self.message_count += 1
     
+    def _resolve_box(self):
+        b = self.style.box
+        if isinstance(b, str):
+            name = b.strip().upper()
+            return getattr(rich_box, name, rich_box.SQUARE)
+        return b or rich_box.SQUARE
+
     def render(self) -> Panel:
         """Render the input panel."""
         height = self.calculate_height()
@@ -875,8 +930,17 @@ class InputPanel:
         lines = self.editor.editor.lines
         cursor_row, cursor_col = self.editor.editor.cursor.row, self.editor.editor.cursor.col
         
-        # Panel height includes content + status line
-        available_content_lines = height - 1
+        # Optional header at top
+        header_lines = 0
+        if self.style.show_header:
+            editor_content.append(f" {self.title} ", style=self.style.header_style)
+            editor_content.append("\n")
+            sep = self.style.header_separator_char * 70
+            editor_content.append(sep + "\n", style=self.style.header_separator_style)
+            header_lines = 2
+        
+        # Panel height includes content + status line (and optional header)
+        available_content_lines = height - (1 + header_lines)
         
         # Calculate viewport
         viewport_size = available_content_lines
@@ -892,7 +956,7 @@ class InputPanel:
                 line_num = f"{i+1:2d}: "
                 
                 if i == cursor_row:
-                    editor_content.append(line_num, style="bold green")
+                    editor_content.append(line_num, style=self.style.current_line_num_style)
                     line_content = lines[i]
                     
                     before_cursor = line_content[:cursor_col]
@@ -900,10 +964,10 @@ class InputPanel:
                     after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
                     
                     editor_content.append(before_cursor)
-                    editor_content.append(cursor_char, style="black on white")
+                    editor_content.append(cursor_char, style=self.style.cursor_style)
                     editor_content.append(after_cursor)
                 else:
-                    editor_content.append(line_num, style="dim")
+                    editor_content.append(line_num, style=self.style.line_num_style)
                     editor_content.append(lines[i])
                 
                 editor_content.append("\n")
@@ -918,12 +982,18 @@ class InputPanel:
         total_lines = len(lines)
         showing_range = f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > available_content_lines else f"{total_lines}"
         
-        editor_content.append(f"[dim]📝 Lines: {showing_range} | Messages sent: {self.message_count} | Ctrl+D to send[/dim]")
+        editor_content.append(
+            f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Ctrl+D to send",
+            style=self.style.status_style
+        )
         
+        panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
         return Panel(
             editor_content,
-            title=f"[bold]{self.title}[/bold]",
-            border_style="green",
+            title=panel_title,
+            title_align=self.style.title_align,
+            border_style=self.style.border_style,
+            box=self._resolve_box(),
             height=height
         )
 

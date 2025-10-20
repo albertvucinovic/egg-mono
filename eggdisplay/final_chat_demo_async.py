@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from text_editor import OutputPanel, InputPanel, HStack, VStack  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.live import Live  # noqa: E402
+from rich import box
 
 
 class FinalChatDemoAsync:
@@ -28,7 +29,8 @@ class FinalChatDemoAsync:
         self.running = False
 
         # Panels
-        self.chat_output = OutputPanel(title="Chat Messages", initial_height=8, max_height=20)
+        chat_output_style = OutputPanel.PanelStyle(border_style="red", box=box.ROUNDED, show_header=False)
+        self.chat_output = OutputPanel(title="Chat Messages", initial_height=8, max_height=20, style=chat_output_style)
         self.system_output = OutputPanel(title="System Messages", initial_height=6, max_height=15)
         self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12)
 

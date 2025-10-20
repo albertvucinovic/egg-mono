@@ -84,6 +84,42 @@ with Live(layout, refresh_per_second=20, screen=False, console=console) as live:
     # Update your panels and rebuild the layout as needed
     # live.update(VStack([...]).render())
     pass
+
+### Customize Panel Display
+
+Both OutputPanel and InputPanel support style options (colors, borders, header, title):
+
+```python
+from text_editor import OutputPanel, InputPanel
+from rich import box
+
+out_style = OutputPanel.PanelStyle(
+    border_style="cyan",
+    box=box.ROUNDED,
+    title_style="bold magenta",
+    title_align="center",
+    show_header=True,
+    header_style="bold white on cyan",
+    header_separator_char="─",
+    header_separator_style="cyan",
+)
+
+inp_style = InputPanel.PanelStyle(
+    border_style="yellow",
+    box=box.SIMPLE,
+    title_style="bold yellow",
+    title_align="center",
+    show_header=False,
+    status_style="dim",
+    cursor_style="black on yellow",
+    line_num_style="dim",
+    current_line_num_style="bold yellow",
+)
+
+left = OutputPanel(title="Left", initial_height=8, max_height=15, style=out_style)
+right = OutputPanel(title="Right", initial_height=8, max_height=15, style=out_style)
+input_panel = InputPanel(title="Input", initial_height=8, max_height=12, style=inp_style)
+```
 ```
 ```
 
