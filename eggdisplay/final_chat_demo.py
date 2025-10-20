@@ -15,6 +15,7 @@ from text_editor import OutputPanel, InputPanel
 from rich.console import Console
 from rich.live import Live
 from rich.layout import Layout
+from typing import List
 
 
 class FinalChatDemo:
@@ -43,9 +44,22 @@ class FinalChatDemo:
             max_height=12
         )
         
+        # Support a variable number of live output panels (top-to-bottom order)
+        # Users can append more panels via add_output_panel().
+        self.output_panels: List[OutputPanel] = [
+            self.chat_output,
+            self.system_output,
+        ]
+        
         # Chat history - application logic, not panel logic
         self.chat_messages = []
         self.system_messages = []
+
+    def add_output_panel(self, title: str, initial_height: int = 6, max_height: int = 15) -> OutputPanel:
+        """Create and append a new live OutputPanel to the stack."""
+        panel = OutputPanel(title=title, initial_height=initial_height, max_height=max_height)
+        self.output_panels.append(panel)
+        return panel
     
     def _format_chat_message(self, timestamp: str, message: str) -> str:
         """Format a chat message for display."""
@@ -84,19 +98,21 @@ class FinalChatDemo:
         self.system_output.set_content(system_content.strip())
     
     def _render_layout(self) -> Layout:
-        """Render the complete layout."""
+        """Render the complete layout with a variable number of live panels."""
         layout = Layout()
         
         # Update panel content
         self._update_panel_content()
         
-        # Create layout with three panels stacked vertically
-        layout.split_column(
-            Layout(self.chat_output.render(), name="chat", size=self.chat_output.calculate_height()),
-            Layout(self.system_output.render(), name="system", size=self.system_output.calculate_height()),
-            Layout(self.input_panel.render(), name="input", size=self.input_panel.calculate_height())
-        )
+        # Build children from all output panels plus the input panel at the end
+        children: List[Layout] = []
+        for idx, panel in enumerate(self.output_panels):
+            children.append(
+                Layout(panel.render(), name=f"out-{idx}", size=panel.calculate_height())
+            )
+        children.append(Layout(self.input_panel.render(), name="input", size=self.input_panel.calculate_height()))
         
+        layout.split_column(*children)
         return layout
     
     def _handle_key(self, key: str) -> bool:
@@ -165,7 +181,9 @@ class FinalChatDemo:
         ])
         
         try:
-            with Live(self._render_layout(), refresh_per_second=30, screen=True) as live:
+            # Use screen=False to render inline with normal terminal scrolling.
+            # Share the same Console so non-live prints appear above the live region.
+            with Live(self._render_layout(), refresh_per_second=30, screen=False, console=self.console) as live:
                 # Start input handling
                 import threading
                 input_thread = threading.Thread(target=self.input_panel.editor._input_worker, daemon=True)

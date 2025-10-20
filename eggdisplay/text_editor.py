@@ -280,7 +280,7 @@ class TextEditor:
         
         return text
     
-    def run(self) -> None:
+    def run(self, *, inline: bool = True) -> None:
         """
         Run the editor in interactive mode.
         
@@ -302,7 +302,9 @@ class TextEditor:
             # Initial render to ensure display works
             initial_render = self._render()
             
-            with Live(initial_render, refresh_per_second=10, screen=True) as live:
+            # Use screen=False when inline=True so the editor renders inline
+            # and the terminal remains normally scrollable.
+            with Live(initial_render, refresh_per_second=10, screen=not inline, console=self._console) as live:
                 self._live = live
                 
                 # Force initial display
@@ -497,8 +499,14 @@ class RealTimeEditor:
         
         return True
     
-    def run(self):
-        """Run the real-time editor."""
+    def run(self, *, inline: bool = True):
+        """Run the real-time editor.
+        
+        Args:
+            inline: When True (default), render inline (screen=False) so the
+                    terminal remains scrollable and other prints can appear
+                    above the live region. When False, use alternate screen.
+        """
         self.running = True
         
         # Start input thread
@@ -509,7 +517,7 @@ class RealTimeEditor:
         self.console.print("[dim]Start typing! Your keystrokes appear immediately. Ctrl+C to exit.[/dim]\n")
         
         try:
-            with Live(self._render(), refresh_per_second=30, screen=True) as live:
+            with Live(self._render(), refresh_per_second=30, screen=not inline, console=self.console) as live:
                 while self.running:
                     # Process any pending input
                     try:
@@ -532,8 +540,11 @@ class RealTimeEditor:
         finally:
             self.running = False
             
-            # Clear screen and show result
-            self.console.clear()
+            # Show result without clearing the screen in inline mode, so
+            # the scrollback remains intact. For full-screen mode you may
+            # still want to clear.
+            if not inline:
+                self.console.clear()
             self.console.print("[green]Editor session ended.[/green]")
             self.console.print("\n[bold]Your text:[/bold]")
             self.console.print("─" * 60)
@@ -658,15 +669,19 @@ class AsyncRealTimeEditor:
         
         return True
     
-    async def run_async(self):
-        """Run the editor using asyncio."""
+    async def run_async(self, *, inline: bool = True):
+        """Run the editor using asyncio.
+        
+        Args:
+            inline: When True (default), render inline (screen=False).
+        """
         self.running = True
         
         self.console.print("[green]Async Real-time Editor Started[/green]")
         self.console.print("[dim]Start typing! Your keystrokes appear immediately. Ctrl+C to exit.[/dim]\n")
         
         try:
-            with Live(self._render(), refresh_per_second=30, screen=True) as live:
+            with Live(self._render(), refresh_per_second=30, screen=not inline, console=self.console) as live:
                 # Start input reader task
                 input_task = asyncio.create_task(self._input_reader())
                 
@@ -696,8 +711,9 @@ class AsyncRealTimeEditor:
         finally:
             self.running = False
             
-            # Show final result
-            self.console.clear()
+            # Show final result without clearing in inline mode.
+            if not inline:
+                self.console.clear()
             self.console.print("[green]Editor session ended.[/green]")
             self.console.print("\n[bold]Your text:[/bold]")
             self.console.print("─" * 60)
