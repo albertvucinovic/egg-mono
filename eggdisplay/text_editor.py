@@ -202,6 +202,18 @@ class TextEditor:
         elif key == "right":
             self.move_cursor(0, 1)
             return True
+        elif key == "home":
+            # Move to beginning of current line
+            self.cursor.col = 0
+            self._clamp_cursor()
+            self._trigger_event('cursor_move', None, None, self.cursor.row, self.cursor.col)
+            return True
+        elif key == "end":
+            # Move to end of current line
+            self.cursor.col = len(self.lines[self.cursor.row])
+            self._clamp_cursor()
+            self._trigger_event('cursor_move', None, None, self.cursor.row, self.cursor.col)
+            return True
         elif key == "backspace":
             self.backspace()
             return True
@@ -331,9 +343,21 @@ class TextEditor:
                                 self.handle_key('right')
                             elif next_chars == '[D':
                                 self.handle_key('left')
+                            elif next_chars in ('[H', 'OH'):
+                                self.handle_key('home')
+                            elif next_chars in ('[F', 'OF'):
+                                self.handle_key('end')
                             elif next_chars == '[3':  # Delete
                                 sys.stdin.read(1)  # Read the ~
                                 self.handle_key('delete')
+                            elif next_chars == '[1':  # Home on some terms
+                                tail = sys.stdin.read(1)
+                                if tail == '~':
+                                    self.handle_key('home')
+                            elif next_chars == '[4':  # End on some terms
+                                tail = sys.stdin.read(1)
+                                if tail == '~':
+                                    self.handle_key('end')
                         elif char == '\x7f':  # Backspace
                             self.handle_key('backspace')
                         elif char == '\r':  # Enter/Return
@@ -472,6 +496,10 @@ class RealTimeEditor:
             self.editor.handle_key('left')
         elif key == readchar.key.RIGHT:
             self.editor.handle_key('right')
+        elif getattr(readchar.key, 'HOME', None) and key == readchar.key.HOME:
+            self.editor.handle_key('home')
+        elif getattr(readchar.key, 'END', None) and key == readchar.key.END:
+            self.editor.handle_key('end')
         elif key in (readchar.key.BACKSPACE, '\x7f', '\x08'):
             self.editor.handle_key('backspace')
         elif key == readchar.key.DELETE:
@@ -495,6 +523,10 @@ class RealTimeEditor:
                 self.editor.handle_key('left')
             elif key == '\x1b[3~':
                 self.editor.handle_key('delete')
+            elif key in ('\x1b[H', '\x1bOH', '\x1b[1~'):
+                self.editor.handle_key('home')
+            elif key in ('\x1b[F', '\x1bOF', '\x1b[4~'):
+                self.editor.handle_key('end')
             else:
                 # Unknown escape sequence - ignore it
                 pass
@@ -642,6 +674,10 @@ class AsyncRealTimeEditor:
             self.editor.handle_key('left')
         elif key == readchar.key.RIGHT:
             self.editor.handle_key('right')
+        elif getattr(readchar.key, 'HOME', None) and key == readchar.key.HOME:
+            self.editor.handle_key('home')
+        elif getattr(readchar.key, 'END', None) and key == readchar.key.END:
+            self.editor.handle_key('end')
         elif key in (readchar.key.BACKSPACE, '\x7f', '\x08'):
             self.editor.handle_key('backspace')
         elif key == readchar.key.DELETE:
@@ -665,6 +701,10 @@ class AsyncRealTimeEditor:
                 self.editor.handle_key('left')
             elif key == '\x1b[3~':
                 self.editor.handle_key('delete')
+            elif key in ('\x1b[H', '\x1bOH', '\x1b[1~'):
+                self.editor.handle_key('home')
+            elif key in ('\x1b[F', '\x1bOF', '\x1b[4~'):
+                self.editor.handle_key('end')
             else:
                 # Unknown escape sequence - ignore it
                 pass

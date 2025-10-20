@@ -29,7 +29,7 @@ class FinalChatDemoAsync:
         self.running = False
 
         # Panels
-        chat_output_style = OutputPanel.PanelStyle(border_style="red", box=box.ROUNDED, show_header=False)
+        chat_output_style = OutputPanel.PanelStyle(border_style="red", box=box.MINIMAL, show_header=False)
         self.chat_output = OutputPanel(title="Chat Messages", initial_height=8, max_height=20, style=chat_output_style)
         self.system_output = OutputPanel(title="System Messages", initial_height=6, max_height=15)
         self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12)
