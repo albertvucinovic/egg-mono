@@ -140,9 +140,19 @@ class FinalChatDemoAsync:
         while self.running:
             try:
                 key = await asyncio.to_thread(readchar.readkey)  # type: ignore[name-defined]
+                # Normal key path
                 self.input_panel.editor.input_queue.put(key)
                 if key == getattr(readchar.key, "CTRL_C", "\x03"):
                     break
+            except KeyboardInterrupt:
+                # Emulate CTRL_C delivery via queue so main loop exits cleanly
+                try:
+                    self.input_panel.editor.input_queue.put(getattr(readchar.key, "CTRL_C", "\x03"))
+                except Exception:
+                    pass
+                break
+            except asyncio.CancelledError:
+                break
             except Exception:
                 break
 
@@ -196,8 +206,12 @@ class FinalChatDemoAsync:
 
                     # Update live region
                     live.update(self._render_inline())
-                    await asyncio.sleep(0.033)
-        except KeyboardInterrupt:
+                    try:
+                        await asyncio.sleep(0.033)
+                    except asyncio.CancelledError:
+                        # Graceful shutdown on cancellation (e.g., Ctrl+C)
+                        break
+        except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
             self.running = False
@@ -205,7 +219,8 @@ class FinalChatDemoAsync:
             input_task.cancel()
             try:
                 await input_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, KeyboardInterrupt, Exception):
+                # Swallow cancellation/interrupt from input task
                 pass
 
             # Final stats
@@ -224,7 +239,10 @@ def main():
     console.print("")
 
     demo = FinalChatDemoAsync()
-    asyncio.run(demo.run_async())
+    try:
+        asyncio.run(demo.run_async())
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
 
     console.print("\n[bold magenta]🎉 Thanks for trying the Async Demo![/bold magenta]")
 
