@@ -1,4 +1,4 @@
-# Rich Text Editor - Feature Summary
+# Inline Live Panels and Text Editor - Feature Summary
 
 ## ✅ Completed Features
 
@@ -26,22 +26,21 @@
 - ✅ Autocomplete event listeners
 
 ### Rich Integration
-- ✅ rich.Live-based display
+- ✅ Inline live rendering (screen=False) so terminal is scrollable
+- ✅ Group/Columns-based layout (VStack/HStack) instead of fullscreen Layout
 - ✅ Real-time cursor visualization
 - ✅ Multi-line text rendering
 - ✅ Proper cursor positioning and bounds checking
 
-## 📁 Files Created
+## 📁 Key Files
 
-- `text_editor.py` - Main editor implementation
-- `__init__.py` - Package initialization
-- `setup.py` - Python package configuration
-- `README.md` - Comprehensive documentation
-- `example_usage.py` - Usage example with event listeners
-- `test_editor.py` - Basic functionality tests
+- `text_editor.py` - Library: TextEditor, RealTimeEditor, AsyncRealTimeEditor, OutputPanel, InputPanel, HStack, VStack
+- `final_chat_demo.py` - Threaded inline demo
+- `final_chat_demo_async.py` - Async inline demo
+- `README.md` - Documentation
 - `FEATURES.md` - This feature summary
 
-## 🚀 Usage Examples
+## 🚀 Usage Examples (Library)
 
 ### Basic Usage
 ```python
@@ -69,16 +68,17 @@ editor.add_event_listener('text_change', on_text_change)
 
 ## 🎯 Key Design Features
 
-- **Modular**: Clean separation of concerns
-- **Extensible**: Easy to add new features and event types
-- **Robust**: Proper bounds checking and error handling
-- **Documented**: Comprehensive docstrings and examples
-- **Testable**: Built-in demo and test scripts
+- **Modular**: Shared LiveEditorBase, clean separation of rendering, input, and demos
+- **Extensible**: Layout composables (HStack/VStack), style options for panels
+- **Unopinionated autocomplete**: callback injected by app code
+- **Robust**: Proper bounds checking and error handling; clean Ctrl+C handling (async demo)
+- **Documented**: README with demos and API overview
 
 ## 🔧 Technical Implementation
 
-- Uses `rich.Live` for real-time display
+- Uses `rich.Live` for real-time display (inline)
 - `Cursor` dataclass for position management
 - Event system with multiple listener types
 - Proper text manipulation with line splitting/merging
-- Comprehensive error handling in event listeners
+- Shared base class for threaded/async editors
+- Composable inline layouts with `rich.console.Group` and `rich.columns.Columns`

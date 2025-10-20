@@ -1,6 +1,6 @@
-# Rich Text Editor
+# Inline Live Panels and Text Editor (Rich-based)
 
-A rich.Live-based text editor component with multi-line editing support.
+Build inline, scrollable CLI UIs with Rich Live: side-by-side panels, a live input editor, threaded or async operation, and app-provided autocomplete.
 
 ## Features
 
@@ -15,10 +15,15 @@ Inline layout helpers for Rich Live (non-fullscreen):
 - HStack: horizontal rows using rich.Columns
 - VStack: vertical stack using rich.console.Group
 
-## Installation
+## Requirements
 
+- Python 3.9+
+- rich
+- readchar
+
+Install:
 ```bash
-pip install -e .
+pip install -r requirements.txt
 ```
 
 ## Quick Start
@@ -44,18 +49,13 @@ editor.handle_key("b")
 editor.handle_key("c")
 ```
 
-### Interactive Usage
+### Interactive Usage (Programmatic Editor)
 ```python
 from text_editor import TextEditor
 
 editor = TextEditor(initial_text="Hello, World!")
-
-# Start interactive mode (requires terminal support)
-editor.run()
-
-# Get the edited text
-final_text = editor.get_text()
-print(f"Final text: {final_text}")
+editor.run()  # requires terminal support
+print(editor.get_text())
 
 ### Side-by-side Panels (Inline Live)
 
@@ -212,30 +212,24 @@ TextEditor(
 - `add_event_listener(event_type: str, callback: Callable)`: Add event listener
 - `handle_key(key: str) -> bool`: Handle key press programmatically
 
-## Demo
+## Demos
 
-### Programmatic Demo (Works Everywhere)
+- Threaded: inline, scrollable
 ```bash
-python programmatic_demo.py
+python final_chat_demo.py
 ```
 
-### Interactive Demo (Requires Terminal Support)
+- Async: inline, scrollable, Ctrl+C exit fixed cleanly
 ```bash
-python interactive_demo.py
+python final_chat_demo_async.py
 ```
 
-### Simple Tests
-```bash
-python simple_test.py
-```
-
-These demonstrate:
-- Basic text editing
-- Arrow key navigation  
-- Autocomplete with Python keywords
-- Event listeners
-- Programmatic text manipulation
+Both demos:
+- Show variable OutputPanels (first two side-by-side by default)
+- Use InputPanel for live input
+- Accept Ctrl+D to “send” input into the chat panels
+- Print non-live status above the live region
+- Use app-defined filename autocomplete on Tab
 
 ## License
-
 MIT
