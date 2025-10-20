@@ -756,7 +756,7 @@ class OutputPanel:
         return int(self.current_height)
     
     def render(self) -> Panel:
-        """Render the panel."""
+        """Render the panel, showing only the last lines that fit."""
         height = self.calculate_height()
         
         # Create content text
@@ -770,9 +770,26 @@ class OutputPanel:
         content_text.append("\n")
         content_text.append("─" * 70 + "\n", style="blue")
         
-        # Add the actual content
+        # Calculate available lines for content (after header)
+        available_content_lines = max(1, height - 4)  # Reserve space for header and padding
+        
+        # Show only the last lines that fit
         if self.content:
-            content_text.append(self.content)
+            all_lines = self.content.split('\n')
+            
+            if len(all_lines) <= available_content_lines:
+                # All lines fit, show everything
+                for line in all_lines:
+                    content_text.append(line + "\n")
+            else:
+                # Show only the last 'available_content_lines' lines
+                start_index = len(all_lines) - available_content_lines
+                for i in range(start_index, len(all_lines)):
+                    content_text.append(all_lines[i] + "\n")
+                
+                # Show scroll indicator
+                hidden_lines = len(all_lines) - available_content_lines
+                content_text.append(f"[dim]... {hidden_lines} lines above[/dim]")
         else:
             content_text.append("[dim]No content[/dim]")
         
