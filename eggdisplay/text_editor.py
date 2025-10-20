@@ -404,156 +404,140 @@ from rich.text import Text
 from rich.panel import Panel
 
 
-class RealTimeEditor:
-    """
-    Real-time interactive text editor with Live display.
-    
-    Provides Vim-like insert mode experience with real-time typing.
-    Uses threading and readchar for non-blocking input.
-    """
-    
+class LiveEditorBase:
+    """Base for real-time editors sharing rendering, key handling, and I/O hooks."""
+
+    LABEL: str = "Real-time Text Editor"
+
     def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
         self.editor = TextEditor(initial_text=initial_text, width=width, height=height)
         self.console = Console()
-        self.input_queue = queue.Queue()
         self.running = False
-    
-    def _input_worker(self):
-        """Worker that reads single characters using readchar."""
-        while self.running:
-            try:
-                # Use readkey instead of readchar for better escape sequence handling
-                key = readchar.readkey()
-                self.input_queue.put(key)
-                
-                if key == readchar.key.CTRL_C:
-                    break
-                    
-            except KeyboardInterrupt:
-                self.input_queue.put(readchar.key.CTRL_C)
-                break
-            except Exception:
-                break
-    
+
+    # ------------ Shared rendering ------------
     def _render(self) -> Text:
-        """Render the editor display."""
         text = Text()
-        
         # Header
-        text.append(" Real-time Text Editor ", style="bold white on blue")
+        text.append(f" {self.LABEL} ", style="bold white on blue")
         text.append("\n")
         text.append("─" * 60 + "\n", style="blue")
-        
+
         # Content with cursor
         lines = self.editor.lines
         cursor_row, cursor_col = self.editor.cursor.row, self.editor.cursor.col
-        
+
         # Show visible area around cursor
         start_line = max(0, cursor_row - 8)
         end_line = min(len(lines), start_line + 16)
-        
+
         for i in range(start_line, end_line):
             line_num = f"{i+1:3d} │ "
-            
             if i == cursor_row:
-                # Current line with cursor
                 text.append(line_num, style="bold green")
                 line_content = lines[i]
-                
                 before_cursor = line_content[:cursor_col]
                 cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
                 after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
-                
                 text.append(before_cursor)
                 text.append(cursor_char, style="black on white")
                 text.append(after_cursor)
             else:
                 text.append(line_num, style="dim")
                 text.append(lines[i])
-            
             text.append("\n")
-        
+
         # Footer
         text.append("─" * 60 + "\n", style="blue")
         text.append(f" Line: {cursor_row + 1}, Column: {cursor_col + 1} ")
         text.append(" │ ")
         text.append(" Type directly! Ctrl+C to exit ", style="yellow")
-        
         return text
-    
+
+    # ------------ Shared key handling ------------
     def _handle_key(self, key: str) -> bool:
         """Handle a key press and return False if should quit."""
         # Debug: uncomment to see what keys are being received
         # print(f"DEBUG: Key received: {repr(key)}")
-        
-        if key == readchar.key.CTRL_C:
+        try:
+            ctrl_c = readchar.key.CTRL_C
+        except Exception:
+            ctrl_c = "\x03"
+
+        if key == ctrl_c:
             return False
-        elif key == readchar.key.UP:
+        elif key == getattr(readchar.key, 'UP', object()) or key == '\x1b[A':
             self.editor.handle_key('up')
-        elif key == readchar.key.DOWN:
+        elif key == getattr(readchar.key, 'DOWN', object()) or key == '\x1b[B':
             self.editor.handle_key('down')
-        elif key == readchar.key.LEFT:
+        elif key == getattr(readchar.key, 'LEFT', object()) or key == '\x1b[D':
             self.editor.handle_key('left')
-        elif key == readchar.key.RIGHT:
+        elif key == getattr(readchar.key, 'RIGHT', object()) or key == '\x1b[C':
             self.editor.handle_key('right')
-        elif getattr(readchar.key, 'HOME', None) and key == readchar.key.HOME:
+        elif getattr(readchar.key, 'HOME', None) and key == readchar.key.HOME or key in ('\x1b[H', '\x1bOH', '\x1b[1~'):
             self.editor.handle_key('home')
-        elif getattr(readchar.key, 'END', None) and key == readchar.key.END:
+        elif getattr(readchar.key, 'END', None) and key == readchar.key.END or key in ('\x1b[F', '\x1bOF', '\x1b[4~'):
             self.editor.handle_key('end')
-        elif key in (readchar.key.BACKSPACE, '\x7f', '\x08'):
+        elif key in (getattr(readchar.key, 'BACKSPACE', '\x7f'), '\x7f', '\x08'):
             self.editor.handle_key('backspace')
-        elif key == readchar.key.DELETE:
+        elif key == getattr(readchar.key, 'DELETE', '\x1b[3~') or key == '\x1b[3~':
             self.editor.handle_key('delete')
-        elif key in (readchar.key.ENTER, '\r', '\n'):
+        elif key in (getattr(readchar.key, 'ENTER', '\r'), '\r', '\n'):
             self.editor.handle_key('enter')
-        elif key == readchar.key.TAB:
+        elif key == getattr(readchar.key, 'TAB', '\t') or key == '\t':
             self.editor.handle_key('tab')
-        elif len(key) == 1 and key.isprintable():
-            # Regular character
+        elif isinstance(key, str) and len(key) == 1 and key.isprintable():
             self.editor.handle_key(key)
-        elif key.startswith('\x1b'):
-            # Handle escape sequences that might not be caught by readchar
-            if key == '\x1b[A':
-                self.editor.handle_key('up')
-            elif key == '\x1b[B':
-                self.editor.handle_key('down')
-            elif key == '\x1b[C':
-                self.editor.handle_key('right')
-            elif key == '\x1b[D':
-                self.editor.handle_key('left')
-            elif key == '\x1b[3~':
-                self.editor.handle_key('delete')
-            elif key in ('\x1b[H', '\x1bOH', '\x1b[1~'):
-                self.editor.handle_key('home')
-            elif key in ('\x1b[F', '\x1bOF', '\x1b[4~'):
-                self.editor.handle_key('end')
-            else:
-                # Unknown escape sequence - ignore it
-                pass
-        
+        # Unknown escape sequences are ignored
         return True
-    
+
+    # ------------ Shared lifecycle hooks ------------
+    def _print_start(self):
+        self.console.print(f"[green]{self.LABEL} Started[/green]")
+        self.console.print("[dim]Start typing! Your keystrokes appear immediately. Ctrl+C to exit.[/dim]\n")
+
+    def _print_end(self, inline: bool):
+        if not inline:
+            self.console.clear()
+        self.console.print("[green]Editor session ended.[/green]")
+        self.console.print("\n[bold]Your text:[/bold]")
+        self.console.print("─" * 60)
+        self.console.print(self.editor.get_text())
+        self.console.print("─" * 60)
+
+
+class RealTimeEditor(LiveEditorBase):
+    """Threaded real-time editor using readchar + queue."""
+
+    LABEL = " Real-time Text Editor "
+
+    def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
+        super().__init__(initial_text=initial_text, width=width, height=height)
+        self.input_queue = queue.Queue()
+
+    def _input_worker(self):
+        while self.running:
+            try:
+                key = readchar.readkey()
+                self.input_queue.put(key)
+                if key == getattr(readchar.key, 'CTRL_C', '\x03'):
+                    break
+            except KeyboardInterrupt:
+                self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                break
+            except Exception:
+                break
+
     def run(self, *, inline: bool = True):
-        """Run the real-time editor.
-        
-        Args:
-            inline: When True (default), render inline (screen=False) so the
-                    terminal remains scrollable and other prints can appear
-                    above the live region. When False, use alternate screen.
-        """
         self.running = True
-        
-        # Start input thread
+
         input_thread = threading.Thread(target=self._input_worker, daemon=True)
         input_thread.start()
-        
-        self.console.print("[green]Real-time Editor Started[/green]")
-        self.console.print("[dim]Start typing! Your keystrokes appear immediately. Ctrl+C to exit.[/dim]\n")
-        
+
+        self._print_start()
+
         try:
             with Live(self._render(), refresh_per_second=30, screen=not inline, console=self.console) as live:
                 while self.running:
-                    # Process any pending input
                     try:
                         while True:
                             key = self.input_queue.get_nowait()
@@ -562,208 +546,63 @@ class RealTimeEditor:
                                 break
                     except queue.Empty:
                         pass
-                    
-                    # Update display
                     live.update(self._render())
-                    
-                    # Small delay
                     time.sleep(0.01)
-                    
         except KeyboardInterrupt:
             pass
         finally:
             self.running = False
-            
-            # Show result without clearing the screen in inline mode, so
-            # the scrollback remains intact. For full-screen mode you may
-            # still want to clear.
-            if not inline:
-                self.console.clear()
-            self.console.print("[green]Editor session ended.[/green]")
-            self.console.print("\n[bold]Your text:[/bold]")
-            self.console.print("─" * 60)
-            self.console.print(self.editor.get_text())
-            self.console.print("─" * 60)
+            self._print_end(inline)
 
 
-class AsyncRealTimeEditor:
-    """
-    Async real-time interactive text editor with Live display.
-    
-    Uses asyncio for cleaner concurrency compared to threading.
-    """
-    
+class AsyncRealTimeEditor(LiveEditorBase):
+    """Async real-time editor using readchar + asyncio.to_thread."""
+
+    LABEL = " Async Real-time Editor "
+
     def __init__(self, initial_text: str = "", width: int = 80, height: int = 24):
-        self.editor = TextEditor(initial_text=initial_text, width=width, height=height)
-        self.console = Console()
-        self.running = False
-        self.input_queue = asyncio.Queue()
-    
+        super().__init__(initial_text=initial_text, width=width, height=height)
+        self.input_queue: asyncio.Queue = asyncio.Queue()
+
     async def _input_reader(self):
-        """Async task that reads keyboard input."""
         while self.running:
             try:
-                # Use asyncio.to_thread to run blocking readkey in a thread
                 key = await asyncio.to_thread(readchar.readkey)
                 await self.input_queue.put(key)
-                
-                if key == readchar.key.CTRL_C:
+                if key == getattr(readchar.key, 'CTRL_C', '\x03'):
                     break
-                    
             except (KeyboardInterrupt, Exception):
                 break
-    
-    def _render(self) -> Text:
-        """Render the editor display."""
-        text = Text()
-        
-        # Header
-        text.append(" Async Real-time Editor ", style="bold white on blue")
-        text.append("\n")
-        text.append("─" * 60 + "\n", style="blue")
-        
-        # Content with cursor
-        lines = self.editor.lines
-        cursor_row, cursor_col = self.editor.cursor.row, self.editor.cursor.col
-        
-        # Show visible area around cursor
-        start_line = max(0, cursor_row - 8)
-        end_line = min(len(lines), start_line + 16)
-        
-        for i in range(start_line, end_line):
-            line_num = f"{i+1:3d} │ "
-            
-            if i == cursor_row:
-                # Current line with cursor
-                text.append(line_num, style="bold green")
-                line_content = lines[i]
-                
-                before_cursor = line_content[:cursor_col]
-                cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
-                after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
-                
-                text.append(before_cursor)
-                text.append(cursor_char, style="black on white")
-                text.append(after_cursor)
-            else:
-                text.append(line_num, style="dim")
-                text.append(lines[i])
-            
-            text.append("\n")
-        
-        # Footer
-        text.append("─" * 60 + "\n", style="blue")
-        text.append(f" Line: {cursor_row + 1}, Column: {cursor_col + 1} ")
-        text.append(" │ ")
-        text.append(" Type directly! Ctrl+C to exit ", style="yellow")
-        
-        return text
-    
-    def _handle_key(self, key: str) -> bool:
-        """Handle a key press and return False if should quit."""
-        # Debug: uncomment to see what keys are being received
-        # print(f"DEBUG: Key received: {repr(key)}")
-        
-        if key == readchar.key.CTRL_C:
-            return False
-        elif key == readchar.key.UP:
-            self.editor.handle_key('up')
-        elif key == readchar.key.DOWN:
-            self.editor.handle_key('down')
-        elif key == readchar.key.LEFT:
-            self.editor.handle_key('left')
-        elif key == readchar.key.RIGHT:
-            self.editor.handle_key('right')
-        elif getattr(readchar.key, 'HOME', None) and key == readchar.key.HOME:
-            self.editor.handle_key('home')
-        elif getattr(readchar.key, 'END', None) and key == readchar.key.END:
-            self.editor.handle_key('end')
-        elif key in (readchar.key.BACKSPACE, '\x7f', '\x08'):
-            self.editor.handle_key('backspace')
-        elif key == readchar.key.DELETE:
-            self.editor.handle_key('delete')
-        elif key in (readchar.key.ENTER, '\r', '\n'):
-            self.editor.handle_key('enter')
-        elif key == readchar.key.TAB:
-            self.editor.handle_key('tab')
-        elif len(key) == 1 and key.isprintable():
-            # Regular character
-            self.editor.handle_key(key)
-        elif key.startswith('\x1b'):
-            # Handle escape sequences that might not be caught by readchar
-            if key == '\x1b[A':
-                self.editor.handle_key('up')
-            elif key == '\x1b[B':
-                self.editor.handle_key('down')
-            elif key == '\x1b[C':
-                self.editor.handle_key('right')
-            elif key == '\x1b[D':
-                self.editor.handle_key('left')
-            elif key == '\x1b[3~':
-                self.editor.handle_key('delete')
-            elif key in ('\x1b[H', '\x1bOH', '\x1b[1~'):
-                self.editor.handle_key('home')
-            elif key in ('\x1b[F', '\x1bOF', '\x1b[4~'):
-                self.editor.handle_key('end')
-            else:
-                # Unknown escape sequence - ignore it
-                pass
-        
-        return True
-    
+
     async def run_async(self, *, inline: bool = True):
-        """Run the editor using asyncio.
-        
-        Args:
-            inline: When True (default), render inline (screen=False).
-        """
         self.running = True
-        
-        self.console.print("[green]Async Real-time Editor Started[/green]")
-        self.console.print("[dim]Start typing! Your keystrokes appear immediately. Ctrl+C to exit.[/dim]\n")
-        
+        self._print_start()
+
         try:
             with Live(self._render(), refresh_per_second=30, screen=not inline, console=self.console) as live:
-                # Start input reader task
                 input_task = asyncio.create_task(self._input_reader())
-                
                 while self.running:
-                    # Wait for input with timeout
                     try:
                         key = await asyncio.wait_for(self.input_queue.get(), timeout=0.01)
                         if not self._handle_key(key):
                             self.running = False
                             break
                     except asyncio.TimeoutError:
-                        # No input, just continue
                         pass
-                    
-                    # Update display
                     live.update(self._render())
-                
-                # Cancel input task
+
                 input_task.cancel()
                 try:
                     await input_task
                 except asyncio.CancelledError:
                     pass
-                    
         except KeyboardInterrupt:
             pass
         finally:
             self.running = False
-            
-            # Show final result without clearing in inline mode.
-            if not inline:
-                self.console.clear()
-            self.console.print("[green]Editor session ended.[/green]")
-            self.console.print("\n[bold]Your text:[/bold]")
-            self.console.print("─" * 60)
-            self.console.print(self.editor.get_text())
-            self.console.print("─" * 60)
-    
+            self._print_end(inline)
+
     def run(self):
-        """Synchronous wrapper for running the async editor."""
         asyncio.run(self.run_async())
 
 
