@@ -11,7 +11,7 @@ import os
 import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from text_editor import OutputPanel, InputPanel, HStack, VStack
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack
 from rich.console import Console, Group
 from rich.live import Live
 from typing import List, Callable, Optional

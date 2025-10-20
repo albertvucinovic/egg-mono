@@ -15,7 +15,7 @@ from typing import List, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from text_editor import OutputPanel, InputPanel, HStack, VStack  # noqa: E402
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.live import Live  # noqa: E402
 from rich import box
@@ -171,7 +171,7 @@ class FinalChatDemoAsync:
         try:
             import readchar  # type: ignore
         except Exception:
-            # Ensure dependency is available via text_editor module behavior
+            # Ensure dependency is available via eggdisplay module behavior
             import importlib
             importlib.import_module("readchar")
 

@@ -34,7 +34,7 @@
 
 ## 📁 Key Files
 
-- `text_editor.py` - Library: TextEditor, RealTimeEditor, AsyncRealTimeEditor, OutputPanel, InputPanel, HStack, VStack
+- `eggdisplay.py` - Library: TextEditor, RealTimeEditor, AsyncRealTimeEditor, OutputPanel, InputPanel, HStack, VStack
 - `final_chat_demo.py` - Threaded inline demo
 - `final_chat_demo_async.py` - Async inline demo
 - `README.md` - Documentation
@@ -44,7 +44,7 @@
 
 ### Basic Usage
 ```python
-from text_editor import TextEditor
+from eggdisplay import TextEditor
 
 editor = TextEditor(initial_text="Hello, World!")
 editor.run()

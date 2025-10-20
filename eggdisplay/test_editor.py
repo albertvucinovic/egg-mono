@@ -1,6 +1,6 @@
 """Simple test for the text editor."""
 
-from text_editor import TextEditor
+from eggdisplay import TextEditor
 
 # Test basic functionality
 editor = TextEditor(initial_text="Hello, World!")

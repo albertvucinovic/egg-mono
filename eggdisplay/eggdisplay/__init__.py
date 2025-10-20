@@ -1,5 +1,5 @@
 """
-Rich Text Editor - A rich.Live-based text editor component.
+egg-display - A rich.Live-based text editing and display panels
 
 This package provides a multi-line text editor with support for:
 - Arrow key navigation
@@ -9,7 +9,7 @@ This package provides a multi-line text editor with support for:
 - Event listeners/hooks
 """
 
-from .text_editor import (
+from .eggdisplay import (
     TextEditor,
     Cursor,
     RealTimeEditor,

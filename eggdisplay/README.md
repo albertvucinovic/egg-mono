@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 ### Programmatic Usage (Recommended)
 ```python
-from text_editor import TextEditor
+from eggdisplay import TextEditor
 
 # Create editor with initial text
 editor = TextEditor(
@@ -51,7 +51,7 @@ editor.handle_key("c")
 
 ### Interactive Usage (Programmatic Editor)
 ```python
-from text_editor import TextEditor
+from eggdisplay import TextEditor
 
 editor = TextEditor(initial_text="Hello, World!")
 editor.run()  # requires terminal support
@@ -63,7 +63,7 @@ You can arrange panels horizontally without using Rich Layout (which claims the 
 
 ```python
 from rich.console import Console
-from text_editor import OutputPanel, InputPanel, HStack, VStack
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack
 from rich.live import Live
 
 console = Console()
@@ -90,7 +90,7 @@ with Live(layout, refresh_per_second=20, screen=False, console=console) as live:
 Both OutputPanel and InputPanel support style options (colors, borders, header, title):
 
 ```python
-from text_editor import OutputPanel, InputPanel
+from eggdisplay import OutputPanel, InputPanel
 from rich import box
 
 out_style = OutputPanel.PanelStyle(
