@@ -105,13 +105,20 @@ class FinalChatDemoAsync:
 
     def _handle_key(self, key: str) -> bool:
         """Handle keystrokes. Return False to exit."""
-        # Ctrl+D to send message
+        # Ctrl+D to send message; Ctrl+C to exit
         try:
             # Attempt to import readchar for constants if available
             import readchar  # type: ignore
             ctrl_d = getattr(readchar.key, "CTRL_D", "\x04")
+            ctrl_c = getattr(readchar.key, "CTRL_C", "\x03")
         except Exception:
             ctrl_d = "\x04"
+            ctrl_c = "\x03"
+
+        # Exit on Ctrl+C
+        if key == ctrl_c or key == "\x03":
+            self.running = False
+            return False
 
         if key == ctrl_d or key == "\x04":
             message = self.input_panel.get_text()
