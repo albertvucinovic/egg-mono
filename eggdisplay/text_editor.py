@@ -751,7 +751,8 @@ class InputPanel:
         current_line_num_style: str = "bold green"
 
     def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12,
-                 style: Optional['InputPanel.PanelStyle'] = None):
+                 style: Optional['InputPanel.PanelStyle'] = None,
+                 io_mode: str = "threaded"):
         """
         Initialize the input panel.
         
@@ -763,11 +764,23 @@ class InputPanel:
         self.title = title
         self.current_height = initial_height
         self.max_height = max_height
-        self.editor = RealTimeEditor(
-            initial_text="",
-            width=80,
-            height=6
-        )
+        # Choose threaded or async real-time editor
+        io_mode = (io_mode or "threaded").lower()
+        if io_mode not in ("threaded", "async"):
+            io_mode = "threaded"
+        self.io_mode = io_mode
+        if io_mode == "async":
+            self.editor = AsyncRealTimeEditor(
+                initial_text="",
+                width=80,
+                height=6
+            )
+        else:
+            self.editor = RealTimeEditor(
+                initial_text="",
+                width=80,
+                height=6
+            )
         self.message_count = 0
         self.style = style or InputPanel.PanelStyle()
         
