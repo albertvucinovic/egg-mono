@@ -112,6 +112,8 @@ class EggDisplayApp:
 
         # Threads and scheduler setup
         self.system_prompt = _get_system_prompt()
+        # Initialize system log early so _start_scheduler can log
+        self._system_log: List[str] = []
         self.current_thread: str = create_root_thread(self.db, name='Root')
         append_message(self.db, self.current_thread, 'system', self.system_prompt)
         create_snapshot(self.db, self.current_thread)
@@ -123,35 +125,9 @@ class EggDisplayApp:
         self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28)
         self.system_output = OutputPanel(title="System", initial_height=8, max_height=16)
         # Input panel with simple filesystem autocomplete
-        def file_autocomplete(line: str, row: int, col: int):
-            import os, re
-            prefix = line[:col]
-            m = re.search(r"([\w\-./~]+)$", prefix)
-            token = m.group(1) if m else ""
-            if not token:
-                return []
-            expanded = os.path.expanduser(token)
-            base_dir = expanded
-            needle = ""
-            if not os.path.isdir(expanded):
-                base_dir = os.path.dirname(expanded) or "."
-                needle = os.path.basename(expanded)
-            try:
-                entries = os.listdir(base_dir)
-            except Exception:
-                return []
-            results = []
-            for name in entries:
-                if needle and not name.startswith(needle):
-                    continue
-                path = os.path.join(base_dir, name)
-                suffix = "/" if os.path.isdir(path) else ""
-                results.append(name[len(needle):] + suffix)
-            results.sort(key=lambda s: (0 if s.endswith('/') else 1, s))
-            return results[:20]
-
+        # Advanced autocomplete (commands, models, threads, files, conversation words)
         self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12,
-                                      autocomplete_callback=file_autocomplete)
+                                      autocomplete_callback=self._autocomplete_cb)
 
         # Streaming/watch state
         self._live_state: Dict[str, Any] = {
@@ -164,7 +140,9 @@ class EggDisplayApp:
         }
         self._watch_task: Optional[asyncio.Task] = None
         self.running = False
-        self._system_log: List[str] = []
+        # ensure system log exists (double safety)
+        if not hasattr(self, '_system_log'):
+            self._system_log = []
 
     # ---------------- Scheduler & thread helpers ----------------
     def _thread_root_id(self, tid: str) -> str:
@@ -340,7 +318,240 @@ class EggDisplayApp:
         return Group(row1, self.input_panel.render())
 
     def _log_system(self, msg: str) -> None:
+        if not hasattr(self, '_system_log'):
+            self._system_log = []
         self._system_log.append(msg)
+
+    # ---------------- Autocomplete support ----------------
+    def _autocomplete_cb(self, line: str, row: int, col: int) -> List[str]:
+        import re, os
+        # Determine current token
+        prefix = line[:col]
+        m = re.search(r"([\w\-.:/~]+)$", prefix)
+        token = m.group(1) if m else ""
+
+        # Helper to convert full suggestion -> remainder to insert
+        def remainders(candidates: List[str]) -> List[str]:
+            out: List[str] = []
+            for c in candidates:
+                if not isinstance(c, str):
+                    continue
+                if token and c.startswith(token):
+                    out.append(c[len(token):])
+                elif not token and c:
+                    out.append(c)
+            # Deduplicate while preserving order
+            seen = set()
+            uniq: List[str] = []
+            for s in out:
+                if s not in seen and s != "":
+                    seen.add(s)
+                    uniq.append(s)
+            return uniq[:50]
+
+        # Command-level autocomplete for first token
+        if prefix.startswith('/'):
+            parts = prefix.split()
+            cmd_token = parts[0]
+            # All commands
+            cmds = [
+                '/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/quit'
+            ]
+            # If in the command word
+            if ' ' not in cmd_token:
+                return remainders([c for c in cmds if c.startswith(cmd_token)])
+            # Sub-argument suggestions
+            # '/model <key>'
+            if cmd_token == '/model':
+                sub = prefix[len('/model'):].lstrip()
+                return remainders(self._model_suggestions(sub))
+            # '/updateAllModels <provider>'
+            if cmd_token == '/updateAllModels':
+                provs: List[str] = []
+                try:
+                    if self.llm_client:
+                        provs = sorted(self.llm_client.get_providers() or [])
+                except Exception:
+                    provs = []
+                return remainders([p for p in provs if p])
+            # '/thread <selector>' and '/delete <selector>'
+            if cmd_token in ('/thread', '/delete'):
+                try:
+                    rows = list_threads(self.db)
+                except Exception:
+                    rows = []
+                ids = [r.thread_id for r in rows]
+                # Also allow suffix matches by completing to full id
+                return remainders(ids)
+            # '/child <pattern>'
+            if cmd_token == '/child':
+                try:
+                    rows = list_children_with_meta(self.db, self.current_thread)
+                except Exception:
+                    rows = []
+                ids = [r[0] if isinstance(r, (list, tuple)) else r.thread_id for r in rows]
+                return remainders(ids)
+            # '/spawn ' -> prefer filesystem suggestions
+            if cmd_token == '/spawn':
+                return remainders(self._fs_suggestions(token))
+            # '/new ' -> no specific suggestions
+            return []
+
+        # Non-command: prefer filesystem suggestions for current token
+        fs = self._fs_suggestions(token)
+        if fs:
+            return remainders(fs)
+
+        # If no filesystem matches, propose conversation words
+        conv = self._conversation_suggestions(token)
+        if conv:
+            return remainders(conv)
+        return []
+
+    def _fs_suggestions(self, token: str) -> List[str]:
+        import os
+        if not token:
+            return []
+        expanded = os.path.expanduser(token)
+        base_dir = expanded
+        needle = ''
+        if not os.path.isdir(expanded):
+            base_dir = os.path.dirname(expanded) or '.'
+            needle = os.path.basename(expanded)
+        try:
+            entries = os.listdir(base_dir)
+        except Exception:
+            return []
+        results: List[str] = []
+        for name in entries:
+            if needle and not name.startswith(needle):
+                continue
+            path = os.path.join(base_dir, name)
+            suffix = '/' if os.path.isdir(path) else ''
+            results.append((os.path.join(base_dir, name)).replace('\n', ''))
+            # Convert to the same style as the token: if token contains directory, produce absolute-like continuation
+            # We return full candidates; the remainder logic will subtract the token.
+            results[-1] = (os.path.join(base_dir, name) + suffix)
+        # Normalize to user-typed style: if user started with ~ keep it
+        # For simplicity, we return absolute-expanded forms; editor inserts remainder only.
+        # Sort: directories first
+        results.sort(key=lambda s: (0 if s.endswith('/') else 1, s))
+        return results[:50]
+
+    def _conversation_suggestions(self, fragment: str) -> List[str]:
+        if not fragment:
+            return []
+        import re
+        words: List[str] = []
+        try:
+            th = self.db.get_thread(self.current_thread)
+            if not th or not th.snapshot_json:
+                return []
+            snap = json.loads(th.snapshot_json)
+            msgs = snap.get('messages', []) or []
+            for m in msgs[-200:]:
+                try:
+                    role = (m or {}).get('role')
+                    if role not in ('user', 'assistant', 'system', 'tool'):
+                        continue
+                    txt = (m or {}).get('content') or ''
+                    if not isinstance(txt, str) or not txt:
+                        continue
+                    for w in re.findall(r"[A-Za-z0-9_]{3,}", txt):
+                        words.append(w)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        fl = fragment.lower()
+        seen: set[str] = set()
+        out: List[str] = []
+        for w in reversed(words):
+            wl = w.lower()
+            if wl.startswith(fl) and wl not in seen:
+                seen.add(wl)
+                out.append(w)
+        return out[:50]
+
+    def _model_suggestions(self, sub: str) -> List[str]:
+        # Build suggestions for '/model ' arguments based on eggllm registry/catalog
+        out: List[str] = []
+        llm = self.llm_client
+        if not llm:
+            return out
+        prefix = sub
+        try:
+            pref_norm = (prefix or '').strip()
+        except Exception:
+            pref_norm = ''
+        seen: set[str] = set()
+
+        # Explicit all: path uses catalog suggestions
+        if prefix.lower().startswith('all:'):
+            try:
+                for s in llm.catalog.get_all_models_suggestions(prefix):
+                    if s not in seen:
+                        seen.add(s)
+                        out.append(s)
+            except Exception:
+                pass
+            return out[:50]
+
+        # Configured display names
+        try:
+            display_names = list((llm.registry.models_config or {}).keys())
+        except Exception:
+            display_names = []
+        for name in sorted(display_names):
+            if not pref_norm or name.lower().startswith(pref_norm.lower()):
+                if name not in seen:
+                    seen.add(name)
+                    out.append(name)
+
+        # provider:name and aliases
+        try:
+            items = list((llm.registry.models_config or {}).items())
+        except Exception:
+            items = []
+        for display, cfg in items:
+            prov = (cfg or {}).get('provider', 'unknown')
+            prov_pref = f"{prov}:{display}"
+            if not pref_norm or prov_pref.lower().startswith(pref_norm.lower()):
+                if prov_pref not in seen:
+                    seen.add(prov_pref)
+                    out.append(prov_pref)
+            for a in (cfg or {}).get('alias', []) or []:
+                if not isinstance(a, str):
+                    continue
+                prov_alias = f"{prov}:{a}"
+                if not pref_norm or prov_alias.lower().startswith(pref_norm.lower()):
+                    if prov_alias not in seen:
+                        seen.add(prov_alias)
+                        out.append(prov_alias)
+
+        # Plain aliases
+        for display, cfg in items:
+            for a in (cfg or {}).get('alias', []) or []:
+                if isinstance(a, str) and (not pref_norm or a.lower().startswith(pref_norm.lower())):
+                    if a not in seen:
+                        seen.add(a)
+                        out.append(a)
+
+        # If user typed something, surface 'all:prov:model' entries for cached providers
+        if pref_norm:
+            try:
+                for prov in (llm.get_providers() or []):
+                    mids = llm.catalog.get_all_models_for_provider(prov) or []
+                    for mid in mids:
+                        cand = f"all:{prov}:{mid}"
+                        if cand in seen:
+                            continue
+                        if pref_norm.lower() in mid.lower() or pref_norm.lower() in cand.lower():
+                            seen.add(cand)
+                            out.append(cand)
+            except Exception:
+                pass
+        return out[:50]
 
     # ---------------- Input and commands ----------------
     def _handle_key(self, key: str) -> bool:
