@@ -8,134 +8,47 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console, Group
-from rich.panel import Panel
-from rich.text import Text
-from rich.markdown import Markdown
 from rich.live import Live
 
-# Prompt session for robust input while we use Rich for output/streaming
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-
+# Local development: add sibling libraries to sys.path
 import sys as _sys
-_sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'eggthreads'))
-from eggthreads import (
+_ROOT = Path(__file__).resolve().parent
+_sys.path.insert(0, str(_ROOT.parent / 'eggthreads'))
+_sys.path.insert(0, str(_ROOT.parent / 'eggllm'))
+_sys.path.insert(0, str(_ROOT.parent / 'eggdisplay'))
+
+# eggthreads backend
+from eggthreads import (  # type: ignore
     ThreadsDB,
     SubtreeScheduler,
     create_root_thread,
     create_child_thread,
     append_message,
     delete_thread,
-    is_thread_runnable,
+    interrupt_thread,
     list_threads,
     list_root_threads,
     get_parent,
     list_children_with_meta,
     list_children_ids,
-    current_open_invoke,
     create_snapshot,
-    interrupt_thread,
     pause_thread,
     resume_thread,
 )
+from eggthreads.event_watcher import EventWatcher  # type: ignore
 
-# Import completer after eggthreads path is on sys.path so completion can import eggthreads APIs
-from completion import EggCompleter
-from eggthreads.event_watcher import EventWatcher
+# eggdisplay UI components
+from eggdisplay import OutputPanel, InputPanel, HStack  # type: ignore
 
-
-MODELS_PATH = Path(__file__).resolve().parent / 'models.json'
-ALL_MODELS_PATH = Path(__file__).resolve().parent / 'all-models.json'
-SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / 'systemPrompt'
-
-# For model listing/completion via eggllm (no network here)
-import sys as _sys2
-# Ensure local sibling libraries are importable
-_sys2.path.insert(0, str(Path(__file__).resolve().parent.parent / 'eggllm'))
+# eggllm (optional, for /model and catalogs)
 try:
     from eggllm import LLMClient  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover - optional
     LLMClient = None  # type: ignore
 
-
-
-def _render_message_panel(m: Dict[str, Any]) -> Optional[Panel]:
-    role = m.get('role')
-    content = (m.get('content') or '').strip()
-    model_key = m.get('model_key') or ''
-
-    # Promote error-looking messages for visibility
-    if role == 'system' and isinstance(content, str) and content.lower().startswith('llm error:'):
-        title = '[bold red]Error[/bold red]'
-        if model_key:
-            title += f" [dim](model: {model_key})[/dim]"
-        return Panel(Text(content, no_wrap=False, overflow='fold', style='red'), title=title, border_style='red')
-
-    if role == 'user':
-        title = "[bold green]User[/bold green]"
-        if model_key:
-            title += f" [dim](model: {model_key})[/dim]"
-        body = content if content else ''
-        return Panel(Text(body, no_wrap=False, overflow='fold', style='green'), title=title, border_style='green')
-
-    elif role == 'assistant':
-        title = '[bold cyan]Assistant[/bold cyan]'
-        if model_key:
-            title += f" [dim](model: {model_key})[/dim]"
-        border = 'cyan'
-        # If no visible content but tool_calls/reasoning exist, render a helpful summary
-        if not content:
-            pieces: List[str] = []
-            reas = m.get('reasoning') or m.get('reasoning_content')
-            if isinstance(reas, str) and reas.strip():
-                pieces.append("Reasoning:\n" + reas.strip())
-            tcs = m.get('tool_calls')
-            if isinstance(tcs, list) and tcs:
-                lines: List[str] = []
-                for tc in tcs:
-                    f = (tc or {}).get('function') or {}
-                    name = f.get('name') or (tc or {}).get('name') or 'function'
-                    args = f.get('arguments') or (tc or {}).get('arguments')
-                    if isinstance(args, (dict, list)):
-                        try:
-                            import json as _json
-                            args_str = _json.dumps(args, ensure_ascii=False)
-                        except Exception:
-                            args_str = str(args)
-                    else:
-                        args_str = str(args or '')
-                    if len(args_str) > 160:
-                        args_str = args_str[:160] + '…'
-                    lines.append(f"- {name}({args_str})")
-                if lines:
-                    pieces.append("Tool calls:\n" + "\n".join(lines))
-            if not pieces:
-                return None
-            content = "\n\n".join(pieces)
-        # Markdown for assistant if it looks like markdown
-        if _looks_markdown(content):
-            renderable = Markdown(content)
-        else:
-            renderable = Text(content, no_wrap=False, overflow='fold', style='cyan')
-
-    elif role == 'tool':
-        name = m.get('name') or 'Tool'
-        title = f'[bold yellow]{name}[/bold yellow]'
-        if model_key:
-            title += f" [dim](model: {model_key})[/dim]"
-        border = 'yellow'
-        renderable = Text(content, no_wrap=False, overflow='fold', style='yellow')
-
-    else:
-        title = role or 'Message'
-        if model_key:
-            title += f" [dim](model: {model_key})[/dim]"
-        border = 'blue'
-        renderable = Text(content, no_wrap=False, overflow='fold', style='blue')
-
-    return Panel(renderable, title=title, border_style=border)
+MODELS_PATH = _ROOT / 'models.json'
+ALL_MODELS_PATH = _ROOT / 'all-models.json'
+SYSTEM_PROMPT_PATH = _ROOT / 'systemPrompt'
 
 
 def _get_system_prompt() -> str:
@@ -144,18 +57,6 @@ def _get_system_prompt() -> str:
             return f.read().strip()
     except Exception:
         return "You are a helpful assistant."
-
-
-def _looks_markdown(content: str) -> bool:
-    if not content:
-        return False
-    indicators = ['```', '# ', '## ', '### ', '* ', '- ', '> ', '`']
-    hits = sum(1 for i in indicators if i in content)
-    if hits >= 2:
-        return True
-    if content.count('\n') >= 2 and hits >= 1:
-        return True
-    return False
 
 
 def _snapshot_messages(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
@@ -171,7 +72,6 @@ def _snapshot_messages(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
 
 
 def _get_subtree(db: ThreadsDB, root_id: str) -> List[str]:
-    # BFS to get subtree threads
     out: List[str] = []
     q = [root_id]
     seen = set()
@@ -186,1034 +86,685 @@ def _get_subtree(db: ThreadsDB, root_id: str) -> List[str]:
                 q.append(cid)
         except Exception:
             pass
-    return out[1:]  # exclude root
+    return out[1:]
 
 
-def _render_static_view(db: ThreadsDB, thread_id: str) -> None:
-    console = Console(force_terminal=True, color_system='auto', no_color=False)
-    msgs = _snapshot_messages(db, thread_id)
-    if not msgs:
-        console.print(Panel('[dim]No messages yet[/dim]', border_style='blue'))
-        return
-    # Show a generous slice of recent history so switching threads gives context
-    for m in msgs[-50:]:
-        # If assistant has stream_sequence, honor streaming order when rendering
-        if isinstance(m, dict) and m.get('role') == 'assistant' and isinstance(m.get('stream_sequence'), list) and m.get('stream_sequence'):
-            seq = m.get('stream_sequence') or []
-            # Group adjacent same-type (and same-name for tool entries)
-            grouped = []
-            for item in seq:
-                t = (item or {}).get('type')
-                txt = (item or {}).get('text') or ''
-                name = (item or {}).get('name')
-                if not isinstance(txt, str) or not txt:
-                    continue
-                if grouped and grouped[-1]['type'] == t and ((t in ('tool_output', 'tool_call_args') and grouped[-1].get('name') == name) or (t in ('content', 'reason'))):
-                    grouped[-1]['text'] += txt
-                else:
-                    grouped.append({'type': t, 'text': txt, 'name': name})
-            # Render in grouped streaming order
-            for g in grouped:
-                gtype = g.get('type')
-                if gtype == 'reason':
-                    console.print(Panel(Text(g.get('text',''), no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
-                elif gtype == 'tool_call_args':
-                    nm = g.get('name') or 'tool'
-                    console.print(Panel(Text(g.get('text',''), no_wrap=False, overflow='fold'), title=f'Tool Call Args: {nm}', border_style='yellow'))
-                elif gtype == 'tool_output':
-                    nm = g.get('name') or 'tool'
-                    console.print(Panel(Text(g.get('text',''), no_wrap=False, overflow='fold'), title=f'Tool: {nm}', border_style='yellow'))
-                elif gtype == 'content':
-                    m2 = dict(m)
-                    m2['content'] = g.get('text','')
-                    panel = _render_message_panel(m2)
-                    if panel:
-                        console.print(panel)
-            # After rendering by sequence, still show final tool_calls summary if present
-            tcs = m.get('tool_calls')
-            if isinstance(tcs, list) and tcs:
-                out_lines = []
-                for tc in tcs:
-                    f = (tc or {}).get('function') or {}
-                    name = f.get('name') or (tc or {}).get('name') or 'function'
-                    args = f.get('arguments') or (tc or {}).get('arguments')
-                    if isinstance(args, (dict, list)):
-                        try:
-                            import json as _json
-                            args_str = _json.dumps(args, ensure_ascii=False)
-                        except Exception:
-                            args_str = str(args)
-                    else:
-                        args_str = str(args or '')
-                    out_lines.append(f"{name}({args_str})")
-                if out_lines:
-                    console.print(Panel(Text("\n".join(out_lines), no_wrap=False, overflow='fold'), title='Tool Calls', border_style='yellow'))
-            continue
+class EggDisplayApp:
+    """Chat UI using eggdisplay panels with eggthreads backend.
 
-        # For assistant messages without explicit stream_sequence, prefer rendering Reasoning before content
-        if isinstance(m, dict) and m.get('role') == 'assistant':
-            reas = m.get('reasoning') or m.get('reasoning_content')
-            has_content = bool((m.get('content') or '').strip())
-            if has_content and isinstance(reas, str) and reas.strip():
-                console.print(Panel(Text(reas, no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
-            panel = _render_message_panel(m)
-            if panel:
-                console.print(panel)
-            # If the assistant message has streamed-only metadata, show those too
-            # Show tool_calls if present
-            tcs = m.get('tool_calls')
-            if isinstance(tcs, list) and tcs:
-                out_lines = []
-                for tc in tcs:
-                    f = (tc or {}).get('function') or {}
-                    name = f.get('name') or (tc or {}).get('name') or 'function'
-                    args = f.get('arguments') or (tc or {}).get('arguments')
-                    if isinstance(args, (dict, list)):
-                        try:
-                            import json as _json
-                            args_str = _json.dumps(args, ensure_ascii=False)
-                        except Exception:
-                            args_str = str(args)
-                    else:
-                        args_str = str(args or '')
-                    out_lines.append(f"{name}({args_str})")
-                if out_lines:
-                    console.print(Panel(Text("\n".join(out_lines), no_wrap=False, overflow='fold'), title='Tool Calls', border_style='yellow'))
-            # Show tool outputs if we captured their stream in snapshot metadata
-            tstream = m.get('tool_stream') or {}
-            if isinstance(tstream, dict) and tstream:
-                for nm, txt in tstream.items():
-                    if txt:
-                        console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Output: {nm}', border_style='yellow'))
-            # Show streamed tool-call arguments if captured
-            tc_stream = m.get('tool_calls_stream') or {}
-            if isinstance(tc_stream, dict) and tc_stream:
-                for nm, txt in tc_stream.items():
-                    if txt:
-                        console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Call Args (streamed): {nm}', border_style='yellow'))
-        else:
-            panel = _render_message_panel(m)
-            if panel:
-                console.print(panel)
+    Layout:
+      - HStack(ChatOutput, SystemOutput)
+      - InputPanel
 
-
-
-
-async def _show_thread_ui(db: ThreadsDB, thread_id: str) -> None:
-    """Render the selected thread and, if a live stream is active, attach to it.
-
-    - Prints a static view of the latest messages for quick context
-    - If open_streams has an active invoke for this thread, attaches to
-      the stream to show live deltas until it closes.
+    Use Ctrl+D to send, Ctrl+C to quit. Commands start with '/'.
     """
-    console = Console(force_terminal=True, color_system='auto')
-    console.clear()
 
-    # Check if a live stream is already open BEFORE snapshotting.
-    # If a stream is active, do not refresh the snapshot so that all
-    # post-snapshot events are processed as part of the streaming view.
-    row_open = None
-    try:
-        row_open = db.current_open(thread_id)
-    except Exception:
-        row_open = None
+    def __init__(self):
+        self.console = Console()
+        self.db = ThreadsDB()
+        self.db.init_schema()
 
-    if row_open is None:
-        # Freshen snapshot only when not streaming
+        # Optional LLM client (for /model listing & catalogs)
         try:
-            create_snapshot(db, thread_id)
+            self.llm_client = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH) if LLMClient else None
         except Exception:
-            pass
+            self.llm_client = None
 
-    console.print(Panel(f'Switched to thread: {thread_id}', border_style='blue'))
-    _render_static_view(db, thread_id)
+        # Threads and scheduler setup
+        self.system_prompt = _get_system_prompt()
+        self.current_thread: str = create_root_thread(self.db, name='Root')
+        append_message(self.db, self.current_thread, 'system', self.system_prompt)
+        create_snapshot(self.db, self.current_thread)
 
-    # Attach to ongoing stream if present, or briefly wait for one to start
-    row = row_open
-    if row is None:
-        # Poll briefly in case a scheduler is about to start streaming
-        import asyncio as _asyncio
-        for _ in range(20):  # ~1s @ 50ms
+        self.active_schedulers: Dict[str, Dict[str, Any]] = {}
+        self._start_scheduler(self.current_thread)
+
+        # Panels
+        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28)
+        self.system_output = OutputPanel(title="System", initial_height=8, max_height=16)
+        # Input panel with simple filesystem autocomplete
+        def file_autocomplete(line: str, row: int, col: int):
+            import os, re
+            prefix = line[:col]
+            m = re.search(r"([\w\-./~]+)$", prefix)
+            token = m.group(1) if m else ""
+            if not token:
+                return []
+            expanded = os.path.expanduser(token)
+            base_dir = expanded
+            needle = ""
+            if not os.path.isdir(expanded):
+                base_dir = os.path.dirname(expanded) or "."
+                needle = os.path.basename(expanded)
             try:
-                row = db.current_open(thread_id)
+                entries = os.listdir(base_dir)
             except Exception:
-                row = None
-            if row is not None:
-                break
-            await _asyncio.sleep(0.05)
-    # Only attach if the thread is runnable or is already streaming
-    if row is not None:
-        console.print(Panel('[dim]Attaching to live stream...[/dim]', border_style='cyan'))
-        await _stream_thread(db, thread_id)
+                return []
+            results = []
+            for name in entries:
+                if needle and not name.startswith(needle):
+                    continue
+                path = os.path.join(base_dir, name)
+                suffix = "/" if os.path.isdir(path) else ""
+                results.append(name[len(needle):] + suffix)
+            results.sort(key=lambda s: (0 if s.endswith('/') else 1, s))
+            return results[:20]
 
-async def _stream_thread(db: ThreadsDB, thread_id: str) -> None:
-    console = Console(force_terminal=True, color_system='auto')
+        self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12,
+                                      autocomplete_callback=file_autocomplete)
 
-    # Start watching from last persisted snapshot event to capture the new turn's stream.open and deltas
-    try:
-        th = db.get_thread(thread_id)
-        start_after = int(th.snapshot_last_event_seq) if th and isinstance(th.snapshot_last_event_seq, int) else -1
-    except Exception:
-        start_after = -1
-
-    # Determine current open invoke, if any
-    active_target: Optional[str] = None
-    try:
-        row_open = db.current_open(thread_id)
-    except Exception:
-        row_open = None
-    if row_open is not None:
-        try:
-            active_target = row_open["invoke_id"] if isinstance(row_open, dict) else row_open["invoke_id"]
-        except Exception:
-            try:
-                active_target = row_open["invoke_id"]
-            except Exception:
-                active_target = None
-
-    # If a stream is open, and the stream.open happened before the snapshot,
-    # attach from the stream.open (so we don't miss the beginning of the turn).
-    attach_after_seq = start_after
-    if active_target:
-        try:
-            row_open_seq = db.conn.execute(
-                "SELECT MIN(event_seq) FROM events WHERE invoke_id=? AND type='stream.open'",
-                (active_target,)
-            ).fetchone()
-            open_seq = int(row_open_seq[0]) if row_open_seq and row_open_seq[0] is not None else None
-            if open_seq is not None:
-                # Watch from just before stream.open to include it in the stream
-                attach_after_seq = min(start_after, open_seq - 1) if start_after >= 0 else (open_seq - 1)
-        except Exception:
-            pass
-
-    # If there are any events after the chosen boundary for the active invoke,
-    # pre-load them into the live buffers so that attaching mid-stream shows the
-    # full live message (reasoning, tool args/output, content) seamlessly.
-    def _preload_existing(after_seq: int, target_invoke: Optional[str]):
-        last_seq = after_seq
-        live_content_local = ''
-        live_reason_local = ''
-        tool_stream_local: Dict[str, str] = {}
-        tc_panels_order_local: List[str] = []
-        tc_text_local: Dict[str, str] = {}
-        tc_map_local: Dict[str, List[str]] = {}
-        seen_open = False
-        try:
-            cur = db.conn.execute(
-                "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
-                (thread_id, after_seq)
-            )
-            rows = cur.fetchall()
-        except Exception:
-            rows = []
-        for e in rows:
-            t = e['type']
-            inv = e['invoke_id']
-            if e['event_seq'] is not None:
-                last_seq = e['event_seq']
-            # If we know the active target, only preload for that invoke
-            if target_invoke is not None and inv != target_invoke:
-                continue
-            if t == 'stream.open':
-                # Start fresh for the target invoke
-                seen_open = True
-                live_content_local = ''
-                live_reason_local = ''
-                tool_stream_local.clear()
-                tc_panels_order_local.clear()
-                tc_text_local.clear()
-                tc_map_local.clear()
-            elif t == 'stream.delta' and (seen_open or target_invoke):
-                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
-                txt = payload.get('text') or payload.get('delta') or payload.get('content')
-                if isinstance(txt, str) and txt:
-                    live_content_local += txt
-                rs = payload.get('reason')
-                if isinstance(rs, str) and rs:
-                    live_reason_local += rs
-                tl = payload.get('tool')
-                if isinstance(tl, dict):
-                    nm = tl.get('name') or 'tool'
-                    tool_stream_local[nm] = tool_stream_local.get(nm, '') + (tl.get('text') or '')
-                tcd = payload.get('tool_call')
-                if isinstance(tcd, dict):
-                    raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
-                    frag = tcd.get('text') or tcd.get('arguments_delta') or ''
-                    if frag is None:
-                        frag = ''
-                    if isinstance(frag, str) and frag:
-                        existing_keys = tc_map_local.get(raw_key, [])
-                        current_pkey = existing_keys[-1] if existing_keys else None
-                        if not current_pkey:
-                            new_pkey = f"{raw_key}-{len(tc_panels_order_local)}"
-                            tc_panels_order_local.append(new_pkey)
-                            tc_text_local[new_pkey] = ''
-                            tc_map_local.setdefault(raw_key, []).append(new_pkey)
-                            current_pkey = new_pkey
-                        tc_text_local[current_pkey] += frag
-            elif t == 'stream.close':
-                # If the active invoke closed, stop preloading here
-                if (target_invoke is None) or (inv == target_invoke):
-                    return {
-                        'last_seq': last_seq,
-                        'content': live_content_local,
-                        'reason': live_reason_local,
-                        'tool_stream': tool_stream_local,
-                        'tc_panels_order': tc_panels_order_local,
-                        'tc_text': tc_text_local,
-                        'tc_map': tc_map_local,
-                        'active_invoke': None,
-                    }
-        return {
-            'last_seq': last_seq,
-            'content': live_content_local,
-            'reason': live_reason_local,
-            'tool_stream': tool_stream_local,
-            'tc_panels_order': tc_panels_order_local,
-            'tc_text': tc_text_local,
-            'tc_map': tc_map_local,
-            'active_invoke': target_invoke,
+        # Streaming/watch state
+        self._live_state: Dict[str, Any] = {
+            "active_invoke": None,
+            "content": "",
+            "reason": "",
+            "tools": {},  # name -> text
+            "tc_text": {},  # key -> text
+            "tc_order": [],
         }
+        self._watch_task: Optional[asyncio.Task] = None
+        self.running = False
+        self._system_log: List[str] = []
 
-    preload = _preload_existing(attach_after_seq, active_target)
-
-    # Use the last preloaded event as the starting point for live watching
-    after_for_watch = preload.get('last_seq', attach_after_seq) if isinstance(preload, dict) else attach_after_seq
-    ew = EventWatcher(db, thread_id, after_seq=after_for_watch, poll_sec=0.05)
-
-    # Track the currently active invoke, if any, so we can attach mid-stream
-    active_invoke: Optional[str] = preload.get('active_invoke') if isinstance(preload, dict) else None
-
-    live_content = preload.get('content', '') if isinstance(preload, dict) else ''
-    live_reason = preload.get('reason', '') if isinstance(preload, dict) else ''
-    # tool streaming buffers: name -> text
-    tool_stream: Dict[str, str] = preload.get('tool_stream', {}) if isinstance(preload, dict) else {}
-    # tool-call args streaming panels: maintain ordered panels to avoid reusing old panel
-    tc_panels_order: List[str] = preload.get('tc_panels_order', []) if isinstance(preload, dict) else []
-    tc_text: Dict[str, str] = preload.get('tc_text', {}) if isinstance(preload, dict) else {}
-    tc_map: Dict[str, List[str]] = preload.get('tc_map', {}) if isinstance(preload, dict) else {}
-
-    # Keep a reference to the latest polled batch for model label detection
-    batch: List[Dict[str, Any]] = []
-
-    def _live_group() -> Group:
-        panels = []
-        # Only show streaming panels here; static panels are printed before entering Live
-        # Determine model from the latest stream events (scan a few recent events)
-        model_label = ''
-        try:
-            # find the most recent model_key from stream events for this invoke
-            for e in reversed(batch[-10:] if batch else []):
-                try:
-                    pj = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
-                except Exception:
-                    pj = {}
-                mk = pj.get('model_key')
-                if isinstance(mk, str) and mk.strip():
-                    model_label = mk.strip()
-                    break
-        except Exception:
-            model_label = ''
-
-        if live_reason.strip():
-            title = 'Reasoning (streaming)'
-            if model_label:
-                title += f" [dim](model: {model_label})[/dim]"
-            panels.append(Panel(Text(live_reason, no_wrap=False, overflow='fold'), title=title, border_style='magenta'))
-        # show tool-call arguments panels in creation order
-        for pkey in tc_panels_order:
-            delta = tc_text.get(pkey, '').strip()
-            if delta:
-                title = f'Tool Call Args: {pkey}'
-                if model_label:
-                    title += f" [dim](model: {model_label})[/dim]"
-                panels.append(Panel(Text(delta, no_wrap=False, overflow='fold'), title=title, border_style='yellow'))
-        for name, txt in tool_stream.items():
-            if txt.strip():
-                title = f'Tool: {name} (streaming)'
-                if model_label:
-                    title += f" [dim](model: {model_label})[/dim]"
-                panels.append(Panel(Text(txt, no_wrap=False, overflow='fold'), title=title, border_style='yellow'))
-        if live_content.strip():
-            title = 'Assistant (streaming)'
-            if model_label:
-                title += f" [dim](model: {model_label})[/dim]"
-            panels.append(Panel(Text(live_content, no_wrap=False, overflow='fold'), title=title, border_style='cyan'))
-        return Group(*panels) if panels else Group(Panel('[dim]No messages yet[/dim]', border_style='blue'))
-
-    # In-place streaming
-    with Live(console=console, auto_refresh=False, vertical_overflow='visible') as live:
-        # Initial paint reflects any preloaded deltas
-        live.update(_live_group(), refresh=True)
+    # ---------------- Scheduler & thread helpers ----------------
+    def _thread_root_id(self, tid: str) -> str:
+        cur = tid
         while True:
-            updated = False
-            batch = []
-            async for b in ew.aiter():
-                batch = b
-                break  # take one batch per loop
-            for e in batch:
-                t = e['type']
-                if t == 'stream.open':
-                    active_invoke = e['invoke_id']
-                    live_content = ''
-                    live_reason = ''
-                    tool_stream.clear()
-                    tc_panels_order.clear()
-                    tc_text.clear()
-                    tc_map.clear()
-                    # reset any per-invoke trackers if needed
-                    updated = True
-                elif t == 'stream.delta' and active_invoke and e['invoke_id'] == active_invoke:
-                    payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
-                    txt = payload.get('text') or payload.get('delta') or payload.get('content')
-                    if isinstance(txt, str) and txt:
-                        live_content += txt
-                        updated = True
-                    rs = payload.get('reason')
-                    if isinstance(rs, str) and rs:
-                        live_reason += rs
-                        updated = True
-                    tl = payload.get('tool')
-                    if isinstance(tl, dict):
-                        nm = tl.get('name') or 'tool'
-                        tool_stream[nm] = tool_stream.get(nm, '') + (tl.get('text') or '')
-                        updated = True
-                    tcd = payload.get('tool_call')
-                    if isinstance(tcd, dict):
-                        raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
-                        frag = tcd.get('text') or tcd.get('arguments_delta') or ''
-                        if frag is None:
-                            frag = ''
-                        if isinstance(frag, str) and frag:
-                            # determine current panel for this raw_key
-                            existing_keys = tc_map.get(raw_key, [])
-                            current_pkey = existing_keys[-1] if existing_keys else None
-                            # start a new panel if no current panel
-                            if not current_pkey:
-                                new_pkey = f"{raw_key}-{len(tc_panels_order)}"
-                                tc_panels_order.append(new_pkey)
-                                tc_text[new_pkey] = ''
-                                tc_map.setdefault(raw_key, []).append(new_pkey)
-                                current_pkey = new_pkey
-                            # append text (assume incremental deltas)
-                            tc_text[current_pkey] += frag
-                            updated = True
-                elif t == 'stream.close' and active_invoke and e['invoke_id'] == active_invoke:
-                    active_invoke = None
-                    updated = True
-                    # finalize this invoke's live display and return to caller
-                    live.update(_live_group(), refresh=True)
-                    return
-            if updated:
-                live.update(_live_group(), refresh=True)
-            # If no new events, sleep briefly before next poll
-            if not batch:
-                await asyncio.sleep(0.05)
+            row = self.db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (cur,)).fetchone()
+            if not row or not row[0]:
+                return cur
+            cur = row[0]
 
-async def run_cli():
-    console = Console(force_terminal=True, color_system='auto', no_color=False)
-    db = ThreadsDB()
-    db.init_schema()
-
-    system_content = _get_system_prompt()
-
-    root = create_root_thread(db, name='Root')
-    append_message(db, root, 'system', system_content)
-    create_snapshot(db, root)
-    current_thread = root
-
-    # Track active subtree schedulers (root_thread_id -> {scheduler, task})
-    active_schedulers: Dict[str, Dict[str, Any]] = {}
-    # Track roots we already prompted user about (to avoid repeated prompts)
-    prompted_roots: set[str] = set()
-    # Guard to avoid concurrent/re-entrant prompting
-    is_prompting_scheduler: bool = False
-
-    # Helper to start a scheduler for a given root thread
-    def _start_scheduler(root_tid: str) -> None:
-        if root_tid in active_schedulers:
+    def _start_scheduler(self, root_tid: str) -> None:
+        if root_tid in self.active_schedulers:
             return
-        sched = SubtreeScheduler(db, root_thread_id=root_tid, models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
-        task = asyncio.create_task(sched.run_forever())
-        active_schedulers[root_tid] = {"scheduler": sched, "task": task}
+        sched = SubtreeScheduler(self.db, root_thread_id=root_tid,
+                                 models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
+        task = asyncio.create_task(sched.run_forever(poll_sec=0.05))
+        self.active_schedulers[root_tid] = {"scheduler": sched, "task": task}
+        self._log_system(f"Started scheduler for root {root_tid[-8:]}")
 
-    # Start default scheduler on the initial root immediately
-    _start_scheduler(root)
+    def _ensure_scheduler_for(self, tid: str) -> None:
+        rid = self._thread_root_id(tid)
+        if rid not in self.active_schedulers:
+            self._start_scheduler(rid)
 
-    # prompt
-    def _current_model_for_thread(tid: str) -> Optional[str]:
-        # Scan recent msg.create events for a model_key
+    def _current_model_for_thread(self, tid: str) -> Optional[str]:
         try:
-            rows = db.conn.execute(
+            rows = self.db.conn.execute(
                 "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
                 (tid,)
             ).fetchall()
             for r in rows:
-                try:
-                    pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
-                except Exception:
-                    pj = {}
+                pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
                 mk = pj.get('model_key')
                 if isinstance(mk, str) and mk.strip():
                     return mk.strip()
         except Exception:
             pass
-        th = db.get_thread(tid)
+        th = self.db.get_thread(tid)
         return th.initial_model_key if th else None
 
-    # Helper functions for thread roots, tree rendering, and ensuring schedulers
-    def _thread_root_id(tid: str) -> str:
-        cur_id = tid
-        while True:
-            row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (cur_id,)).fetchone()
-            if not row or not row[0]:
-                return cur_id
-            cur_id = row[0]
-
-    def _is_streaming(tid: str) -> bool:
-        try:
-            return db.current_open(tid) is not None
-        except Exception:
-            return False
-
-    def _is_root_thread(tid: str) -> bool:
-        try:
-            row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (tid,)).fetchone()
-            return not (row and row[0])
-        except Exception:
-            return False
-
-    def _root_has_scheduler(tid: str) -> bool:
-        try:
-            rid = _thread_root_id(tid)
-            return rid in active_schedulers
-        except Exception:
-            return False
-
-    def _format_thread_line(tid: str) -> str:
-        th = db.get_thread(tid)
+    # ---------------- Formatting helpers ----------------
+    def _format_thread_line(self, tid: str) -> str:
+        th = self.db.get_thread(tid)
         status = th.status if th else 'unknown'
         recap = (th.short_recap if th and th.short_recap else 'No recap').strip()
-        mk = _current_model_for_thread(tid) or 'default'
-        streaming = _is_streaming(tid)
+        mk = self._current_model_for_thread(tid) or 'default'
         try:
-            subtree_size = len(_get_subtree(db, tid))
+            streaming = self.db.current_open(tid) is not None
         except Exception:
-            subtree_size = 0
+            streaming = False
         label = th.name if th and th.name else ''
         id_short = tid[-8:]
-        sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
-        cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == current_thread else ''
-        sched_tag = '[bold cyan][SCHED][/bold cyan] ' if _is_root_thread(tid) and _root_has_scheduler(tid) else ''
-        return f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status} - {recap} (subtree={subtree_size}) [dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
+        sflag = 'STREAMING ' if streaming else ''
+        cur_tag = '[CUR] ' if tid == self.current_thread else ''
+        sched_tag = '[SCHED] ' if self._thread_root_id(tid) in self.active_schedulers else ''
+        return f"{cur_tag}{sched_tag}{sflag}{id_short} {status} - {recap} [model:{mk}]" + (f"  {label}" if label else '')
 
-    def _render_tree(root_tid: str, prefix: str = '', is_last: bool = True) -> None:
-        connector = '└─ ' if is_last else '├─ '
-        indent_next = '   ' if is_last else '│  '
-        console.print(prefix + connector + _format_thread_line(root_tid))
-        # List children ordered by created_at for readability
-        try:
-            kids = [cid for cid, _n, _r, _c in list_children_with_meta(db, root_tid)]
-        except Exception:
-            kids = []
-        for i, cid in enumerate(kids):
-            last = (i == len(kids) - 1)
-            _render_tree(cid, prefix + indent_next, last)
-
-    async def _ensure_scheduler_for_thread(tid: str) -> None:
-        nonlocal active_schedulers, prompted_roots, is_prompting_scheduler
-        root_tid = _thread_root_id(tid)
-        if root_tid in active_schedulers:
-            return
-        # If we already prompted for this root during this session, do not prompt again.
-        if root_tid in prompted_roots:
-            return
-        # Avoid re-entrant prompts (e.g., triggered during live streaming side-effects)
-        if is_prompting_scheduler:
-            return
-        is_prompting_scheduler = True
-        try:
-            console.print(Panel(f"No scheduler is running for root [bold]{root_tid}[/bold]. Proposed subtree:", border_style='blue'))
-            _render_tree(root_tid)
-            # Ask user for confirmation using a separate, short-lived PromptSession
+    def _format_tree(self, root_tid: Optional[str] = None) -> str:
+        def _render_tree(tid: str, prefix: str = '', is_last: bool = True, out: Optional[List[str]] = None):
+            if out is None:
+                out = []
+            connector = '└─ ' if is_last else '├─ '
+            indent_next = '   ' if is_last else '│  '
+            out.append(prefix + connector + self._format_thread_line(tid))
             try:
-                confirm_session = PromptSession(message="Start scheduler for this subtree? [y/N] ")
-                ans = (await confirm_session.prompt_async()).strip().lower()
+                kids = [cid for cid, _n, _r, _c in list_children_with_meta(self.db, tid)]
             except Exception:
-                ans = 'n'
-            if ans in ('y', 'yes'):
-                _start_scheduler(root_tid)
-                console.print(Panel(f"Started scheduler for root {root_tid}", border_style='green'))
-                prompted_roots.add(root_tid)
-            else:
-                console.print(Panel("Skipped starting scheduler.", border_style='yellow'))
-                prompted_roots.add(root_tid)
-        finally:
-            is_prompting_scheduler = False
+                kids = []
+            for i, cid in enumerate(kids):
+                last = (i == len(kids) - 1)
+                _render_tree(cid, prefix + indent_next, last, out)
+            return out
+        roots = [root_tid] if root_tid else list_root_threads(self.db)
+        lines: List[str] = []
+        if not roots:
+            return 'No threads.'
+        for rid in roots:
+            lines.extend(_render_tree(rid))
+        return "\n".join(lines)
 
-    # ---- Common helpers (DRY) ----------------------------------------------
-    def _select_threads_by_selector(selector: str) -> List[str]:
-        """Return thread IDs matching selector using the same logic as /thread.
+    def _format_messages_text(self, thread_id: str) -> str:
+        msgs = _snapshot_messages(self.db, thread_id)
+        lines: List[str] = []
+        if not msgs:
+            return "No messages yet."
+        for m in msgs[-50:]:
+            role = m.get('role')
+            if role == 'assistant':
+                reas = (m.get('reasoning') or m.get('reasoning_content') or '').strip()
+                if reas:
+                    lines.append(f"[Reasoning]\n{reas}")
+                content = (m.get('content') or '').strip()
+                if content:
+                    lines.append(f"[Assistant]\n{content}")
+                # Final tool calls summary (if any)
+                tcs = m.get('tool_calls') or []
+                if isinstance(tcs, list) and tcs:
+                    for tc in tcs:
+                        f = (tc or {}).get('function') or {}
+                        name = f.get('name') or ''
+                        args = f.get('arguments')
+                        try:
+                            args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args or '')
+                        except Exception:
+                            args_str = str(args or '')
+                        lines.append(f"[ToolCall] {name} {args_str}")
+                # Streamed-only metadata (if snapshot captured)
+                tstream = m.get('tool_stream') or {}
+                if isinstance(tstream, dict):
+                    for nm, txt in tstream.items():
+                        if txt:
+                            lines.append(f"[Tool Output: {nm}]\n{txt}")
+                tc_stream = m.get('tool_calls_stream') or {}
+                if isinstance(tc_stream, dict):
+                    for nm, txt in tc_stream.items():
+                        if txt:
+                            lines.append(f"[Tool Call Args: {nm}]\n{txt}")
+            elif role == 'user':
+                content = (m.get('content') or '').strip()
+                if content:
+                    lines.append(f"[User]\n{content}")
+            elif role == 'tool':
+                name = m.get('name') or 'tool'
+                content = (m.get('content') or '').strip()
+                if content:
+                    lines.append(f"[Tool: {name}]\n{content}")
+            elif role == 'system':
+                content = (m.get('content') or '').strip()
+                if content:
+                    lines.append(f"[System]\n{content}")
+        return "\n\n".join(lines)
 
-        Order: exact id > id endswith suffix > id contains > name contains > recap contains.
-        Result preserves DB scan order; caller can re-sort by created_at if needed.
-        """
+    def _compose_chat_panel_text(self) -> str:
+        # Create/refresh snapshot when idle for readability
         try:
-            rows = list_threads(db)
+            row = self.db.current_open(self.current_thread)
+        except Exception:
+            row = None
+        if row is None:
+            try:
+                create_snapshot(self.db, self.current_thread)
+            except Exception:
+                pass
+        base = self._format_messages_text(self.current_thread)
+        ls = self._live_state
+        parts: List[str] = [base]
+        if ls.get('active_invoke'):
+            if ls.get('reason'):
+                parts.append(f"\n[Reasoning (streaming)]\n{ls['reason']}")
+            for pk in ls.get('tc_order') or []:
+                delta = (ls.get('tc_text') or {}).get(pk, '')
+                if delta:
+                    parts.append(f"\n[Tool Call Args: {pk}]\n{delta}")
+            for name, txt in (ls.get('tools') or {}).items():
+                if txt:
+                    parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
+            if ls.get('content'):
+                parts.append(f"\n[Assistant (streaming)]\n{ls['content']}")
+        head = f"Thread {self.current_thread[-8:]} | Model: {self._current_model_for_thread(self.current_thread) or 'default'}"
+        return head + "\n" + ("\n".join(parts).strip() or "No messages yet.")
+
+    def _update_panels(self) -> None:
+        self.chat_output.set_content(self._compose_chat_panel_text())
+        status_lines = [
+            f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
+            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /quit",
+        ]
+        tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
+        self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
+
+    def _render_group(self) -> Group:
+        row1 = HStack([self.chat_output, self.system_output]).render()
+        return Group(row1, self.input_panel.render())
+
+    def _log_system(self, msg: str) -> None:
+        self._system_log.append(msg)
+
+    # ---------------- Input and commands ----------------
+    def _handle_key(self, key: str) -> bool:
+        # Ctrl+D sends, Ctrl+C exits
+        try:
+            import readchar  # type: ignore
+            ctrl_d = getattr(readchar.key, 'CTRL_D', '\x04')
+            ctrl_c = getattr(readchar.key, 'CTRL_C', '\x03')
+        except Exception:
+            ctrl_d = '\x04'
+            ctrl_c = '\x03'
+        if key == ctrl_c or key == '\x03':
+            # Try to interrupt any active stream on the current thread for fast shutdown
+            try:
+                interrupt_thread(self.db, self.current_thread)
+            except Exception:
+                pass
+            self.running = False
+            return False
+        if key == ctrl_d or key == '\x04':
+            text = self.input_panel.get_text().strip()
+            if text:
+                self._on_submit(text)
+            self.input_panel.clear_text()
+            self.input_panel.increment_message_count()
+            return True
+        # delegate to editor engine
+        return self.input_panel.editor._handle_key(key)
+
+    def _on_submit(self, text: str) -> None:
+        if text.startswith('$$') and len(text) > 2:
+            self._run_shell(text[2:].strip(), keep_user_turn=True, hidden=True)
+            return
+        if text.startswith('$') and len(text) > 1:
+            self._run_shell(text[1:].strip(), keep_user_turn=True, hidden=False)
+            return
+        if text.startswith('/'):
+            self._handle_command(text)
+            return
+        append_message(self.db, self.current_thread, 'user', text)
+        create_snapshot(self.db, self.current_thread)
+        self._ensure_scheduler_for(self.current_thread)
+        self._log_system("User message queued; scheduler will stream the response.")
+
+    def _run_shell(self, bash_command: str, keep_user_turn: bool, hidden: bool) -> None:
+        import subprocess
+        try:
+            res = subprocess.run(bash_command, shell=True, capture_output=True, text=True, cwd=os.getcwd())
+            output = res.stdout or ''
+            if res.stderr:
+                output += f"\nSTDERR:\n{res.stderr}"
+            if res.returncode != 0:
+                output += f"\nReturn code: {res.returncode}"
+            message_content = f"Command: {bash_command}\n\nOutput:\n{output}"
+            extra = {'keep_user_turn': keep_user_turn}
+            if hidden:
+                extra['no_api'] = True
+            append_message(self.db, self.current_thread, 'user', message_content, extra=extra)
+            create_snapshot(self.db, self.current_thread)
+            self._log_system(("(hidden) " if hidden else "") + f"Executed: {bash_command}")
+        except Exception as e:
+            err = f"Error executing command: {e}"
+            append_message(self.db, self.current_thread, 'user', f"Command: {bash_command}\n\nError: {err}", extra={'keep_user_turn': keep_user_turn})
+            create_snapshot(self.db, self.current_thread)
+            self._log_system(err)
+
+    def _handle_command(self, text: str) -> None:
+        parts = text[1:].split(None, 1)
+        cmd = parts[0]
+        arg = parts[1] if len(parts) > 1 else ''
+        if cmd == 'help':
+            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /quit')
+        elif cmd == 'quit':
+            self.running = False
+        elif cmd == 'pause':
+            pause_thread(self.db, self.current_thread)
+            self._log_system('Paused current thread')
+        elif cmd == 'resume':
+            resume_thread(self.db, self.current_thread)
+            self._log_system('Resumed current thread')
+        elif cmd == 'new':
+            new_name = (arg or '').strip() or 'Root'
+            cur_model_key = self._current_model_for_thread(self.current_thread) or None
+            new_root = create_root_thread(self.db, name=new_name, initial_model_key=cur_model_key)
+            append_message(self.db, new_root, 'system', self.system_prompt)
+            if cur_model_key:
+                self.db.append_event(event_id=os.urandom(10).hex(), thread_id=new_root, type_='msg.create',
+                                     msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model_key}]', 'model_key': cur_model_key})
+            create_snapshot(self.db, new_root)
+            self._ensure_scheduler_for(new_root)
+            self.current_thread = new_root
+            asyncio.get_running_loop().create_task(self._start_watching_current())
+            self._log_system(f"Created new root thread: {new_root[-8:]}")
+        elif cmd == 'spawn':
+            def _latest_model_for_thread(tid: str) -> Optional[str]:
+                try:
+                    rows = self.db.conn.execute(
+                        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
+                        (tid,)
+                    ).fetchall()
+                    for r in rows:
+                        pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
+                        mk = pj.get('model_key')
+                        if isinstance(mk, str) and mk.strip():
+                            return mk.strip()
+                except Exception:
+                    pass
+                th = self.db.get_thread(tid)
+                return th.initial_model_key if th else None
+            cur_model = _latest_model_for_thread(self.current_thread)
+            child = create_child_thread(self.db, self.current_thread, name='spawn', initial_model_key=cur_model)
+            append_message(self.db, child, 'system', self.system_prompt)
+            append_message(self.db, child, 'user', arg or 'Spawned task')
+            if cur_model:
+                self.db.append_event(event_id=os.urandom(10).hex(), thread_id=child, type_='msg.create',
+                                     msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model}]', 'model_key': cur_model})
+            create_snapshot(self.db, child)
+            self._ensure_scheduler_for(child)
+            self._log_system(f"Spawned thread: {child[-8:]}")
+        elif cmd == 'children':
+            sub = _get_subtree(self.db, self.current_thread)
+            if not sub:
+                self._log_system('No subthreads.')
+            else:
+                self._log_system('Subtree:\n' + self._format_tree(self.current_thread))
+        elif cmd == 'child':
+            patt = (arg or '').lower()
+            rows = list_children_with_meta(self.db, self.current_thread)
+            candidates: List[str] = []
+            for child_id, name, recap, _created in rows:
+                if not patt or patt in (name + ' ' + recap + ' ' + child_id).lower():
+                    candidates.append(child_id)
+            if candidates:
+                self._ensure_scheduler_for(candidates[0])
+                self.current_thread = candidates[0]
+                asyncio.get_running_loop().create_task(self._start_watching_current())
+                self._log_system(f"Switched to child: {self.current_thread[-8:]}")
+            else:
+                self._log_system('No matching child.')
+        elif cmd == 'parent':
+            pid = get_parent(self.db, self.current_thread)
+            if pid:
+                self.current_thread = pid
+                asyncio.get_running_loop().create_task(self._start_watching_current())
+                self._log_system('Moved to parent thread')
+            else:
+                self._log_system('Already at root or no parent found.')
+        elif cmd == 'threads':
+            try:
+                text = self._format_tree()
+                self._log_system('Threads by subtree:\n' + text)
+            except Exception as e:
+                self._log_system(f"Error listing threads: {e}")
+        elif cmd == 'thread':
+            sel = (arg or '').strip()
+            if not sel:
+                self._log_system(f"Current thread: {self.current_thread}")
+            else:
+                matches = self._select_threads_by_selector(sel)
+                if not matches and ' ' in sel:
+                    sel_first = sel.split()[0]
+                    matches = self._select_threads_by_selector(sel_first)
+                if not matches:
+                    try:
+                        rows_all = list_threads(self.db)
+                        suf = sel.lower()
+                        matches = [r.thread_id for r in rows_all if r.thread_id.lower().endswith(suf)]
+                    except Exception:
+                        matches = []
+                if not matches:
+                    self._log_system(f"No thread matches selector: {sel}")
+                else:
+                    try:
+                        rows = list_threads(self.db)
+                        ca = {r.thread_id: r.created_at for r in rows}
+                    except Exception:
+                        ca = {}
+                    matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
+                    new_tid = matches[0]
+                    self._ensure_scheduler_for(new_tid)
+                    self.current_thread = new_tid
+                    asyncio.get_running_loop().create_task(self._start_watching_current())
+                    self._log_system(f"Switched to thread: {new_tid[-8:]}")
+        elif cmd == 'delete':
+            selector = (arg or '').strip()
+            if not selector:
+                self._log_system('Usage: /delete <thread-id|suffix|name|recap-fragment>')
+                return
+            matches = self._select_threads_by_selector(selector)
+            if not matches and ' ' in selector:
+                sel_first = selector.split()[0]
+                matches = self._select_threads_by_selector(sel_first)
+            if not matches:
+                try:
+                    rows_all = list_threads(self.db)
+                    suf = selector.lower()
+                    matches = [r.thread_id for r in rows_all if r.thread_id.lower().endswith(suf)]
+                except Exception:
+                    matches = []
+            matches = [m for m in matches if m != self.current_thread]
+            if not matches:
+                self._log_system('No deletable thread matches selector.')
+                return
+            try:
+                rows = list_threads(self.db)
+                ca = {r.thread_id: r.created_at for r in rows}
+            except Exception:
+                ca = {}
+            matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
+            target_tid = matches[0]
+            try:
+                delete_thread(self.db, target_tid)
+                self._log_system(f"Thread {target_tid[-8:]} deleted.")
+            except Exception as e:
+                self._log_system(f'Error deleting thread: {e}')
+        elif cmd == 'model':
+            arg2 = (arg or '').strip()
+            if arg2:
+                self.db.append_event(event_id=os.urandom(10).hex(), thread_id=self.current_thread, type_='msg.create',
+                                     msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{arg2}]', 'model_key': arg2})
+                create_snapshot(self.db, self.current_thread)
+                self._log_system(f"Model set to: {arg2}")
+            else:
+                try:
+                    llm = self.llm_client
+                    if not llm:
+                        self._log_system('Models not available (llm client not initialized).')
+                    else:
+                        by_provider: Dict[str, List[str]] = {}
+                        for name, cfg in (llm.registry.models_config or {}).items():
+                            prov = cfg.get('provider', 'unknown')
+                            by_provider.setdefault(prov, []).append(name)
+                        lines = []
+                        for prov in sorted(by_provider.keys()):
+                            lines.append(f"{prov}:")
+                            for m in sorted(by_provider[prov]):
+                                lines.append(f"  - {m}")
+                        lines.append("\nTip: use 'all:provider:model' to pick catalog models.")
+                        self._log_system("Available models:\n" + "\n".join(lines))
+                except Exception as e:
+                    self._log_system(f"Error listing models: {e}")
+        elif cmd == 'updateAllModels':
+            provider = (arg or '').strip()
+            if not provider:
+                self._log_system('Usage: /updateAllModels <provider>')
+            else:
+                try:
+                    if not LLMClient:
+                        raise RuntimeError('eggllm not available')
+                    llm_tmp = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
+                    res = llm_tmp.update_all_models(provider)
+                    self._log_system("Update All Models:\n" + res)
+                except Exception as e:
+                    self._log_system(f"Update All Models error: {e}")
+        elif cmd == 'schedulers':
+            if not self.active_schedulers:
+                self._log_system('No active schedulers in this session.')
+            else:
+                out: List[str] = []
+                for rid in self.active_schedulers.keys():
+                    out.append(f"- root {rid[-8:]}")
+                    out.append(self._format_tree(rid))
+                self._log_system("Active SubtreeSchedulers:\n" + "\n".join(out))
+        else:
+            self._log_system('Unknown command')
+
+    def _select_threads_by_selector(self, selector: str) -> List[str]:
+        try:
+            rows = list_threads(self.db)
         except Exception:
             rows = []
         sel_l = (selector or '').lower()
         matches: List[str] = []
-        # Priority 1: exact id
         for r in rows:
             if r.thread_id == selector:
                 matches = [r.thread_id]
                 break
         if not matches and sel_l:
-            # Priority 2: endswith id suffix
             suf = [r.thread_id for r in rows if r.thread_id.lower().endswith(sel_l)]
             if suf:
                 matches = suf
         if not matches and sel_l:
-            # Priority 3: id contains
             cont = [r.thread_id for r in rows if sel_l in r.thread_id.lower()]
             if cont:
                 matches = cont
         if not matches and sel_l:
-            # Priority 4: name contains
             name_matches = [r.thread_id for r in rows if isinstance(r.name, str) and sel_l in r.name.lower()]
             if name_matches:
                 matches = name_matches
         if not matches and sel_l:
-            # Priority 5: recap contains
             recap_matches = [r.thread_id for r in rows if isinstance(r.short_recap, str) and sel_l in r.short_recap.lower()]
             if recap_matches:
                 matches = recap_matches
         return matches
 
-    def _most_recent_root_thread() -> Optional[str]:
-        try:
-            row2 = db.conn.execute(
-                "SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children) ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
-            return row2[0] if row2 else None
-        except Exception:
-            return None
-    def prompt_message():
-        mk = _current_model_for_thread(current_thread) or 'default'
-        return f"You & {mk}: "
-
-    try:
-        llm_for_completion = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH) if LLMClient else None
-    except Exception:
-        llm_for_completion = None
-
-    # Unified completer: preserve /model behavior and add user text/file completions
-    def _get_current_thread():
-        return current_thread
-
-    session = PromptSession(
-        message=prompt_message,
-        auto_suggest=AutoSuggestFromHistory(),
-        completer=EggCompleter(db, _get_current_thread, llm_for_completion),
-    )
-    kb = KeyBindings()
-
-    @kb.add('c-c')
-    def _(event):
-        try:
-            interrupt_thread(db, current_thread)
-        except Exception:
-            pass
-        event.app.invalidate()
-
-    # Multiline input support: Ctrl-J (and Alt-Enter) insert a newline without sending
-    @kb.add('c-j')
-    def _(event):
-        event.current_buffer.insert_text('\n')
-
-    @kb.add('escape', 'enter')
-    def _(event):
-        event.current_buffer.insert_text('\n')
-
-    session.key_bindings = kb
-
-    console.print(Panel('Started chat. Type /help for commands.', border_style='blue'))
-
-    while True:
-        # Schedulers are managed per-root via active_schedulers; initial root already started.
-        try:
-            # Accept multiline pastes and allow Ctrl-J / Alt-Enter to insert newlines
-            user_input = (await session.prompt_async())
-        except KeyboardInterrupt:
-            break
-        except EOFError:
-            break
-
-        if not user_input.strip():
-            continue
-
-        # Handle $$ command first (hidden from API)
-        if user_input.startswith('$$') and len(user_input) > 2:
-            bash_command = user_input[2:].strip()
-            
-            # Execute the bash command
-            import subprocess
+    # ---------------- Watching & streaming ----------------
+    async def _start_watching_current(self):
+        if self._watch_task is not None:
             try:
-                result = subprocess.run(bash_command, shell=True, capture_output=True, text=True, cwd=os.getcwd())
-                output = result.stdout
-                if result.stderr:
-                    output += f"\nSTDERR:\n{result.stderr}"
-                if result.returncode != 0:
-                    output += f"\nReturn code: {result.returncode}"
-                
-                # Create message content with command and output
-                message_content = f"Command: {bash_command}\n\nOutput:\n{output}"
-                
-                console.print(f"[bold yellow]Executing (hidden from API):[/bold yellow] {bash_command}")
-                console.print(f"[bold yellow]Output:[/bold yellow]\n{output}")
-                # Save with both flags to prevent sending to API and LLM response
-                append_message(db, current_thread, 'user', message_content, extra={'no_api': True, 'keep_user_turn': True})
-                create_snapshot(db, current_thread)
-                
-            except Exception as e:
-                error_msg = f"Error executing command: {e}"
-                console.print(f"[bold red]{error_msg}[/bold red]")
-                append_message(db, current_thread, 'user', f"Command: {bash_command}\n\nError: {error_msg}", extra={'no_api': True, 'keep_user_turn': True})
-                create_snapshot(db, current_thread)
-            continue
-
-        # Handle $ command (visible to LLM but keeps user turn)
-        elif user_input.startswith('$') and len(user_input) > 1:
-            bash_command = user_input[1:].strip()
-            
-            # Execute the bash command
-            import subprocess
-            try:
-                result = subprocess.run(bash_command, shell=True, capture_output=True, text=True, cwd=os.getcwd())
-                output = result.stdout
-                if result.stderr:
-                    output += f"\nSTDERR:\n{result.stderr}"
-                if result.returncode != 0:
-                    output += f"\nReturn code: {result.returncode}"
-                
-                # Create message content with command and output
-                message_content = f"Command: {bash_command}\n\nOutput:\n{output}"
-                
-                console.print(f"[bold cyan]Executing:[/bold cyan] {bash_command}")
-                console.print(f"[bold cyan]Output:[/bold cyan]\n{output}")
-                # Save with keep_user_turn flag to prevent LLM response
-                append_message(db, current_thread, 'user', message_content, extra={'keep_user_turn': True})
-                create_snapshot(db, current_thread)
-                
-            except Exception as e:
-                error_msg = f"Error executing command: {e}"
-                console.print(f"[bold red]{error_msg}[/bold red]")
-                append_message(db, current_thread, 'user', f"Command: {bash_command}\n\nError: {error_msg}", extra={'keep_user_turn': True})
-                create_snapshot(db, current_thread)
-            continue
-
-        if user_input.startswith('/'):
-            parts = user_input[1:].split(None, 1)
-            cmd = parts[0]
-            arg = parts[1] if len(parts) > 1 else ''
-            if cmd == 'help':
-                console.print('/model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /quit')
-                console.print('$ <command> - Execute bash command (keeps user turn)')
-                console.print('$$ <command> - Execute bash command (hidden from API, keeps user turn)')
-            elif cmd == 'model':
-                if arg:
-                    db.append_event(event_id=os.urandom(10).hex(), thread_id=current_thread, type_='msg.create',
-                                    msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{arg}]', 'model_key': arg})
-                    create_snapshot(db, current_thread)
-                else:
-                    # Pretty print available models grouped by provider
-                    try:
-                        llm = llm_for_completion
-                        if not llm:
-                            console.print('Models not available (llm client not initialized).')
-                        else:
-                            by_provider: Dict[str, List[str]] = {}
-                            for name, cfg in (llm.registry.models_config or {}).items():
-                                prov = cfg.get('provider', 'unknown')
-                                by_provider.setdefault(prov, []).append(name)
-                            lines = []
-                            for prov in sorted(by_provider.keys()):
-                                lines.append(f"{prov}:")
-                                for m in sorted(by_provider[prov]):
-                                    lines.append(f"  - {m}")
-                            lines.append("\nTip: type 'all:' to see full provider catalogs (if downloaded). Use 'all:provider:model'.")
-                            console.print("[bold]Available models (by provider):[/bold]\n" + "\n".join(lines))
-                    except Exception as e:
-                        console.print(f"[red]Error listing models: {e}[/red]")
-            elif cmd == 'pause':
-                pause_thread(db, current_thread)
-            elif cmd == 'resume':
-                resume_thread(db, current_thread)
-            elif cmd == 'spawn':
-                # Determine current model to propagate
-                def _latest_model_for_thread(tid: str) -> Optional[str]:
-                    try:
-                        rows = db.conn.execute(
-                            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
-                            (tid,)
-                        ).fetchall()
-                        for r in rows:
-                            pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
-                            mk = pj.get('model_key')
-                            if isinstance(mk, str) and mk.strip():
-                                return mk.strip()
-                    except Exception:
-                        pass
-                    th = db.get_thread(tid)
-                    return th.initial_model_key if th else None
-
-                cur_model = _latest_model_for_thread(current_thread)
-                child = create_child_thread(db, current_thread, name='spawn', initial_model_key=cur_model)
-                append_message(db, child, 'system', system_content)
-                append_message(db, child, 'user', arg or 'Spawned task')
-                if cur_model:
-                    # Also record the model selection in the child so tooling picks it up
-                    db.append_event(event_id=os.urandom(10).hex(), thread_id=child, type_='msg.create',
-                                    msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model}]', 'model_key': cur_model})
-                create_snapshot(db, child)
-                console.print(Panel(f"Spawned thread: {child}", border_style='green'))
-                # Ensure a scheduler exists for the root of the new child
-                await _ensure_scheduler_for_thread(child)
-            elif cmd == 'new':
-                # Create a brand new root thread and switch to it
-                new_name = (arg or '').strip() or 'Root'
-                try:
-                    cur_model_key = _current_model_for_thread(current_thread) or None
-                except Exception:
-                    cur_model_key = None
-                new_root = create_root_thread(db, name=new_name, initial_model_key=cur_model_key)
-                # Seed with system prompt
-                append_message(db, new_root, 'system', system_content)
-                # Record model selection for tooling if we have one
-                if cur_model_key:
-                    try:
-                        db.append_event(event_id=os.urandom(10).hex(), thread_id=new_root, type_='msg.create',
-                                        msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model_key}]', 'model_key': cur_model_key})
-                    except Exception:
-                        pass
-                create_snapshot(db, new_root)
-                console.print(Panel(f"Created new root thread: {new_root}", border_style='green'))
-                # Ask to start scheduler for this subtree
-                await _ensure_scheduler_for_thread(new_root)
-                current_thread = new_root
-                await _show_thread_ui(db, current_thread)
-            elif cmd == 'delete':
-                # Require selector; do not allow deleting current thread directly
-                selector = (arg or '').strip()
-                if not selector:
-                    console.print(Panel('Usage: /delete <thread-id|suffix|name|recap-fragment>', border_style='yellow'))
-                    continue
-                # Resolve selector using same logic as /thread
-                matches = _select_threads_by_selector(selector)
-                # If nothing matched, try parsing first token (in case UI inserted display text)
-                if not matches and ' ' in selector:
-                    sel_first = selector.split()[0]
-                    if sel_first:
-                        matches = _select_threads_by_selector(sel_first)
-                # If still nothing, try suffix match against all threads as a last resort
-                if not matches:
-                    try:
-                        rows_all = list_threads(db)
-                        suf = selector.lower()
-                        matches = [r.thread_id for r in rows_all if r.thread_id.lower().endswith(suf)]
-                    except Exception:
-                        matches = []
-                # Exclude current thread from deletable candidates
-                matches = [m for m in matches if m != current_thread]
-                if not matches:
-                    console.print(Panel('No deletable thread matches selector.', border_style='yellow'))
-                    continue
-                # If ambiguous, pick most recent by created_at
-                if len(matches) > 1:
-                    # Map id->created_at and pick max
-                    try:
-                        rows = list_threads(db)
-                        ca = {r.thread_id: r.created_at for r in rows}
-                    except Exception:
-                        ca = {}
-                    matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
-                    console.print(Panel(f"Multiple matches, deleting most recent candidate. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}", border_style='yellow'))
-                target_tid = matches[0]
-                # Ask for confirmation
-                try:
-                    confirm_session = PromptSession(message=f"Delete thread {target_tid[-8:]} (y/N)? ")
-                    ans = (await confirm_session.prompt_async()).strip().lower()
-                except Exception:
-                    ans = 'n'
-                if ans not in ('y', 'yes'):
-                    console.print(Panel('Delete cancelled.', border_style='yellow'))
-                    continue
-                # Perform deletion
-                try:
-                    delete_thread(db, target_tid)
-                except Exception as e:
-                    console.print(Panel(f'Error deleting thread: {e}', border_style='red'))
-                    continue
-                console.print(Panel(f'Thread {target_tid[-8:]} deleted.', border_style='green'))
-            elif cmd == 'child':
-                patt = (arg or '').lower()
-                rows = list_children_with_meta(db, current_thread)
-                candidates: List[str] = []
-                for child_id, name, recap, _created in rows:
-                    if not patt or patt in (name + ' ' + recap + ' ' + child_id).lower():
-                        candidates.append(child_id)
-                if candidates:
-                    # Ensure scheduler for the child's root before switching
-                    await _ensure_scheduler_for_thread(candidates[0])
-                    root_new = _thread_root_id(candidates[0])
-                    if root_new not in active_schedulers and root_new in prompted_roots:
-                        console.print(Panel("Scheduler not started for that subtree; staying on current thread.", border_style='yellow'))
-                    else:
-                        current_thread = candidates[0]
-                        # Show the newly selected child's conversation (and live stream if any)
-                        await _show_thread_ui(db, current_thread)
-                else:
-                    console.print('No matching child.')
-            elif cmd == 'parent':
-                pid = get_parent(db, current_thread)
-                if pid:
-                    current_thread = pid
-                    # Show the parent's conversation (and live stream if any)
-                    await _show_thread_ui(db, current_thread)
-                else:
-                    console.print('Already at root or no parent found.')
-            elif cmd == 'children':
-                sub = _get_subtree(db, current_thread)
-                if sub:
-                    # Render as a tree for each direct child
-                    try:
-                        direct = [cid for cid, _n, _r, _c in list_children_with_meta(db, current_thread)]
-                    except Exception:
-                        direct = []
-                    if not direct:
-                        # fallback to flat
-                        for tid in sub:
-                            console.print(_format_thread_line(tid))
-                    else:
-                        for i, cid in enumerate(direct):
-                            last = (i == len(direct) - 1)
-                            _render_tree(cid, prefix='', is_last=last)
-                else:
-                    console.print('No subthreads.')
-            elif cmd == 'threads':
-                try:
-                    # Find all roots (threads that are not children)
-                    roots = list_root_threads(db)
-                    if not roots:
-                        console.print('No threads found.')
-                    else:
-                        console.print('[bold]Threads (by subtree):[/bold]')
-                        console.print('[dim]Legend: [CUR]=current thread  [SCHED]=local scheduler running  STREAMING=has open stream[/dim]')
-                        for i, rid in enumerate(roots):
-                            last = (i == len(roots) - 1)
-                            _render_tree(rid, prefix='', is_last=last)
-                except Exception as e:
-                    console.print(f"Error listing threads: {e}")
-            elif cmd == 'thread':
-                sel = (arg or '').strip()
-                if not sel:
-                    th = db.get_thread(current_thread)
-                    console.print(f"Current thread: {current_thread} name='{(th.name if th else '') or ''}'")
-                else:
-                    try:
-                        matches = _select_threads_by_selector(sel)
-                        if not matches and ' ' in sel:
-                            sel_first = sel.split()[0]
-                            if sel_first:
-                                matches = _select_threads_by_selector(sel_first)
-                        if not matches:
-                            try:
-                                rows_all = list_threads(db)
-                                suf = sel.lower()
-                                matches = [r.thread_id for r in rows_all if r.thread_id.lower().endswith(suf)]
-                            except Exception:
-                                matches = []
-                        if not matches:
-                            console.print(f"No thread matches selector: {sel}")
-                        else:
-                            # If ambiguous, choose most recent by created_at
-                            if len(matches) > 1:
-                                # Map id->created_at and pick max
-                                try:
-                                    rows = list_threads(db)
-                                    ca = {r.thread_id: r.created_at for r in rows}
-                                except Exception:
-                                    ca = {}
-                                matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
-                                console.print(f"Multiple matches, switching to most recent. Candidates: {', '.join(m[-8:] for m in matches[:5])}{'...' if len(matches)>5 else ''}")
-                            new_tid = matches[0]
-                            # Ensure a scheduler exists for the root of the new thread if it's outside current schedulers
-                            await _ensure_scheduler_for_thread(new_tid)
-                            #Even if no scheduler, we can see thread content (it will not run though)
-                            current_thread = new_tid
-                            await _show_thread_ui(db, current_thread)
-                    except Exception as e:
-                        console.print(f"Error switching thread: {e}")
-            elif cmd == 'updateAllModels':
-                provider = (arg or '').strip()
-                if not provider:
-                    console.print('Usage: /updateAllModels <provider>')
-                else:
-                    # Defer to eggllm catalog updater via a lightweight LLMClient
-                    try:
-                        if not LLMClient:
-                            raise RuntimeError('eggllm not available')
-                        llm_tmp = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
-                        res = llm_tmp.update_all_models(provider)
-                        console.print(Panel(res, border_style='cyan', title='Update All Models'))
-                    except Exception as e:
-                        console.print(Panel(f'Error: {e}', border_style='red', title='Update All Models'))
-            elif cmd == 'schedulers':
-                if not active_schedulers:
-                    console.print('No active schedulers in this session.')
-                else:
-                    console.print('[bold]Active SubtreeSchedulers:[/bold]')
-                    for rid, ent in active_schedulers.items():
-                        console.print(f"- root {rid}:")
-                        _render_tree(rid, prefix='   ', is_last=True)
-            elif cmd == 'quit':
-                break
-            else:
-                console.print('Unknown command')
-            continue
-
-        # Normal user message
-        append_message(db, current_thread, 'user', user_input)
-        create_snapshot(db, current_thread)
-        # Stream response synchronously only if last trigger is runnable
-        while True:
-            # Check runnable before streaming (avoid running on assistant-only tail)
-            try:
-                runnable = is_thread_runnable(db, current_thread)
+                self._watch_task.cancel()
             except Exception:
-                runnable = True
-            if not runnable:
-                break
+                pass
+        self._watch_task = asyncio.create_task(self._watch_thread(self.current_thread))
+
+    async def _watch_thread(self, thread_id: str):
+        # Start from last snapshot event
+        try:
+            th = self.db.get_thread(thread_id)
+            start_after = int(th.snapshot_last_event_seq) if th and isinstance(th.snapshot_last_event_seq, int) else -1
+        except Exception:
+            start_after = -1
+
+        # Preload: if currently open stream, fold existing deltas into buffers
+        try:
+            row_open = self.db.current_open(thread_id)
+        except Exception:
+            row_open = None
+        after_for_watch = start_after
+        if row_open is not None:
             try:
-                await _stream_thread(db, current_thread)
-            except KeyboardInterrupt:
+                cur = self.db.conn.execute(
+                    "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
+                    (thread_id, start_after)
+                )
+                for e in cur.fetchall():
+                    after_for_watch = e["event_seq"] or after_for_watch
+                    await self._ingest_event_for_live(e, thread_id)
+            except Exception:
+                pass
+
+        ew = EventWatcher(self.db, thread_id, after_seq=after_for_watch, poll_sec=0.05)
+        async for batch in ew.aiter():
+            for e in batch:
+                await self._ingest_event_for_live(e, thread_id)
+            # Update panels after each batch
+            self._update_panels()
+
+    async def _ingest_event_for_live(self, e, thread_id: str):
+        if thread_id != self.current_thread:
+            return
+        t = e["type"]
+        if t == 'stream.open':
+            self._live_state = {"active_invoke": e["invoke_id"], "content": "", "reason": "", "tools": {}, "tc_text": {}, "tc_order": []}
+        elif t == 'stream.delta':
+            try:
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+            except Exception:
+                payload = {}
+            txt = payload.get('text') or payload.get('content') or payload.get('delta')
+            if isinstance(txt, str) and txt:
+                self._live_state['content'] = (self._live_state.get('content') or '') + txt
+            if isinstance(payload.get('reason'), str):
+                self._live_state['reason'] = (self._live_state.get('reason') or '') + payload.get('reason', '')
+            tl = payload.get('tool')
+            if isinstance(tl, dict):
+                name = tl.get('name') or 'tool'
+                self._live_state.setdefault('tools', {})
+                self._live_state['tools'][name] = self._live_state['tools'].get(name, '') + (tl.get('text') or '')
+            tcd = payload.get('tool_call')
+            if isinstance(tcd, dict):
+                raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
+                frag = tcd.get('text') or tcd.get('arguments_delta') or ''
+                if isinstance(frag, str) and frag:
+                    order = self._live_state.setdefault('tc_order', [])
+                    text_map = self._live_state.setdefault('tc_text', {})
+                    if raw_key not in order:
+                        order.append(raw_key)
+                    text_map[raw_key] = text_map.get(raw_key, '') + frag
+        elif t == 'stream.close':
+            self._live_state['active_invoke'] = None
+            try:
+                create_snapshot(self.db, self.current_thread)
+            except Exception:
+                pass
+
+    # ---------------- Main loop ----------------
+    async def run(self):
+        self.running = True
+        await self._start_watching_current()
+
+        self.console.print("[bold blue]Egg Chat (eggdisplay UI)[/bold blue]")
+        self.console.print("Press Ctrl+D to send, Ctrl+C to quit. Type /help for commands.\n")
+
+        # Start input worker thread (readchar -> queue)
+        import threading
+        input_thread = threading.Thread(target=self.input_panel.editor._input_worker, daemon=True)
+        input_thread.start()
+
+        try:
+            with Live(self._render_group(), refresh_per_second=30, screen=False, console=self.console) as live:
+                while self.running:
+                    # Drain input queue
+                    try:
+                        while True:
+                            key = self.input_panel.editor.input_queue.get_nowait()
+                            if not self._handle_key(key):
+                                self.running = False
+                                break
+                    except Exception:
+                        pass
+                    # Update panels and live region
+                    self._update_panels()
+                    live.update(self._render_group())
+                    try:
+                        await asyncio.sleep(0.033)
+                    except asyncio.CancelledError:
+                        break
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            self.running = False
+            # Cancel watcher task
+            if self._watch_task:
                 try:
-                    interrupt_thread(db, current_thread)
+                    self._watch_task.cancel()
+                    await asyncio.sleep(0)
                 except Exception:
                     pass
-                break  # Break out of while on interrupt
-            # Check if we need to continue
-            msgs = _snapshot_messages(db, current_thread)
-            if not msgs:
-                break
-            last = msgs[-1]
-            role = last.get('role')
-            # Continue automatically if tool execution just happened or assistant had tool_calls
-            if role == 'tool' or (role == 'assistant' and last.get('tool_calls')):
-                continue
-            break
+
+
+async def run_cli():
+    app = EggDisplayApp()
+    await app.run()
+
 
 if __name__ == '__main__':
     asyncio.run(run_cli())
