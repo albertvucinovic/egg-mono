@@ -474,83 +474,96 @@ class EggDisplayApp:
         return out[:50]
 
     def _model_suggestions(self, sub: str) -> List[str]:
-        # Build suggestions for '/model ' arguments based on eggllm registry/catalog
+        """Model suggestions for '/model ' arguments.
+
+        Prefer reusing existing logic:
+          1) Use completion.ModelCompleter to mirror original CLI behavior.
+          2) Fall back to AllModelsCatalog.get_all_models_suggestions for 'all:' path.
+          3) Finally, a minimal manual listing from the registry as a safety net.
+        """
         out: List[str] = []
         llm = self.llm_client
         if not llm:
             return out
-        prefix = sub
-        try:
-            pref_norm = (prefix or '').strip()
-        except Exception:
-            pref_norm = ''
-        seen: set[str] = set()
 
-        # Explicit all: path uses catalog suggestions
-        if prefix.lower().startswith('all:'):
-            try:
-                for s in llm.catalog.get_all_models_suggestions(prefix):
-                    if s not in seen:
-                        seen.add(s)
-                        out.append(s)
-            except Exception:
-                pass
-            return out[:50]
-
-        # Configured display names
+        # Try to reuse completion.ModelCompleter for parity with prompt_toolkit flow
         try:
-            display_names = list((llm.registry.models_config or {}).keys())
-        except Exception:
-            display_names = []
-        for name in sorted(display_names):
-            if not pref_norm or name.lower().startswith(pref_norm.lower()):
-                if name not in seen:
-                    seen.add(name)
-                    out.append(name)
+            from completion import ModelCompleter  # type: ignore
 
-        # provider:name and aliases
-        try:
-            items = list((llm.registry.models_config or {}).items())
-        except Exception:
-            items = []
-        for display, cfg in items:
-            prov = (cfg or {}).get('provider', 'unknown')
-            prov_pref = f"{prov}:{display}"
-            if not pref_norm or prov_pref.lower().startswith(pref_norm.lower()):
-                if prov_pref not in seen:
-                    seen.add(prov_pref)
-                    out.append(prov_pref)
-            for a in (cfg or {}).get('alias', []) or []:
-                if not isinstance(a, str):
+            class _Doc:
+                def __init__(self, text: str):
+                    self.text_before_cursor = text
+
+            mc = ModelCompleter(llm)
+            # Feed a fake '/model ' document so completer logic runs identically
+            doc = _Doc(f"/model {sub}")
+            suggestions: List[str] = []
+            for c in mc.get_completions(doc, None):  # type: ignore
+                try:
+                    txt = getattr(c, 'text', None)
+                    if isinstance(txt, str) and txt:
+                        suggestions.append(txt)
+                except Exception:
                     continue
-                prov_alias = f"{prov}:{a}"
-                if not pref_norm or prov_alias.lower().startswith(pref_norm.lower()):
-                    if prov_alias not in seen:
-                        seen.add(prov_alias)
-                        out.append(prov_alias)
+            # Deduplicate, preserve order
+            seen: set[str] = set()
+            uniq = []
+            for s in suggestions:
+                if s not in seen:
+                    seen.add(s)
+                    uniq.append(s)
+            return uniq[:50]
+        except Exception:
+            pass
 
-        # Plain aliases
-        for display, cfg in items:
-            for a in (cfg or {}).get('alias', []) or []:
-                if isinstance(a, str) and (not pref_norm or a.lower().startswith(pref_norm.lower())):
-                    if a not in seen:
-                        seen.add(a)
-                        out.append(a)
+        # Fallback 2: use AllModelsCatalog helper for 'all:' path
+        try:
+            prefix = sub or ''
+            if prefix.lower().startswith('all:'):
+                return llm.catalog.get_all_models_suggestions(prefix)[:50]
+        except Exception:
+            pass
 
-        # If user typed something, surface 'all:prov:model' entries for cached providers
-        if pref_norm:
-            try:
-                for prov in (llm.get_providers() or []):
-                    mids = llm.catalog.get_all_models_for_provider(prov) or []
-                    for mid in mids:
-                        cand = f"all:{prov}:{mid}"
-                        if cand in seen:
-                            continue
-                        if pref_norm.lower() in mid.lower() or pref_norm.lower() in cand.lower():
-                            seen.add(cand)
-                            out.append(cand)
-            except Exception:
-                pass
+        # Fallback 3: minimal manual suggestions from registry
+        try:
+            pref = (sub or '').strip().lower()
+            seen: set[str] = set()
+            # display names
+            for name in sorted((llm.registry.models_config or {}).keys()):
+                if not pref or name.lower().startswith(pref):
+                    if name not in seen:
+                        seen.add(name)
+                        out.append(name)
+            # provider:name and alias forms
+            for display, cfg in (llm.registry.models_config or {}).items():
+                prov = (cfg or {}).get('provider', 'unknown')
+                prov_pref = f"{prov}:{display}"
+                if not pref or prov_pref.lower().startswith(pref):
+                    if prov_pref not in seen:
+                        seen.add(prov_pref)
+                        out.append(prov_pref)
+                for a in (cfg or {}).get('alias', []) or []:
+                    if not isinstance(a, str):
+                        continue
+                    alias_full = f"{prov}:{a}"
+                    if not pref or alias_full.lower().startswith(pref) or a.lower().startswith(pref):
+                        if alias_full not in seen:
+                            seen.add(alias_full)
+                            out.append(alias_full)
+            # Consider 'all:prov:model' matches if catalogs exist
+            if pref:
+                try:
+                    for prov in (llm.get_providers() or []):
+                        for mid in (llm.catalog.get_all_models_for_provider(prov) or []):
+                            cand = f"all:{prov}:{mid}"
+                            if pref in cand.lower() or pref in mid.lower():
+                                if cand not in seen:
+                                    seen.add(cand)
+                                    out.append(cand)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return out[:50]
 
     # ---------------- Input and commands ----------------
