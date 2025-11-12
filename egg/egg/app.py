@@ -126,8 +126,9 @@ class EggDisplayApp:
         self.system_output = OutputPanel(title="System", initial_height=8, max_height=16)
         # Input panel with simple filesystem autocomplete
         # Advanced autocomplete (commands, models, threads, files, conversation words)
+        io_mode = os.environ.get("EGG_IO_MODE", "threaded").strip().lower()
         self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12,
-                                      autocomplete_callback=self._autocomplete_cb)
+                                      autocomplete_callback=self._autocomplete_cb, io_mode=io_mode)
 
         # Streaming/watch state
         self._live_state: Dict[str, Any] = {
@@ -143,6 +144,8 @@ class EggDisplayApp:
         # ensure system log exists (double safety)
         if not hasattr(self, '_system_log'):
             self._system_log = []
+        # Input behavior: default to Enter sends (toggle with /enterMode)
+        self.enter_sends: bool = True
 
     # ---------------- Scheduler & thread helpers ----------------
     def _thread_root_id(self, tid: str) -> str:
@@ -308,6 +311,7 @@ class EggDisplayApp:
         self.chat_output.set_content(self._compose_chat_panel_text())
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
+            "Send: Enter | New line: Ctrl+J | Quit: Ctrl+C",
             "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /quit",
         ]
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
@@ -573,9 +577,12 @@ class EggDisplayApp:
             import readchar  # type: ignore
             ctrl_d = getattr(readchar.key, 'CTRL_D', '\x04')
             ctrl_c = getattr(readchar.key, 'CTRL_C', '\x03')
+            enter_key = getattr(readchar.key, 'ENTER', '\r')
         except Exception:
             ctrl_d = '\x04'
             ctrl_c = '\x03'
+            enter_key = '\r'
+        # Quit
         if key == ctrl_c or key == '\x03':
             # Try to interrupt any active stream on the current thread for fast shutdown
             try:
@@ -584,13 +591,36 @@ class EggDisplayApp:
                 pass
             self.running = False
             return False
+        # Send on Ctrl+D always
         if key == ctrl_d or key == '\x04':
             text = self.input_panel.get_text().strip()
             if text:
-                self._on_submit(text)
+                try:
+                    self._on_submit(text)
+                except Exception as e:
+                    self._log_system(f"Submit error: {e}")
             self.input_panel.clear_text()
             self.input_panel.increment_message_count()
             return True
+        # Enter behavior depends on mode
+        if key in (enter_key, '\r', '\n'):
+            if self.enter_sends:
+                text = self.input_panel.get_text().strip()
+                if text:
+                    try:
+                        self._on_submit(text)
+                    except Exception as e:
+                        self._log_system(f"Submit error: {e}")
+                self.input_panel.clear_text()
+                self.input_panel.increment_message_count()
+                return True
+            else:
+                # Insert newline in editor
+                try:
+                    self.input_panel.editor.editor.insert_newline()
+                except Exception:
+                    pass
+                return True
         # delegate to editor engine
         return self.input_panel.editor._handle_key(key)
 
@@ -636,7 +666,7 @@ class EggDisplayApp:
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
-            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /quit')
+            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /quit')
         elif cmd == 'quit':
             self.running = False
         elif cmd == 'pause':
@@ -828,6 +858,16 @@ class EggDisplayApp:
                     out.append(f"- root {rid[-8:]}")
                     out.append(self._format_tree(rid))
                 self._log_system("Active SubtreeSchedulers:\n" + "\n".join(out))
+        elif cmd == 'enterMode':
+            mode = (arg or '').strip().lower()
+            if mode in ('send', 's', 'on'):
+                self.enter_sends = True
+                self._log_system('Enter mode: send (Enter sends, Ctrl+D also sends).')
+            elif mode in ('newline', 'n', 'off'):
+                self.enter_sends = False
+                self._log_system('Enter mode: newline (Enter inserts newline, Ctrl+D sends).')
+            else:
+                self._log_system('Usage: /enterMode <send|newline>')
         else:
             self._log_system('Unknown command')
 
@@ -897,8 +937,20 @@ class EggDisplayApp:
 
         ew = EventWatcher(self.db, thread_id, after_seq=after_for_watch, poll_sec=0.05)
         async for batch in ew.aiter():
+            saw_non_stream_msg = False
             for e in batch:
+                try:
+                    if e["type"] in ("msg.create", "msg.edit", "msg.delete"):
+                        saw_non_stream_msg = True
+                except Exception:
+                    pass
                 await self._ingest_event_for_live(e, thread_id)
+            # If we saw message-level events, refresh snapshot to include them
+            if saw_non_stream_msg:
+                try:
+                    create_snapshot(self.db, self.current_thread)
+                except Exception:
+                    pass
             # Update panels after each batch
             self._update_panels()
 
@@ -908,6 +960,11 @@ class EggDisplayApp:
         t = e["type"]
         if t == 'stream.open':
             self._live_state = {"active_invoke": e["invoke_id"], "content": "", "reason": "", "tools": {}, "tc_text": {}, "tc_order": []}
+            try:
+                inv = e.get("invoke_id") if isinstance(e, dict) else e["invoke_id"]
+                self._log_system(f"Streaming started (invoke {str(inv)[-6:]}).")
+            except Exception:
+                pass
         elif t == 'stream.delta':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
@@ -939,6 +996,7 @@ class EggDisplayApp:
                 create_snapshot(self.db, self.current_thread)
             except Exception:
                 pass
+            self._log_system('Streaming finished.')
 
     # ---------------- Main loop ----------------
     async def run(self):
@@ -950,6 +1008,11 @@ class EggDisplayApp:
 
         # Start input worker thread (readchar -> queue)
         import threading
+        # Ensure the editor input loop is enabled
+        try:
+            self.input_panel.editor.running = True
+        except Exception:
+            pass
         input_thread = threading.Thread(target=self.input_panel.editor._input_worker, daemon=True)
         input_thread.start()
 
@@ -983,6 +1046,11 @@ class EggDisplayApp:
                     await asyncio.sleep(0)
                 except Exception:
                     pass
+            # Stop editor input loop
+            try:
+                self.input_panel.editor.running = False
+            except Exception:
+                pass
 
 
 async def run_cli():
