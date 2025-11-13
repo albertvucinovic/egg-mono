@@ -12,6 +12,8 @@ Features:
 """
 
 from typing import List, Optional, Callable, Dict, Any
+import shutil
+import textwrap
 from rich.live import Live
 from rich.text import Text
 from rich.console import Console, Group
@@ -721,7 +723,7 @@ class OutputPanel:
         header_separator_style: str = "blue"
 
     def __init__(self, title: str = "Output", initial_height: int = 8, max_height: int = 20,
-                 style: Optional['OutputPanel.PanelStyle'] = None):
+                 style: Optional['OutputPanel.PanelStyle'] = None, columns_hint: int = 1):
         """
         Initialize the output panel.
         
@@ -735,6 +737,8 @@ class OutputPanel:
         self.max_height = max_height
         self.content = ""
         self.style = style or OutputPanel.PanelStyle()
+        # Hint how many equal-width columns this panel shares row with (for width estimate)
+        self.columns_hint = max(1, int(columns_hint or 1))
         
     def set_content(self, content: str) -> None:
         """Set the content to display."""
@@ -792,20 +796,34 @@ class OutputPanel:
         
         # Show only the last lines that fit
         if self.content:
-            all_lines = self.content.split('\n')
-            
-            if len(all_lines) <= available_content_lines:
-                # All lines fit, show everything
-                for line in all_lines:
-                    content_text.append(line + "\n")
+            # Estimate available width per column to compute wrapped display lines
+            term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+            # subtract a few chars for panel borders/padding
+            approx_width = max(10, term_cols // self.columns_hint - 6)
+            # Build display lines accounting for wrapping
+            display_lines: List[str] = []
+            for line in self.content.split('\n'):
+                if line == "":
+                    display_lines.append("")
+                    continue
+                wrapped = textwrap.wrap(
+                    line,
+                    width=approx_width,
+                    replace_whitespace=False,
+                    drop_whitespace=False,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+                display_lines.extend(wrapped if wrapped else [""])
+            # Now render only the tail that fits
+            if len(display_lines) <= available_content_lines:
+                for dl in display_lines:
+                    content_text.append(dl + "\n")
             else:
-                # Show only the last 'available_content_lines' lines
-                start_index = len(all_lines) - available_content_lines
-                for i in range(start_index, len(all_lines)):
-                    content_text.append(all_lines[i] + "\n")
-                
-                # Show scroll indicator
-                hidden_lines = len(all_lines) - available_content_lines
+                start_index = len(display_lines) - available_content_lines
+                for dl in display_lines[start_index:]:
+                    content_text.append(dl + "\n")
+                hidden_lines = len(display_lines) - available_content_lines
                 content_text.append(f"[dim]... {hidden_lines} lines above[/dim]")
         else:
             content_text.append("[dim]No content[/dim]")
