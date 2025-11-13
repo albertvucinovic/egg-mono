@@ -9,6 +9,9 @@ from typing import Any, Dict, List, Optional
 
 from rich.console import Console, Group
 from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
+from rich.markdown import Markdown
 
 # Local development: add sibling libraries to sys.path
 import sys as _sys
@@ -146,6 +149,8 @@ class EggDisplayApp:
             self._system_log = []
         # Input behavior: default to Enter sends (toggle with /enterMode)
         self.enter_sends: bool = True
+        # Track last printed event sequence per thread for console output
+        self._last_printed_seq_by_thread: Dict[str, int] = {}
 
     # ---------------- Scheduler & thread helpers ----------------
     def _thread_root_id(self, tid: str) -> str:
@@ -325,6 +330,135 @@ class EggDisplayApp:
         if not hasattr(self, '_system_log'):
             self._system_log = []
         self._system_log.append(msg)
+
+    # ---------------- Console rendering of finished messages ----------------
+    def _looks_markdown(self, content: str) -> bool:
+        if not content:
+            return False
+        indicators = ['```', '# ', '## ', '### ', '* ', '- ', '> ', '`']
+        hits = sum(1 for i in indicators if i in content)
+        if hits >= 2:
+            return True
+        if content.count('\n') >= 2 and hits >= 1:
+            return True
+        return False
+
+    def _console_print_message(self, m: Dict[str, Any]) -> None:
+        role = m.get('role')
+        content = (m.get('content') or '').strip()
+        model_key = (m.get('model_key') or '').strip()
+
+        def _panel(renderable, title: str, border: str):
+            try:
+                self.console.print(Panel(renderable, title=title, border_style=border))
+            except Exception:
+                # Fallback to plain text if Panel fails for any reason
+                self.console.print(f"[{border}]{title}[/] {getattr(renderable, 'plain', str(renderable))}")
+
+        if role == 'system':
+            title = '[bold blue]System[/bold blue]'
+            if isinstance(content, str) and content.lower().startswith('llm error:'):
+                title = '[bold red]Error[/bold red]'
+                _panel(Text(content, no_wrap=False, overflow='fold', style='red'), title, 'red')
+                return
+            if model_key:
+                title += f" [dim](model: {model_key})[/dim]"
+            _panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
+            return
+
+        if role == 'user':
+            title = '[bold green]User[/bold green]'
+            if model_key:
+                title += f" [dim](model: {model_key})[/dim]"
+            _panel(Text(content, no_wrap=False, overflow='fold', style='green'), title, 'green')
+            return
+
+        if role == 'assistant':
+            title = '[bold cyan]Assistant[/bold cyan]'
+            if model_key:
+                title += f" [dim](model: {model_key})[/dim]"
+            # Prefer to show reasoning first if present
+            reas = m.get('reasoning') or m.get('reasoning_content')
+            if isinstance(reas, str) and reas.strip():
+                self.console.print(Panel(Text(reas, no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
+            if content:
+                if self._looks_markdown(content):
+                    _panel(Markdown(content), title, 'cyan')
+                else:
+                    _panel(Text(content, no_wrap=False, overflow='fold', style='cyan'), title, 'cyan')
+            # Tool-calls summary if present
+            tcs = m.get('tool_calls')
+            if isinstance(tcs, list) and tcs:
+                lines = []
+                for tc in tcs:
+                    f = (tc or {}).get('function') or {}
+                    name = f.get('name') or (tc or {}).get('name') or 'function'
+                    args = f.get('arguments') or (tc or {}).get('arguments')
+                    if isinstance(args, (dict, list)):
+                        try:
+                            args_str = json.dumps(args, ensure_ascii=False)
+                        except Exception:
+                            args_str = str(args)
+                    else:
+                        args_str = str(args or '')
+                    lines.append(f"{name}({args_str})")
+                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold'), title='Tool Calls', border_style='yellow'))
+            # Streamed-only metadata if present in snapshot (optional)
+            tstream = m.get('tool_stream') or {}
+            if isinstance(tstream, dict) and tstream:
+                for nm, txt in tstream.items():
+                    if txt:
+                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Output: {nm}', border_style='yellow'))
+            tc_stream = m.get('tool_calls_stream') or {}
+            if isinstance(tc_stream, dict) and tc_stream:
+                for nm, txt in tc_stream.items():
+                    if txt:
+                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Call Args (streamed): {nm}', border_style='yellow'))
+            return
+
+        if role == 'tool':
+            name = m.get('name') or 'Tool'
+            title = f'[bold yellow]{name}[/bold yellow]'
+            if model_key:
+                title += f" [dim](model: {model_key})[/dim]"
+            _panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
+            return
+
+        # Fallback generic
+        title = (role or 'Message')
+        if model_key:
+            title += f" [dim](model: {model_key})[/dim]"
+        _panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
+
+    def _print_static_view_current(self, heading: Optional[str] = None) -> None:
+        # Print a static view of recent messages for the selected thread
+        tid = self.current_thread
+        try:
+            create_snapshot(self.db, tid)
+        except Exception:
+            pass
+        if heading:
+            try:
+                self.console.print(Panel(heading, border_style='blue'))
+            except Exception:
+                self.console.print(heading)
+        msgs = _snapshot_messages(self.db, tid)
+        if not msgs:
+            self.console.print(Panel('[dim]No messages yet[/dim]', border_style='blue'))
+        else:
+            for m in msgs[-50:]:
+                if isinstance(m, dict):
+                    self._console_print_message(m)
+        # Update last-printed seq to the latest message event so we don't re-print
+        try:
+            row = self.db.conn.execute(
+                "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='msg.create'",
+                (tid,)
+            ).fetchone()
+            last = int(row[0]) if row and row[0] is not None else -1
+            self._last_printed_seq_by_thread[tid] = last
+        except Exception:
+            self._last_printed_seq_by_thread[tid] = self._last_printed_seq_by_thread.get(tid, -1)
 
     # ---------------- Autocomplete support ----------------
     def _autocomplete_cb(self, line: str, row: int, col: int) -> List[str]:
@@ -688,6 +822,7 @@ class EggDisplayApp:
             self.current_thread = new_root
             asyncio.get_running_loop().create_task(self._start_watching_current())
             self._log_system(f"Created new root thread: {new_root[-8:]}")
+            self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
         elif cmd == 'spawn':
             def _latest_model_for_thread(tid: str) -> Optional[str]:
                 try:
@@ -732,6 +867,7 @@ class EggDisplayApp:
                 self.current_thread = candidates[0]
                 asyncio.get_running_loop().create_task(self._start_watching_current())
                 self._log_system(f"Switched to child: {self.current_thread[-8:]}")
+                self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
             else:
                 self._log_system('No matching child.')
         elif cmd == 'parent':
@@ -740,6 +876,7 @@ class EggDisplayApp:
                 self.current_thread = pid
                 asyncio.get_running_loop().create_task(self._start_watching_current())
                 self._log_system('Moved to parent thread')
+                self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
             else:
                 self._log_system('Already at root or no parent found.')
         elif cmd == 'threads':
@@ -778,6 +915,7 @@ class EggDisplayApp:
                     self.current_thread = new_tid
                     asyncio.get_running_loop().create_task(self._start_watching_current())
                     self._log_system(f"Switched to thread: {new_tid[-8:]}")
+                    self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
         elif cmd == 'delete':
             selector = (arg or '').strip()
             if not selector:
@@ -951,6 +1089,24 @@ class EggDisplayApp:
                     create_snapshot(self.db, self.current_thread)
                 except Exception:
                     pass
+                # Print any new messages to console (above live panel)
+                try:
+                    last_printed = self._last_printed_seq_by_thread.get(self.current_thread, -1)
+                    cur = self.db.conn.execute(
+                        "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND event_seq>? AND type='msg.create' ORDER BY event_seq ASC",
+                        (self.current_thread, last_printed)
+                    )
+                    rows = cur.fetchall()
+                    for ev_seq, pj in rows:
+                        try:
+                            m = json.loads(pj) if isinstance(pj, str) else (pj or {})
+                            if isinstance(m, dict):
+                                self._console_print_message(m)
+                            self._last_printed_seq_by_thread[self.current_thread] = ev_seq
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             # Update panels after each batch
             self._update_panels()
 
@@ -1004,7 +1160,9 @@ class EggDisplayApp:
         await self._start_watching_current()
 
         self.console.print("[bold blue]Egg Chat (eggdisplay UI)[/bold blue]")
-        self.console.print("Press Ctrl+D to send, Ctrl+C to quit. Type /help for commands.\n")
+        self.console.print("Press Enter or Ctrl+D to send (configurable). Ctrl+C to quit. Type /help for commands.\n")
+        # Print initial static view to console so history is visible above live panels
+        self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
 
         # Start input worker thread (readchar -> queue)
         import threading
