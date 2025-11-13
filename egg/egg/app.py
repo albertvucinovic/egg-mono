@@ -204,10 +204,20 @@ class EggDisplayApp:
             streaming = False
         label = th.name if th and th.name else ''
         id_short = tid[-8:]
-        sflag = 'STREAMING ' if streaming else ''
-        cur_tag = '[CUR] ' if tid == self.current_thread else ''
-        sched_tag = '[SCHED] ' if self._thread_root_id(tid) in self.active_schedulers else ''
-        return f"{cur_tag}{sched_tag}{sflag}{id_short} {status} - {recap} [model:{mk}]" + (f"  {label}" if label else '')
+        sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
+        cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == self.current_thread else ''
+        sched_tag = '[bold cyan][SCHED][/bold cyan] ' if self._thread_root_id(tid) in self.active_schedulers else ''
+        # Color status
+        if status == 'active':
+            status_tag = f"[bold green]{status}[/]"
+        elif status == 'paused':
+            status_tag = f"[bold red]{status}[/]"
+        else:
+            status_tag = f"[bold]{status}[/]"
+        return (
+            f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap} "
+            f"[dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
+        )
 
     def _format_tree(self, root_tid: Optional[str] = None) -> str:
         def _render_tree(tid: str, prefix: str = '', is_last: bool = True, out: Optional[List[str]] = None):
@@ -463,7 +473,8 @@ class EggDisplayApp:
 
     def _console_print_block(self, title: str, text: str, border_style: str = 'blue') -> None:
         try:
-            self.console.print(Panel(Text(text, no_wrap=False, overflow='fold'), title=title, border_style=border_style))
+            # Parse rich markup within the text for colored segments
+            self.console.print(Panel(Text.from_markup(text), title=title, border_style=border_style))
         except Exception:
             # Fallback plain
             self.console.print(f"{title}\n{text}")
