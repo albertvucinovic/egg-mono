@@ -460,49 +460,81 @@ class EggDisplayApp:
         except Exception:
             self._last_printed_seq_by_thread[tid] = self._last_printed_seq_by_thread.get(tid, -1)
 
+    def _console_print_block(self, title: str, text: str, border_style: str = 'blue') -> None:
+        try:
+            self.console.print(Panel(Text(text, no_wrap=False, overflow='fold'), title=title, border_style=border_style))
+        except Exception:
+            # Fallback plain
+            self.console.print(f"{title}\n{text}")
+
     # ---------------- Autocomplete support ----------------
     def _autocomplete_cb(self, line: str, row: int, col: int) -> List[str]:
         import re, os
-        # Determine current token
+        # Determine current token (last word before cursor in the whole line)
         prefix = line[:col]
         m = re.search(r"([\w\-.:/~]+)$", prefix)
-        token = m.group(1) if m else ""
+        token_line = m.group(1) if m else ""
 
-        # Helper to convert full suggestion -> remainder to insert
-        def remainders(candidates: List[str]) -> List[str]:
-            out: List[str] = []
-            for c in candidates:
-                if not isinstance(c, str):
-                    continue
-                if token and c.startswith(token):
-                    out.append(c[len(token):])
-                elif not token and c:
-                    out.append(c)
-            # Deduplicate while preserving order
+        # Helper: convert full suggestions into eggdisplay items {'display','insert'}.
+        def mk_items(candidates: List[str], base_token: str) -> List[Dict[str, str]]:
+            items: List[Dict[str, str]] = []
             seen = set()
-            uniq: List[str] = []
-            for s in out:
-                if s not in seen and s != "":
-                    seen.add(s)
-                    uniq.append(s)
-            return uniq[:50]
+            for c in candidates:
+                if not isinstance(c, str) or c == "":
+                    continue
+                # Default insertion is suffix beyond the typed token when it is a prefix; otherwise empty to avoid surprising inserts
+                if base_token and c.lower().startswith(base_token.lower()):
+                    ins = c[len(base_token):]
+                    replace_n = 0
+                elif not base_token:
+                    # Nothing typed for token -> insert full candidate
+                    ins = c
+                    replace_n = 0
+                else:
+                    # Containment match: replace the token with the full candidate
+                    ins = c
+                    replace_n = len(base_token)
+                key = (c, ins)
+                if ins == "" and base_token:
+                    # When we can't compute a simple suffix, still present the display, insert empty so Tab-accept won't add text
+                    replace_n = len(base_token)
+                if key in seen:
+                    continue
+                seen.add(key)
+                item = {"display": c, "insert": ins}
+                if replace_n:
+                    item["replace"] = replace_n
+                items.append(item)
+            return items[:50]
 
         # Command-level autocomplete for first token
         if prefix.startswith('/'):
-            parts = prefix.split()
-            cmd_token = parts[0]
+            # Command mode: split once to separate command and everything after it
+            sp = prefix.find(' ')
+            if sp == -1:
+                # Completing the command name itself
+                cmd_prefix = prefix
+                cmds = [
+                    '/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/quit'
+                ]
+                return mk_items([c for c in cmds if c.startswith(cmd_prefix)], cmd_prefix)
+
+            cmd_token = prefix[:sp]
+            sub = prefix[sp+1:]  # raw argument text so far (may be empty)
+            # Current argument fragment (last word in sub)
+            mm = re.search(r"([\w\-.:/~]+)$", sub)
+            arg_token = mm.group(1) if mm else ""
             # All commands
-            cmds = [
-                '/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/quit'
-            ]
-            # If in the command word
-            if ' ' not in cmd_token:
-                return remainders([c for c in cmds if c.startswith(cmd_token)])
             # Sub-argument suggestions
             # '/model <key>'
             if cmd_token == '/model':
-                sub = prefix[len('/model'):].lstrip()
-                return remainders(self._model_suggestions(sub))
+                # Get broad list from model completer/registry
+                cands = self._model_suggestions(sub)
+                # Filter by case-insensitive containment of the current arg token if present
+                atok = (arg_token or '').strip().lower()
+                if atok:
+                    cands = [c for c in cands if atok in c.lower()]
+                return mk_items(cands, arg_token)
             # '/updateAllModels <provider>'
             if cmd_token == '/updateAllModels':
                 provs: List[str] = []
@@ -511,16 +543,43 @@ class EggDisplayApp:
                         provs = sorted(self.llm_client.get_providers() or [])
                 except Exception:
                     provs = []
-                return remainders([p for p in provs if p])
-            # '/thread <selector>' and '/delete <selector>'
-            if cmd_token in ('/thread', '/delete'):
+                return mk_items([p for p in provs if p], arg_token)
+            # '/thread <selector>' rich suggestions: match id, name, or short_recap (case-insensitive)
+            if cmd_token == '/thread':
+                try:
+                    rows = list_threads(self.db)
+                except Exception:
+                    rows = []
+                atok = (arg_token or '').strip().lower()
+                # Sort newest-first by created_at if present
+                try:
+                    rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
+                except Exception:
+                    pass
+                items: List[Dict[str, str]] = []
+                for r in rows:
+                    tid = r.thread_id
+                    name = (r.name or '') if hasattr(r, 'name') and r.name else ''
+                    recap = (r.short_recap or '') if hasattr(r, 'short_recap') and r.short_recap else ''
+                    if atok:
+                        hay = f"{tid} {name} {recap}".lower()
+                        if atok not in hay:
+                            continue
+                    disp = self._format_thread_line(tid)
+                    # Replace current token with full id on accept
+                    rep = len(arg_token)
+                    items.append({"display": disp, "insert": tid, "replace": rep})
+                    if len(items) >= 50:
+                        break
+                return items
+            # '/delete <selector>' basic id suggestions
+            if cmd_token == '/delete':
                 try:
                     rows = list_threads(self.db)
                 except Exception:
                     rows = []
                 ids = [r.thread_id for r in rows]
-                # Also allow suffix matches by completing to full id
-                return remainders(ids)
+                return mk_items(ids, arg_token)
             # '/child <pattern>'
             if cmd_token == '/child':
                 try:
@@ -528,22 +587,22 @@ class EggDisplayApp:
                 except Exception:
                     rows = []
                 ids = [r[0] if isinstance(r, (list, tuple)) else r.thread_id for r in rows]
-                return remainders(ids)
+                return mk_items(ids, arg_token)
             # '/spawn ' -> prefer filesystem suggestions
             if cmd_token == '/spawn':
-                return remainders(self._fs_suggestions(token))
+                return mk_items(self._fs_suggestions(arg_token), arg_token)
             # '/new ' -> no specific suggestions
             return []
 
         # Non-command: prefer filesystem suggestions for current token
-        fs = self._fs_suggestions(token)
+        fs = self._fs_suggestions(token_line)
         if fs:
-            return remainders(fs)
+            return mk_items(fs, token_line)
 
         # If no filesystem matches, propose conversation words
-        conv = self._conversation_suggestions(token)
+        conv = self._conversation_suggestions(token_line)
         if conv:
-            return remainders(conv)
+            return mk_items(conv, token_line)
         return []
 
     def _fs_suggestions(self, token: str) -> List[str]:
@@ -650,7 +709,8 @@ class EggDisplayApp:
                 if s not in seen:
                     seen.add(s)
                     uniq.append(s)
-            return uniq[:50]
+            # Do not pre-filter; return raw list for caller to fuzzy filter
+            return uniq[:200]
         except Exception:
             pass
 
@@ -658,7 +718,7 @@ class EggDisplayApp:
         try:
             prefix = sub or ''
             if prefix.lower().startswith('all:'):
-                return llm.catalog.get_all_models_suggestions(prefix)[:50]
+                return llm.catalog.get_all_models_suggestions(prefix)[:200]
         except Exception:
             pass
 
@@ -702,7 +762,7 @@ class EggDisplayApp:
                     pass
         except Exception:
             pass
-        return out[:50]
+        return out[:200]
 
     # ---------------- Input and commands ----------------
     def _handle_key(self, key: str) -> bool:
@@ -854,7 +914,9 @@ class EggDisplayApp:
             if not sub:
                 self._log_system('No subthreads.')
             else:
-                self._log_system('Subtree:\n' + self._format_tree(self.current_thread))
+                block = self._format_tree(self.current_thread)
+                self._log_system('Subtree (see console for full):')
+                self._console_print_block('Subtree', block, border_style='blue')
         elif cmd == 'child':
             patt = (arg or '').lower()
             rows = list_children_with_meta(self.db, self.current_thread)
@@ -882,7 +944,8 @@ class EggDisplayApp:
         elif cmd == 'threads':
             try:
                 text = self._format_tree()
-                self._log_system('Threads by subtree:\n' + text)
+                self._log_system('Threads by subtree (see console for full).')
+                self._console_print_block('Threads', text, border_style='blue')
             except Exception as e:
                 self._log_system(f"Error listing threads: {e}")
         elif cmd == 'thread':
@@ -995,7 +1058,9 @@ class EggDisplayApp:
                 for rid in self.active_schedulers.keys():
                     out.append(f"- root {rid[-8:]}")
                     out.append(self._format_tree(rid))
-                self._log_system("Active SubtreeSchedulers:\n" + "\n".join(out))
+                block = "\n".join(out)
+                self._log_system("Active SubtreeSchedulers (see console for full).")
+                self._console_print_block('Schedulers', block, border_style='cyan')
         elif cmd == 'enterMode':
             mode = (arg or '').strip().lower()
             if mode in ('send', 's', 'on'):
