@@ -291,11 +291,16 @@ class TextEditor:
                 completions.append({"display": disp, "insert": ins})
         # If single suggestion, insert immediately
         if len(completions) == 1:
-            ins = completions[0].get("insert", "")
-            if ins:
-                self.insert_text(ins)
-                self._trigger_event('autocomplete', ins, self.cursor.row, self.cursor.col)
-            return True
+            # Reuse accept logic so optional 'replace' is honored
+            self._completion_items = completions
+            self._completion_index = 0
+            self._completion_active = True
+            accepted = self.accept_completion()
+            # Ensure popup is closed
+            self._completion_active = False
+            self._completion_items = []
+            self._completion_index = 0
+            return accepted
         # If multiple, open selection UI
         if len(completions) > 1:
             self._completion_items = completions[:10]  # show top 10
@@ -317,14 +322,19 @@ class TextEditor:
         if isinstance(item, dict):
             replace_n = int(item.get("replace", item.get("replace_chars", 0)) or 0)
         if replace_n > 0:
-            # Delete replace_n characters before cursor position on the current line
+            # Delete replace_n characters of the last token before cursor, ignoring trailing whitespace
             line = self.lines[self.cursor.row]
-            n = min(replace_n, self.cursor.col)
+            col = self.cursor.col
+            # Find end of token ignoring trailing spaces
+            i = col
+            while i > 0 and line[i - 1].isspace():
+                i -= 1
+            n = min(replace_n, i)
             if n > 0:
-                before = line[: self.cursor.col - n]
-                after = line[self.cursor.col :]
+                before = line[: i - n]
+                after = line[i:]
                 self.lines[self.cursor.row] = before + after
-                self.cursor.col -= n
+                self.cursor.col = i - n
         if ins:
             self.insert_text(ins)
             self._trigger_event('autocomplete', ins, self.cursor.row, self.cursor.col)
