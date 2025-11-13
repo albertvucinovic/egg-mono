@@ -69,6 +69,11 @@ class TextEditor:
         self._live: Optional[Live] = None
         self._running = False
         self._console = Console()
+        # Autocomplete UI state
+        # Each item: {"display": str, "insert": str}
+        self._completion_items: List[Dict[str, str]] = []
+        self._completion_index: int = 0
+        self._completion_active: bool = False
         
         # Ensure cursor is within bounds
         self._clamp_cursor()
@@ -190,6 +195,24 @@ class TextEditor:
         """
         self._trigger_event('key_press', key, self.cursor.row, self.cursor.col)
         
+        # When completion is active, handle navigation keys first
+        if self._completion_active and key in ("up", "down", "escape", "enter"):
+            if key == "up":
+                if self._completion_items:
+                    self._completion_index = (self._completion_index - 1) % len(self._completion_items)
+                return True
+            if key == "down":
+                if self._completion_items:
+                    self._completion_index = (self._completion_index + 1) % len(self._completion_items)
+                return True
+            if key == "escape":
+                self._completion_active = False
+                self._completion_items = []
+                self._completion_index = 0
+                return True
+            if key == "enter":
+                return self.accept_completion()
+
         if key == "up":
             self.move_cursor(-1, 0)
             return True
@@ -233,16 +256,81 @@ class TextEditor:
     
     def _handle_tab(self) -> bool:
         """Handle Tab key for autocomplete."""
-        if self.autocomplete_callback:
-            current_line = self.lines[self.cursor.row]
-            completions = self.autocomplete_callback(current_line, self.cursor.row, self.cursor.col)
-            if completions:
-                # Use the first completion for now
-                completion = completions[0]
-                self.insert_text(completion)
-                self._trigger_event('autocomplete', completion, self.cursor.row, self.cursor.col)
-                return True
+        if not self.autocomplete_callback:
+            return False
+
+        current_line = self.lines[self.cursor.row]
+        # If already active, accept currently selected completion
+        if self._completion_active and self._completion_items:
+            return self.accept_completion()
+
+        # Not active -> fetch suggestions
+        raw = self.autocomplete_callback(current_line, self.cursor.row, self.cursor.col) or []
+        # Normalize to list of {display,insert}
+        completions: List[Dict[str, str]] = []
+        for c in raw:
+            if isinstance(c, str):
+                completions.append({"display": c, "insert": c})
+            elif isinstance(c, dict):
+                disp = str(c.get("display", c.get("insert", "")))
+                ins = str(c.get("insert", ""))
+                item = {"display": disp, "insert": ins}
+                # Preserve optional replace count for token replacement behavior
+                if "replace" in c or "replace_chars" in c:
+                    try:
+                        item["replace"] = int(c.get("replace", c.get("replace_chars", 0)) or 0)
+                    except Exception:
+                        item["replace"] = 0
+                if disp or ins or item.get("replace", 0):
+                    completions.append(item)
+            elif isinstance(c, (list, tuple)) and len(c) >= 2:
+                disp = str(c[0])
+                ins = str(c[1])
+                completions.append({"display": disp, "insert": ins})
+        # If single suggestion, insert immediately
+        if len(completions) == 1:
+            ins = completions[0].get("insert", "")
+            if ins:
+                self.insert_text(ins)
+                self._trigger_event('autocomplete', ins, self.cursor.row, self.cursor.col)
+            return True
+        # If multiple, open selection UI
+        if len(completions) > 1:
+            self._completion_items = completions[:10]  # show top 10
+            self._completion_index = 0
+            self._completion_active = True
+            # Fire autocomplete event with no insertion
+            self._trigger_event('autocomplete', '', self.cursor.row, self.cursor.col)
+            return True
         return False
+
+    def accept_completion(self) -> bool:
+        """Accept the currently highlighted completion (if active)."""
+        if not (self._completion_active and self._completion_items):
+            return False
+        item = self._completion_items[self._completion_index]
+        ins = item.get("insert", "") if isinstance(item, dict) else ""
+        # Optional: number of characters to replace (delete) before cursor
+        replace_n = 0
+        if isinstance(item, dict):
+            replace_n = int(item.get("replace", item.get("replace_chars", 0)) or 0)
+        if replace_n > 0:
+            # Delete replace_n characters before cursor position on the current line
+            line = self.lines[self.cursor.row]
+            n = min(replace_n, self.cursor.col)
+            if n > 0:
+                before = line[: self.cursor.col - n]
+                after = line[self.cursor.col :]
+                self.lines[self.cursor.row] = before + after
+                self.cursor.col -= n
+        if ins:
+            self.insert_text(ins)
+            self._trigger_event('autocomplete', ins, self.cursor.row, self.cursor.col)
+        # Clear completion state after accept
+        self._completion_active = False
+        self._completion_items = []
+        self._completion_index = 0
+        return True
     
     def get_text(self) -> str:
         """Get the current text content."""
@@ -290,7 +378,7 @@ class TextEditor:
         
         # Add footer with instructions
         text.append("-" * min(60, self.width) + "\n", style="dim")
-        text.append("Ctrl+C to exit | Tab for autocomplete | Arrows to navigate", style="dim")
+        text.append("Ctrl+C to exit | Tab: suggest/accept | Up/Down: navigate | Esc: cancel", style="dim")
         
         return text
     
@@ -796,7 +884,16 @@ class InputPanel:
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on editor content."""
         editor_lines = len(self.editor.editor.lines)
-        target_height = max(6, min(self.max_height, editor_lines + 4))
+        # Account for autocomplete popup height when active
+        extra = 0
+        try:
+            if getattr(self.editor.editor, "_completion_active", False):
+                items = getattr(self.editor.editor, "_completion_items", []) or []
+                if items:
+                    extra = min(1 + len(items[:10]), 12)  # 1 title + up to 10 items
+        except Exception:
+            extra = 0
+        target_height = max(6, min(self.max_height, editor_lines + 4 + extra))
         if self.current_height < target_height:
             self.current_height = min(target_height, self.current_height + 0.3)
         elif self.current_height > target_height:
@@ -839,12 +936,24 @@ class InputPanel:
             sep = self.style.header_separator_char * 70
             editor_content.append(sep + "\n", style=self.style.header_separator_style)
             header_lines = 2
-        
-        # Panel height includes content + status line (and optional header)
-        available_content_lines = height - (1 + header_lines)
+
+        # Check autocomplete popup and reserve space for it
+        try:
+            ed = self.editor.editor
+            comp_active = bool(getattr(ed, "_completion_active", False))
+            comp_items = list(getattr(ed, "_completion_items", []) or [])
+            comp_index = int(getattr(ed, "_completion_index", 0))
+        except Exception:
+            comp_active, comp_items, comp_index = False, [], 0
+        suggestion_lines = 0
+        if comp_active and comp_items:
+            suggestion_lines = 1 + min(10, len(comp_items))  # title + items
+
+        # Panel height includes content + suggestions + status line (and optional header)
+        available_content_lines = height - (1 + header_lines + suggestion_lines)
         
         # Calculate viewport
-        viewport_size = available_content_lines
+        viewport_size = max(1, available_content_lines)
         viewport_start = max(0, cursor_row - viewport_size // 2)
         viewport_end = min(len(lines), viewport_start + viewport_size)
         
@@ -873,18 +982,27 @@ class InputPanel:
                 
                 editor_content.append("\n")
         
-        # Fill empty space
+        # Fill empty space (leave room for suggestions block and status line)
         lines_shown = viewport_end - viewport_start
         empty_lines_needed = int(available_content_lines - lines_shown)
         for _ in range(empty_lines_needed):
             editor_content.append("\n")
         
+        if comp_active and comp_items:
+            editor_content.append("Suggestions:\n", style="bold cyan")
+            for i, item in enumerate(comp_items[:10]):
+                # Support dict form {display, insert}
+                disp = item.get("display", str(item)) if isinstance(item, dict) else str(item)
+                marker = "> " if i == comp_index else "  "
+                style = "black on white" if i == comp_index else ""
+                editor_content.append(f"{marker}{disp}\n", style=style)
+
         # Status line
         total_lines = len(lines)
         showing_range = f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > available_content_lines else f"{total_lines}"
         
         editor_content.append(
-            f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Ctrl+D to send",
+            f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send",
             style=self.style.status_style
         )
         
