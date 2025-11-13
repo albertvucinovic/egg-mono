@@ -329,40 +329,16 @@ class ThreadRunner:
                             await asyncio.sleep(0)
                         elif evt.get("type") == "done":  # end of provider stream call
                             final = evt.get("message") or {}
-                            # If provider only supplied final content at done, emit content in small chunks for visible streaming
-                            try:
-                                if not saw_content_delta:
-                                    fc = final.get("content")
-                                    if isinstance(fc, str) and fc:
-                                        chunks = [fc[i:i+40] for i in range(0, len(fc), 40)]
-                                        for ch in chunks:
-                                            chunk_seq += 1
-                                            ok = self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec))
-                                            if not ok:
-                                                stop_flag = True
-                                                break
-                                            self.db.append_event(event_id=os.urandom(10).hex(), thread_id=self.thread_id, type_="stream.delta",
-                                                                 invoke_id=invoke_id, chunk_seq=chunk_seq, payload={"text": ch, "model_key": current_model})
-                                        await asyncio.sleep(0.02)
-                            except Exception:
-                                pass
-                            # If provider never streamed reasoning but final contains it, stream that too
-                            try:
-                                if not saw_reason_delta:
-                                    fr = final.get("reasoning") or final.get("reason")
-                                    if isinstance(fr, str) and fr:
-                                        chunks = [fr[i:i+60] for i in range(0, len(fr), 60)]
-                                        for ch in chunks:
-                                            chunk_seq += 1
-                                            ok = self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec))
-                                            if not ok:
-                                                stop_flag = True
-                                                break
-                                            self.db.append_event(event_id=os.urandom(10).hex(), thread_id=self.thread_id, type_="stream.delta",
-                                                                 invoke_id=invoke_id, chunk_seq=chunk_seq, payload={"reason": ch, "model_key": current_model})
-                                        await asyncio.sleep(0.02)
-                            except Exception:
-                                pass
+                            # If provider only supplied final content at done, and we saw no deltas,
+                            # do NOT simulate streaming. Record content/reasoning for the final assistant message.
+                            if not saw_content_delta:
+                                fc = final.get("content")
+                                if isinstance(fc, str) and fc:
+                                    assistant_text_parts = [fc]
+                            if not saw_reason_delta:
+                                fr = final.get("reasoning") or final.get("reason")
+                                if isinstance(fr, str) and fr:
+                                    reasoning_parts = [fr]
                             # Handle tool calls if present (exclusive mode under same lease). First, stream final tool-call arguments if we haven't already.
                             tcs = final.get("tool_calls") or []
                             had_tools = bool(tcs)
