@@ -125,8 +125,9 @@ class EggDisplayApp:
         self._start_scheduler(self.current_thread)
 
         # Panels
-        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28)
-        self.system_output = OutputPanel(title="System", initial_height=8, max_height=16)
+        # columns_hint=2 because chat/system panels are side-by-side
+        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=2)
+        self.system_output = OutputPanel(title="System", initial_height=8, max_height=16, columns_hint=2)
         # Input panel with simple filesystem autocomplete
         # Advanced autocomplete (commands, models, threads, files, conversation words)
         io_mode = os.environ.get("EGG_IO_MODE", "threaded").strip().lower()
@@ -572,14 +573,32 @@ class EggDisplayApp:
                     if len(items) >= 50:
                         break
                 return items
-            # '/delete <selector>' basic id suggestions
+            # '/delete <selector>' rich suggestions: match id, name, or short_recap
             if cmd_token == '/delete':
                 try:
                     rows = list_threads(self.db)
                 except Exception:
                     rows = []
-                ids = [r.thread_id for r in rows]
-                return mk_items(ids, arg_token)
+                atok = (arg_token or '').strip().lower()
+                try:
+                    rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
+                except Exception:
+                    pass
+                items: List[Dict[str, str]] = []
+                for r in rows:
+                    tid = r.thread_id
+                    name = (r.name or '') if hasattr(r, 'name') and r.name else ''
+                    recap = (r.short_recap or '') if hasattr(r, 'short_recap') and r.short_recap else ''
+                    if atok:
+                        hay = f"{tid} {name} {recap}".lower()
+                        if atok not in hay:
+                            continue
+                    disp = self._format_thread_line(tid)
+                    rep = len(arg_token)
+                    items.append({"display": disp, "insert": tid, "replace": rep})
+                    if len(items) >= 50:
+                        break
+                return items
             # '/child <pattern>'
             if cmd_token == '/child':
                 try:
