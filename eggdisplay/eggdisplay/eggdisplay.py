@@ -126,6 +126,11 @@ class TextEditor:
         """Insert text at current cursor position."""
         if not text:
             return
+        # Dismiss any active autocomplete when editing text
+        if self._completion_active:
+            self._completion_active = False
+            self._completion_items = []
+            self._completion_index = 0
             
         current_line = self.lines[self.cursor.row]
         new_line = current_line[:self.cursor.col] + text + current_line[self.cursor.col:]
@@ -137,6 +142,10 @@ class TextEditor:
         """Delete character at cursor position."""
         current_line = self.lines[self.cursor.row]
         if self.cursor.col < len(current_line):
+            if self._completion_active:
+                self._completion_active = False
+                self._completion_items = []
+                self._completion_index = 0
             deleted_char = current_line[self.cursor.col]
             new_line = current_line[:self.cursor.col] + current_line[self.cursor.col + 1:]
             self.lines[self.cursor.row] = new_line
@@ -150,6 +159,10 @@ class TextEditor:
             new_line = current_line[:self.cursor.col - 1] + current_line[self.cursor.col:]
             self.lines[self.cursor.row] = new_line
             self.cursor.col -= 1
+            if self._completion_active:
+                self._completion_active = False
+                self._completion_items = []
+                self._completion_index = 0
             self._trigger_event('text_change', 'backspace', self.cursor.row, self.cursor.col, deleted_char)
         elif self.cursor.row > 0:
             # Merge with previous line
@@ -159,10 +172,18 @@ class TextEditor:
             self.lines.pop(self.cursor.row)
             self.cursor.row -= 1
             self.cursor.col = len(prev_line)
+            if self._completion_active:
+                self._completion_active = False
+                self._completion_items = []
+                self._completion_index = 0
             self._trigger_event('text_change', 'backspace_merge', self.cursor.row, self.cursor.col)
     
     def insert_newline(self) -> None:
         """Insert a newline at cursor position."""
+        if self._completion_active:
+            self._completion_active = False
+            self._completion_items = []
+            self._completion_index = 0
         current_line = self.lines[self.cursor.row]
         before_cursor = current_line[:self.cursor.col]
         after_cursor = current_line[self.cursor.col:]
@@ -320,7 +341,10 @@ class TextEditor:
         # Optional: number of characters to replace (delete) before cursor
         replace_n = 0
         if isinstance(item, dict):
-            replace_n = int(item.get("replace", item.get("replace_chars", 0)) or 0)
+            try:
+                replace_n = int(item.get("replace", item.get("replace_chars", 0)) or 0)
+            except Exception:
+                replace_n = 0
         if replace_n > 0:
             # Delete replace_n characters of the last token before cursor, ignoring trailing whitespace
             line = self.lines[self.cursor.row]
