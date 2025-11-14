@@ -828,24 +828,26 @@ class OutputPanel:
         self.content = content
         
     def calculate_height(self) -> int:
-        """Calculate the optimal panel height based on content."""
+        """Calculate the optimal panel height based on content.
+
+        For chat-style UIs we prefer snappy resizing rather than
+        line-by-line animation, especially when content arrives
+        in large chunks (e.g. initial system prompt or when
+        autocomplete suggestions appear/disappear).
+        """
         if not self.content:
-            return self.current_height
-            
+            return int(self.current_height)
+
         # Count lines in content
         content_lines = self.content.count('\n') + 1
-        
-        # Add space for header and padding
+
+        # Add space for header and a bit of padding
         total_lines_needed = content_lines + 3
-        
-        # Smooth animation towards target
         target_height = max(8, min(self.max_height, total_lines_needed))
-        if self.current_height < target_height:
-            self.current_height = min(target_height, self.current_height + 0.5)
-        elif self.current_height > target_height:
-            self.current_height = max(target_height, self.current_height - 0.5)
-            
-        return int(self.current_height)
+
+        # Jump directly to the target height for immediate layout updates.
+        self.current_height = float(target_height)
+        return target_height
     
     def _resolve_box(self):
         b = self.style.box
@@ -983,7 +985,12 @@ class InputPanel:
         self.style = style or InputPanel.PanelStyle()
         
     def calculate_height(self) -> int:
-        """Calculate the optimal panel height based on editor content."""
+        """Calculate the optimal panel height based on editor content.
+
+        We resize immediately to the required height so that the
+        input panel and its autocomplete popup appear/disappear
+        without a slow line-by-line animation.
+        """
         editor_lines = len(self.editor.editor.lines)
         # Account for autocomplete popup height when active
         extra = 0
@@ -995,12 +1002,8 @@ class InputPanel:
         except Exception:
             extra = 0
         target_height = max(6, min(self.max_height, editor_lines + 4 + extra))
-        if self.current_height < target_height:
-            self.current_height = min(target_height, self.current_height + 0.3)
-        elif self.current_height > target_height:
-            self.current_height = max(target_height, self.current_height - 0.3)
-            
-        return int(self.current_height)
+        self.current_height = float(target_height)
+        return target_height
     
     def get_text(self) -> str:
         """Get the current text from the editor."""
