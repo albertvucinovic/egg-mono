@@ -126,29 +126,26 @@ class TextEditor:
         """Insert text at current cursor position."""
         if not text:
             return
-        # Dismiss any active autocomplete when editing text
-        if self._completion_active:
-            self._completion_active = False
-            self._completion_items = []
-            self._completion_index = 0
-            
+        # Perform insertion first so refresh sees the updated token
         current_line = self.lines[self.cursor.row]
         new_line = current_line[:self.cursor.col] + text + current_line[self.cursor.col:]
         self.lines[self.cursor.row] = new_line
         self.cursor.col += len(text)
+        # Live-refresh suggestions if popup is active
+        if self._completion_active:
+            self._refresh_completion()
         self._trigger_event('text_change', 'insert', self.cursor.row, self.cursor.col - len(text), text)
     
     def delete_char(self) -> None:
         """Delete character at cursor position."""
         current_line = self.lines[self.cursor.row]
         if self.cursor.col < len(current_line):
-            if self._completion_active:
-                self._completion_active = False
-                self._completion_items = []
-                self._completion_index = 0
             deleted_char = current_line[self.cursor.col]
             new_line = current_line[:self.cursor.col] + current_line[self.cursor.col + 1:]
             self.lines[self.cursor.row] = new_line
+            # Refresh after the deletion so suggestions reflect the new token
+            if self._completion_active:
+                self._refresh_completion()
             self._trigger_event('text_change', 'delete', self.cursor.row, self.cursor.col, deleted_char)
     
     def backspace(self) -> None:
@@ -160,9 +157,7 @@ class TextEditor:
             self.lines[self.cursor.row] = new_line
             self.cursor.col -= 1
             if self._completion_active:
-                self._completion_active = False
-                self._completion_items = []
-                self._completion_index = 0
+                self._refresh_completion()
             self._trigger_event('text_change', 'backspace', self.cursor.row, self.cursor.col, deleted_char)
         elif self.cursor.row > 0:
             # Merge with previous line
@@ -173,13 +168,12 @@ class TextEditor:
             self.cursor.row -= 1
             self.cursor.col = len(prev_line)
             if self._completion_active:
-                self._completion_active = False
-                self._completion_items = []
-                self._completion_index = 0
+                self._refresh_completion()
             self._trigger_event('text_change', 'backspace_merge', self.cursor.row, self.cursor.col)
     
     def insert_newline(self) -> None:
         """Insert a newline at cursor position."""
+        # Newline typically ends the current token; dismiss popup if visible
         if self._completion_active:
             self._completion_active = False
             self._completion_items = []
@@ -204,6 +198,8 @@ class TextEditor:
         self._clamp_cursor()
         
         if old_row != self.cursor.row or old_col != self.cursor.col:
+            if self._completion_active:
+                self._refresh_completion()
             self._trigger_event('cursor_move', old_row, old_col, self.cursor.row, self.cursor.col)
     
     def handle_key(self, key: str) -> bool:
@@ -229,6 +225,7 @@ class TextEditor:
                     self._completion_index = (self._completion_index + 1) % len(self._completion_items)
                 return True
             if key == "escape":
+                # Dismiss the popup on Esc
                 self._completion_active = False
                 self._completion_items = []
                 self._completion_index = 0
@@ -331,6 +328,55 @@ class TextEditor:
             self._trigger_event('autocomplete', '', self.cursor.row, self.cursor.col)
             return True
         return False
+
+    def _refresh_completion(self) -> None:
+        """Refresh visible completion items based on current line/cursor.
+
+        If no suggestions are returned, dismiss the popup.
+        """
+        try:
+            if not self.autocomplete_callback:
+                self._completion_active = False
+                self._completion_items = []
+                self._completion_index = 0
+                return
+            current_line = self.lines[self.cursor.row]
+            raw = self.autocomplete_callback(current_line, self.cursor.row, self.cursor.col) or []
+            # Normalize like in _handle_tab
+            items: List[Dict[str, str]] = []
+            for c in raw:
+                if isinstance(c, str):
+                    items.append({"display": c, "insert": c})
+                elif isinstance(c, dict):
+                    disp = str(c.get("display", c.get("insert", "")))
+                    ins = str(c.get("insert", ""))
+                    it = {"display": disp, "insert": ins}
+                    if "replace" in c or "replace_chars" in c:
+                        try:
+                            it["replace"] = int(c.get("replace", c.get("replace_chars", 0)) or 0)
+                        except Exception:
+                            it["replace"] = 0
+                    if disp or ins or it.get("replace", 0):
+                        items.append(it)
+                elif isinstance(c, (list, tuple)) and len(c) >= 2:
+                    disp = str(c[0])
+                    ins = str(c[1])
+                    items.append({"display": disp, "insert": ins})
+            if items:
+                self._completion_items = items[:10]
+                if self._completion_index >= len(self._completion_items):
+                    self._completion_index = 0
+                self._completion_active = True
+            else:
+                # Dismiss when there are no results
+                self._completion_active = False
+                self._completion_items = []
+                self._completion_index = 0
+        except Exception:
+            # On any error, dismiss gracefully
+            self._completion_active = False
+            self._completion_items = []
+            self._completion_index = 0
 
     def accept_completion(self) -> bool:
         """Accept the currently highlighted completion (if active)."""
@@ -599,6 +645,9 @@ class LiveEditorBase:
             self.editor.handle_key('left')
         elif key == getattr(readchar.key, 'RIGHT', object()) or key == '\x1b[C':
             self.editor.handle_key('right')
+        elif key == '\x1b':
+            # Plain ESC key: dismiss autocomplete popup
+            self.editor.handle_key('escape')
         elif getattr(readchar.key, 'HOME', None) and key == readchar.key.HOME or key in ('\x1b[H', '\x1bOH', '\x1b[1~'):
             self.editor.handle_key('home')
         elif getattr(readchar.key, 'END', None) and key == readchar.key.END or key in ('\x1b[F', '\x1bOF', '\x1b[4~'):
