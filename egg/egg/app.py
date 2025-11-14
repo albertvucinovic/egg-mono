@@ -100,7 +100,8 @@ class EggDisplayApp:
       - HStack(ChatOutput, SystemOutput)
       - InputPanel
 
-    Use Ctrl+D to send, Ctrl+C to quit. Commands start with '/'.
+    Use Ctrl+D to send, Ctrl+E to clear input, Ctrl+C to quit.
+    Commands start with '/'.
     """
 
     def __init__(self):
@@ -329,7 +330,7 @@ class EggDisplayApp:
         self.chat_output.set_content(self._compose_chat_panel_text())
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
-            "Send: Enter | New line: Ctrl+J | Quit: Ctrl+C",
+            "Send: Enter or Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
             "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /quit",
         ]
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
@@ -483,16 +484,37 @@ class EggDisplayApp:
 
     # ---------------- Input and commands ----------------
     def _handle_key(self, key: str) -> bool:
-        # Ctrl+D sends, Ctrl+C exits
+        # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits
         try:
             import readchar  # type: ignore
             ctrl_d = getattr(readchar.key, 'CTRL_D', '\x04')
             ctrl_c = getattr(readchar.key, 'CTRL_C', '\x03')
+            ctrl_e = getattr(readchar.key, 'CTRL_E', '\x05')
             enter_key = getattr(readchar.key, 'ENTER', '\r')
         except Exception:
             ctrl_d = '\x04'
             ctrl_c = '\x03'
+            ctrl_e = '\x05'
             enter_key = '\r'
+        # Esc handling: log and forward a logical 'escape' to the editor.
+        # Some terminals send a single ESC ('\x1b'), others double ('\x1b\x1b').
+        try:
+            esc = getattr(readchar.key, 'ESC', '\x1b')  # type: ignore[name-defined]
+        except Exception:
+            esc = '\x1b'
+        esc2 = esc + esc
+        if isinstance(key, str) and (key == esc or key == esc2):
+            try:
+                self._log_system(f"Esc-like key received: {repr(key)}")
+            except Exception:
+                pass
+            try:
+                # Tell the underlying text editor that an escape key was pressed,
+                # so it can dismiss the autocomplete popup if active.
+                self.input_panel.editor.editor.handle_key('escape')
+            except Exception:
+                pass
+            return True
         # Quit
         if key == ctrl_c or key == '\x03':
             # Try to interrupt any active stream on the current thread for fast shutdown
@@ -512,6 +534,14 @@ class EggDisplayApp:
                     self._log_system(f"Submit error: {e}")
             self.input_panel.clear_text()
             self.input_panel.increment_message_count()
+            return True
+        # Clear input on Ctrl+E
+        if key == ctrl_e or key == '\x05':
+            self.input_panel.clear_text()
+            try:
+                self._log_system('Input cleared.')
+            except Exception:
+                pass
             return True
         # Enter behavior depends on mode
         if key in (enter_key, '\r', '\n'):
@@ -942,7 +972,7 @@ class EggDisplayApp:
         await self._start_watching_current()
 
         self.console.print("[bold blue]Egg Chat (eggdisplay UI)[/bold blue]")
-        self.console.print("Press Enter or Ctrl+D to send (configurable). Ctrl+C to quit. Type /help for commands.\n")
+        self.console.print("Press Enter or Ctrl+D to send (configurable). Ctrl+E clears input. Ctrl+C to quit. Type /help for commands.\n")
         # Print initial static view to console so history is visible above live panels
         self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
 
