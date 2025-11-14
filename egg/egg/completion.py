@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, List, Dict, Optional
 
 import re
 
@@ -350,3 +350,257 @@ class EggCompleter(Completer):
                 for w in self._conversation_word_matches(fragment, tid):
                     yield Completion(w, start_position=-len(fragment))
             return
+
+
+# -------- eggdisplay autocomplete adapter ------------------------------------
+def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm: Any | None) -> List[Dict[str, str]]:
+    """Return a list of autocomplete items for eggdisplay InputPanel.
+
+    Each item: {display: str, insert: str, optional replace: int}
+    - insert is the text to insert at cursor.
+    - replace (if present) deletes N characters before the cursor prior to insertion.
+    """
+    try:
+        prefix = line[:col]
+    except Exception:
+        prefix = line
+
+    def _last_token(s: str) -> str:
+        m = re.search(r"([\w\-.:/~]+)$", s)
+        return m.group(1) if m else ""
+
+    def _mk_items(cands: List[str], base: str) -> List[Dict[str, str]]:
+        items: List[Dict[str, str]] = []
+        seen = set()
+        base_l = base or ""
+        for c in cands:
+            if not isinstance(c, str) or not c:
+                continue
+            if base_l and c.lower().startswith(base_l.lower()):
+                ins = c[len(base):]
+                rep = 0
+            elif not base_l:
+                ins = c
+                rep = 0
+            else:
+                # containment match -> replace the current token with full candidate
+                ins = c
+                rep = len(base)
+            key = (c, ins, rep)
+            if key in seen:
+                continue
+            seen.add(key)
+            it: Dict[str, str] = {"display": c, "insert": ins}
+            if rep:
+                it["replace"] = str(rep)
+            items.append(it)
+        return items[:50]
+
+    def _fs_suggestions(token: str) -> List[str]:
+        import os as _os
+        if not token:
+            return []
+        expanded = _os.path.expanduser(token)
+        base_dir = expanded
+        needle = ''
+        if not _os.path.isdir(expanded):
+            base_dir = _os.path.dirname(expanded) or '.'
+            needle = _os.path.basename(expanded)
+        try:
+            entries = _os.listdir(base_dir)
+        except Exception:
+            return []
+        results: List[str] = []
+        for name in entries:
+            if needle and not name.startswith(needle):
+                continue
+            path = _os.path.join(base_dir, name)
+            suffix = '/' if _os.path.isdir(path) else ''
+            results.append(_os.path.join(base_dir, name) + suffix)
+        results.sort(key=lambda s: (0 if s.endswith('/') else 1, s))
+        return results[:50]
+
+    def _conversation_suggestions(tid: str, fragment: str) -> List[str]:
+        if not fragment:
+            return []
+        words: list[str] = []
+        try:
+            th = db.get_thread(tid)
+            if not th or not th.snapshot_json:
+                return []
+            import json as _json
+            snap = _json.loads(th.snapshot_json)
+            msgs = snap.get('messages', []) or []
+            for m in msgs[-200:]:
+                try:
+                    role = (m or {}).get('role')
+                    if role not in ('user', 'assistant', 'system', 'tool'):
+                        continue
+                    txt = (m or {}).get('content') or ''
+                    if not isinstance(txt, str) or not txt:
+                        continue
+                    for w in re.findall(r"[A-Za-z0-9_]{3,}", txt):
+                        words.append(w)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        fl = fragment.lower()
+        seen: set[str] = set()
+        out: list[str] = []
+        for w in reversed(words):
+            wl = w.lower()
+            if wl.startswith(fl) and wl not in seen:
+                seen.add(wl)
+                out.append(w)
+        return out[:50]
+
+    def _providers() -> List[str]:
+        try:
+            return sorted(llm.get_providers() or []) if llm else []
+        except Exception:
+            return []
+
+    # Commands root
+    if prefix.startswith('/'):
+        sp = prefix.find(' ')
+        if sp == -1:
+            # Complete command name
+            cmds = ['/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/quit']
+            return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
+
+        cmd = prefix[:sp]
+        sub = prefix[sp+1:]  # raw arg text
+        arg_tok = _last_token(sub)
+        # /model
+        if cmd == '/model':
+            # Use existing ModelCompleter for parity
+            items: List[str] = []
+            try:
+                mc = ModelCompleter(llm)
+                class _Doc:  # minimal document for ModelCompleter
+                    def __init__(self, t: str):
+                        self.text_before_cursor = t
+                suggestions = []
+                for c in mc.get_completions(_Doc(f"/model {sub}"), None):
+                    try:
+                        txt = getattr(c, 'text', None)
+                        if isinstance(txt, str) and txt:
+                            suggestions.append(txt)
+                    except Exception:
+                        continue
+                items = suggestions
+            except Exception:
+                items = []
+            # Contains filtering based on the current token only (not whole sub-line)
+            atok = (arg_tok or '').lower()
+            if atok:
+                items = [s for s in items if atok in s.lower()]
+            # If the user typed additional non-whitespace after the last token, treat it as part of the token
+            # e.g., '/model hi'+tab+'g' should filter to ones containing 'hig'.
+            if sub and not sub.endswith(' '):
+                # recompute token from end of sub
+                import re as _re
+                m = _re.search(r"([\w\-.:/~]+)$", sub)
+                tok2 = m.group(1) if m else arg_tok
+                if tok2 != arg_tok:
+                    items = [s for s in items if tok2.lower() in s.lower()]
+                    return _mk_items(items, tok2)
+            return _mk_items(items, arg_tok)
+
+        # /updateAllModels providers
+        if cmd == '/updateAllModels':
+            # Filter providers by current arg token (prefix preferred, then contains)
+            provs = _providers()
+            atok = (arg_tok or '').lower()
+            if atok:
+                pref = [p for p in provs if p.lower().startswith(atok)]
+                cont = [p for p in provs if atok in p.lower() and p not in pref]
+                provs = pref + cont
+            rep = len(arg_tok or '')
+            out_items: List[Dict[str, str]] = []
+            for p in provs:
+                it: Dict[str, str] = {"display": p, "insert": p}
+                if rep:
+                    it["replace"] = str(rep)
+                out_items.append(it)
+            return out_items
+
+        # /thread and /delete: rich suggestions id/name/recap
+        if cmd in ('/thread', '/delete'):
+            try:
+                rows = list_threads(db) if list_threads else []
+            except Exception:
+                rows = []
+            atok = (arg_tok or '').lower()
+            try:
+                rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
+            except Exception:
+                pass
+            tid_cur = None
+            try:
+                tid_cur = get_current_thread()
+            except Exception:
+                tid_cur = None
+            out_items: List[Dict[str, str]] = []
+            for r in rows:
+                tid = getattr(r, 'thread_id', '')
+                name = getattr(r, 'name', '') or ''
+                recap = getattr(r, 'short_recap', '') or ''
+                if atok:
+                    hay = f"{tid} {name} {recap}".lower()
+                    if atok not in hay:
+                        continue
+                # Minimal display similar to /threads
+                try:
+                    streaming = bool(db.current_open(tid))
+                except Exception:
+                    streaming = False
+                id_short = tid[-8:]
+                cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid_cur and tid == tid_cur else ''
+                sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
+                status = (db.get_thread(tid).status if db.get_thread(tid) else 'unknown')
+                if status == 'active':
+                    status_tag = f"[bold green]{status}[/]"
+                elif status == 'paused':
+                    status_tag = f"[bold red]{status}[/]"
+                else:
+                    status_tag = f"[bold]{status}[/]"
+                disp = f"{cur_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap}" + (f"  [dim]{name}[/dim]" if name else '')
+                rep = len(arg_tok)
+                out_items.append({"display": disp, "insert": tid, "replace": str(rep)})
+                if len(out_items) >= 50:
+                    break
+            return out_items
+
+        # /child pattern -> show child ids
+        if cmd == '/child':
+            try:
+                tid = get_current_thread()
+                rows = list_children_with_meta(db, tid) if list_children_with_meta else []
+            except Exception:
+                rows = []
+            ids = [(r[0] if isinstance(r, (list, tuple)) else getattr(r, 'thread_id', '')) for r in rows]
+            return _mk_items(ids, arg_tok)
+
+        # /spawn -> filesystem
+        if cmd == '/spawn':
+            return _mk_items(_fs_suggestions(arg_tok), arg_tok)
+
+        # Other commands: no specific suggestions
+        return []
+
+    # Non-command: prefer filesystem then conversation words
+    tok = _last_token(prefix)
+    fs = _fs_suggestions(tok)
+    if fs:
+        return _mk_items(fs, tok)
+    try:
+        tid = get_current_thread()
+    except Exception:
+        tid = None
+    if tid and tok:
+        conv = _conversation_suggestions(tid, tok)
+        if conv:
+            return _mk_items(conv, tok)
+    return []

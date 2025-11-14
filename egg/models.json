@@ -4,47 +4,54 @@
       "api_base": "https://api.openai.com/v1/chat/completions",
       "api_key_env": "OPENAI_API_KEY",
       "models": {
-	"GPT 5 high": {
-	  "model_name": "gpt-5",
-	  "max_tokens": 400000,
+         "GPT 5.1 high": {
+	        "model_name": "gpt-5.1",
+	        "max_tokens": 400000,
           "parameters": {
-            "reasoning_effort": "high"
-	  }
-	},
-        "GPT 5": {
-          "model_name": "gpt-5",
-          "max_tokens": 400000
-        },
-        "GPT 5 Chat": {
-          "model_name": "gpt-5-chat-latest",
-          "max_tokens": 400000
-        },
-        "GPT 5 Mini": {
-          "model_name": "gpt-5-mini",
-          "max_tokens": 400000,
-	  "parameters": {
-             "reasoning_effort": "high"
-	  }
-        },
-        "OpenAI o3-mini": {
-          "model_name": "o3-mini",
-          "max_tokens": 128000
-        },
-        "OpenAI GPT-4.1": {
-          "model_name": "gpt-4.1",
-          "max_tokens": 128000
-        },
-        "OpenAI GPT-4o": {
-          "model_name": "gpt-4o",
-          "max_tokens": 128000
-        },
-        "GPT 5 Nano": {
-          "model_name": "gpt-5-nano",
-          "max_tokens": 32000,
-	  "parameters": {
-            "reasoning_effort": "high"
-	  }
-        }
+                  "reasoning_effort": "high"
+	         }
+	       },
+	      "GPT 5 high": {
+	        "model_name": "gpt-5",
+	        "max_tokens": 400000,
+          "parameters": {
+                  "reasoning_effort": "high"
+	         }
+	       },
+         "GPT 5": {
+           "model_name": "gpt-5",
+           "max_tokens": 400000
+         },
+         "GPT 5 Chat": {
+           "model_name": "gpt-5-chat-latest",
+           "max_tokens": 400000
+         },
+         "GPT 5 Mini": {
+           "model_name": "gpt-5-mini",
+           "max_tokens": 400000,
+	          "parameters": {
+              "reasoning_effort": "high"
+	          }
+         },
+         "OpenAI o3-mini": {
+           "model_name": "o3-mini",
+           "max_tokens": 128000
+         },
+         "OpenAI GPT-4.1": {
+           "model_name": "gpt-4.1",
+           "max_tokens": 128000
+         },
+         "OpenAI GPT-4o": {
+           "model_name": "gpt-4o",
+           "max_tokens": 128000
+         },
+         "GPT 5 Nano": {
+           "model_name": "gpt-5-nano",
+           "max_tokens": 32000,
+	           "parameters": {
+               "reasoning_effort": "high"
+	            }
+         }
       }
     },
     "anthropic": {
