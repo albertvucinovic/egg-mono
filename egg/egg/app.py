@@ -509,9 +509,17 @@ class EggDisplayApp:
             except Exception:
                 pass
             try:
-                # Tell the underlying text editor that an escape key was pressed,
-                # so it can dismiss the autocomplete popup if active.
-                self.input_panel.editor.editor.handle_key('escape')
+                ed = self.input_panel.editor.editor
+                # Ask the editor to handle a logical escape first
+                ed.handle_key('escape')
+                # Then forcefully clear any active completion popup in case
+                # the terminal sent a non-standard ESC sequence.
+                if hasattr(ed, '_completion_active'):
+                    ed._completion_active = False
+                if hasattr(ed, '_completion_items'):
+                    ed._completion_items = []
+                if hasattr(ed, '_completion_index'):
+                    ed._completion_index = 0
             except Exception:
                 pass
             return True
