@@ -129,7 +129,28 @@ class EggDisplayApp:
         # Panels
         # columns_hint=2 because chat/system panels are side-by-side
         self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=2)
+        # System panel
         self.system_output = OutputPanel(title="System", initial_height=8, max_height=16, columns_hint=2)
+        # Approval panel: appears between the output panels and the input
+        # panel when an execution or output approval is pending for the
+        # current thread. Style it in yellow to stand out.
+        approval_style = OutputPanel.PanelStyle(
+            border_style="yellow",
+            box="SQUARE",
+            title_style="bold yellow",
+            title_align="left",
+            show_header=True,
+            header_style="bold black on yellow",
+            header_separator_char="─",
+            header_separator_style="yellow",
+        )
+        self.approval_panel = OutputPanel(
+            title="Approval",
+            initial_height=3,
+            max_height=6,
+            columns_hint=1,
+            style=approval_style,
+        )
         # Input panel with autocomplete via completion module
         io_mode = os.environ.get("EGG_IO_MODE", "threaded").strip().lower()
         def _adapter(line: str, row: int, col: int):
@@ -345,6 +366,25 @@ class EggDisplayApp:
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
         self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
 
+        # Update approval panel content based on pending prompt. This
+        # panel is rendered between the output panels and the input
+        # panel so that approval requests are visually close to where
+        # the user types a y/n/o answer.
+        pending = getattr(self, '_pending_prompt', {}) or {}
+        if pending:
+            kind = pending.get('kind')
+            msg_lines: List[str] = []
+            if kind == 'exec':
+                msg_lines.append("Execution approval needed.")
+                msg_lines.append("Type 'y' to approve or 'n' to deny, then press Enter.")
+            elif kind == 'output':
+                msg_lines.append("Output approval needed.")
+                msg_lines.append("Type 'y' to include full output, 'n' for a shortened preview, or 'o' to omit, then press Enter.")
+            self.approval_panel.set_content("\n".join(msg_lines))
+        else:
+            # Empty content makes the panel effectively invisible
+            self.approval_panel.set_content("")
+
         self._compute_pending_prompt()
 
 
@@ -445,7 +485,11 @@ class EggDisplayApp:
         return truncated
     def _render_group(self) -> Group:
         row1 = HStack([self.chat_output, self.system_output]).render()
-        return Group(row1, self.input_panel.render())
+        # Approval panel (if any content) is rendered between the output
+        # row and the input panel so that approval questions are visually
+        # close to the input area. When empty, the panel collapses to its
+        # minimal height and appears effectively invisible.
+        return Group(row1, self.approval_panel.render(), self.input_panel.render())
 
     def _log_system(self, msg: str) -> None:
         if not hasattr(self, '_system_log'):
