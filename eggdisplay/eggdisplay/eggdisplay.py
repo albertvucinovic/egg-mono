@@ -858,12 +858,16 @@ class OutputPanel:
         return b or rich_box.SQUARE
 
     def render(self) -> Panel:
-        """Render the panel, showing only the last lines that fit."""
+        """Render the panel, showing only the last lines that fit.
+
+        Content is interpreted as Rich markup so callers can embed
+        simple markup tags (e.g. ``[yellow]``) in panel bodies.
+        """
         height = self.calculate_height()
-        
+
         # Create content text
         content_text = Text()
-        
+
         # Add optional header with stats inside content area
         content_lines = self.content.count('\n') + 1 if self.content else 0
         header_lines = 0
@@ -875,10 +879,10 @@ class OutputPanel:
             sep = self.style.header_separator_char * 70
             content_text.append(sep + "\n", style=self.style.header_separator_style)
             header_lines = 2
-        
+
         # Calculate available lines for content (after header)
         available_content_lines = max(1, height - (header_lines + 2))  # Reserve space for header and padding
-        
+
         # Show only the last lines that fit
         if self.content:
             # Estimate available width per column to compute wrapped display lines
@@ -903,16 +907,18 @@ class OutputPanel:
             # Now render only the tail that fits
             if len(display_lines) <= available_content_lines:
                 for dl in display_lines:
-                    content_text.append(dl + "\n")
+                    content_text.append(Text.from_markup(dl + "\n"))
             else:
                 start_index = len(display_lines) - available_content_lines
                 for dl in display_lines[start_index:]:
-                    content_text.append(dl + "\n")
+                    content_text.append(Text.from_markup(dl + "\n"))
                 hidden_lines = len(display_lines) - available_content_lines
-                content_text.append(f"[dim]... {hidden_lines} lines above[/dim]")
+                content_text.append(Text.from_markup(f"[dim]... {hidden_lines} lines above[/dim]"))
         else:
-            content_text.append("[dim]No content[/dim]")
-        
+            # Interpret "No content" string as markup as well so callers
+            # can control styling if desired.
+            content_text.append(Text.from_markup("[dim]No content[/dim]"))
+
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
         return Panel(
             content_text,
