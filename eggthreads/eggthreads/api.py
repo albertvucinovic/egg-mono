@@ -80,34 +80,12 @@ def delete_thread(db: ThreadsDB, thread_id: str) -> None:
 def is_thread_runnable(db: ThreadsDB, thread_id: str) -> bool:
     """Public API to check if a thread is runnable.
 
-    Mirrors ThreadRunner._is_thread_runnable logic to provide a stable interface
-    without consumers importing internal runner details.
+    This now delegates to discover_runner_actionable so that the
+    ThreadRunner and external callers share the same notion of
+    runnable work (RA1/RA2/RA3).
     """
-    # Implement the same SQL check as in ThreadRunner._is_thread_runnable
-    row_close = db.conn.execute(
-        "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='stream.close'",
-        (thread_id,)
-    ).fetchone()
-    last_close_seq = int(row_close[0]) if row_close and row_close[0] is not None else -1
-    row = db.conn.execute(
-        """
-        SELECT 1 FROM events e
-         WHERE e.thread_id=?
-           AND e.event_seq>?
-           AND e.type='msg.create'
-           AND (
-                json_extract(e.payload_json,'$.role') IN ('user','tool')
-             OR (
-                  json_extract(e.payload_json,'$.role')='assistant'
-              AND json_extract(e.payload_json,'$.tool_calls') IS NOT NULL
-                )
-           )
-           AND json_extract(e.payload_json,'$.keep_user_turn') IS NULL
-         LIMIT 1
-        """,
-        (thread_id, last_close_seq)
-    ).fetchone()
-    return bool(row)
+    from .tool_state import discover_runner_actionable
+    return discover_runner_actionable(db, thread_id) is not None
 
 
 # --------- Query helpers (expose common SQL as API) -------------------------
