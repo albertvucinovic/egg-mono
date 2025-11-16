@@ -156,6 +156,9 @@ class EggDisplayApp:
         # Track last printed event sequence per thread for console output
         self._last_printed_seq_by_thread: Dict[str, int] = {}
 
+        # Pending approval prompt state (execution/output approvals)
+        self._pending_prompt: Dict[str, Any] = {}
+
     # ---------------- Scheduler & thread helpers ----------------
     def _thread_root_id(self, tid: str) -> str:
         cur = tid
@@ -287,7 +290,13 @@ class EggDisplayApp:
                 if content:
                     lines.append(f"[User]\n{content}")
             elif role == 'tool':
-                name = m.get('name') or 'tool'
+                # Distinguish between genuine assistant tool outputs and
+                # user-initiated command outputs that are stored as
+                # role="tool" with user_tool_call flag.
+                if m.get('user_tool_call'):
+                    name = m.get('name') or 'user_command'
+                else:
+                    name = m.get('name') or 'tool'
                 content = (m.get('content') or '').strip()
                 if content:
                     lines.append(f"[Tool: {name}]\n{content}")
@@ -336,6 +345,60 @@ class EggDisplayApp:
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
         self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
 
+        self._compute_pending_prompt()
+
+
+
+    def _compute_pending_prompt(self) -> None:
+        """Compute whether there is an execution or output approval pending
+        for the current thread and update self._pending_prompt accordingly.
+
+        Minimal first version:
+        - Execution approval (TC1) is only for assistant tool calls.
+        - Output approval (TC4) is for any tool call with finished_output
+          present and no output_approval yet.
+
+        To avoid spamming the System panel, we only log when the
+        pending prompt *changes* (kind or ids).
+        """
+        try:
+            from eggthreads import list_tool_calls_for_thread, thread_state
+        except Exception:
+            self._pending_prompt = {}
+            return
+
+        old = getattr(self, '_pending_prompt', {}) or {}
+        new = {}
+        try:
+            st = thread_state(self.db, self.current_thread)
+        except Exception:
+            st = 'unknown'
+        if st in ('waiting_tool_approval', 'waiting_output_approval'):
+            try:
+                tcs = list_tool_calls_for_thread(self.db, self.current_thread)
+            except Exception:
+                tcs = []
+            # Prefer execution approval first
+            exec_needed = [tc for tc in tcs if tc.state == 'TC1']
+            if exec_needed:
+                ids = [tc.tool_call_id for tc in exec_needed]
+                new = {'kind': 'exec', 'tool_call_ids': ids}
+            else:
+                # Otherwise, check output approval
+                out_needed = [tc for tc in tcs if tc.state == 'TC4' and tc.finished_output]
+                if out_needed:
+                    ids = [tc.tool_call_id for tc in out_needed]
+                    new = {'kind': 'output', 'tool_call_ids': ids}
+
+        # Update and log only if changed
+        if new != old:
+            self._pending_prompt = new
+            if not new:
+                return
+            if new.get('kind') == 'exec':
+                self._log_system('Execution approval needed for some tool calls. Type "y" to approve or "n" to deny.')
+            elif new.get('kind') == 'output':
+                self._log_system('Output approval needed for some tool calls. Type "y" to include or "n" to omit.')
     def _render_group(self) -> Group:
         row1 = HStack([self.chat_output, self.system_output]).render()
         return Group(row1, self.input_panel.render())
@@ -553,6 +616,69 @@ class EggDisplayApp:
             return True
         # Enter behavior depends on mode
         if key in (enter_key, '\r', '\n'):
+            # If we have a pending approval prompt, interpret single-line
+            # y/n answers here before treating them as normal messages.
+            try:
+                pending = getattr(self, '_pending_prompt', {}) or {}
+            except Exception:
+                pending = {}
+            if pending and self.enter_sends:
+                txt = self.input_panel.get_text().strip().lower()
+                kind = pending.get('kind')
+                ids = pending.get('tool_call_ids') or []
+                if txt in ('y', 'n') and ids:
+                    try:
+                        from eggthreads import list_tool_calls_for_thread
+                        import os as _os, json as _json
+                        approve = (txt == 'y')
+                        if kind == 'exec':
+                            decision = 'granted' if approve else 'denied'
+                            for tcid in ids:
+                                self.db.append_event(
+                                    event_id=_os.urandom(10).hex(),
+                                    thread_id=self.current_thread,
+                                    type_='tool_call.approval',
+                                    msg_id=None,
+                                    invoke_id=None,
+                                    payload={
+                                        'tool_call_id': tcid,
+                                        'decision': decision,
+                                        'reason': 'Approved/denied by user from UI',
+                                    },
+                                )
+                            self._log_system(f"Tool calls {ids} approval decision: {decision}.")
+                        elif kind == 'output':
+                            # For now, output approval: y -> whole, n -> omit,
+                            # and we use the full finished_output as preview.
+                            from eggthreads import list_tool_calls_for_thread, build_tool_call_states
+                            decision = 'whole' if approve else 'omit'
+                            states = build_tool_call_states(self.db, self.current_thread)
+                            for tcid in ids:
+                                tc = states.get(str(tcid))
+                                if not tc or not tc.finished_output:
+                                    continue
+                                preview = tc.finished_output
+                                self.db.append_event(
+                                    event_id=_os.urandom(10).hex(),
+                                    thread_id=self.current_thread,
+                                    type_='tool_call.output_approval',
+                                    msg_id=None,
+                                    invoke_id=None,
+                                    payload={
+                                        'tool_call_id': tcid,
+                                        'decision': decision,
+                                        'reason': 'User decided in UI',
+                                        'preview': preview,
+                                    },
+                                )
+                            self._log_system(f"Tool calls {ids} output decision: {decision}.")
+                        # Clear prompt and input after handling
+                        self._pending_prompt = {}
+                    except Exception as e:
+                        self._log_system(f'Error recording approval: {e}')
+                    self.input_panel.clear_text()
+                    self.input_panel.increment_message_count()
+                    return True
             if self.enter_sends:
                 text = self.input_panel.get_text().strip()
                 if text:
@@ -574,11 +700,16 @@ class EggDisplayApp:
         return self.input_panel.editor._handle_key(key)
 
     def _on_submit(self, text: str) -> None:
+        # User command execution ($ / $$) is modeled as a user-originated
+        # tool call (RA3). We enqueue a user message with tool_calls and
+        # an automatic tool_call.approval so that the ThreadRunner executes
+        # the command via the bash tool under the normal tool-call state
+        # machine, rather than running it locally in the UI.
         if text.startswith('$$') and len(text) > 2:
-            self._run_shell(text[2:].strip(), keep_user_turn=True, hidden=True)
+            self._enqueue_bash_tool(text[2:].strip(), hidden=True)
             return
         if text.startswith('$') and len(text) > 1:
-            self._run_shell(text[1:].strip(), keep_user_turn=True, hidden=False)
+            self._enqueue_bash_tool(text[1:].strip(), hidden=False)
             return
         if text.startswith('/'):
             self._handle_command(text)
@@ -587,6 +718,72 @@ class EggDisplayApp:
         create_snapshot(self.db, self.current_thread)
         self._ensure_scheduler_for(self.current_thread)
         self._log_system("User message queued; scheduler will stream the response.")
+
+
+    def _enqueue_bash_tool(self, script: str, hidden: bool) -> None:
+        """Enqueue a bash command as a user tool call (RA3).
+
+        - For `$ cmd` (hidden=False): output is intended to be visible to the
+          model, subject to output_approval gating.
+        - For `$$ cmd` (hidden=True): we still execute the command and store
+          the result in the thread, but mark the eventual tool message as
+          no_api via the output_approval decision so the model does not see
+          it.
+        """
+        import os as _os, json as _json
+        cmd = (script or '').strip()
+        if not cmd:
+            self._log_system('Empty bash command, skipping.')
+            return
+        # Build a single tool_call entry for the bash tool
+        tc_id = _os.urandom(8).hex()
+        tool_call = {
+            'id': tc_id,
+            'type': 'function',
+            'function': {
+                'name': 'bash',
+                'arguments': _json.dumps({'script': cmd}, ensure_ascii=False),
+            },
+        }
+        extra = {
+            'tool_calls': [tool_call],
+            # Keep the user turn: the runner will execute the tool but we do
+            # not immediately hand control to the LLM.
+            'keep_user_turn': True,
+            'user_command_type': '$$' if hidden else '$',
+        }
+        if hidden:
+            # The user explicitly requested that this command output not be
+            # shown to the model; we still allow the tool result to be stored
+            # in the thread but mark this triggering message as no_api so it
+            # is excluded from LLM context reconstruction.
+            extra['no_api'] = True
+        # Store the triggering user message (for transcript) and associated
+        # tool_calls metadata.
+        msg_id = append_message(self.db, self.current_thread, 'user', f"$ {cmd}", extra=extra)
+        # Automatically approve this tool call so it starts in TC2.1
+        try:
+            self.db.append_event(
+                event_id=_os.urandom(10).hex(),
+                thread_id=self.current_thread,
+                type_='tool_call.approval',
+                msg_id=None,
+                invoke_id=None,
+                payload={
+                    'tool_call_id': tc_id,
+                    'decision': 'granted',
+                    'reason': 'Approved as user-initiated command',
+                },
+            )
+        except Exception as e:
+            self._log_system(f'Error recording tool_call.approval for bash: {e}')
+        # Snapshot and ensure scheduler so that RA3 will pick this up.
+        try:
+            create_snapshot(self.db, self.current_thread)
+        except Exception:
+            pass
+        self._ensure_scheduler_for(self.current_thread)
+        self._log_system(f"Queued bash command as tool_call {tc_id[-6:]} (hidden={hidden}).")
 
     def _run_shell(self, bash_command: str, keep_user_turn: bool, hidden: bool) -> None:
         import subprocess
