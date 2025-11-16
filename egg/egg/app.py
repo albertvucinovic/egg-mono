@@ -868,8 +868,10 @@ class EggDisplayApp:
             # is excluded from LLM context reconstruction.
             extra['no_api'] = True
         # Store the triggering user message (for transcript) and associated
-        # tool_calls metadata.
-        msg_id = append_message(self.db, self.current_thread, 'user', f"$ {cmd}", extra=extra)
+        # tool_calls metadata. Visible commands use "$ ", hidden commands
+        # use "$$ " so they are easy to distinguish in the transcript.
+        prefix = '$$ ' if hidden else '$ '
+        msg_id = append_message(self.db, self.current_thread, 'user', f"{prefix}{cmd}", extra=extra)
         # Automatically approve this tool call so it starts in TC2.1
         try:
             self.db.append_event(
