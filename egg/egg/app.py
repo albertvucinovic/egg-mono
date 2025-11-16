@@ -353,7 +353,6 @@ class EggDisplayApp:
         """Compute whether there is an execution or output approval pending
         for the current thread and update self._pending_prompt accordingly.
 
-        Minimal first version:
         - Execution approval (TC1) is only for assistant tool calls.
         - Output approval (TC4) is for any tool call with finished_output
           present and no output_approval yet.
@@ -373,6 +372,7 @@ class EggDisplayApp:
             st = thread_state(self.db, self.current_thread)
         except Exception:
             st = 'unknown'
+
         if st in ('waiting_tool_approval', 'waiting_output_approval'):
             try:
                 tcs = list_tool_calls_for_thread(self.db, self.current_thread)
@@ -384,7 +384,7 @@ class EggDisplayApp:
                 ids = [tc.tool_call_id for tc in exec_needed]
                 new = {'kind': 'exec', 'tool_call_ids': ids}
             else:
-                # Otherwise, check output approval
+                # Otherwise, check output approval for finished tool calls
                 out_needed = [tc for tc in tcs if tc.state == 'TC4' and tc.finished_output]
                 if out_needed:
                     ids = [tc.tool_call_id for tc in out_needed]
@@ -398,7 +398,51 @@ class EggDisplayApp:
             if new.get('kind') == 'exec':
                 self._log_system('Execution approval needed for some tool calls. Type "y" to approve or "n" to deny.')
             elif new.get('kind') == 'output':
-                self._log_system('Output approval needed for some tool calls. Type "y" to include or "n" to omit.')
+                # Compose a size-aware prompt for the first pending long output.
+                try:
+                    from eggthreads import list_tool_calls_for_thread
+                    tcs_all = list_tool_calls_for_thread(self.db, self.current_thread)
+                except Exception:
+                    tcs_all = []
+                tc_for_msg = None
+                ids = new.get('tool_call_ids') or []
+                for tc in tcs_all:
+                    if tc.tool_call_id in ids and tc.finished_output:
+                        tc_for_msg = tc
+                        break
+                if tc_for_msg and isinstance(tc_for_msg.finished_output, str):
+                    out = tc_for_msg.finished_output
+                    line_count = len(out.splitlines())
+                    char_count = len(out)
+                    self._log_system(
+                        f"This output is very long ({line_count} lines, {char_count} chars), "
+                        "do you want to include all of it?([y]es/[n]o/[o]mit)"
+                    )
+                    preview = self._shorten_output_preview(out)
+                    if preview:
+                        self._log_system("Preview (shortened):\n" + preview)
+                else:
+                    # Fallback generic message if we cannot inspect the output.
+                    self._log_system('Output approval needed for some tool calls. Type "y" to include, "n" to send a shortened preview, or "o" to omit.')
+
+    def _shorten_output_preview(self, text: str, max_lines: int = 200, max_chars: int = 8000) -> str:
+        """Return a shortened preview for very long tool outputs.
+
+        This keeps at most max_lines and max_chars of content and appends
+        an ellipsis notice when truncation occurs.
+        """
+        if not isinstance(text, str) or not text:
+            return ""
+        lines = text.splitlines()
+        truncated = text
+        if len(lines) > max_lines:
+            truncated = "\n".join(lines[:max_lines])
+        if len(truncated) > max_chars:
+            truncated = truncated[:max_chars]
+        if truncated != text:
+            truncated = truncated.rstrip()
+            truncated += "\n\n...[output truncated for preview]..."
+        return truncated
     def _render_group(self) -> Group:
         row1 = HStack([self.chat_output, self.system_output]).render()
         return Group(row1, self.input_panel.render())
@@ -617,7 +661,7 @@ class EggDisplayApp:
         # Enter behavior depends on mode
         if key in (enter_key, '\r', '\n'):
             # If we have a pending approval prompt, interpret single-line
-            # y/n answers here before treating them as normal messages.
+            # y/n/o answers here before treating them as normal messages.
             try:
                 pending = getattr(self, '_pending_prompt', {}) or {}
             except Exception:
@@ -626,12 +670,11 @@ class EggDisplayApp:
                 txt = self.input_panel.get_text().strip().lower()
                 kind = pending.get('kind')
                 ids = pending.get('tool_call_ids') or []
-                if txt in ('y', 'n') and ids:
+                if txt in ('y', 'n', 'o') and ids:
                     try:
-                        from eggthreads import list_tool_calls_for_thread
-                        import os as _os, json as _json
-                        approve = (txt == 'y')
+                        import os as _os
                         if kind == 'exec':
+                            approve = (txt == 'y')
                             decision = 'granted' if approve else 'denied'
                             for tcid in ids:
                                 self.db.append_event(
@@ -648,16 +691,31 @@ class EggDisplayApp:
                                 )
                             self._log_system(f"Tool calls {ids} approval decision: {decision}.")
                         elif kind == 'output':
-                            # For now, output approval: y -> whole, n -> omit,
-                            # and we use the full finished_output as preview.
-                            from eggthreads import list_tool_calls_for_thread, build_tool_call_states
-                            decision = 'whole' if approve else 'omit'
+                            # Output approval for very long tool outputs:
+                            # y -> whole, n -> shortened preview, o -> omit.
+                            from eggthreads import build_tool_call_states
                             states = build_tool_call_states(self.db, self.current_thread)
+                            if txt == 'y':
+                                decision = 'whole'
+                            elif txt == 'n':
+                                decision = 'partial'
+                            else:
+                                decision = 'omit'
                             for tcid in ids:
                                 tc = states.get(str(tcid))
                                 if not tc or not tc.finished_output:
                                     continue
-                                preview = tc.finished_output
+                                full = tc.finished_output
+                                if not isinstance(full, str):
+                                    full = str(full)
+                                line_count = len(full.splitlines())
+                                char_count = len(full)
+                                if decision == 'whole':
+                                    preview = full
+                                elif decision == 'partial':
+                                    preview = self._shorten_output_preview(full)
+                                else:
+                                    preview = "Output omitted."
                                 self.db.append_event(
                                     event_id=_os.urandom(10).hex(),
                                     thread_id=self.current_thread,
@@ -669,6 +727,8 @@ class EggDisplayApp:
                                         'decision': decision,
                                         'reason': 'User decided in UI',
                                         'preview': preview,
+                                        'line_count': line_count,
+                                        'char_count': char_count,
                                     },
                                 )
                             self._log_system(f"Tool calls {ids} output decision: {decision}.")
