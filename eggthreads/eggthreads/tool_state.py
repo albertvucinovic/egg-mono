@@ -35,6 +35,10 @@ class ToolCallState:
     finished_reason: Optional[str] = None  # "success" | "interrupted" | ...
     output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
     published: bool = False  # final tool message written
+    # Last output_approval payload (if any) for this tool call; allows UI to
+    # encode preview/truncation/paths that the runner can later use when
+    # publishing the final tool message.
+    last_output_approval_payload: Optional[Dict[str, Any]] = None
 
     @property
     def state(self) -> str:
@@ -151,6 +155,8 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 decision = payload.get("decision")
                 if isinstance(decision, str):
                     states[tcid].output_decision = decision
+                # Preserve full payload for later use when publishing
+                states[tcid].last_output_approval_payload = payload
         elif ev_type == "msg.create":
             # Final published tool result
             try:

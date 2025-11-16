@@ -493,14 +493,29 @@ class ThreadRunner:
                     payload={'tool_call_id': tc.tool_call_id, 'reason': 'success'},
                 )
 
-            # Output approval done (TC5) -> publish final tool message
+            # Output approval done (TC5) -> publish final tool message based on
+            # the last tool_call.output_approval payload.
             if tc.state == 'TC5':
+                payload = tc.last_output_approval_payload or {}
+                decision = payload.get('decision')
+                preview = payload.get('preview') or ''
+                # For now, preview is assumed to be the full, already-filtered
+                # content that should go into the tool message.
+                content = str(preview)
+                # no_api rules:
+                #  - omit => no_api True (LLM will not see it)
+                #  - otherwise: for assistant tools we expose to LLM; for user
+                #    commands ($/$$) we will rely on user_tool_call + no_api
+                #    when building the provider payload.
+                no_api_flag = bool(decision == 'omit')
                 msg = {
                     'role': 'tool',
-                    'content': '',  # final content will be provided by UI via output_approval metadata in a later revision
+                    'content': content,
                     'tool_call_id': tc.tool_call_id,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
+                if no_api_flag:
+                    msg['no_api'] = True
                 if current_model:
                     msg['model_key'] = current_model
                 self.db.append_event(
