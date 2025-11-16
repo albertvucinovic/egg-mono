@@ -25,6 +25,7 @@ class ToolCallState:
     tool_call_id: str
     parent_msg_id: str
     parent_event_seq: int
+    parent_role: Optional[str]
     index: int  # index within tool_calls list of parent message
     name: str
     arguments: Any
@@ -33,6 +34,7 @@ class ToolCallState:
     approval_decision: Optional[str] = None  # "granted" | "denied"
     execution_started: bool = False
     finished_reason: Optional[str] = None  # "success" | "interrupted" | ...
+    finished_output: Optional[str] = None  # full tool output from tool_call.finished, if any
     output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
     published: bool = False  # final tool message written
     # Last output_approval payload (if any) for this tool call; allows UI to
@@ -102,6 +104,7 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
             payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
         except Exception:
             payload = {}
+        role = payload.get("role")
         tcs = payload.get("tool_calls") or []
         if not isinstance(tcs, list) or not tcs:
             continue
@@ -117,6 +120,7 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 tool_call_id=str(tcid),
                 parent_msg_id=msg_id,
                 parent_event_seq=ev_seq,
+                parent_role=str(role) if isinstance(role, str) else None,
                 index=idx,
                 name=str(name),
                 arguments=args,
@@ -149,6 +153,9 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 reason = payload.get("reason")
                 if isinstance(reason, str):
                     states[tcid].finished_reason = reason
+                out = payload.get('output')
+                if out is not None:
+                    states[tcid].finished_output = str(out)
         elif ev_type == "tool_call.output_approval":
             tcid = payload.get("tool_call_id")
             if tcid in states:
@@ -206,11 +213,61 @@ def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[Runner
     """Determine the next actionable work item for a thread.
 
     This function encapsulates the Runner Actionables (RA1/RA2/RA3) logic
-    based solely on the event log and tool call states.
+    based on the event log and tool call states.
+
+    RA1 (LLM) uses messages *after* the last stream.close, while RA2/RA3
+    operate directly on tool call states so that they can act on tool
+    calls whose parent message may have been emitted before the last
+    stream.close (e.g. assistant tool calls created by a prior LLM turn
+    or user commands that have already finished execution).
     """
     last_close = _last_stream_close_seq(db, thread_id)
     all_states = build_tool_call_states(db, thread_id)
 
+    # -------- RA3: user-originated tool calls (user commands) --------
+    user_tcs = [
+        tc for tc in all_states.values()
+        if tc.parent_role == 'user' and tc.state in ("TC2.1", "TC2.2", "TC5")
+    ]
+    if user_tcs:
+        # Pick earliest parent message and group its runnable tool calls
+        user_tcs.sort(key=lambda tc: tc.parent_event_seq)
+        msg_id = user_tcs[0].parent_msg_id
+        parent_seq = user_tcs[0].parent_event_seq
+        tcs_for_msg = [tc for tc in user_tcs if tc.parent_msg_id == msg_id]
+        return RunnerActionable(
+            kind="RA3_tools_user",
+            thread_id=thread_id,
+            triggering_event_seq=parent_seq,
+            msg_id=msg_id,
+            tool_calls=tcs_for_msg,
+        )
+
+    # -------- RA2: assistant-originated tool calls --------
+    # Consider tool calls whose parent assistant message occurred at or
+    # before the last stream.close (i.e. produced by a prior LLM turn).
+    assistant_tcs = [
+        tc for tc in all_states.values()
+        if tc.parent_role == 'assistant'
+        and tc.state in ("TC2.1", "TC2.2", "TC5")
+        and tc.parent_event_seq <= last_close
+    ]
+    if assistant_tcs:
+        assistant_tcs.sort(key=lambda tc: tc.parent_event_seq)
+        msg_id = assistant_tcs[0].parent_msg_id
+        parent_seq = assistant_tcs[0].parent_event_seq
+        tcs_for_msg = [tc for tc in assistant_tcs if tc.parent_msg_id == msg_id]
+        return RunnerActionable(
+            kind="RA2_tools_assistant",
+            thread_id=thread_id,
+            triggering_event_seq=parent_seq,
+            msg_id=msg_id,
+            tool_calls=tcs_for_msg,
+        )
+
+    # -------- RA1: LLM call --------
+    # Scan messages after the last stream.close to find a user or tool
+    # message that should trigger an LLM turn.
     for ev in _iter_messages_after(db, thread_id, last_close):
         ev_seq = int(ev["event_seq"])
         msg_id = ev.get("msg_id") or ""
@@ -223,47 +280,10 @@ def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[Runner
         no_api = bool(payload.get("no_api"))
         tool_calls = payload.get("tool_calls") or []
 
-        # Map tool_call_ids in this message to their states
-        tcs_for_msg: List[ToolCallState] = []
-        if isinstance(tool_calls, list) and tool_calls:
-            for idx, tc in enumerate(tool_calls):
-                if not isinstance(tc, dict):
-                    continue
-                tcid = tc.get("id") or f"{msg_id}:{idx}"
-                st = all_states.get(str(tcid))
-                if st:
-                    tcs_for_msg.append(st)
-            tcs_for_msg.sort(key=lambda tc: tc.index)
-
-        # RA3: user-originated tool calls (user commands / user tools)
-        if role == "user" and tcs_for_msg:
-            # Runnable tool calls: those not yet published and whose state the runner can advance
-            runnable = [tc for tc in tcs_for_msg if tc.state in ("TC2.1", "TC2.2", "TC5")]
-            if runnable:
-                return RunnerActionable(
-                    kind="RA3_tools_user",
-                    thread_id=thread_id,
-                    triggering_event_seq=ev_seq,
-                    msg_id=msg_id,
-                    tool_calls=runnable,
-                )
-
-        # RA2: assistant-originated tool calls
-        if role == "assistant" and tcs_for_msg:
-            runnable = [tc for tc in tcs_for_msg if tc.state in ("TC2.1", "TC2.2", "TC5")]
-            if runnable:
-                return RunnerActionable(
-                    kind="RA2_tools_assistant",
-                    thread_id=thread_id,
-                    triggering_event_seq=ev_seq,
-                    msg_id=msg_id,
-                    tool_calls=runnable,
-                )
-
         # RA1: LLM call
         # - user messages without tool_calls and without keep_user_turn
         # - tool messages that are not no_api and not keep_user_turn
-        if role == "user" and not tcs_for_msg and not keep_user_turn:
+        if role == "user" and not tool_calls and not keep_user_turn:
             return RunnerActionable(
                 kind="RA1_llm",
                 thread_id=thread_id,

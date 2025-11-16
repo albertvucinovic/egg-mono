@@ -60,6 +60,11 @@ class SnapshotBuilder:
                         msg["name"] = payload.get("name")
                     if payload.get("tool_call_id"):
                         msg["tool_call_id"] = payload.get("tool_call_id")
+                    # Preserve user_tool_call so that user-initiated
+                    # command outputs can be distinguished from genuine
+                    # assistant tool outputs when rebuilding API context.
+                    if payload.get("user_tool_call"):
+                        msg["user_tool_call"] = payload.get("user_tool_call")
                 if payload.get("role") == 'assistant':
                     if payload.get("tool_calls"):
                         msg["tool_calls"] = payload.get("tool_calls")

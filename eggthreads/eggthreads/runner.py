@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from pathlib import Path
-from eggllm import LLMClient
+try:
+    from eggllm import LLMClient
+except Exception:
+    LLMClient = None  # type: ignore
 from .db import ThreadsDB
 from .tools import ToolRegistry, create_default_tools
 from .tool_state import ToolCallState, RunnerActionable, discover_runner_actionable, thread_state
@@ -37,7 +40,12 @@ class ThreadRunner:
                  models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None):
         self.db = db
         self.thread_id = thread_id
-        self.llm = llm or LLMClient(models_path=models_path or "models.json", all_models_path=all_models_path or "all-models.json")
+        if llm is not None:
+            self.llm = llm
+        elif LLMClient is not None:
+            self.llm = LLMClient(models_path=models_path or 'models.json', all_models_path=all_models_path or 'all-models.json')
+        else:
+            self.llm = None
         self.owner = owner or os.environ.get("USER") or "runner"
         self.purpose = purpose
         self.cfg = config or RunnerConfig()
@@ -492,6 +500,36 @@ class ThreadRunner:
                     invoke_id=invoke_id,
                     payload={'tool_call_id': tc.tool_call_id, 'reason': 'success', 'output': full_result},
                 )
+                # Auto output-approval for small outputs (chat.sh style):
+                # - if output is not excessively long in lines or characters,
+                #   mark it as decision="whole" so the UI does not need to
+                #   prompt the user and the runner can publish it on the next
+                #   pass. Large outputs will remain in TC4 and require an
+                #   explicit tool_call.output_approval from the UI.
+                try:
+                    lines = full_result.splitlines() if isinstance(full_result, str) else []
+                    line_count = len(lines)
+                    char_count = len(full_result) if isinstance(full_result, str) else 0
+                    is_long = line_count > 800 or char_count > 100000
+                    if not is_long:
+                        self.db.append_event(
+                            event_id=os.urandom(10).hex(),
+                            thread_id=self.thread_id,
+                            type_='tool_call.output_approval',
+                            msg_id=None,
+                            invoke_id=None,
+                            payload={
+                                'tool_call_id': tc.tool_call_id,
+                                'decision': 'whole',
+                                'reason': 'Auto: output below size thresholds',
+                                'preview': full_result,
+                            },
+                        )
+                except Exception:
+                    # Best-effort only; on any error the call will remain
+                    # in TC4 and the UI can still request explicit output
+                    # approval from the user.
+                    pass
 
             # Output approval done (TC5) -> publish final tool message based on
             # the last tool_call.output_approval payload.
@@ -534,7 +572,12 @@ class SubtreeScheduler:
                  models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None):
         self.db = db
         self.root = root_thread_id
-        self.llm = llm or LLMClient(models_path=models_path or "models.json", all_models_path=all_models_path or "all-models.json")
+        if llm is not None:
+            self.llm = llm
+        elif LLMClient is not None:
+            self.llm = LLMClient(models_path=models_path or 'models.json', all_models_path=all_models_path or 'all-models.json')
+        else:
+            self.llm = None
         print(f"LLMClient type: {type(self.llm)} module: {type(self.llm).__module__} has astream_chat: {hasattr(self.llm, 'astream_chat')}")
         self.owner = owner or os.environ.get("USER") or "scheduler"
         self.cfg = config or RunnerConfig()
