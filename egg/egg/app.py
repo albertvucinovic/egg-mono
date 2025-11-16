@@ -375,11 +375,11 @@ class EggDisplayApp:
             kind = pending.get('kind')
             msg_lines: List[str] = []
             if kind == 'exec':
-                msg_lines.append("Execution approval needed.")
-                msg_lines.append("Type 'y' to approve or 'n' to deny, then press Enter.")
+                msg_lines.append("[yellow]Execution approval needed.[/yellow]")
+                msg_lines.append("[yellow]Type 'y' to approve or 'n' to deny, then press Enter.[/yellow]")
             elif kind == 'output':
-                msg_lines.append("Output approval needed.")
-                msg_lines.append("Type 'y' to include full output, 'n' for a shortened preview, or 'o' to omit, then press Enter.")
+                msg_lines.append("[yellow]Output approval needed.[/yellow]")
+                msg_lines.append("[yellow]Type 'y' to include full output, 'n' for a shortened preview, or 'o' to omit, then press Enter.[/yellow]")
             self.approval_panel.set_content("\n".join(msg_lines))
         else:
             # Empty content makes the panel effectively invisible
@@ -485,11 +485,16 @@ class EggDisplayApp:
         return truncated
     def _render_group(self) -> Group:
         row1 = HStack([self.chat_output, self.system_output]).render()
-        # Approval panel (if any content) is rendered between the output
-        # row and the input panel so that approval questions are visually
-        # close to the input area. When empty, the panel collapses to its
-        # minimal height and appears effectively invisible.
-        return Group(row1, self.approval_panel.render(), self.input_panel.render())
+        # Compose rows: top output row, optional approval panel, then input.
+        children: List[Any] = [row1]
+        pending = getattr(self, '_pending_prompt', {}) or {}
+        # Only render the approval panel when there is a pending prompt
+        # and it has non-empty content. Otherwise, omit it entirely so it
+        # visually disappears from the layout.
+        if pending and getattr(self.approval_panel, 'content', ''):
+            children.append(self.approval_panel.render())
+        children.append(self.input_panel.render())
+        return Group(*children)
 
     def _log_system(self, msg: str) -> None:
         if not hasattr(self, '_system_log'):
