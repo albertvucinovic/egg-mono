@@ -630,11 +630,13 @@ class ThreadRunner:
                             content = f"{cmd_text}\n\n{content}" if content else cmd_text
 
                 # no_api rules:
-                #  - For user-initiated commands (RA3), decision "omit" means
-                #    the model should not see this tool message at all.
-                #  - For assistant-initiated tool calls (RA2), even "omit"
-                #    still sends the small "Output omitted." placeholder.
-                no_api_flag = bool(decision == 'omit' and ra.kind == 'RA3_tools_user')
+                #  - For user-initiated commands (RA3), the model should not
+                #    see this tool message at all when either the decision is
+                #    "omit" *or* the parent user message was marked no_api
+                #    (hidden "$$" commands). Visible "$" commands only hide
+                #    the output when the decision is "omit".
+                parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
+                no_api_flag = bool(ra.kind == 'RA3_tools_user' and (decision == 'omit' or parent_no_api))
 
                 msg = {
                     'role': 'tool',
@@ -679,6 +681,31 @@ class ThreadRunner:
             payload = {}
         content = payload.get('content')
         return content if isinstance(content, str) else None
+
+    def _parent_msg_has_no_api(self, msg_id: str) -> bool:
+        """Check whether the parent message for a tool call was tagged no_api.
+
+        This is used to propagate the hidden semantics of "$$" user
+        commands to their eventual tool result messages so that the
+        provider never sees them.
+        """
+        if not msg_id:
+            return False
+        try:
+            cur = self.db.conn.execute(
+                "SELECT payload_json FROM events WHERE msg_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 1",
+                (msg_id,),
+            )
+            row = cur.fetchone()
+        except Exception:
+            return False
+        if not row:
+            return False
+        try:
+            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        except Exception:
+            payload = {}
+        return bool(payload.get('no_api'))
 
     def _render_tool_invocation(self, tc: ToolCallState) -> str:
         """Render a human-readable representation of a tool invocation.
