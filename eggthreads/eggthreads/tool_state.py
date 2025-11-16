@@ -193,11 +193,44 @@ def list_tool_calls_for_thread(db: ThreadsDB, thread_id: str) -> List[ToolCallSt
 
 
 def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
-    row = db.conn.execute(
-        "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='stream.close'",
+    """Return the event_seq of the last *LLM* stream.close for a thread.
+
+    We intentionally ignore stream.close events that belong to tool
+    execution streams (RA2/RA3). Those streams only emit deltas with a
+    ``tool`` field (and no top-level ``text``/``reason``), whereas LLM
+    streams (RA1) emit deltas with ``text`` and/or ``reason`` keys.
+
+    This distinction matters because RA1 (LLM turns) should be driven by
+    user/tool messages that appear *after* the last LLM stream finishes,
+    but we do not want tool-execution streams to reset that boundary.
+    """
+    last_close = -1
+    llm_invokes: set[str] = set()
+
+    # Single pass over events in order: mark invoke_ids that have LLM
+    # deltas, then record the last stream.close for any such invoke_id.
+    cur = db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
         (thread_id,),
-    ).fetchone()
-    return int(row[0]) if row and row[0] is not None else -1
+    )
+    for row in cur.fetchall():
+        ev = dict(row)
+        t = ev.get("type")
+        inv = ev.get("invoke_id")
+        if t == "stream.delta":
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and ("text" in payload or "reason" in payload):
+                if isinstance(inv, str) and inv:
+                    llm_invokes.add(inv)
+        elif t == "stream.close" and isinstance(inv, str) and inv in llm_invokes:
+            try:
+                last_close = int(ev.get("event_seq"))
+            except Exception:
+                continue
+    return last_close
 
 
 def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Iterable[Dict[str, Any]]:
