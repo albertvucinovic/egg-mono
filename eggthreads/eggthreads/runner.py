@@ -13,7 +13,7 @@ except Exception:
     LLMClient = None  # type: ignore
 from .db import ThreadsDB
 from .tools import ToolRegistry, create_default_tools
-from .tool_state import ToolCallState, RunnerActionable, discover_runner_actionable, thread_state
+from .tool_state import ToolCallState, RunnerActionable, discover_runner_actionable, thread_state, build_tool_call_states
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -276,6 +276,11 @@ class ThreadRunner:
                             obj['name'] = m.get('name')
                         if m.get('tool_call_id'):
                             obj['tool_call_id'] = m.get('tool_call_id')
+                        # Preserve user_tool_call so that RA3 user commands
+                        # can be rewritten to user-role messages before
+                        # hitting the provider API.
+                        if m.get('user_tool_call'):
+                            obj['user_tool_call'] = m.get('user_tool_call')
                         base_messages.append(obj)
                     elif r in ('system', 'user', 'assistant'):
                         base_messages.append({'role': r, 'content': content})
@@ -296,6 +301,8 @@ class ThreadRunner:
                         obj['name'] = payload.get('name')
                     if payload.get('tool_call_id'):
                         obj['tool_call_id'] = payload.get('tool_call_id')
+                    if payload.get('user_tool_call'):
+                        obj['user_tool_call'] = payload.get('user_tool_call')
                     base_messages.append(obj)
                 else:
                     base_messages.append({'role': 'user', 'content': user_content})
@@ -349,6 +356,19 @@ class ThreadRunner:
         saw_content_delta = False
         saw_reason_delta = False
         chunk_seq = self.db.max_chunk_seq(invoke_id)
+
+        # Final sanitation step before calling the provider: make sure that
+        # user messages never carry "tool_calls" fields. User commands are
+        # modelled as tool calls attached to user messages in the event log,
+        # but when we send context to the API we want these to appear as
+        # ordinary user messages (see ../egg/temp/approval-prompt.md).
+        #
+        # Most of this is already guaranteed by how we build base_messages
+        # from the snapshot (we only copy role + content for user messages),
+        # but we apply a dedicated sanitizer here so that any future changes
+        # or external callers that add tool_calls to user messages cannot
+        # accidentally leak them to the model.
+        base_messages = self._sanitize_messages_for_api(base_messages)
 
         try:
             async for raw in self.llm.astream_chat(base_messages, tools=self.tools.tools_spec() or None, tool_choice='auto'):
@@ -435,6 +455,57 @@ class ThreadRunner:
                     recorder.close()
                 except Exception:
                     pass
+
+
+    def _sanitize_messages_for_api(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return a sanitized copy of messages for provider API.
+
+        Responsibilities that belong specifically to eggthreads (and not
+        to eggllm which is reused by other programs):
+
+        - Convert RA3 user-command tool outputs (role="tool",
+          user_tool_call=True) into plain user messages. The provider
+          should never see these as tool-role messages; instead, they
+          should look like "the user ran this command and saw this text".
+
+        - Strip any ``tool_calls`` field from *user* messages so that
+          user commands appear as ordinary user turns in the provider
+          protocol.
+
+        We intentionally **do not** touch assistant messages here,
+        since their ``tool_calls`` and tool-role responses are the
+        standard OpenAI-compatible tools protocol (RA2).
+        """
+        out: List[Dict[str, Any]] = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            m2 = dict(m)
+            role = m2.get("role")
+
+            # RA3: user-command tool outputs -> plain user messages
+            if role == "tool" and m2.get("user_tool_call") and not m2.get("no_api"):
+                content = m2.get("content", "")
+                m2 = {"role": "user", "content": content}
+                role = "user"
+
+            # User messages must not carry tool_calls when sent to provider
+            if role == "user" and "tool_calls" in m2:
+                m2.pop("tool_calls", None)
+
+            # Some providers are strict about assistant/tool pairing and
+            # will error if they see assistant messages with no content
+            # between an assistant(tool_calls) and a tool message.  Blank
+            # assistant messages carry no information, so we drop them
+            # here to avoid confusing such templates.
+            if role == "assistant":
+                text = m2.get("content")
+                if (text is None or (isinstance(text, str) and not text.strip())) \
+                        and not m2.get("tool_calls"):
+                    continue
+
+            out.append(m2)
+        return out
 
 
     async def _run_ra_tools(self, invoke_id: str, current_model: Optional[str], ra: RunnerActionable) -> None:
@@ -537,15 +608,34 @@ class ThreadRunner:
                 payload = tc.last_output_approval_payload or {}
                 decision = payload.get('decision')
                 preview = payload.get('preview') or ''
-                # For now, preview is assumed to be the full, already-filtered
-                # content that should go into the tool message.
-                content = str(preview)
+                # Determine base content from the approved preview.
+                if decision == 'omit':
+                    # User chose to omit the (possibly huge) output; we keep a
+                    # small placeholder string instead of the real content.
+                    content = "Output omitted."
+                else:
+                    # 'whole' or 'partial' (or unknown) -> use the preview string.
+                    content = str(preview)
+
+                # For user-originated commands ($ / $$), prepend the original
+                # command text so that the message containing the output also
+                # includes the command itself.
+                if ra.kind == 'RA3_tools_user':
+                    cmd_text = self._get_parent_message_content(tc.parent_msg_id)
+                    if not cmd_text:
+                        cmd_text = self._render_tool_invocation(tc)
+                    if cmd_text:
+                        # Avoid duplicating the command if the preview already starts with it.
+                        if not content.startswith(cmd_text):
+                            content = f"{cmd_text}\n\n{content}" if content else cmd_text
+
                 # no_api rules:
-                #  - omit => no_api True (LLM will not see it)
-                #  - otherwise: for assistant tools we expose to LLM; for user
-                #    commands ($/$$) we will rely on user_tool_call + no_api
-                #    when building the provider payload.
-                no_api_flag = bool(decision == 'omit')
+                #  - For user-initiated commands (RA3), decision "omit" means
+                #    the model should not see this tool message at all.
+                #  - For assistant-initiated tool calls (RA2), even "omit"
+                #    still sends the small "Output omitted." placeholder.
+                no_api_flag = bool(decision == 'omit' and ra.kind == 'RA3_tools_user')
+
                 msg = {
                     'role': 'tool',
                     'content': content,
@@ -563,6 +653,59 @@ class ThreadRunner:
                     msg_id=os.urandom(10).hex(),
                     payload=msg,
                 )
+
+    def _get_parent_message_content(self, msg_id: str) -> Optional[str]:
+        """Best-effort lookup of the original message content for a tool call.
+
+        This is used primarily for user-initiated commands so that the
+        final message containing the tool output also includes the
+        original command text for readability.
+        """
+        if not msg_id:
+            return None
+        try:
+            cur = self.db.conn.execute(
+                "SELECT payload_json FROM events WHERE msg_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 1",
+                (msg_id,),
+            )
+            row = cur.fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        try:
+            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        except Exception:
+            payload = {}
+        content = payload.get('content')
+        return content if isinstance(content, str) else None
+
+    def _render_tool_invocation(self, tc: ToolCallState) -> str:
+        """Render a human-readable representation of a tool invocation.
+
+        Used as a fallback when we cannot recover the user's original
+        command text (e.g. if the parent message was edited or missing).
+        """
+        try:
+            args = tc.arguments
+            if isinstance(args, str):
+                try:
+                    args_obj = json.loads(args) if args.strip() else {}
+                except Exception:
+                    args_obj = {"_raw": args}
+            elif isinstance(args, dict):
+                args_obj = args
+            else:
+                args_obj = {"_arg": args}
+            if tc.name in ("bash", "python") and isinstance(args_obj.get("script"), str):
+                script = args_obj.get("script")
+                if tc.name == "bash":
+                    return f"$ {script}"
+                return f"python {script}"
+            # Generic fallback
+            return f"{tc.name}({json.dumps(args_obj, ensure_ascii=False)})"
+        except Exception:
+            return ""
 
 
 class SubtreeScheduler:
