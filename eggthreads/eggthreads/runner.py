@@ -490,7 +490,7 @@ class ThreadRunner:
                     type_='tool_call.finished',
                     msg_id=None,
                     invoke_id=invoke_id,
-                    payload={'tool_call_id': tc.tool_call_id, 'reason': 'success'},
+                    payload={'tool_call_id': tc.tool_call_id, 'reason': 'success', 'output': full_result},
                 )
 
             # Output approval done (TC5) -> publish final tool message based on
