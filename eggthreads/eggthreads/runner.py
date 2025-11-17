@@ -532,6 +532,154 @@ class ThreadRunner:
         return out
 
 
+    async def _run_bash_tool_async(self, tc: ToolCallState, invoke_id: str, current_model: Optional[str], ra: RunnerActionable) -> None:
+        """Execute a bash tool call with OS-level cancellation.
+
+        This bypasses the generic ToolRegistry implementation so that we
+        can terminate the underlying subprocess when the thread's lease
+        is interrupted (e.g. via Ctrl+C in the UI).
+        """
+        import json as _json
+        import asyncio as _asyncio
+        import os as _os
+        import signal as _signal
+
+        # Decode arguments into a script string
+        args = tc.arguments
+        if isinstance(args, str):
+            try:
+                args_obj = _json.loads(args) if args.strip() else {}
+            except Exception:
+                args_obj = {"script": args}
+        elif isinstance(args, dict):
+            args_obj = args
+        else:
+            args_obj = {"script": str(args)}
+        script = (args_obj.get("script") or "").strip()
+
+        # Mark execution started
+        self.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=self.thread_id,
+            type_='tool_call.execution_started',
+            msg_id=None,
+            invoke_id=invoke_id,
+            payload={'tool_call_id': tc.tool_call_id},
+        )
+
+        # Spawn bash subprocess in its own process group so we can kill
+        # the entire command (sleep, child processes, etc.) on interrupt.
+        proc = await _asyncio.create_subprocess_shell(
+            script,
+            executable='/bin/bash',
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+            preexec_fn=_os.setsid,
+        )
+        cancelled = False
+
+        async def _hb_watcher():
+            nonlocal cancelled
+            while True:
+                await _asyncio.sleep(self.cfg.heartbeat_sec)
+                if cancelled:
+                    return
+                # If we lose the lease (e.g. via interrupt_thread),
+                # terminate the subprocess group.
+                if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                    cancelled = True
+                    try:
+                        pgid = _os.getpgid(proc.pid)
+                        _os.killpg(pgid, _signal.SIGTERM)
+                    except Exception:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                    return
+
+        watcher = _asyncio.create_task(_hb_watcher())
+        try:
+            stdout, stderr = await proc.communicate()
+        finally:
+            cancelled = True
+            try:
+                watcher.cancel()
+                await _asyncio.sleep(0)
+            except Exception:
+                pass
+
+        # Build combined output (match default bash tool formatting)
+        out = ''
+        if stdout:
+            out += f"--- STDOUT ---\n{stdout.decode().strip()}\n"
+        if stderr:
+            out += f"--- STDERR ---\n{stderr.decode().strip()}\n"
+        full_result = out.strip() or "--- The command executed successfully and produced no output ---"
+
+        # Stream the output as tool stream.deltas (respecting lease)
+        CH = 400
+        for i in range(0, len(full_result), CH):
+            part = full_result[i : i + CH]
+            if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                cancelled = True
+                break
+            self.db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=self.thread_id,
+                type_='stream.delta',
+                invoke_id=invoke_id,
+                chunk_seq=self.db.max_chunk_seq(invoke_id) + 1,
+                payload={'tool': {'name': tc.name or '', 'text': part, 'id': tc.tool_call_id}, 'model_key': current_model},
+            )
+            await _asyncio.sleep(0)
+
+        # Mark tool_call.finished with interrupted/success
+        self.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=self.thread_id,
+            type_='tool_call.finished',
+            msg_id=None,
+            invoke_id=invoke_id,
+            payload={
+                'tool_call_id': tc.tool_call_id,
+                'reason': 'interrupted' if cancelled else 'success',
+                'output': full_result,
+            },
+        )
+
+        # Auto output-approval for small outputs, unless the UI (e.g.
+        # Ctrl+C) already recorded an explicit decision for this
+        # tool_call.
+        try:
+            lines = full_result.splitlines() if isinstance(full_result, str) else []
+            line_count = len(lines)
+            char_count = len(full_result) if isinstance(full_result, str) else 0
+            is_long = line_count > 800 or char_count > 100000
+            try:
+                from .tool_state import build_tool_call_states
+                states_now = build_tool_call_states(self.db, self.thread_id)
+                existing = states_now.get(str(tc.tool_call_id))
+                has_decision = bool(getattr(existing, 'output_decision', None))
+            except Exception:
+                has_decision = False
+            if not is_long and not has_decision:
+                self.db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=self.thread_id,
+                    type_='tool_call.output_approval',
+                    msg_id=None,
+                    invoke_id=None,
+                    payload={
+                        'tool_call_id': tc.tool_call_id,
+                        'decision': 'whole',
+                        'reason': 'Auto: output below size thresholds',
+                        'preview': full_result,
+                    },
+                )
+        except Exception:
+            pass
+
     async def _run_ra_tools(self, invoke_id: str, current_model: Optional[str], ra: RunnerActionable) -> None:
         """Handle RA2/RA3: process tool calls that are already approved or denied
         (TC2.1/TC2.2/TC5) and advance them along the state machine."""
@@ -559,6 +707,12 @@ class ThreadRunner:
 
             # Approved, not yet executed -> execution_started -> finished
             if tc.state == 'TC2.1':
+                # Special-case bash so we can terminate the underlying
+                # subprocess on Ctrl+C / lease loss.
+                if tc.name == 'bash':
+                    await self._run_bash_tool_async(tc, invoke_id, current_model, ra)
+                    continue
+
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.thread_id,
