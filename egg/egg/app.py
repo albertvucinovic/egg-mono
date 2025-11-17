@@ -484,6 +484,67 @@ class EggDisplayApp:
             truncated = truncated.rstrip()
             truncated += "\n\n...[output truncated for preview]..."
         return truncated
+
+    def _cancel_pending_tools_on_interrupt(self) -> None:
+        """Best-effort cancellation of pending or running tool calls.
+
+        Used by Ctrl+C handling to stop any user command or tool execution
+        from continuing without quitting the app.
+
+        Semantics:
+          - TC1 (needs approval): auto-deny execution.
+          - TC2.1 / TC3 / TC4: mark output decision as "omit" so that any
+            eventual results are not surfaced to the model and do not
+            require further approval.
+        """
+        try:
+            from eggthreads import build_tool_call_states  # type: ignore
+        except Exception:
+            return
+        try:
+            states = build_tool_call_states(self.db, self.current_thread)
+        except Exception:
+            return
+        if not states:
+            return
+        import os as _os
+        for tcid, tc in states.items():
+            try:
+                tool_call_id = str(tcid)
+                # TC1: needs approval -> deny execution entirely.
+                if tc.state == 'TC1':
+                    self.db.append_event(
+                        event_id=_os.urandom(10).hex(),
+                        thread_id=self.current_thread,
+                        type_='tool_call.approval',
+                        msg_id=None,
+                        invoke_id=None,
+                        payload={
+                            'tool_call_id': tool_call_id,
+                            'decision': 'denied',
+                            'reason': 'Cancelled by user via Ctrl+C',
+                        },
+                    )
+                # TC2.1 (approved), TC3 (executing), TC4 (finished, waiting
+                # for output approval): mark output as omitted so the
+                # runner will not auto-approve or surface it.
+                elif tc.state in ('TC2.1', 'TC3', 'TC4'):
+                    self.db.append_event(
+                        event_id=_os.urandom(10).hex(),
+                        thread_id=self.current_thread,
+                        type_='tool_call.output_approval',
+                        msg_id=None,
+                        invoke_id=None,
+                        payload={
+                            'tool_call_id': tool_call_id,
+                            'decision': 'omit',
+                            'reason': 'Cancelled by user via Ctrl+C',
+                            'preview': 'Output omitted (cancelled by user).',
+                        },
+                    )
+            except Exception:
+                continue
+
     def _render_group(self) -> Group:
         row1 = HStack([self.chat_output, self.system_output]).render()
         # Compose rows: top output row, optional approval panel, then input.
@@ -690,13 +751,68 @@ class EggDisplayApp:
             except Exception:
                 pass
             return True
-        # Quit
+        # Ctrl+C: interrupt/cancel first, quit only when idle with empty input
         if key == ctrl_c or key == '\x03':
-            # Try to interrupt any active stream on the current thread for fast shutdown
+            # Current editor contents
             try:
-                interrupt_thread(self.db, self.current_thread)
+                current_text = self.input_panel.get_text()
             except Exception:
-                pass
+                current_text = ""
+            text_empty = not (current_text.strip())
+
+            # Coarse thread state
+            try:
+                from eggthreads import thread_state  # type: ignore
+                thread_st = thread_state(self.db, self.current_thread)
+            except Exception:
+                thread_st = "unknown"
+
+            # Is there an active stream (LLM or tool) for this thread?
+            try:
+                row_open = self.db.current_open(self.current_thread)
+            except Exception:
+                row_open = None
+            has_active_stream = row_open is not None
+
+            # When there is active work (streaming or pending tool approvals),
+            # treat Ctrl+C as "interrupt/cancel" without quitting.
+            if has_active_stream or thread_st in ("running", "waiting_tool_approval", "waiting_output_approval"):
+                # Interrupt any in-flight stream (LLM or tools)
+                try:
+                    interrupt_thread(self.db, self.current_thread)
+                except Exception:
+                    pass
+                # Best-effort: cancel pending/running tool calls so they do not
+                # continue or require further approval.
+                try:
+                    self._cancel_pending_tools_on_interrupt()
+                except Exception:
+                    pass
+                # Reset live streaming state so UI stops showing partial output
+                self._live_state = {
+                    "active_invoke": None,
+                    "content": "",
+                    "reason": "",
+                    "tools": {},
+                    "tc_text": {},
+                    "tc_order": [],
+                }
+                self._log_system('Interrupted current stream/tool execution with Ctrl+C (thread remains open).')
+                # Recompute any approval prompts after cancellation
+                self._compute_pending_prompt()
+                return True
+
+            # No active work. If there's text in the input panel, clear it.
+            if not text_empty:
+                self.input_panel.clear_text()
+                try:
+                    self._log_system('Input cleared with Ctrl+C (press Ctrl+C again on empty input to quit).')
+                except Exception:
+                    pass
+                return True
+
+            # Idle thread and empty input -> quit.
+            self._log_system('Exiting on Ctrl+C (no active work and empty input).')
             self.running = False
             return False
         # Send on Ctrl+D always
