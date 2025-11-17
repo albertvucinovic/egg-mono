@@ -543,9 +543,15 @@ class ThreadRunner:
                     invoke_id=invoke_id,
                     payload={'tool_call_id': tc.tool_call_id},
                 )
-                full_result = None
+                # Run tools in a background thread to avoid blocking the
+                # asyncio event loop, which is especially important for
+                # tools like `wait` that may sleep and poll.
+                loop = asyncio.get_running_loop()
                 try:
-                    full_result = self.tools.execute(tc.name, tc.arguments)
+                    full_result = await loop.run_in_executor(
+                        None,
+                        lambda: self.tools.execute(tc.name, tc.arguments),
+                    )
                 except Exception as e:
                     full_result = f"ERROR: {e}"
                 if not isinstance(full_result, str):
@@ -644,6 +650,12 @@ class ThreadRunner:
                     'tool_call_id': tc.tool_call_id,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
+                # For user-initiated commands (RA3), keep the user turn
+                # after publishing the tool result. The model should not
+                # be invoked automatically; instead, the result becomes
+                # part of the context for the *next* user message.
+                if ra.kind == 'RA3_tools_user':
+                    msg['keep_user_turn'] = True
                 if no_api_flag:
                     msg['no_api'] = True
                 if current_model:
