@@ -1,6 +1,7 @@
 import json
 from typing import Dict, Any, Optional
 
+import os
 import requests
 
 from .base import ProviderAdapter
@@ -105,16 +106,27 @@ class OpenAICompatAdapter(ProviderAdapter):
         interrupted) so that local servers (e.g. llama.cpp) can stop
         generation promptly when the client disconnects.
 
-        To guarantee this, aiohttp is a hard dependency here. If it is
-        not available, we raise a clear error instead of silently
-        falling back to the thread-bridged implementation.
+        To guarantee this, aiohttp is a hard dependency here during
+        normal operation. If it is not available and the environment
+        variable ``EGG_FORCE_WITHOUT_AIOHTTP`` is **not** set, we raise a
+        clear error. If that variable *is* set, we fall back to the
+        thread-bridged implementation from ProviderAdapter (which does
+        not guarantee hard HTTP cancellation).
         """
         try:
             import aiohttp
         except Exception as e:
+            if os.environ.get("EGG_FORCE_WITHOUT_AIOHTTP"):
+                # Degraded mode: rely on the generic async bridge which
+                # uses the synchronous stream() in a background thread.
+                async for evt in super().stream_async(url, headers, payload, timeout=timeout, session=session):
+                    yield evt
+                return
             raise RuntimeError(
                 "aiohttp is required for async streaming in eggllm. "
-                "Please install it in the Egg environment, e.g. `pip install aiohttp`."
+                "Install it (e.g. `pip install aiohttp`), or set "
+                "EGG_FORCE_WITHOUT_AIOHTTP=1 to run without hard HTTP "
+                "cancellation support."
             ) from e
 
         assistant_text_parts: list[str] = []
