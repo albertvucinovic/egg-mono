@@ -975,40 +975,23 @@ class EggDisplayApp:
         elif cmd == 'wait':
             # Treat /wait as a user command that enqueues a wait tool
             # call (RA3). The argument is a space-separated list of
-            # thread-id suffixes or full ids; we resolve them to full
-            # thread_ids here and then delegate to the 'wait' tool via
-            # the standard tool-call mechanism.
-            from eggthreads import list_threads
+            # thread selectors; use the same resolution logic as /thread
+            # (via _resolve_single_thread_selector) for maximum DRYness.
 
             arg_txt = (arg or '').strip()
             if not arg_txt:
-                self._log_system('Usage: /wait <thread-id|suffix> [more ...]')
+                self._log_system('Usage: /wait <thread-id|suffix|name|recap-fragment>[,more...]')
                 return
 
-            suffixes = arg_txt.split()
-            try:
-                rows = list_threads(self.db)
-            except Exception:
-                rows = []
-            all_ids = [r.thread_id for r in rows]
-
-            def _resolve_one(suf: str) -> str | None:
-                suf_l = suf.lower()
-                # Exact id
-                for tid in all_ids:
-                    if tid == suf:
-                        return tid
-                # Suffix match
-                candidates = [tid for tid in all_ids if tid.lower().endswith(suf_l)]
-                if len(candidates) == 1:
-                    return candidates[0]
-                return None
-
+            # Support comma- or whitespace-separated selectors, e.g.
+            #   /wait abc,def ghi
+            # becomes selectors ['abc', 'def', 'ghi'].
+            selectors = [s for s in re.split(r'[\s,]+', arg_txt) if s]
             resolved: list[str] = []
-            for suf in suffixes:
-                tid = _resolve_one(suf)
+            for sel in selectors:
+                tid = self._resolve_single_thread_selector(sel)
                 if not tid:
-                    self._log_system(f"/wait: could not resolve thread selector '{suf}'")
+                    self._log_system(f"/wait: no thread matches selector '{sel}'")
                     return
                 resolved.append(tid)
 
@@ -1031,7 +1014,7 @@ class EggDisplayApp:
                 'user_command_type': '/wait',
             }
             # Store the triggering user message and associated tool_calls
-            msg_id = append_message(self.db, self.current_thread, 'user', f"/wait {' '.join(suffixes)}", extra=extra)
+            msg_id = append_message(self.db, self.current_thread, 'user', f"/wait {arg_txt}", extra=extra)
             # Auto-approve this user-initiated tool call
             try:
                 self.db.append_event(
@@ -1247,6 +1230,43 @@ class EggDisplayApp:
             if recap_matches:
                 matches = recap_matches
         return matches
+
+    def _resolve_single_thread_selector(self, selector: str) -> Optional[str]:
+        """Resolve a free-form thread selector to a single thread_id.
+
+        This wraps _select_threads_by_selector with the same additional
+        fallbacks and created_at ordering used by /thread and /delete so
+        that other commands (e.g. /wait) can reuse the exact selector
+        semantics.
+        """
+        from eggthreads import list_threads  # local import to avoid cycles
+
+        sel = (selector or '').strip()
+        if not sel:
+            return None
+
+        matches = self._select_threads_by_selector(sel)
+        if not matches and ' ' in sel:
+            sel_first = sel.split()[0]
+            matches = self._select_threads_by_selector(sel_first)
+        if not matches:
+            try:
+                rows_all = list_threads(self.db)
+                suf = sel.lower()
+                matches = [r.thread_id for r in rows_all if r.thread_id.lower().endswith(suf)]
+            except Exception:
+                matches = []
+        if not matches:
+            return None
+
+        # Order by created_at newest-first, mirroring /thread behavior
+        try:
+            rows = list_threads(self.db)
+            ca = {r.thread_id: r.created_at for r in rows}
+        except Exception:
+            ca = {}
+        matches.sort(key=lambda tid: ca.get(tid, ''), reverse=True)
+        return matches[0]
 
     # ---------------- Watching & streaming ----------------
     async def _start_watching_current(self):

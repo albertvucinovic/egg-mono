@@ -500,6 +500,57 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         cmd = prefix[:sp]
         sub = prefix[sp+1:]  # raw arg text
         arg_tok = _last_token(sub)
+
+        def _thread_arg_items(arg_tok: str) -> List[Dict[str, str]]:
+            """Return rich thread suggestions for commands that take a thread selector.
+
+            Shared by /thread, /delete, and /wait so that the selector
+            semantics are consistent across commands.
+            """
+            try:
+                rows = list_threads(db) if list_threads else []
+            except Exception:
+                rows = []
+            atok = (arg_tok or '').lower()
+            try:
+                rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
+            except Exception:
+                pass
+            tid_cur = None
+            try:
+                tid_cur = get_current_thread()
+            except Exception:
+                tid_cur = None
+            out_items: List[Dict[str, str]] = []
+            for r in rows:
+                tid = getattr(r, 'thread_id', '')
+                name = getattr(r, 'name', '') or ''
+                recap = getattr(r, 'short_recap', '') or ''
+                if atok:
+                    hay = f"{tid} {name} {recap}".lower()
+                    if atok not in hay:
+                        continue
+                # Minimal display similar to /threads
+                try:
+                    streaming = bool(db.current_open(tid))
+                except Exception:
+                    streaming = False
+                id_short = tid[-8:]
+                cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid_cur and tid == tid_cur else ''
+                sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
+                status = (db.get_thread(tid).status if db.get_thread(tid) else 'unknown')
+                if status == 'active':
+                    status_tag = f"[bold green]{status}[/]"
+                elif status == 'paused':
+                    status_tag = f"[bold red]{status}[/]"
+                else:
+                    status_tag = f"[bold]{status}[/]"
+                disp = f"{cur_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap}" + (f"  [dim]{name}[/dim]" if name else '')
+                rep = len(arg_tok or '')
+                out_items.append({"display": disp, "insert": tid, "replace": str(rep)})
+                if len(out_items) >= 50:
+                    break
+            return out_items
         # /model
         if cmd == '/model':
             # Use existing ModelCompleter for parity
@@ -556,50 +607,11 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
 
         # /thread and /delete: rich suggestions id/name/recap
         if cmd in ('/thread', '/delete'):
-            try:
-                rows = list_threads(db) if list_threads else []
-            except Exception:
-                rows = []
-            atok = (arg_tok or '').lower()
-            try:
-                rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
-            except Exception:
-                pass
-            tid_cur = None
-            try:
-                tid_cur = get_current_thread()
-            except Exception:
-                tid_cur = None
-            out_items: List[Dict[str, str]] = []
-            for r in rows:
-                tid = getattr(r, 'thread_id', '')
-                name = getattr(r, 'name', '') or ''
-                recap = getattr(r, 'short_recap', '') or ''
-                if atok:
-                    hay = f"{tid} {name} {recap}".lower()
-                    if atok not in hay:
-                        continue
-                # Minimal display similar to /threads
-                try:
-                    streaming = bool(db.current_open(tid))
-                except Exception:
-                    streaming = False
-                id_short = tid[-8:]
-                cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid_cur and tid == tid_cur else ''
-                sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
-                status = (db.get_thread(tid).status if db.get_thread(tid) else 'unknown')
-                if status == 'active':
-                    status_tag = f"[bold green]{status}[/]"
-                elif status == 'paused':
-                    status_tag = f"[bold red]{status}[/]"
-                else:
-                    status_tag = f"[bold]{status}[/]"
-                disp = f"{cur_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap}" + (f"  [dim]{name}[/dim]" if name else '')
-                rep = len(arg_tok)
-                out_items.append({"display": disp, "insert": tid, "replace": str(rep)})
-                if len(out_items) >= 50:
-                    break
-            return out_items
+            return _thread_arg_items(arg_tok)
+
+        # /wait: thread selectors, same suggestions as /thread
+        if cmd == '/wait':
+            return _thread_arg_items(arg_tok)
 
         # /child pattern -> show child ids
         if cmd == '/child':
