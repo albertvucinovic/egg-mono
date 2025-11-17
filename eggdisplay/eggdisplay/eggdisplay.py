@@ -692,15 +692,23 @@ class RealTimeEditor(LiveEditorBase):
         self.input_queue = queue.Queue()
 
     def _input_worker(self):
+        """Background reader for RealTimeEditor.
+
+        We treat Ctrl+C as a normal key and let the embedding
+        application decide whether to quit. The loop exits when
+        self.running is set to False.
+        """
         while self.running:
             try:
                 key = readchar.readkey()
                 self.input_queue.put(key)
-                if key == getattr(readchar.key, 'CTRL_C', '\x03'):
-                    break
             except KeyboardInterrupt:
-                self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
-                break
+                # Normalize KeyboardInterrupt to a Ctrl+C key and
+                # continue, letting the main loop handle it.
+                try:
+                    self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                except Exception:
+                    pass
             except Exception:
                 break
 
@@ -744,13 +752,24 @@ class AsyncRealTimeEditor(LiveEditorBase):
         self.input_queue: asyncio.Queue = asyncio.Queue()
 
     async def _input_reader(self):
+        """Async background reader for AsyncRealTimeEditor.
+
+        Ctrl+C is forwarded as a regular key and the embedding
+        application decides whether to quit. The loop exits when
+        self.running is set to False.
+        """
         while self.running:
             try:
                 key = await asyncio.to_thread(readchar.readkey)
                 await self.input_queue.put(key)
-                if key == getattr(readchar.key, 'CTRL_C', '\x03'):
-                    break
-            except (KeyboardInterrupt, Exception):
+            except KeyboardInterrupt:
+                # Normalize KeyboardInterrupt to a Ctrl+C key and
+                # continue, letting the main loop handle it.
+                try:
+                    await self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                except Exception:
+                    pass
+            except Exception:
                 break
 
     async def run_async(self, *, inline: bool = True):
