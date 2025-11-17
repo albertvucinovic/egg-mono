@@ -21,6 +21,12 @@ _sys.path.insert(0, str(_ROOT.parent / 'eggthreads'))
 _sys.path.insert(0, str(_ROOT.parent / 'eggllm'))
 _sys.path.insert(0, str(_ROOT.parent / 'eggdisplay'))
 
+# Global flag: allow forcing run without aiohttp (no hard HTTP cancellation)
+_FORCE_WITHOUT_AIOHTTP = '--force-without-aiohttp' in _sys.argv
+if _FORCE_WITHOUT_AIOHTTP:
+    os.environ['EGG_FORCE_WITHOUT_AIOHTTP'] = '1'
+    _sys.argv = [a for a in _sys.argv if a != '--force-without-aiohttp']
+
 # eggthreads backend
 from eggthreads import (  # type: ignore
     ThreadsDB,
@@ -115,6 +121,32 @@ class EggDisplayApp:
             self.llm_client = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH) if LLMClient else None
         except Exception:
             self.llm_client = None
+
+        # If LLM is enabled and hard cancellation is expected, ensure
+        # aiohttp is available unless the user explicitly forces
+        # degraded mode via --force-without-aiohttp / EGG_FORCE_WITHOUT_AIOHTTP.
+        if self.llm_client is not None:
+            force_no_aiohttp = bool(os.environ.get('EGG_FORCE_WITHOUT_AIOHTTP'))
+            if not force_no_aiohttp:
+                try:
+                    import aiohttp  # type: ignore
+                except Exception:
+                    # Exit early with a clear message so the user knows
+                    # why Ctrl+C will not work as expected.
+                    self.console.print(
+                        "[bold red]aiohttp is required for streaming cancellation (Ctrl+C) in Egg.[/bold red]\n"
+                        "[bold yellow]Install it with:[/bold yellow] [white]pip install aiohttp[/white]\n"
+                        "Or run [white]./egg.sh --force-without-aiohttp[/white] to continue without hard HTTP cancellation."
+                    )
+                    raise SystemExit(1)
+            else:
+                try:
+                    self.console.print(
+                        "[yellow]Warning: running without aiohttp; Ctrl+C will not stop the underlying HTTP stream.\n"
+                        "Use --force-without-aiohttp only if you understand the implications.[/yellow]"
+                    )
+                except Exception:
+                    pass
 
         # Threads and scheduler setup
         self.system_prompt = _get_system_prompt()
