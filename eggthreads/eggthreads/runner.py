@@ -576,18 +576,21 @@ class ThreadRunner:
             stderr=_asyncio.subprocess.PIPE,
             preexec_fn=_os.setsid,
         )
-        cancelled = False
+        # True iff we lost the lease and explicitly interrupted via
+        # heartbeat failure; used to tag tool_call.finished.reason.
+        interrupted_by_lease = False
 
         async def _hb_watcher():
-            nonlocal cancelled
+            nonlocal interrupted_by_lease
             while True:
                 await _asyncio.sleep(self.cfg.heartbeat_sec)
-                if cancelled:
+                # If bash has already completed naturally, stop watching.
+                if proc.returncode is not None:
                     return
                 # If we lose the lease (e.g. via interrupt_thread),
                 # terminate the subprocess group.
                 if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
-                    cancelled = True
+                    interrupted_by_lease = True
                     try:
                         pgid = _os.getpgid(proc.pid)
                         _os.killpg(pgid, _signal.SIGTERM)
@@ -668,7 +671,7 @@ class ThreadRunner:
             invoke_id=invoke_id,
             payload={
                 'tool_call_id': tc.tool_call_id,
-                'reason': 'interrupted' if cancelled else 'success',
+                'reason': 'interrupted' if interrupted_by_lease else 'success',
                 'output': full_result,
             },
         )
@@ -838,14 +841,39 @@ class ThreadRunner:
                 payload = tc.last_output_approval_payload or {}
                 decision = payload.get('decision')
                 preview = payload.get('preview') or ''
-                # Determine base content from the approved preview.
-                if decision == 'omit':
-                    # User chose to omit the (possibly huge) output; we keep a
-                    # small placeholder string instead of the real content.
-                    content = "Output omitted."
+                finished_output = tc.finished_output or ''
+                finished_reason = (tc.finished_reason or '').lower()
+
+                # Determine base content. For interrupted tool calls we want
+                # to surface the partial output that was produced before the
+                # interruption so the user can inspect it (even if the
+                # decision is "omit" for LLM context).
+                if finished_reason == 'interrupted':
+                    # Prefer an explicit preview when decision='partial';
+                    # otherwise fall back to the full finished_output.
+                    if decision == 'partial' and preview:
+                        content = str(preview)
+                    elif finished_output:
+                        content = finished_output
+                    else:
+                        content = str(preview or "Output omitted.")
+                    # Append a clear note so it is obvious this output is
+                    # incomplete.
+                    note = "Output incomplete - interrupted"
+                    if content:
+                        if not content.rstrip().endswith(note):
+                            content = content.rstrip() + "\n\n" + note
+                    else:
+                        content = note
                 else:
-                    # 'whole' or 'partial' (or unknown) -> use the preview string.
-                    content = str(preview)
+                    # Non-interrupted calls keep the previous semantics.
+                    if decision == 'omit':
+                        # User chose to omit the (possibly huge) output; we keep a
+                        # small placeholder string instead of the real content.
+                        content = "Output omitted."
+                    else:
+                        # 'whole' or 'partial' (or unknown) -> use the preview string.
+                        content = str(preview)
 
                 # For user-originated commands ($ / $$), prepend the original
                 # command text so that the message containing the output also
