@@ -602,12 +602,22 @@ class EggDisplayApp:
         _panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
 
     def _print_static_view_current(self, heading: Optional[str] = None) -> None:
-        # Print a static view of recent messages for the selected thread
+        # Print a static view of recent messages for the selected thread.
+        # Only take a fresh snapshot if the thread is not currently
+        # streaming. For streaming threads we want to keep
+        # snapshot_last_event_seq at the last completed message so that
+        # any in-flight stream can be fully reconstructed from its
+        # stream.delta events when attaching a watcher mid-stream.
         tid = self.current_thread
         try:
-            create_snapshot(self.db, tid)
+            row = self.db.current_open(tid)
         except Exception:
-            pass
+            row = None
+        if row is None:
+            try:
+                create_snapshot(self.db, tid)
+            except Exception:
+                pass
         if heading:
             try:
                 self.console.print(Panel(heading, border_style='blue'))
@@ -1276,6 +1286,17 @@ class EggDisplayApp:
                 self._watch_task.cancel()
             except Exception:
                 pass
+        # Reset live streaming state when switching threads so that we
+        # don't show stale streaming output from a previous thread while
+        # we wait for the new thread's events to arrive.
+        self._live_state = {
+            "active_invoke": None,
+            "content": "",
+            "reason": "",
+            "tools": {},
+            "tc_text": {},
+            "tc_order": [],
+        }
         self._watch_task = asyncio.create_task(self._watch_thread(self.current_thread))
 
     async def _watch_thread(self, thread_id: str):
@@ -1293,6 +1314,25 @@ class EggDisplayApp:
             row_open = None
         after_for_watch = start_after
         if row_open is not None:
+            # There is an active stream for this thread. Initialize the
+            # in-memory live_state so that any subsequent stream.delta
+            # events (and any preloaded deltas below) are rendered as
+            # "(streaming)" output, even if we joined the thread after
+            # the stream had already started.
+            try:
+                self._live_state = {
+                    "active_invoke": row_open["invoke_id"],
+                    "content": "",
+                    "reason": "",
+                    "tools": {},
+                    "tc_text": {},
+                    "tc_order": [],
+                }
+            except Exception:
+                # If anything goes wrong, we still proceed; the stream
+                # deltas will be applied, we just might miss the
+                # "active" flag for this session.
+                pass
             try:
                 cur = self.db.conn.execute(
                     "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
