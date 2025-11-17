@@ -598,9 +598,55 @@ class ThreadRunner:
                             pass
                     return
 
+        # Concurrently read stdout/stderr so we can stream output as it
+        # arrives. We accumulate into buffers while also emitting
+        # stream.delta events for live display.
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
+
+        async def _stream_reader(stream, is_stdout: bool):
+            nonlocal cancelled
+            header_emitted = False
+            prefix = '--- STDOUT ---\n' if is_stdout else '--- STDERR ---\n'
+            while True:
+                try:
+                    chunk = await stream.readline()
+                except Exception:
+                    break
+                if not chunk:
+                    break
+                text = chunk.decode(errors='replace')
+                if not header_emitted:
+                    if is_stdout:
+                        stdout_buf.append(prefix)
+                    else:
+                        stderr_buf.append(prefix)
+                    header_emitted = True
+                if is_stdout:
+                    stdout_buf.append(text)
+                else:
+                    stderr_buf.append(text)
+                # Stream this chunk immediately for live UI
+                if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                    cancelled = True
+                    break
+                self.db.append_event(
+                    event_id=_os.urandom(10).hex(),
+                    thread_id=self.thread_id,
+                    type_='stream.delta',
+                    invoke_id=invoke_id,
+                    chunk_seq=self.db.max_chunk_seq(invoke_id) + 1,
+                    payload={'tool': {'name': tc.name or '', 'text': text, 'id': tc.tool_call_id}, 'model_key': current_model},
+                )
+                await _asyncio.sleep(0)
+
         watcher = _asyncio.create_task(_hb_watcher())
+        stdout_task = _asyncio.create_task(_stream_reader(proc.stdout, True))
+        stderr_task = _asyncio.create_task(_stream_reader(proc.stderr, False))
+
         try:
-            stdout, stderr = await proc.communicate()
+            await proc.wait()
+            await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         finally:
             cancelled = True
             try:
@@ -609,34 +655,13 @@ class ThreadRunner:
             except Exception:
                 pass
 
-        # Build combined output (match default bash tool formatting)
-        out = ''
-        if stdout:
-            out += f"--- STDOUT ---\n{stdout.decode().strip()}\n"
-        if stderr:
-            out += f"--- STDERR ---\n{stderr.decode().strip()}\n"
+        # Build combined output from accumulated buffers
+        out = ''.join(stdout_buf) + ''.join(stderr_buf)
         full_result = out.strip() or "--- The command executed successfully and produced no output ---"
-
-        # Stream the output as tool stream.deltas (respecting lease)
-        CH = 400
-        for i in range(0, len(full_result), CH):
-            part = full_result[i : i + CH]
-            if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
-                cancelled = True
-                break
-            self.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
-                type_='stream.delta',
-                invoke_id=invoke_id,
-                chunk_seq=self.db.max_chunk_seq(invoke_id) + 1,
-                payload={'tool': {'name': tc.name or '', 'text': part, 'id': tc.tool_call_id}, 'model_key': current_model},
-            )
-            await _asyncio.sleep(0)
 
         # Mark tool_call.finished with interrupted/success
         self.db.append_event(
-            event_id=os.urandom(10).hex(),
+            event_id=_os.urandom(10).hex(),
             thread_id=self.thread_id,
             type_='tool_call.finished',
             msg_id=None,
@@ -665,7 +690,7 @@ class ThreadRunner:
                 has_decision = False
             if not is_long and not has_decision:
                 self.db.append_event(
-                    event_id=os.urandom(10).hex(),
+                    event_id=_os.urandom(10).hex(),
                     thread_id=self.thread_id,
                     type_='tool_call.output_approval',
                     msg_id=None,
