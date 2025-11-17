@@ -98,17 +98,24 @@ class OpenAICompatAdapter(ProviderAdapter):
                payload: Dict[str, Any],
                timeout: int = 600,
                session: Optional[Any] = None):
-        """Async streaming using aiohttp when available, falling back to the
-        default thread-bridged async implementation from ProviderAdapter.
+        """Async streaming using aiohttp.
 
-        This preserves the same event protocol as stream().
+        For Egg/eggthreads we rely on HTTP-level cancellation semantics
+        (closing the underlying TCP connection when a stream is
+        interrupted) so that local servers (e.g. llama.cpp) can stop
+        generation promptly when the client disconnects.
+
+        To guarantee this, aiohttp is a hard dependency here. If it is
+        not available, we raise a clear error instead of silently
+        falling back to the thread-bridged implementation.
         """
         try:
             import aiohttp
-        except Exception:
-            async for evt in super().stream_async(url, headers, payload, timeout=timeout, session=session):
-                yield evt
-            return
+        except Exception as e:
+            raise RuntimeError(
+                "aiohttp is required for async streaming in eggllm. "
+                "Please install it in the Egg environment, e.g. `pip install aiohttp`."
+            ) from e
 
         assistant_text_parts: list[str] = []
         reasoning_parts: list[str] = []
