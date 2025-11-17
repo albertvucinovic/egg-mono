@@ -49,7 +49,7 @@ class ToolRegistry:
 
 # Default tools similar to chat.sh
 def create_default_tools() -> ToolRegistry:
-    import asyncio, subprocess, sys, os, json as _json
+    import asyncio, subprocess, sys, os, json as _json, time as _time
     from io import StringIO
     from pathlib import Path
 
@@ -253,6 +253,114 @@ def create_default_tools() -> ToolRegistry:
             "required": ["query"],
         },
         impl=_search_tavily,
+    )
+
+    # wait: synchronize on other threads and return their last assistant
+    # message when finished. This is a standard tool so that both the
+    # assistant and user commands (/wait) can use the same implementation.
+    def _wait_tool(args: Dict[str, Any]):
+        from .tool_state import thread_state
+        from .db import ThreadsDB
+
+        tids_arg = args.get('thread_ids') or args.get('threads') or args.get('thread_id')
+        if isinstance(tids_arg, str):
+            thread_ids = [tids_arg]
+        elif isinstance(tids_arg, list):
+            thread_ids = [str(t) for t in tids_arg if isinstance(t, (str, int))]
+        else:
+            return 'Error: "thread_ids" must be a string or a list of strings.'
+        if not thread_ids:
+            return 'Error: no valid thread_ids provided.'
+
+        timeout = args.get('timeout_sec') or args.get('timeout')
+        try:
+            timeout_sec = float(timeout) if timeout is not None else None
+        except Exception:
+            timeout_sec = None
+
+        db = ThreadsDB()
+
+        # Helper: get last assistant content for a thread from its snapshot
+        def _last_assistant_content(tid: str) -> str:
+            row = db.get_thread(tid)
+            if not row or not row.snapshot_json:
+                return ''
+            try:
+                snap = _json.loads(row.snapshot_json)
+            except Exception:
+                return ''
+            msgs = snap.get('messages', []) or []
+            for m in reversed(msgs):
+                try:
+                    if m.get('role') == 'assistant' and isinstance(m.get('content'), str):
+                        return m.get('content') or ''
+                except Exception:
+                    continue
+            return ''
+
+        start = _time.time()
+        finished: Dict[str, bool] = {tid: False for tid in thread_ids}
+        results: Dict[str, str] = {}
+
+        # Poll until all threads reach waiting_user or timeout
+        while True:
+            all_done = True
+            for tid in thread_ids:
+                if finished.get(tid):
+                    continue
+                try:
+                    st = thread_state(db, tid)
+                except Exception:
+                    st = 'unknown'
+                if st == 'waiting_user':
+                    results[tid] = _last_assistant_content(tid)
+                    finished[tid] = True
+                else:
+                    all_done = False
+            if all_done:
+                break
+            if timeout_sec is not None and (_time.time() - start) >= timeout_sec:
+                break
+            _time.sleep(0.2)
+
+        # Format summary
+        lines: list[str] = []
+        for tid in thread_ids:
+            short = tid[-8:]
+            if finished.get(tid):
+                content = results.get(tid) or '(no assistant content found)'
+                lines.append(f"Thread {short} finished. Last assistant message:\n{content}")
+            else:
+                try:
+                    st = thread_state(db, tid)
+                except Exception:
+                    st = 'unknown'
+                lines.append(f"Thread {short} not finished (state={st}).")
+        return "\n\n".join(lines)
+
+    reg.register(
+        name='wait',
+        description=(
+            'Wait for one or more threads to finish and return their last '
+            'assistant message. A thread is considered finished when its '
+            "state is 'waiting_user'. Optional timeout_sec limits how long to wait."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "thread_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of thread_ids to wait for.",
+                },
+                "timeout_sec": {
+                    "type": "number",
+                    "description": "Maximum seconds to wait before returning.",
+                },
+            },
+            "required": ["thread_ids"],
+        },
+        impl=_wait_tool,
     )
 
     # Note: agent-oriented tools like popContext/spawn_agent are excluded from default registry
