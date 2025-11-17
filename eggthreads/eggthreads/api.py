@@ -143,18 +143,31 @@ def current_open_invoke(db: ThreadsDB, thread_id: str) -> Optional[str]:
 
 
 def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Optional[str]:
-    """Hard-preempt current step by flipping invoke_id. Returns previous invoke_id if any.
+    """Hard-preempt current step by dropping the current lease.
 
-    Writers that gate on (thread_id, invoke_id) will fail on next write.
+    Writers that gate on (thread_id, invoke_id) will fail on the next
+    heartbeat because the open_streams row for that (thread, invoke)
+    no longer exists. A new runner can immediately acquire a fresh
+    lease for the thread.
     """
     cur = db.conn.execute("SELECT invoke_id FROM open_streams WHERE thread_id=?", (thread_id,))
     row = cur.fetchone()
     old = row[0] if row else None
     new_inv = _ulid_like()
-    db.conn.execute("UPDATE open_streams SET invoke_id=?, heartbeat_at=datetime('now'), lease_until=datetime('now','+10 seconds') WHERE thread_id=?",
-                    (new_inv, thread_id))
     if old:
-        db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='control.interrupt', payload={"reason": reason, "old_invoke_id": old, "new_invoke_id": new_inv})
+        # Remove the existing open_streams row so that:
+        #  - the current runner loses its lease (heartbeat will fail), and
+        #  - future runners can immediately acquire a new lease.
+        try:
+            db.conn.execute("DELETE FROM open_streams WHERE thread_id=? AND invoke_id=?", (thread_id, old))
+        except Exception:
+            pass
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_='control.interrupt',
+            payload={"reason": reason, "old_invoke_id": old, "new_invoke_id": new_inv},
+        )
     return old
 
 

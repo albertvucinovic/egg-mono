@@ -193,7 +193,13 @@ def list_tool_calls_for_thread(db: ThreadsDB, thread_id: str) -> List[ToolCallSt
 
 
 def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
-    """Return the event_seq of the last *LLM* stream.close for a thread.
+    """Return the event_seq of the last *LLM* boundary for a thread.
+
+    Boundaries are either:
+      - a stream.close whose invoke_id saw LLM-style deltas (``text`` or
+        ``reason`` fields), or
+      - a control.interrupt whose payload.old_invoke_id matches such an
+        invoke_id.
 
     We intentionally ignore stream.close events that belong to tool
     execution streams (RA2/RA3). Those streams only emit deltas with a
@@ -201,14 +207,16 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
     streams (RA1) emit deltas with ``text`` and/or ``reason`` keys.
 
     This distinction matters because RA1 (LLM turns) should be driven by
-    user/tool messages that appear *after* the last LLM stream finishes,
-    but we do not want tool-execution streams to reset that boundary.
+    user/tool messages that appear *after* the last LLM turn finishes or
+    is explicitly interrupted by the user, but we do not want
+    tool-execution streams to reset that boundary.
     """
     last_close = -1
     llm_invokes: set[str] = set()
 
     # Single pass over events in order: mark invoke_ids that have LLM
-    # deltas, then record the last stream.close for any such invoke_id.
+    # deltas, then record the last stream.close/control.interrupt for any
+    # such invoke_id.
     cur = db.conn.execute(
         "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
         (thread_id,),
@@ -230,6 +238,19 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
                 last_close = int(ev.get("event_seq"))
             except Exception:
                 continue
+        elif t == "control.interrupt":
+            # Treat an explicit interrupt of an LLM invoke as a boundary
+            # equivalent to a stream.close for RA1 purposes.
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            old_inv = payload.get("old_invoke_id")
+            if isinstance(old_inv, str) and old_inv in llm_invokes:
+                try:
+                    last_close = int(ev.get("event_seq"))
+                except Exception:
+                    continue
     return last_close
 
 

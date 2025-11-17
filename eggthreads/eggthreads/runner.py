@@ -370,6 +370,7 @@ class ThreadRunner:
         # accidentally leak them to the model.
         base_messages = self._sanitize_messages_for_api(base_messages)
 
+        interrupted = False
         try:
             async for raw in self.llm.astream_chat(base_messages, tools=self.tools.tools_spec() or None, tool_choice='auto'):
                 try:
@@ -393,7 +394,8 @@ class ThreadRunner:
                             assistant_text_parts.append(content)
                             # Heartbeat / lease extension; stop if we lost lease
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
-                                return
+                                interrupted = True
+                                break
                             chunk_seq += 1
                             self.db.append_event(
                                 event_id=os.urandom(10).hex(),
@@ -410,7 +412,8 @@ class ThreadRunner:
                         if reason:
                             reasoning_parts.append(reason)
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
-                                return
+                                interrupted = True
+                                break
                             chunk_seq += 1
                             self.db.append_event(
                                 event_id=os.urandom(10).hex(),
@@ -449,7 +452,28 @@ class ThreadRunner:
                             payload=assistant_msg,
                         )
                         return
+                if interrupted:
+                    break
         finally:
+            # If the stream was interrupted (e.g. via Ctrl+C removing the
+            # lease), we still want to persist whatever partial assistant
+            # content we have as a user-visible message so that users can
+            # inspect or edit it and the model can see what was interrupted.
+            if interrupted and (assistant_text_parts or reasoning_parts):
+                assistant_msg: Dict[str, Any] = {'role': 'assistant'}
+                if assistant_text_parts:
+                    assistant_msg['content'] = ''.join(assistant_text_parts)
+                if reasoning_parts:
+                    assistant_msg['reasoning'] = ''.join(reasoning_parts)
+                if current_model:
+                    assistant_msg['model_key'] = current_model
+                self.db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=self.thread_id,
+                    type_='msg.create',
+                    msg_id=os.urandom(10).hex(),
+                    payload=assistant_msg,
+                )
             if recorder is not None:
                 try:
                     recorder.close()
@@ -558,8 +582,15 @@ class ThreadRunner:
                     full_result = str(full_result)
                 out = full_result or ''
                 CH = 400
+                cancelled = False
                 for i in range(0, len(out), CH):
                     part = out[i : i + CH]
+                    # Respect the per-thread lease: if we lose it (e.g. via
+                    # interrupt_thread on Ctrl+C), stop streaming further
+                    # tool output for this invoke.
+                    if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                        cancelled = True
+                        break
                     self.db.append_event(
                         event_id=os.urandom(10).hex(),
                         thread_id=self.thread_id,
@@ -575,7 +606,11 @@ class ThreadRunner:
                     type_='tool_call.finished',
                     msg_id=None,
                     invoke_id=invoke_id,
-                    payload={'tool_call_id': tc.tool_call_id, 'reason': 'success', 'output': full_result},
+                    payload={
+                        'tool_call_id': tc.tool_call_id,
+                        'reason': 'interrupted' if cancelled else 'success',
+                        'output': full_result,
+                    },
                 )
                 # Auto output-approval for small outputs (chat.sh style):
                 # - if output is not excessively long in lines or characters,
@@ -588,7 +623,17 @@ class ThreadRunner:
                     line_count = len(lines)
                     char_count = len(full_result) if isinstance(full_result, str) else 0
                     is_long = line_count > 800 or char_count > 100000
-                    if not is_long:
+                    # If a user/output decision already exists for this tool
+                    # call (e.g. Ctrl+C marked it as "omit"), do not
+                    # override it with an automatic "whole" approval.
+                    try:
+                        from .tool_state import build_tool_call_states
+                        states_now = build_tool_call_states(self.db, self.thread_id)
+                        existing = states_now.get(str(tc.tool_call_id))
+                        has_decision = bool(getattr(existing, 'output_decision', None))
+                    except Exception:
+                        has_decision = False
+                    if not is_long and not has_decision:
                         self.db.append_event(
                             event_id=os.urandom(10).hex(),
                             thread_id=self.thread_id,
