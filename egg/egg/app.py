@@ -923,7 +923,7 @@ class EggDisplayApp:
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
-            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /quit')
+            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /wait <threads>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /quit')
         elif cmd == 'quit':
             self.running = False
         elif cmd == 'pause':
@@ -972,6 +972,88 @@ class EggDisplayApp:
             create_snapshot(self.db, child)
             self._ensure_scheduler_for(child)
             self._log_system(f"Spawned thread: {child[-8:]}")
+        elif cmd == 'wait':
+            # Treat /wait as a user command that enqueues a wait tool
+            # call (RA3). The argument is a space-separated list of
+            # thread-id suffixes or full ids; we resolve them to full
+            # thread_ids here and then delegate to the 'wait' tool via
+            # the standard tool-call mechanism.
+            from eggthreads import list_threads
+
+            arg_txt = (arg or '').strip()
+            if not arg_txt:
+                self._log_system('Usage: /wait <thread-id|suffix> [more ...]')
+                return
+
+            suffixes = arg_txt.split()
+            try:
+                rows = list_threads(self.db)
+            except Exception:
+                rows = []
+            all_ids = [r.thread_id for r in rows]
+
+            def _resolve_one(suf: str) -> str | None:
+                suf_l = suf.lower()
+                # Exact id
+                for tid in all_ids:
+                    if tid == suf:
+                        return tid
+                # Suffix match
+                candidates = [tid for tid in all_ids if tid.lower().endswith(suf_l)]
+                if len(candidates) == 1:
+                    return candidates[0]
+                return None
+
+            resolved: list[str] = []
+            for suf in suffixes:
+                tid = _resolve_one(suf)
+                if not tid:
+                    self._log_system(f"/wait: could not resolve thread selector '{suf}'")
+                    return
+                resolved.append(tid)
+
+            # Enqueue a wait tool call via the RA3 mechanism. We do not
+            # hide it from the model by default; the model should see the
+            # summary of the waited threads.
+            import os as _os, json as _json
+            tc_id = _os.urandom(8).hex()
+            tool_call = {
+                'id': tc_id,
+                'type': 'function',
+                'function': {
+                    'name': 'wait',
+                    'arguments': _json.dumps({'thread_ids': resolved}, ensure_ascii=False),
+                },
+            }
+            extra = {
+                'tool_calls': [tool_call],
+                'keep_user_turn': True,
+                'user_command_type': '/wait',
+            }
+            # Store the triggering user message and associated tool_calls
+            msg_id = append_message(self.db, self.current_thread, 'user', f"/wait {' '.join(suffixes)}", extra=extra)
+            # Auto-approve this user-initiated tool call
+            try:
+                self.db.append_event(
+                    event_id=_os.urandom(10).hex(),
+                    thread_id=self.current_thread,
+                    type_='tool_call.approval',
+                    msg_id=None,
+                    invoke_id=None,
+                    payload={
+                        'tool_call_id': tc_id,
+                        'decision': 'granted',
+                        'reason': 'Approved as user-initiated /wait command',
+                    },
+                )
+            except Exception as e:
+                self._log_system(f'Error recording tool_call.approval for wait: {e}')
+            try:
+                create_snapshot(self.db, self.current_thread)
+            except Exception:
+                pass
+            self._ensure_scheduler_for(self.current_thread)
+            self._log_system(f"Queued /wait for threads: {' '.join([tid[-8:] for tid in resolved])}.")
         elif cmd == 'children':
             sub = _get_subtree(self.db, self.current_thread)
             if not sub:

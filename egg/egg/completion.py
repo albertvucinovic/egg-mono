@@ -327,7 +327,35 @@ class EggCompleter(Completer):
                     yield Completion(w, start_position=-len(current_fragment))
             return
 
-        # 7) Generic filename completion for the last token when not a recognized command
+        # 7) /wait: suggest thread ids similarly to /thread
+        if text.startswith('/wait '):
+            prefix = text[len('/wait '):]
+            try:
+                rows = list_threads(self.db) if list_threads else []
+            except Exception:
+                rows = []
+            pref_l = prefix.lower()
+            # Sort newest-first by created_at
+            try:
+                rows.sort(key=lambda r: getattr(r, 'created_at', ''), reverse=True)
+            except Exception:
+                pass
+            for r in rows:
+                tid2, name, recap = (
+                    getattr(r, 'thread_id', '') or '',
+                    getattr(r, 'name', '') or '',
+                    getattr(r, 'short_recap', '') or '',
+                )
+                if (not prefix or
+                    tid2.lower().startswith(pref_l) or tid2.lower().endswith(pref_l) or pref_l in tid2.lower() or
+                    (isinstance(name, str) and pref_l in name.lower()) or
+                    (isinstance(recap, str) and pref_l in recap.lower())):
+                    disp = f"{tid2[-8:]}  {name}" if name else tid2[-8:]
+                    meta = recap if isinstance(recap, str) else ''
+                    yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
+            return
+
+        # 8) Generic filename completion for the last token when not a recognized command
         if text and not text.startswith('/'):
             parts = text.split()
             if parts and not text.endswith(' '):
@@ -466,7 +494,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name
-            cmds = ['/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/quit']
+            cmds = ['/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/wait', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/quit']
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 
         cmd = prefix[:sp]
