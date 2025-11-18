@@ -5,6 +5,8 @@ import asyncio
 import json
 import os
 import re
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -48,7 +50,7 @@ from eggthreads import (  # type: ignore
 from eggthreads.event_watcher import EventWatcher  # type: ignore
 
 # eggdisplay UI components
-from eggdisplay import OutputPanel, InputPanel, HStack  # type: ignore
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack  # type: ignore
 from completion import get_autocomplete_items  # type: ignore
 
 # eggllm (optional, for /model and catalogs)
@@ -164,6 +166,24 @@ class EggDisplayApp:
         self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=2)
         # System panel
         self.system_output = OutputPanel(title="System", initial_height=8, max_height=16, columns_hint=2)
+        # Children panel: shows subtree of the current thread
+        children_style = OutputPanel.PanelStyle(
+            border_style="cyan",
+            box="SQUARE",
+            title_style="bold cyan",
+            title_align="left",
+            show_header=True,
+            header_style="bold white on cyan",
+            header_separator_char="─",
+            header_separator_style="cyan",
+        )
+        self.children_output = OutputPanel(
+            title="Children",
+            initial_height=8,
+            max_height=20,
+            columns_hint=2,
+            style=children_style,
+        )
         # Approval panel: appears between the output panels and the input
         # panel when an execution or output approval is pending for the
         # current thread. Style it in yellow to stand out.
@@ -212,6 +232,8 @@ class EggDisplayApp:
 
         # Pending approval prompt state (execution/output approvals)
         self._pending_prompt: Dict[str, Any] = {}
+        # Last time we refreshed the children tree panel (sec since epoch)
+        self._last_children_refresh: float = 0.0
 
     # ---------------- TTY helpers ----------------
     def _restore_tty(self) -> None:
@@ -428,10 +450,23 @@ class EggDisplayApp:
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
             "Send: Enter or Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
-            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /quit",
+            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /quit",
         ]
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
         self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
+
+        # Children panel: refresh at most once every 2 seconds
+        try:
+            now = time.time()
+            if now - self._last_children_refresh >= 2.0:
+                try:
+                    subtree_text = self._format_tree(self.current_thread)
+                except Exception:
+                    subtree_text = "(error rendering children tree)"
+                self.children_output.set_content(subtree_text)
+                self._last_children_refresh = now
+        except Exception:
+            pass
 
         # Update approval panel content based on pending prompt. This
         # panel is rendered between the output panels and the input
@@ -618,7 +653,9 @@ class EggDisplayApp:
                 continue
 
     def _render_group(self) -> Group:
-        row1 = HStack([self.chat_output, self.system_output]).render()
+        # Left: chat; right: vertical stack of system + children panels
+        right = VStack([self.system_output, self.children_output]).render()
+        row1 = HStack([self.chat_output, right]).render()
         # Compose rows: top output row, optional approval panel, then input.
         children: List[Any] = [row1]
         pending = getattr(self, '_pending_prompt', {}) or {}
