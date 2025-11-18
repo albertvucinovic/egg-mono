@@ -176,11 +176,12 @@ class EggDisplayApp:
             header_style="bold white on cyan",
             header_separator_char="─",
             header_separator_style="cyan",
+            line_wrap_mode="crop",
         )
         self.children_output = OutputPanel(
             title="Children",
-            initial_height=8,
-            max_height=20,
+            initial_height=5,
+            max_height=24,
             columns_hint=2,
             style=children_style,
         )
@@ -339,9 +340,14 @@ class EggDisplayApp:
         def _render_tree(tid: str, prefix: str = '', is_last: bool = True, out: Optional[List[str]] = None):
             if out is None:
                 out = []
+            is_root = (tid == (root_tid or tid))
             connector = '└─ ' if is_last else '├─ '
             indent_next = '   ' if is_last else '│  '
-            out.append(prefix + connector + self._format_thread_line(tid))
+            base_line = self._format_thread_line(tid)
+            # For now, we rely on the short id printed by
+            # _format_thread_line; we no longer append the full tid here
+            # to keep the Children panel concise.
+            out.append(prefix + connector + base_line)
             try:
                 kids = [cid for cid, _n, _r, _c in list_children_with_meta(self.db, tid)]
             except Exception:
@@ -1272,6 +1278,17 @@ class EggDisplayApp:
             # log the result.
             self._ensure_scheduler_for(child)
             self._log_system(f"Spawned thread: {child[-8:]}")
+
+            # Also append a user-visible command output message so the
+            # spawned thread id becomes part of the conversation
+            # context, similar to other user commands.
+            try:
+                cmd_text = text.strip()  # e.g. "/spawn tell me a story"
+                msg_content = f"Command: {cmd_text}\n\nOutput:\n{child}"
+                append_message(self.db, self.current_thread, 'user', msg_content, extra={'keep_user_turn': True})
+                create_snapshot(self.db, self.current_thread)
+            except Exception:
+                pass
         elif cmd == 'spawn_auto':
             # Same as /spawn, but use spawn_agent_auto so the spawned
             # child has global tool auto-approval.
