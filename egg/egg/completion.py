@@ -494,7 +494,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name
-            cmds = ['/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/wait', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/quit']
+            cmds = ['/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/spawn_auto', '/wait', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/enterMode', '/toggle_auto_approval', '/quit']
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 
         cmd = prefix[:sp]
@@ -623,8 +623,8 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             ids = [(r[0] if isinstance(r, (list, tuple)) else getattr(r, 'thread_id', '')) for r in rows]
             return _mk_items(ids, arg_tok)
 
-        # /spawn -> filesystem
-        if cmd == '/spawn':
+        # /spawn and /spawn_auto -> filesystem suggestions for arg
+        if cmd in ('/spawn', '/spawn_auto'):
             return _mk_items(_fs_suggestions(arg_tok), arg_tok)
 
         # Other commands: no specific suggestions
