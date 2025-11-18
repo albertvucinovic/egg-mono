@@ -1120,7 +1120,7 @@ class EggDisplayApp:
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
-            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /wait <threads>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /quit')
+            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /spawn_auto <text>, /wait <threads>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /toggle_auto_approval, /quit')
         elif cmd == 'quit':
             self.running = False
         elif cmd == 'pause':
@@ -1201,8 +1201,50 @@ class EggDisplayApp:
             # log the result.
             self._ensure_scheduler_for(child)
             self._log_system(f"Spawned thread: {child[-8:]}")
+        elif cmd == 'spawn_auto':
+            # Same as /spawn, but use spawn_agent_auto so the spawned
+            # child has global tool auto-approval.
+            def _latest_model_for_thread(tid: str) -> Optional[str]:
+                try:
+                    rows = self.db.conn.execute(
+                        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
+                        (tid,)
+                    ).fetchall()
+                    for r in rows:
+                        pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
+                        mk = pj.get('model_key')
+                        if isinstance(mk, str) and mk.strip():
+                            return mk.strip()
+                except Exception:
+                    pass
+                th = self.db.get_thread(tid)
+                return th.initial_model_key if th else None
+
+            cur_model = _latest_model_for_thread(self.current_thread)
+
+            try:
+                from eggthreads.tools import create_default_tools  # type: ignore
+                tools = create_default_tools()
+                args = {
+                    'parent_thread_id': self.current_thread,
+                    'context_text': arg or 'Spawned task',
+                    'label': 'spawn_auto',
+                    'system_prompt': self.system_prompt,
+                }
+                if cur_model:
+                    args['initial_model_key'] = cur_model
+                res = tools.execute('spawn_agent_auto', args)
+            except Exception as e:
+                self._log_system(f"/spawn_auto error: {e}")
+                return
+
+            if not isinstance(res, str):
+                self._log_system(f"/spawn_auto returned non-string thread id: {res!r}")
+                return
+
+            child = res
             self._ensure_scheduler_for(child)
-            self._log_system(f"Spawned thread: {child[-8:]}")
+            self._log_system(f"Spawned auto-approval thread: {child[-8:]}")
         elif cmd == 'wait':
             # Treat /wait as a user command that enqueues a wait tool
             # call (RA3). The argument is a space-separated list of
@@ -1430,6 +1472,59 @@ class EggDisplayApp:
                 self._log_system('Enter mode: newline (Enter inserts newline, Ctrl+D sends).')
             else:
                 self._log_system('Usage: /enterMode <send|newline>')
+        elif cmd == 'toggle_auto_approval':
+            # Toggle per-thread global tool auto-approval by emitting a
+            # tool_call.approval event with decision global_approval /
+            # revoke_global_approval. This affects future tool calls in
+            # this thread (both assistant- and user-originated).
+            import os as _os
+            try:
+                from eggthreads import build_tool_call_states  # type: ignore
+                from eggthreads import thread_state as _thread_state  # type: ignore
+            except Exception:
+                self._log_system('Auto-approval toggle not available (eggthreads import failed).')
+                return
+            # Heuristic: check whether there exists any approval event with
+            # decision == 'global_approval' more recent than any
+            # revoke_global_approval; since we don't persist this flag
+            # separately, we simply toggle based on the last such event.
+            try:
+                cur = self.db.conn.execute(
+                    "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.approval' ORDER BY event_seq ASC",
+                    (self.current_thread,),
+                )
+                last_decision = None
+                for (pj,) in cur.fetchall():
+                    try:
+                        payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+                    except Exception:
+                        payload = {}
+                    d = payload.get('decision')
+                    if d in ('global_approval', 'revoke_global_approval'):
+                        last_decision = d
+                enable = (last_decision != 'global_approval')
+            except Exception:
+                enable = True
+
+            decision = 'global_approval' if enable else 'revoke_global_approval'
+            try:
+                self.db.append_event(
+                    event_id=_os.urandom(10).hex(),
+                    thread_id=self.current_thread,
+                    type_='tool_call.approval',
+                    msg_id=None,
+                    invoke_id=None,
+                    payload={
+                        'decision': decision,
+                        'reason': 'Toggled by user via /toggle_auto_approval',
+                    },
+                )
+                self._log_system(
+                    'Global tool auto-approval ENABLED for this thread.' if enable
+                    else 'Global tool auto-approval DISABLED for this thread.'
+                )
+            except Exception as e:
+                self._log_system(f'Error toggling auto-approval: {e}')
         else:
             self._log_system('Unknown command')
 
