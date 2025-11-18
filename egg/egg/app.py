@@ -1780,7 +1780,9 @@ class EggDisplayApp:
             except Exception:
                 pass
 
-        ew = EventWatcher(self.db, thread_id, after_seq=after_for_watch, poll_sec=0.05)
+        # Poll a bit less aggressively to reduce idle CPU; EventWatcher
+        # itself backs off further when idle.
+        ew = EventWatcher(self.db, thread_id, after_seq=after_for_watch, poll_sec=0.1)
         async for batch in ew.aiter():
             saw_non_stream_msg = False
             for e in batch:
@@ -1887,7 +1889,9 @@ class EggDisplayApp:
         input_thread.start()
 
         try:
-            with Live(self._render_group(), refresh_per_second=30, screen=False, console=self.console) as live:
+            # Lower refresh rate to reduce CPU, and rely on EventWatcher
+            # / input changes to keep the UI responsive.
+            with Live(self._render_group(), refresh_per_second=10, screen=False, console=self.console) as live:
                 while self.running:
                     # Drain input queue
                     try:
@@ -1902,7 +1906,7 @@ class EggDisplayApp:
                     self._update_panels()
                     live.update(self._render_group())
                     try:
-                        await asyncio.sleep(0.033)
+                        await asyncio.sleep(0.1)
                     except asyncio.CancelledError:
                         break
         except (KeyboardInterrupt, asyncio.CancelledError):
