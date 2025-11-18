@@ -1144,6 +1144,8 @@ class EggDisplayApp:
             self._log_system(f"Created new root thread: {new_root[-8:]}")
             self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
         elif cmd == 'spawn':
+            # Use the spawn_agent tool implementation from eggthreads so we
+            # share the same semantics between UI (/spawn) and model tools.
             def _latest_model_for_thread(tid: str) -> Optional[str]:
                 try:
                     rows = self.db.conn.execute(
@@ -1159,14 +1161,46 @@ class EggDisplayApp:
                     pass
                 th = self.db.get_thread(tid)
                 return th.initial_model_key if th else None
+
             cur_model = _latest_model_for_thread(self.current_thread)
-            child = create_child_thread(self.db, self.current_thread, name='spawn', initial_model_key=cur_model)
-            append_message(self.db, child, 'system', self.system_prompt)
-            append_message(self.db, child, 'user', arg or 'Spawned task')
-            if cur_model:
-                self.db.append_event(event_id=os.urandom(10).hex(), thread_id=child, type_='msg.create',
-                                     msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model}]', 'model_key': cur_model})
-            create_snapshot(self.db, child)
+
+            # Import ToolRegistry/create_default_tools in a local scope to
+            # avoid circular imports at module import time.
+            try:
+                from eggthreads.tools import create_default_tools  # type: ignore
+                tools = create_default_tools()
+                # Ensure spawn_agent exists; if not, this will raise.
+                args = {
+                    # Parent is this UI thread; we pass it explicitly so
+                    # spawn_agent behaves the same as model-initiated calls
+                    # that receive thread_id via the runner context.
+                    'parent_thread_id': self.current_thread,
+                    'context_text': arg or 'Spawned task',
+                    'label': 'spawn',
+                    'system_prompt': self.system_prompt,
+                }
+                if cur_model:
+                    args['initial_model_key'] = cur_model
+                # When called directly from the UI, we do not rely on the
+                # implicit _thread_id injection and pass parent id
+                # explicitly.
+                res = tools.execute('spawn_agent', args)
+            except Exception as e:
+                self._log_system(f"/spawn error: {e}")
+                return
+
+            if not isinstance(res, str):
+                self._log_system(f"/spawn returned non-string thread id: {res!r}")
+                return
+
+            child = res
+
+            # Child thread now exists and has the system prompt + user
+            # message and optional model marker already seeded by the
+            # tool. We only need to ensure a scheduler is running and
+            # log the result.
+            self._ensure_scheduler_for(child)
+            self._log_system(f"Spawned thread: {child[-8:]}")
             self._ensure_scheduler_for(child)
             self._log_system(f"Spawned thread: {child[-8:]}")
         elif cmd == 'wait':
