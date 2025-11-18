@@ -20,6 +20,7 @@ from rich.console import Console, Group
 from rich.layout import Layout
 from rich.columns import Columns
 from rich import box as rich_box
+from rich.errors import MarkupError
 import threading
 import time
 import asyncio
@@ -926,17 +927,29 @@ class OutputPanel:
             # Now render only the tail that fits
             if len(display_lines) <= available_content_lines:
                 for dl in display_lines:
-                    content_text.append(Text.from_markup(dl + "\n"))
+                    try:
+                        content_text.append(Text.from_markup(dl + "\n"))
+                    except MarkupError:
+                        content_text.append(dl + "\n")
             else:
                 start_index = len(display_lines) - available_content_lines
                 for dl in display_lines[start_index:]:
-                    content_text.append(Text.from_markup(dl + "\n"))
+                    try:
+                        content_text.append(Text.from_markup(dl + "\n"))
+                    except MarkupError:
+                        content_text.append(dl + "\n")
                 hidden_lines = len(display_lines) - available_content_lines
-                content_text.append(Text.from_markup(f"[dim]... {hidden_lines} lines above[/dim]"))
+                try:
+                    content_text.append(Text.from_markup(f"[dim]... {hidden_lines} lines above[/dim]"))
+                except MarkupError:
+                    content_text.append(f"... {hidden_lines} lines above")
         else:
             # Interpret "No content" string as markup as well so callers
             # can control styling if desired.
-            content_text.append(Text.from_markup("[dim]No content[/dim]"))
+            try:
+                content_text.append(Text.from_markup("[dim]No content[/dim]"))
+            except MarkupError:
+                content_text.append("No content")
 
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
         return Panel(
