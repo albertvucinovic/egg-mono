@@ -909,47 +909,67 @@ class OutputPanel:
             term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
             # subtract a few chars for panel borders/padding
             approx_width = max(10, term_cols // self.columns_hint - 6)
-            # Build display lines accounting for wrapping
-            display_lines: List[str] = []
+
+            # Build display segments accounting for wrapping. Use Rich's
+            # Text.wrap so that markup is preserved while wrapping to the
+            # panel width. Each wrapped segment represents a visual line.
+            from rich.console import Console as _Console
+            _console = _Console()
+            display_segments: List[Text] = []
             for line in self.content.split('\n'):
                 if line == "":
-                    display_lines.append("")
+                    display_segments.append(Text())
                     continue
-                wrapped = textwrap.wrap(
-                    line,
-                    width=approx_width,
-                    replace_whitespace=False,
-                    drop_whitespace=False,
-                    break_long_words=True,
-                    break_on_hyphens=False,
-                )
-                display_lines.extend(wrapped if wrapped else [""])
+                try:
+                    rich_line = Text.from_markup(line)
+                    wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
+                    if not wrapped_segments:
+                        display_segments.append(Text())
+                    else:
+                        display_segments.extend(wrapped_segments)
+                except MarkupError:
+                    # Fallback: use plain text wrapping if markup is
+                    # invalid; this will drop styling but keep layout.
+                    wrapped = textwrap.wrap(
+                        line,
+                        width=approx_width,
+                        replace_whitespace=False,
+                        drop_whitespace=False,
+                        break_long_words=True,
+                        break_on_hyphens=False,
+                    )
+                    if not wrapped:
+                        display_segments.append(Text())
+                    else:
+                        for wl in wrapped:
+                            display_segments.append(Text(wl))
+
             # Now render only the tail that fits
-            if len(display_lines) <= available_content_lines:
-                for dl in display_lines:
-                    try:
-                        content_text.append(Text.from_markup(dl + "\n"))
-                    except MarkupError:
-                        content_text.append(dl + "\n")
+            total_segments = len(display_segments)
+            if total_segments <= available_content_lines:
+                visible = display_segments
+                hidden_lines = 0
             else:
-                start_index = len(display_lines) - available_content_lines
-                for dl in display_lines[start_index:]:
-                    try:
-                        content_text.append(Text.from_markup(dl + "\n"))
-                    except MarkupError:
-                        content_text.append(dl + "\n")
-                hidden_lines = len(display_lines) - available_content_lines
+                hidden_lines = total_segments - available_content_lines
+                visible = display_segments[-available_content_lines:]
+
+            for seg in visible:
+                seg = seg.copy()
+                seg.append("\n")
+                content_text.append(seg)
+
+            if hidden_lines > 0:
                 try:
                     content_text.append(Text.from_markup(f"[dim]... {hidden_lines} lines above[/dim]"))
                 except MarkupError:
-                    content_text.append(f"... {hidden_lines} lines above")
+                    content_text.append(Text(f"... {hidden_lines} lines above"))
         else:
             # Interpret "No content" string as markup as well so callers
             # can control styling if desired.
             try:
                 content_text.append(Text.from_markup("[dim]No content[/dim]"))
             except MarkupError:
-                content_text.append("No content")
+                content_text.append(Text("No content"))
 
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
         return Panel(
