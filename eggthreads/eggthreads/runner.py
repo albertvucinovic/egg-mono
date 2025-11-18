@@ -775,7 +775,15 @@ class ThreadRunner:
                 try:
                     full_result = await loop.run_in_executor(
                         None,
-                        lambda: self.tools.execute(tc.name, tc.arguments),
+                        # Pass thread_id and initial_model_key so tools
+                        # like spawn_agent can infer their parent and
+                        # inherit the model when not explicitly set.
+                        lambda: self.tools.execute(
+                            tc.name,
+                            tc.arguments,
+                            thread_id=self.thread_id,
+                            initial_model_key=current_model,
+                        ),
                     )
                 except Exception as e:
                     full_result = f"ERROR: {e}"

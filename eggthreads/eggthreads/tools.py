@@ -14,7 +14,19 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Dict[str, Any]] = {}
 
-    def register(self, name: str, description: str, parameters_schema: Dict[str, Any], impl: Callable[[Dict[str, Any]], Any]):
+    def register(self, name: str, description: str, parameters_schema: Dict[str, Any], impl: Callable[[Dict[str, Any]], Any], local_only: bool = False):
+        """Register a tool.
+
+        Args:
+            name: Tool name used in tool_calls.
+            description: Human-readable description for the LLM.
+            parameters_schema: JSONSchema for the tool arguments.
+            impl: Callable implementing the tool. Receives a dict of args.
+            local_only: If True, the tool is *not* exposed to the LLM via
+                tools_spec(), but can still be executed via execute(). This is
+                useful for UI-only helpers like spawn_agent or wait that should
+                not be called directly by the model.
+        """
         self._tools[name] = {
             "spec": {
                 "type": "function",
@@ -25,12 +37,18 @@ class ToolRegistry:
                 }
             },
             "impl": impl,
+            "local_only": local_only,
         }
 
     def tools_spec(self) -> List[Dict[str, Any]]:
-        return [d["spec"] for d in self._tools.values()]
+        """Return the list of tool specs to expose to the LLM.
 
-    def execute(self, name: str, arguments: Any) -> Any:
+        Tools marked local_only=True are omitted so they can be used by the
+        UI (RA3 user commands, etc.) without being surfaced as model tools.
+        """
+        return [d["spec"] for d in self._tools.values() if not d.get("local_only")]
+
+    def execute(self, name: str, arguments: Any, **context: Any) -> Any:
         entry = self._tools.get(name)
         if not entry:
             raise KeyError(f"Unknown tool: {name}")
@@ -41,9 +59,27 @@ class ToolRegistry:
             except Exception:
                 args = {"_raw": arguments}
         elif isinstance(arguments, dict):
-            args = arguments
+            # Work on a shallow copy so we can safely inject context
+            # keys (e.g. _thread_id) without mutating the caller's dict.
+            args = dict(arguments)
         else:
             args = {"_arg": arguments}
+
+        # Inject the current thread id into arguments for tools that need
+        # to know "who called me" (e.g. spawn_agent). We use a reserved
+        # key name to avoid colliding with user-provided arguments.
+        thread_id = context.get("thread_id")
+        if thread_id and "parent_thread_id" not in args and "_thread_id" not in args:
+            args["_thread_id"] = thread_id
+
+        # Similarly, propagate the calling thread's model key so tools can
+        # inherit it when the caller did not specify an explicit
+        # initial_model_key. We keep this under a reserved key so that a
+        # user-specified initial_model_key always wins.
+        init_m = context.get("initial_model_key")
+        if init_m and "initial_model_key" not in args and "_initial_model_key" not in args:
+            args["_initial_model_key"] = init_m
+
         return impl(args)
 
 
@@ -138,27 +174,109 @@ def create_default_tools() -> ToolRegistry:
             "required": ["return_value"],
         },
         impl=_popContext,
+        local_only=True,
     )
 
-    # spawn_agent (stub)
+    # spawn_agent: create a child thread under a given parent, mirroring
+    # the behaviour of the /spawn UI command but in a UI-agnostic way.
     def _spawn_agent(args: Dict[str, Any]):
-        # The app can implement real agent spawning. Here we just acknowledge the request.
-        label = args.get('label') or 'agent'
-        ctx = args.get('context_text') or ''
-        return f"spawn_agent stub: label={label!r}, context_len={len(ctx)}"
+        from .db import ThreadsDB
+        from .api import create_child_thread, append_message, create_snapshot
+
+        # Parent is either explicitly provided (for UI/user commands) or
+        # inferred from the calling thread context (_thread_id injected by
+        # ToolRegistry.execute when called from a runner).
+        parent_id = (args.get('parent_thread_id') or args.get('_thread_id') or '').strip()
+        if not parent_id:
+            return 'Error: parent_thread_id is required.'
+
+        # Optional fields
+        label = (args.get('label') or 'spawn').strip() or 'spawn'
+        user_text = (args.get('context_text') or '').strip() or 'Spawned task'
+        # initial_model_key may be explicitly provided by the UI, or
+        # inherited from the calling thread via _initial_model_key
+        # injected by the runner context.
+        initial_model_key = (args.get('initial_model_key')
+                             or args.get('_initial_model_key')
+                             or '').strip() or None
+        system_prompt = (args.get('system_prompt') or '').strip() or None
+
+        db = ThreadsDB()
+
+        # Create child thread
+        try:
+            child = create_child_thread(db, parent_id, name=label, initial_model_key=initial_model_key)
+        except Exception as e:
+            return f"Error: failed to create child thread: {e}"
+
+        # Optional system prompt/message seeded by the caller (UI layer).
+        if system_prompt:
+            try:
+                append_message(db, child, 'system', system_prompt)
+            except Exception:
+                # Best-effort; child thread still exists.
+                pass
+
+        # Attach the requested user/context text
+        try:
+            append_message(db, child, 'user', user_text)
+        except Exception as e:
+            return f"Error: created child {child} but failed to append user message: {e}"
+
+        # Mirror /spawn: if an initial_model_key was provided, record a
+        # small system message that tags the model for downstream tools
+        # and UIs.
+        if initial_model_key:
+            try:
+                db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=child,
+                    type_='msg.create',
+                    msg_id=os.urandom(10).hex(),
+                    payload={
+                        'role': 'system',
+                        'content': f'[model:{initial_model_key}]',
+                        'model_key': initial_model_key,
+                    },
+                )
+            except Exception:
+                pass
+
+        try:
+            create_snapshot(db, child)
+        except Exception:
+            # Non-fatal
+            pass
+
+        return child
 
     reg.register(
         name='spawn_agent',
-        description='Stub: spawn a child agent (no-op; app may override).',
+        description=(
+            'Spawn a child agent as a new thread under the current task. '
+            'Use this whenever you want to delegate a sub-problem to a '
+            'child agent. Provide a short natural-language description of '
+            'the sub-task in context_text. The child agent will run '
+            'independently and eventually produce an assistant message as '
+            'its result. To retrieve that result, call the "wait" tool on '
+            'the returned thread id and read the last assistant message.'
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
+                # The parent thread is always the current calling thread;
+                # the model never needs to provide its id explicitly.
                 "context_text": {"type": "string"},
-                "label": {"type": "string"}
+                "label": {"type": "string"},
+                "initial_model_key": {"type": "string"},
+                "system_prompt": {"type": "string"},
             },
+            # Models must provide a short description of the sub-task.
             "required": ["context_text"],
         },
         impl=_spawn_agent,
+        # Exposed to the model so it can explicitly spawn child agents.
+        local_only=False,
     )
 
     # spawn_agent_auto (stub)
@@ -179,6 +297,7 @@ def create_default_tools() -> ToolRegistry:
             "required": ["context_text"],
         },
         impl=_spawn_agent_auto,
+        local_only=True,
     )
 
     # replace_between
@@ -361,6 +480,9 @@ def create_default_tools() -> ToolRegistry:
             "required": ["thread_ids"],
         },
         impl=_wait_tool,
+        # Exposed to the model so it can explicitly wait for spawned
+        # child agents and read their final responses.
+        local_only=False,
     )
 
     # Note: agent-oriented tools like popContext/spawn_agent are excluded from default registry
