@@ -94,6 +94,13 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
     """
     states: Dict[str, ToolCallState] = {}
 
+    # Track global tool auto-approval intervals for this thread. These
+    # are derived purely from tool_call.approval events with
+    # decision="global_approval" / "revoke_global_approval".
+    global_auto_approval = False
+    global_intervals: list[tuple[int, Optional[int]]] = []
+    current_global_start: Optional[int] = None
+
     # First pass: find messages that declare tool_calls
     for ev in _iter_events(db, thread_id):
         if ev.get("type") != "msg.create":
@@ -146,7 +153,8 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
             except Exception:
                 continue
 
-    # Second pass: fold tool_call.* events and tool messages into states
+    # Second pass: fold tool_call.* events and tool messages into states,
+    # and record global auto-approval intervals.
     for ev in _iter_events(db, thread_id):
         ev_type = ev.get("type")
         try:
@@ -156,6 +164,27 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
 
         if ev_type == "tool_call.approval":
             decision = payload.get("decision")
+            # global_approval / revoke_global_approval mark intervals
+            # (by event_seq) during which automatic approval is active
+            # for all tool calls in this thread.
+            if decision == "global_approval":
+                global_auto_approval = True
+                try:
+                    current_global_start = int(ev.get("event_seq"))
+                except Exception:
+                    current_global_start = None
+                continue
+            if decision == "revoke_global_approval":
+                if global_auto_approval and current_global_start is not None:
+                    try:
+                        end_seq = int(ev.get("event_seq"))
+                    except Exception:
+                        end_seq = None
+                    global_intervals.append((current_global_start, end_seq))
+                global_auto_approval = False
+                current_global_start = None
+                continue
+
             # Special case: "all-in-turn" means: mark all tool calls in the
             # current USER turn as granted, even if some tool calls are
             # declared after this event. A USER turn is the span between
@@ -222,10 +251,37 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 if tcid in states:
                     states[tcid].published = True
 
+    # Finalize global intervals: if auto-approval was still active at the
+    # end of the log, close the interval with an open-ended end (None).
+    if global_auto_approval and current_global_start is not None:
+        global_intervals.append((current_global_start, None))
+
+    # Helper: is a given event_seq covered by any global auto-approval
+    # interval? This is purely derived from events.
+    def _has_global_approval(ev_seq: int) -> bool:
+        for start, end in global_intervals:
+            if start is None:
+                continue
+            if ev_seq < start:
+                continue
+            if end is not None and ev_seq > end:
+                continue
+            return True
+        return False
+
+    # Apply global auto-approval to any tool calls that are still in TC1
+    # and whose parent message falls within an active interval (i.e.,
+    # that were created after the last global_approval and before a
+    # revoke_global_approval).
+    for tc in states.values():
+        if tc.approval_decision is None and _has_global_approval(tc.parent_event_seq):
+            tc.approval_decision = "granted"
+
     return states
 
 
 def list_tool_calls_for_message(db: ThreadsDB, thread_id: str, msg_id: str) -> List[ToolCallState]:
+
     """Return ToolCallState objects for tool calls declared in a given message."""
     all_states = build_tool_call_states(db, thread_id)
     out = [tc for tc in all_states.values() if tc.parent_msg_id == msg_id]

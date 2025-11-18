@@ -203,19 +203,52 @@ def create_default_tools() -> ToolRegistry:
 
         db = ThreadsDB()
 
+        # If no explicit system prompt was provided, try to inherit it from
+        # the parent thread's first system message. This mirrors the
+        # interactive app's behaviour where child threads reuse the global
+        # system prompt. As a final fallback, use a generic helper prompt.
+        if not system_prompt:
+            try:
+                row = db.get_thread(parent_id)
+                # Build a fresh snapshot if needed so we see system
+                # messages even for recently created parents.
+                if row and not row.snapshot_json:
+                    try:
+                        create_snapshot(db, parent_id)
+                        row = db.get_thread(parent_id)
+                    except Exception:
+                        pass
+                if row and row.snapshot_json:
+                    try:
+                        snap = _json.loads(row.snapshot_json)
+                        msgs = snap.get('messages', []) or []
+                        for m in msgs:
+                            try:
+                                if m.get('role') == 'system' and isinstance(m.get('content'), str):
+                                    system_prompt = m.get('content') or None
+                                    if system_prompt:
+                                        break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if not system_prompt:
+            system_prompt = 'You are a helpful assistant.'
+
         # Create child thread
         try:
             child = create_child_thread(db, parent_id, name=label, initial_model_key=initial_model_key)
         except Exception as e:
             return f"Error: failed to create child thread: {e}"
 
-        # Optional system prompt/message seeded by the caller (UI layer).
-        if system_prompt:
-            try:
-                append_message(db, child, 'system', system_prompt)
-            except Exception:
-                # Best-effort; child thread still exists.
-                pass
+        # Seed the child with the resolved system prompt.
+        try:
+            append_message(db, child, 'system', system_prompt)
+        except Exception:
+            # Best-effort; child thread still exists.
+            pass
 
         # Attach the requested user/context text
         try:
@@ -279,25 +312,133 @@ def create_default_tools() -> ToolRegistry:
         local_only=False,
     )
 
-    # spawn_agent_auto (stub)
+    # spawn_agent_auto: like spawn_agent, but also enables global tool
+    # call auto-approval for the spawned child thread so it can execute
+    # tools without further per-call approvals.
     def _spawn_agent_auto(args: Dict[str, Any]):
-        label = args.get('label') or 'agent'
-        ctx = args.get('context_text') or ''
-        return f"spawn_agent_auto stub: label={label!r}, context_len={len(ctx)}"
+        from .db import ThreadsDB
+        from .api import create_child_thread, append_message, create_snapshot
+
+        parent_id = (args.get('parent_thread_id') or args.get('_thread_id') or '').strip()
+        if not parent_id:
+            return 'Error: parent_thread_id is required.'
+
+        label = (args.get('label') or 'spawn_auto').strip() or 'spawn_auto'
+        user_text = (args.get('context_text') or '').strip() or 'Spawned task'
+        initial_model_key = (args.get('initial_model_key')
+                             or args.get('_initial_model_key')
+                             or '').strip() or None
+        system_prompt = (args.get('system_prompt') or '').strip() or None
+
+        db = ThreadsDB()
+
+        # Inherit or default system prompt as in _spawn_agent.
+        if not system_prompt:
+            try:
+                row = db.get_thread(parent_id)
+                if row and not row.snapshot_json:
+                    try:
+                        create_snapshot(db, parent_id)
+                        row = db.get_thread(parent_id)
+                    except Exception:
+                        pass
+                if row and row.snapshot_json:
+                    try:
+                        snap = _json.loads(row.snapshot_json)
+                        msgs = snap.get('messages', []) or []
+                        for m in msgs:
+                            try:
+                                if m.get('role') == 'system' and isinstance(m.get('content'), str):
+                                    system_prompt = m.get('content') or None
+                                    if system_prompt:
+                                        break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if not system_prompt:
+            system_prompt = 'You are a helpful assistant.'
+
+        # Create child thread
+        try:
+            child = create_child_thread(db, parent_id, name=label, initial_model_key=initial_model_key)
+        except Exception as e:
+            return f"Error: failed to create child thread: {e}"
+
+        # Seed system prompt and user text
+        try:
+            append_message(db, child, 'system', system_prompt)
+        except Exception:
+            pass
+        try:
+            append_message(db, child, 'user', user_text)
+        except Exception as e:
+            return f"Error: created child {child} but failed to append user message: {e}"
+
+        # Model marker message if we know the initial model
+        if initial_model_key:
+            try:
+                db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=child,
+                    type_='msg.create',
+                    msg_id=os.urandom(10).hex(),
+                    payload={
+                        'role': 'system',
+                        'content': f'[model:{initial_model_key}]',
+                        'model_key': initial_model_key,
+                    },
+                )
+            except Exception:
+                pass
+
+        # Record a global auto-approval decision for this child thread so
+        # it can execute tools without further per-call approvals.
+        try:
+            db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=child,
+                type_='tool_call.approval',
+                msg_id=None,
+                invoke_id=None,
+                payload={
+                    'decision': 'global_approval',
+                    'reason': 'spawn_agent_auto enabled global tool auto-approval for this thread',
+                },
+            )
+        except Exception:
+            pass
+
+        try:
+            create_snapshot(db, child)
+        except Exception:
+            pass
+
+        return child
 
     reg.register(
         name='spawn_agent_auto',
-        description='Stub: spawn a child agent with auto-approval (no-op; app may override).',
+        description=(
+            'Like spawn_agent, but configures the spawned child thread to '
+            'have global tool auto-approval. The child agent can call '
+            'tools without further approval events. Use context_text to '
+            'describe the delegated sub-task, then use the "wait" tool on '
+            'the returned thread id to read its final assistant message.'
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "context_text": {"type": "string"},
-                "label": {"type": "string"}
+                "label": {"type": "string"},
+                "initial_model_key": {"type": "string"},
+                "system_prompt": {"type": "string"},
             },
             "required": ["context_text"],
         },
         impl=_spawn_agent_auto,
-        local_only=True,
+        local_only=False,
     )
 
     # replace_between
