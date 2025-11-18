@@ -691,16 +691,43 @@ class EggDisplayApp:
         return False
 
     def _console_print_message(self, m: Dict[str, Any]) -> None:
+        # Enrich titles with msg_id and timestamp when available so that
+        # static views are easier to correlate with events in the DB.
+        from datetime import datetime
+
+        def _fmt_ts(val: Any) -> str:
+            if not val:
+                return ""
+            s = str(val)
+            # SQLite ts is typically ISO-like (e.g. '2024-01-01T12:34:56.789Z')
+            # Try a few common formats; fall back to raw string on failure.
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+            return s
+
         role = m.get('role')
         content = (m.get('content') or '').strip()
         model_key = (m.get('model_key') or '').strip()
+        msg_id = m.get('msg_id') or ''
+        ts_str = _fmt_ts(m.get('ts'))
 
         def _panel(renderable, title: str, border: str):
+            # Build a unified title with optional timestamp and msg_id
+            parts = [title]
+            if ts_str:
+                parts.append(f"[dim]{ts_str}[/dim]")
+            if msg_id:
+                parts.append(f"[dim]{msg_id[-8:]}[/dim]")
+            full_title = " | ".join(parts)
             try:
-                self.console.print(Panel(renderable, title=title, border_style=border))
+                self.console.print(Panel(renderable, title=full_title, border_style=border))
             except Exception:
                 # Fallback to plain text if Panel fails for any reason
-                self.console.print(f"[{border}]{title}[/] {getattr(renderable, 'plain', str(renderable))}")
+                self.console.print(f"[{border}]{full_title}[/] {getattr(renderable, 'plain', str(renderable))}")
 
         if role == 'system':
             title = '[bold blue]System[/bold blue]'
@@ -727,7 +754,10 @@ class EggDisplayApp:
             # Prefer to show reasoning first if present
             reas = m.get('reasoning') or m.get('reasoning_content')
             if isinstance(reas, str) and reas.strip():
-                self.console.print(Panel(Text(reas, no_wrap=False, overflow='fold'), title='Reasoning', border_style='magenta'))
+                reason_title = '[bold magenta]Reasoning[/bold magenta]'
+                if model_key:
+                    reason_title += f" [dim](model: {model_key})[/dim]"
+                _panel(Text(reas, no_wrap=False, overflow='fold'), reason_title, 'magenta')
             if content:
                 if self._looks_markdown(content):
                     _panel(Markdown(content), title, 'cyan')
@@ -1767,14 +1797,19 @@ class EggDisplayApp:
                 try:
                     last_printed = self._last_printed_seq_by_thread.get(self.current_thread, -1)
                     cur = self.db.conn.execute(
-                        "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND event_seq>? AND type='msg.create' ORDER BY event_seq ASC",
+                        "SELECT event_seq, msg_id, ts, payload_json FROM events WHERE thread_id=? AND event_seq>? AND type='msg.create' ORDER BY event_seq ASC",
                         (self.current_thread, last_printed)
                     )
                     rows = cur.fetchall()
-                    for ev_seq, pj in rows:
+                    for ev_seq, msg_id, ts, pj in rows:
                         try:
                             m = json.loads(pj) if isinstance(pj, str) else (pj or {})
                             if isinstance(m, dict):
+                                # Ensure msg_id and ts are propagated so
+                                # console titles can display them.
+                                m.setdefault('msg_id', msg_id)
+                                if ts is not None:
+                                    m.setdefault('ts', ts)
                                 self._console_print_message(m)
                             self._last_printed_seq_by_thread[self.current_thread] = ev_seq
                         except Exception:
