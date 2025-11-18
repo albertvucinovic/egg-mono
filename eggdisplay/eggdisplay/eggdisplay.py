@@ -824,6 +824,10 @@ class OutputPanel:
         header_style: str = "bold white on blue"
         header_separator_char: str = "─"
         header_separator_style: str = "blue"
+        # How to treat long logical lines:
+        #   - "wrap" (default): wrap to multiple visual lines
+        #   - "crop": crop/clip each logical line to panel width
+        line_wrap_mode: str = "wrap"
 
     def __init__(self, title: str = "Output", initial_height: int = 8, max_height: int = 20,
                  style: Optional['OutputPanel.PanelStyle'] = None, columns_hint: int = 1):
@@ -858,12 +862,17 @@ class OutputPanel:
         if not self.content:
             return int(self.current_height)
 
-        # Count lines in content
+        # Count logical lines in content
         content_lines = self.content.count('\n') + 1
 
-        # Add space for header and a bit of padding
-        total_lines_needed = content_lines + 3
-        target_height = max(8, min(self.max_height, total_lines_needed))
+        # For crop-mode panels we want one row per logical line, plus
+        # header, but no extra padding; for wrapped panels we keep the
+        # previous behaviour.
+        if getattr(self.style, "line_wrap_mode", "wrap") == "crop":
+            total_lines_needed = content_lines + (4 if self.style.show_header else 1)
+        else:
+            total_lines_needed = content_lines + 4
+        target_height = max(1, min(self.max_height, total_lines_needed))
 
         # Jump directly to the target height for immediate layout updates.
         self.current_height = float(target_height)
@@ -900,8 +909,15 @@ class OutputPanel:
             content_text.append(sep + "\n", style=self.style.header_separator_style)
             header_lines = 2
 
-        # Calculate available lines for content (after header)
-        available_content_lines = max(1, height - (header_lines + 2))  # Reserve space for header and padding
+        # Calculate available lines for content (after header). For
+        # crop-mode panels we reserve slightly less padding so that the
+        # number of visible logical lines more closely matches the
+        # content lines.
+        if getattr(self.style, "line_wrap_mode", "wrap") == "crop":
+            padding = 1
+        else:
+            padding = 2
+        available_content_lines = max(1, height - (header_lines + padding))
 
         # Show only the last lines that fit
         if self.content:
@@ -910,48 +926,78 @@ class OutputPanel:
             # subtract a few chars for panel borders/padding
             approx_width = max(10, term_cols // self.columns_hint - 6)
 
-            # Build display segments accounting for wrapping. Use Rich's
-            # Text.wrap so that markup is preserved while wrapping to the
-            # panel width. Each wrapped segment represents a visual line.
             from rich.console import Console as _Console
             _console = _Console()
-            display_segments: List[Text] = []
-            for line in self.content.split('\n'):
-                if line == "":
-                    display_segments.append(Text())
-                    continue
-                try:
-                    rich_line = Text.from_markup(line)
-                    wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
-                    if not wrapped_segments:
-                        display_segments.append(Text())
-                    else:
-                        display_segments.extend(wrapped_segments)
-                except MarkupError:
-                    # Fallback: use plain text wrapping if markup is
-                    # invalid; this will drop styling but keep layout.
-                    wrapped = textwrap.wrap(
-                        line,
-                        width=approx_width,
-                        replace_whitespace=False,
-                        drop_whitespace=False,
-                        break_long_words=True,
-                        break_on_hyphens=False,
-                    )
-                    if not wrapped:
-                        display_segments.append(Text())
-                    else:
-                        for wl in wrapped:
-                            display_segments.append(Text(wl))
 
-            # Now render only the tail that fits
-            total_segments = len(display_segments)
-            if total_segments <= available_content_lines:
-                visible = display_segments
-                hidden_lines = 0
+            # For most panels (line_wrap_mode="wrap"), we want wrapped
+            # visual lines. For crop mode we keep one segment per logical
+            # line and rely on the Panel/terminal to clip overflow.
+            if getattr(self.style, "line_wrap_mode", "wrap") == "crop":
+                display_segments: List[Text] = []
+                for line in self.content.split('\n'):
+                    if line == "":
+                        display_segments.append(Text())
+                        continue
+                    try:
+                        rich_line = Text.from_markup(line)
+                    except MarkupError:
+                        rich_line = Text(line)
+                    # Explicitly crop to the available width so that
+                    # long lines do not expand the column and break
+                    # the overall layout.
+                    try:
+                        rich_line.truncate(approx_width, overflow="crop")
+                    except Exception:
+                        pass
+                    display_segments.append(rich_line)
+                total_segments = len(display_segments)
+                if total_segments <= available_content_lines:
+                    visible = display_segments
+                    hidden_lines = 0
+                else:
+                    hidden_lines = total_segments - available_content_lines
+                    visible = display_segments[-available_content_lines:]
             else:
-                hidden_lines = total_segments - available_content_lines
-                visible = display_segments[-available_content_lines:]
+                # Build display segments accounting for wrapping. Use Rich's
+                # Text.wrap so that markup is preserved while wrapping to the
+                # panel width. Each wrapped segment represents a visual line.
+                display_segments: List[Text] = []
+                for line in self.content.split('\n'):
+                    if line == "":
+                        display_segments.append(Text())
+                        continue
+                    try:
+                        rich_line = Text.from_markup(line)
+                        wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
+                        if not wrapped_segments:
+                            display_segments.append(Text())
+                        else:
+                            display_segments.extend(wrapped_segments)
+                    except MarkupError:
+                        # Fallback: use plain text wrapping if markup is
+                        # invalid; this will drop styling but keep layout.
+                        wrapped = textwrap.wrap(
+                            line,
+                            width=approx_width,
+                            replace_whitespace=False,
+                            drop_whitespace=False,
+                            break_long_words=True,
+                            break_on_hyphens=False,
+                        )
+                        if not wrapped:
+                            display_segments.append(Text())
+                        else:
+                            for wl in wrapped:
+                                display_segments.append(Text(wl))
+
+                # Now render only the tail that fits
+                total_segments = len(display_segments)
+                if total_segments <= available_content_lines:
+                    visible = display_segments
+                    hidden_lines = 0
+                else:
+                    hidden_lines = total_segments - available_content_lines
+                    visible = display_segments[-available_content_lines:]
 
             for seg in visible:
                 seg = seg.copy()
