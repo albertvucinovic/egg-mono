@@ -20,6 +20,11 @@ The quotation marks are double not single.
 
 Assume that te project directory is the current working directory and that paths are relative to that.
 
+### CODE STYLE AND RULES IF CODING
+- NEVER PATCH UP PROBLEMS OR SWEEP THEM UNDER A RUG, ALWAYS TRY SOLVING THE ROOT CAUSE.
+- ALWAYS BE DRY. IF WRITING CODE, ALWAYS ASK YOUR SELF IS THERE SOME SIMILAR CODE IN THE CODEBASE THAT I CAN REUSE? LESS IS MORE!!!
+
+
 ### SUMMARY
 You MUST output a short <short_recap>...</short_recap> at the end of every turn, to help name the chat. Up to 10 words.
 

@@ -409,7 +409,10 @@ class EggDisplayApp:
             msg_lines: List[str] = []
             if kind == 'exec':
                 msg_lines.append("[yellow]Execution approval needed.[/yellow]")
-                msg_lines.append("[yellow]Type 'y' to approve or 'n' to deny, then press Enter.[/yellow]")
+                msg_lines.append(
+                    "[yellow]Type 'y' to approve, 'n' to deny, or 'a' to approve all "
+                    "tool calls for this user turn, then press Enter.[/yellow]"
+                )
             elif kind == 'output':
                 msg_lines.append("[yellow]Output approval needed.[/yellow]")
                 msg_lines.append("[yellow]Type 'y' to include full output, 'n' for a shortened preview, or 'o' to omit, then press Enter.[/yellow]")
@@ -469,7 +472,10 @@ class EggDisplayApp:
             if not new:
                 return
             if new.get('kind') == 'exec':
-                self._log_system('Execution approval needed for some tool calls. Type "y" to approve or "n" to deny.')
+                self._log_system(
+                    'Execution approval needed for some tool calls. '
+                    'Type "y" to approve, "n" to deny, or "a" to approve all tool calls for this assistant turn.'
+                )
             elif new.get('kind') == 'output':
                 # Compose a size-aware prompt for the first pending long output.
                 try:
@@ -878,10 +884,16 @@ class EggDisplayApp:
                 txt = self.input_panel.get_text().strip().lower()
                 kind = pending.get('kind')
                 ids = pending.get('tool_call_ids') or []
-                if txt in ('y', 'n', 'o') and ids:
+                try:
+                    import os as _os
+                    from eggthreads import build_tool_call_states
+                except Exception:
+                    ids = []
+                # Exec approval: y = approve this set, n = deny this set,
+                # a = approve all tool calls in this user turn (RA2 and RA3)
+                if kind == 'exec' and ids and txt in ('y', 'n', 'a'):
                     try:
-                        import os as _os
-                        if kind == 'exec':
+                        if txt in ('y', 'n'):
                             approve = (txt == 'y')
                             decision = 'granted' if approve else 'denied'
                             for tcid in ids:
@@ -898,52 +910,78 @@ class EggDisplayApp:
                                     },
                                 )
                             self._log_system(f"Tool calls {ids} approval decision: {decision}.")
-                        elif kind == 'output':
-                            # Output approval for very long tool outputs:
-                            # y -> whole, n -> shortened preview, o -> omit.
-                            from eggthreads import build_tool_call_states
-                            states = build_tool_call_states(self.db, self.current_thread)
-                            if txt == 'y':
-                                decision = 'whole'
-                            elif txt == 'n':
-                                decision = 'partial'
-                            else:
-                                decision = 'omit'
-                            for tcid in ids:
-                                tc = states.get(str(tcid))
-                                if not tc or not tc.finished_output:
-                                    continue
-                                full = tc.finished_output
-                                if not isinstance(full, str):
-                                    full = str(full)
-                                line_count = len(full.splitlines())
-                                char_count = len(full)
-                                if decision == 'whole':
-                                    preview = full
-                                elif decision == 'partial':
-                                    preview = self._shorten_output_preview(full)
-                                else:
-                                    preview = "Output omitted."
-                                self.db.append_event(
-                                    event_id=_os.urandom(10).hex(),
-                                    thread_id=self.current_thread,
-                                    type_='tool_call.output_approval',
-                                    msg_id=None,
-                                    invoke_id=None,
-                                    payload={
-                                        'tool_call_id': tcid,
-                                        'decision': decision,
-                                        'reason': 'User decided in UI',
-                                        'preview': preview,
-                                        'line_count': line_count,
-                                        'char_count': char_count,
-                                    },
-                                )
-                            self._log_system(f"Tool calls {ids} output decision: {decision}.")
-                        # Clear prompt and input after handling
-                        self._pending_prompt = {}
+                        else:  # txt == 'a'
+                            # Approve all tool calls for the current user
+                            # turn. The exact interval (from previous user
+                            # message up to the next) is interpreted purely
+                            # from event positions inside build_tool_call_states.
+                            self.db.append_event(
+                                event_id=_os.urandom(10).hex(),
+                                thread_id=self.current_thread,
+                                type_='tool_call.approval',
+                                msg_id=None,
+                                invoke_id=None,
+                                payload={
+                                    'decision': 'all-in-turn',
+                                    'reason': 'Approved by user from UI',
+                                },
+                            )
+                            self._log_system(
+                                "Approved all tool calls for this user turn (decision=all-in-turn)."
+                            )
                     except Exception as e:
                         self._log_system(f'Error recording approval: {e}')
+                    # Clear prompt and input after handling
+                    self._pending_prompt = {}
+                    self.input_panel.clear_text()
+                    self.input_panel.increment_message_count()
+                    return True
+                # Output approval for very long tool outputs:
+                # y -> whole, n -> shortened preview, o -> omit.
+                if kind == 'output' and ids and txt in ('y', 'n', 'o'):
+                    try:
+                        states = build_tool_call_states(self.db, self.current_thread)
+                        if txt == 'y':
+                            decision = 'whole'
+                        elif txt == 'n':
+                            decision = 'partial'
+                        else:
+                            decision = 'omit'
+                        for tcid in ids:
+                            tc = states.get(str(tcid))
+                            if not tc or not tc.finished_output:
+                                continue
+                            full = tc.finished_output
+                            if not isinstance(full, str):
+                                full = str(full)
+                            line_count = len(full.splitlines())
+                            char_count = len(full)
+                            if decision == 'whole':
+                                preview = full
+                            elif decision == 'partial':
+                                preview = self._shorten_output_preview(full)
+                            else:
+                                preview = "Output omitted."
+                            self.db.append_event(
+                                event_id=_os.urandom(10).hex(),
+                                thread_id=self.current_thread,
+                                type_='tool_call.output_approval',
+                                msg_id=None,
+                                invoke_id=None,
+                                payload={
+                                    'tool_call_id': tcid,
+                                    'decision': decision,
+                                    'reason': 'User decided in UI',
+                                    'preview': preview,
+                                    'line_count': line_count,
+                                    'char_count': char_count,
+                                },
+                            )
+                        self._log_system(f"Tool calls {ids} output decision: {decision}.")
+                    except Exception as e:
+                        self._log_system(f'Error recording approval: {e}')
+                    # Clear prompt and input after handling
+                    self._pending_prompt = {}
                     self.input_panel.clear_text()
                     self.input_panel.increment_message_count()
                     return True
