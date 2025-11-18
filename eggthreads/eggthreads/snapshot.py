@@ -50,6 +50,11 @@ class SnapshotBuilder:
                 "msg_id": _get(e, "msg_id"),
                 "role": role,
             }
+            # Preserve the original event timestamp if available so UIs
+            # can display when a message was created.
+            ts_val = _get(e, "ts")
+            if ts_val is not None:
+                msg["ts"] = ts_val
             # Preserve model_key if present so UIs can display the model for each message
             if isinstance(payload, dict) and payload.get("model_key"):
                 msg["model_key"] = payload.get("model_key")
