@@ -213,6 +213,40 @@ class EggDisplayApp:
         # Pending approval prompt state (execution/output approvals)
         self._pending_prompt: Dict[str, Any] = {}
 
+    # ---------------- TTY helpers ----------------
+    def _restore_tty(self) -> None:
+        """Best-effort restoration of terminal settings (echo / canonical).
+
+        In some environments, libraries like readchar or low-level input
+        handling may leave the TTY with echo or canonical mode disabled
+        if the process exits unexpectedly. This method tries to ensure
+        that, when Egg exits, the terminal is in a sane state so that
+        subsequent shell input is visible again.
+        """
+        try:
+            import sys as _sys
+            import termios as _termios
+        except Exception:
+            return
+        try:
+            if not _sys.stdin.isatty():
+                return
+            fd = _sys.stdin.fileno()
+            try:
+                attrs = _termios.tcgetattr(fd)
+            except Exception:
+                return
+            # Ensure echo and canonical mode are enabled
+            lflag = attrs[3]
+            lflag |= _termios.ECHO | _termios.ICANON
+            attrs[3] = lflag
+            try:
+                _termios.tcsetattr(fd, _termios.TCSADRAIN, attrs)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     # ---------------- Scheduler & thread helpers ----------------
     def _thread_root_id(self, tid: str) -> str:
         cur = tid
@@ -1793,6 +1827,12 @@ class EggDisplayApp:
             # Stop editor input loop
             try:
                 self.input_panel.editor.running = False
+            except Exception:
+                pass
+            # Best-effort: restore TTY so subsequent shell input is
+            # visible and line-editing works as expected.
+            try:
+                self._restore_tty()
             except Exception:
                 pass
 
