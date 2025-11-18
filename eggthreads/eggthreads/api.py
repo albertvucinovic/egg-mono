@@ -179,3 +179,64 @@ def pause_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:
 def resume_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:
     db.conn.execute("UPDATE threads SET status='active' WHERE thread_id=?", (thread_id,))
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='control.resume', payload={"reason": reason})
+
+
+def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str = 'user') -> None:
+    """Append a model.switch event to a thread.
+
+    This is the authoritative record of model selection for a thread.
+    The ThreadRunner and UIs should not infer the active model from
+    message payloads; they should instead call current_thread_model(),
+    which uses these events.
+    """
+    db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_='model.switch',
+        payload={
+            'model_key': model_key,
+            'reason': reason,
+        },
+    )
+
+
+def current_thread_model(db: ThreadsDB, thread_id: str) -> Optional[str]:
+    """Return the effective model for a thread.
+
+    Precedence:
+      1. Most recent model.switch event (by event_seq) in this thread
+         whose payload contains a non-empty model_key.
+      2. threads.initial_model_key for this thread, if set and non-empty.
+      3. None (caller may then fall back to the LLM client's default).
+
+    This helper must be the single source of truth for determining the
+    active model for a thread in eggthreads-based applications.
+    """
+    model_key: Optional[str] = None
+    try:
+        cur = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='model.switch' ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            try:
+                payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except Exception:
+                payload = {}
+            mk = payload.get('model_key')
+            if isinstance(mk, str) and mk.strip():
+                model_key = mk.strip()
+    except Exception:
+        model_key = None
+
+    if not model_key:
+        try:
+            th = db.get_thread(thread_id)
+        except Exception:
+            th = None
+        imk = getattr(th, 'initial_model_key', None) if th else None
+        if isinstance(imk, str) and imk.strip():
+            model_key = imk.strip()
+
+    return model_key

@@ -257,21 +257,12 @@ def create_default_tools() -> ToolRegistry:
             return f"Error: created child {child} but failed to append user message: {e}"
 
         # Mirror /spawn: if an initial_model_key was provided, record a
-        # small system message that tags the model for downstream tools
-        # and UIs.
+        # model.switch event so downstream tools and UIs can resolve the
+        # effective model via current_thread_model().
         if initial_model_key:
             try:
-                db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=child,
-                    type_='msg.create',
-                    msg_id=os.urandom(10).hex(),
-                    payload={
-                        'role': 'system',
-                        'content': f'[model:{initial_model_key}]',
-                        'model_key': initial_model_key,
-                    },
-                )
+                from .api import set_thread_model
+                set_thread_model(db, child, initial_model_key, reason='spawn_agent initial model')
             except Exception:
                 pass
 
@@ -377,20 +368,13 @@ def create_default_tools() -> ToolRegistry:
         except Exception as e:
             return f"Error: created child {child} but failed to append user message: {e}"
 
-        # Model marker message if we know the initial model
+        # Model marker: if we know the initial model, record a
+        # model.switch event so tools and UIs can resolve the effective
+        # model via current_thread_model().
         if initial_model_key:
             try:
-                db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=child,
-                    type_='msg.create',
-                    msg_id=os.urandom(10).hex(),
-                    payload={
-                        'role': 'system',
-                        'content': f'[model:{initial_model_key}]',
-                        'model_key': initial_model_key,
-                    },
-                )
+                from .api import set_thread_model
+                set_thread_model(db, child, initial_model_key, reason='spawn_agent_auto initial model')
             except Exception:
                 pass
 

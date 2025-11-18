@@ -75,11 +75,29 @@ class ThreadRunner:
         if not self.db.try_open_stream(self.thread_id, invoke_id, lease_until, owner=self.owner, purpose=self.purpose):
             return False
 
-        # Resolve current model for visibility and to configure LLM
+        # Resolve current model for this turn from eggthreads API so that
+        # the provider call and the event annotations stay in sync. Fall
+        # back to the LLM client's current_model_key if needed.
+        current_model: Optional[str] = None
         try:
-            current_model = getattr(self.llm, 'current_model_key', None)
+            from .api import current_thread_model
+            current_model = current_thread_model(self.db, self.thread_id)
         except Exception:
             current_model = None
+        if not current_model:
+            try:
+                current_model = getattr(self.llm, 'current_model_key', None)
+            except Exception:
+                current_model = None
+
+        # For LLM turns, configure the underlying client before we start
+        # streaming so that the model used for the provider call matches
+        # the model we record in events.
+        if ra.kind == 'RA1_llm' and current_model:
+            try:
+                self.llm.set_model(current_model)
+            except Exception:
+                pass
 
         # Open streaming event tagged with model_key
         self.db.append_event(
@@ -307,37 +325,6 @@ class ThreadRunner:
                 else:
                     base_messages.append({'role': 'user', 'content': user_content})
 
-        # Apply last requested model change (same precedence as before)
-        try:
-            curm = self.db.conn.execute(
-                "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
-                (self.thread_id,),
-            )
-            model_key: Optional[str] = None
-            for rr in curm.fetchall():
-                try:
-                    pj = json.loads(rr[0]) if isinstance(rr[0], str) else (rr[0] or {})
-                except Exception:
-                    pj = {}
-                mk = pj.get('model_key')
-                if isinstance(mk, str) and mk.strip():
-                    model_key = mk.strip()
-                    break
-            if model_key:
-                try:
-                    self.llm.set_model(model_key)
-                except Exception:
-                    pass
-            else:
-                th2 = self.db.get_thread(self.thread_id)
-                imk = getattr(th2, 'initial_model_key', None) if th2 else None
-                if isinstance(imk, str) and imk.strip():
-                    try:
-                        self.llm.set_model(imk.strip())
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
         assistant_text_parts: List[str] = []
         reasoning_parts: List[str] = []

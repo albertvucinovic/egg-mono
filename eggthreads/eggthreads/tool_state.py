@@ -440,8 +440,10 @@ def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[Runner
 
         # RA1: LLM call
         # - user messages without tool_calls and without keep_user_turn
+        #   and not marked no_api (no_api user messages are metadata and
+        #   must not trigger an LLM turn)
         # - tool messages that are not no_api and not keep_user_turn
-        if role == "user" and not tool_calls and not keep_user_turn:
+        if role == "user" and not tool_calls and not keep_user_turn and not no_api:
             return RunnerActionable(
                 kind="RA1_llm",
                 thread_id=thread_id,
