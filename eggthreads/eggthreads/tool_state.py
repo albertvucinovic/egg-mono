@@ -129,6 +129,23 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
     if not states:
         return states
 
+    # Precompute user message event sequences so that "all-in-turn"
+    # approvals can be scoped from the approval event until the next
+    # user message.
+    user_seqs: list[int] = []
+    for ev in _iter_events(db, thread_id):
+        if ev.get("type") != "msg.create":
+            continue
+        try:
+            payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+        except Exception:
+            payload = {}
+        if payload.get("role") == "user":
+            try:
+                user_seqs.append(int(ev["event_seq"]))
+            except Exception:
+                continue
+
     # Second pass: fold tool_call.* events and tool messages into states
     for ev in _iter_events(db, thread_id):
         ev_type = ev.get("type")
@@ -138,11 +155,41 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
             payload = {}
 
         if ev_type == "tool_call.approval":
-            tcid = payload.get("tool_call_id")
-            if tcid in states:
-                decision = payload.get("decision")
-                if isinstance(decision, str):
-                    states[tcid].approval_decision = decision
+            decision = payload.get("decision")
+            # Special case: "all-in-turn" means: mark all tool calls in the
+            # current USER turn as granted, even if some tool calls are
+            # declared after this event. A USER turn is the span between
+            # one user msg.create and the next.
+            if decision == "all-in-turn":
+                try:
+                    cur_seq = int(ev.get("event_seq"))
+                except Exception:
+                    cur_seq = None
+                if cur_seq is None:
+                    continue
+                prev_user_seq = -1
+                next_user_seq = None
+                if user_seqs:
+                    for us in user_seqs:
+                        if us <= cur_seq:
+                            prev_user_seq = us
+                        elif us > cur_seq and next_user_seq is None:
+                            next_user_seq = us
+                            break
+                for tc in states.values():
+                    if tc.approval_decision is not None:
+                        continue
+                    # Parent must exist within the approved user turn
+                    if tc.parent_event_seq < prev_user_seq:
+                        continue
+                    if next_user_seq is not None and tc.parent_event_seq >= next_user_seq:
+                        continue
+                    tc.approval_decision = "granted"
+            else:
+                tcid = payload.get("tool_call_id")
+                if tcid in states:
+                    if isinstance(decision, str):
+                        states[tcid].approval_decision = decision
         elif ev_type == "tool_call.execution_started":
             tcid = payload.get("tool_call_id")
             if tcid in states:
@@ -193,32 +240,65 @@ def list_tool_calls_for_thread(db: ThreadsDB, thread_id: str) -> List[ToolCallSt
 
 
 def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
-    """Return the event_seq of the last *stream boundary* for a thread.
+    """Return the event_seq of the last *LLM* stream boundary for a thread.
 
-    A boundary is either:
-      - any ``stream.close`` event for the thread, or
-      - any ``control.interrupt`` event for the thread.
+    Boundaries are either:
+      - a stream.close whose invoke_id saw LLM-style deltas (``text`` or
+        ``reason`` fields), or
+      - a control.interrupt whose payload.old_invoke_id matches such an
+        invoke_id.
 
-    We intentionally treat tool and LLM streams the same here. The
-    purpose of this boundary is to ensure that RA1 (LLM turns) only
-    considers messages that arrive *after* the last completed or
-    explicitly interrupted streaming step (whether that step was an LLM
-    call or a tool execution). This avoids pathological loops where an
-    LLM call that produced only tool_calls (no content deltas) or
-    errored before streaming would otherwise not advance the boundary
-    and be retried repeatedly.
+    We intentionally ignore stream.close events that belong purely to
+    tool-execution streams (RA2/RA3). Those streams only emit deltas
+    with a ``tool`` field (and no top-level ``text``/``reason``),
+    whereas LLM streams (RA1) emit deltas with ``text`` and/or
+    ``reason`` keys.
+
+    This distinction matters because RA1 (LLM turns) should be driven by
+    user/tool messages that appear *after* the last LLM turn finishes or
+    is explicitly interrupted by the user, but we do not want
+    tool-execution streams to reset that boundary.
     """
     last_close = -1
+    llm_invokes: set[str] = set()
+
+    # Single pass over events in order: mark invoke_ids that have LLM
+    # deltas, then record the last stream.close/control.interrupt for any
+    # such invoke_id.
     cur = db.conn.execute(
-        "SELECT event_seq FROM events WHERE thread_id=? AND type IN ('stream.close', 'control.interrupt') ORDER BY event_seq ASC",
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
         (thread_id,),
     )
-    rows = cur.fetchall()
-    if rows:
-        try:
-            last_close = int(rows[-1][0])
-        except Exception:
-            last_close = -1
+    for row in cur.fetchall():
+        ev = dict(row)
+        t = ev.get("type")
+        inv = ev.get("invoke_id")
+        if t == "stream.delta":
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and ("text" in payload or "reason" in payload):
+                if isinstance(inv, str) and inv:
+                    llm_invokes.add(inv)
+        elif t == "stream.close" and isinstance(inv, str) and inv in llm_invokes:
+            try:
+                last_close = int(ev.get("event_seq"))
+            except Exception:
+                continue
+        elif t == "control.interrupt":
+            # Treat an explicit interrupt of an LLM invoke as a boundary
+            # equivalent to a stream.close for RA1 purposes.
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            old_inv = payload.get("old_invoke_id")
+            if isinstance(old_inv, str) and old_inv in llm_invokes:
+                try:
+                    last_close = int(ev.get("event_seq"))
+                except Exception:
+                    continue
     return last_close
 
 

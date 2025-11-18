@@ -444,13 +444,32 @@ class ThreadRunner:
                             assistant_msg['reasoning'] = ''.join(reasoning_parts)
                         if current_model:
                             assistant_msg['model_key'] = current_model
-                        self.db.append_event(
-                            event_id=os.urandom(10).hex(),
-                            thread_id=self.thread_id,
-                            type_='msg.create',
-                            msg_id=os.urandom(10).hex(),
-                            payload=assistant_msg,
-                        )
+                        # If the provider returned an entirely empty
+                        # assistant message (no content, no tools, no
+                        # reasoning), skip creating a blank assistant
+                        # msg and surface a system notice instead.
+                        if not assistant_msg.get('content') and not assistant_msg.get('tool_calls') and not reasoning_parts:
+                            err_payload: Dict[str, Any] = {
+                                'role': 'system',
+                                'content': 'LLM error: empty assistant message returned by provider',
+                            }
+                            if current_model:
+                                err_payload['model_key'] = current_model
+                            self.db.append_event(
+                                event_id=os.urandom(10).hex(),
+                                thread_id=self.thread_id,
+                                type_='msg.create',
+                                msg_id=os.urandom(10).hex(),
+                                payload=err_payload,
+                            )
+                        else:
+                            self.db.append_event(
+                                event_id=os.urandom(10).hex(),
+                                thread_id=self.thread_id,
+                                type_='msg.create',
+                                msg_id=os.urandom(10).hex(),
+                                payload=assistant_msg,
+                            )
                         return
                 if interrupted:
                     break
