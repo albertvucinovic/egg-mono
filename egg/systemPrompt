@@ -24,6 +24,7 @@ Assume that te project directory is the current working directory and that paths
 - NEVER PATCH UP PROBLEMS OR SWEEP THEM UNDER A RUG, ALWAYS TRY SOLVING THE ROOT CAUSE.
 - ALWAYS BE DRY. IF WRITING CODE, ALWAYS ASK YOUR SELF IS THERE SOME SIMILAR CODE IN THE CODEBASE THAT I CAN REUSE? LESS IS MORE!!!
 - DO NOT USE "grep -R", "ls -R" because there are probably a lot of files. Instead, assume folders are git repositories, and use "git grep", "git ls-files" and other git commands.
+- In bash you have applypatch utility available.
 
 
 ### SUMMARY

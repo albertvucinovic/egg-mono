@@ -294,20 +294,19 @@ class EggDisplayApp:
             self._start_scheduler(rid)
 
     def _current_model_for_thread(self, tid: str) -> Optional[str]:
+        """Return the effective model for a thread using eggthreads API.
+
+        This calls eggthreads.current_thread_model so the UI and
+        ThreadRunner share the exact same semantics for model selection.
+        """
         try:
-            rows = self.db.conn.execute(
-                "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
-                (tid,)
-            ).fetchall()
-            for r in rows:
-                pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
-                mk = pj.get('model_key')
-                if isinstance(mk, str) and mk.strip():
-                    return mk.strip()
+            from eggthreads import current_thread_model  # type: ignore
         except Exception:
-            pass
-        th = self.db.get_thread(tid)
-        return th.initial_model_key if th else None
+            # Fallback: show only the thread's initial_model_key if any.
+            th = self.db.get_thread(tid)
+            imk = getattr(th, 'initial_model_key', None) if th else None
+            return imk.strip() if isinstance(imk, str) and imk.strip() else None
+        return current_thread_model(self.db, tid)
 
     # ---------------- Formatting helpers ----------------
     def _format_thread_line(self, tid: str) -> str:
@@ -1241,9 +1240,6 @@ class EggDisplayApp:
             cur_model_key = self._current_model_for_thread(self.current_thread) or None
             new_root = create_root_thread(self.db, name=new_name, initial_model_key=cur_model_key)
             append_message(self.db, new_root, 'system', self.system_prompt)
-            if cur_model_key:
-                self.db.append_event(event_id=os.urandom(10).hex(), thread_id=new_root, type_='msg.create',
-                                     msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{cur_model_key}]', 'model_key': cur_model_key})
             create_snapshot(self.db, new_root)
             self._ensure_scheduler_for(new_root)
             self.current_thread = new_root
@@ -1254,20 +1250,16 @@ class EggDisplayApp:
             # Use the spawn_agent tool implementation from eggthreads so we
             # share the same semantics between UI (/spawn) and model tools.
             def _latest_model_for_thread(tid: str) -> Optional[str]:
+                # Mirror _current_model_for_thread so that spawned
+                # children inherit the same effective model as their
+                # parent thread.
                 try:
-                    rows = self.db.conn.execute(
-                        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
-                        (tid,)
-                    ).fetchall()
-                    for r in rows:
-                        pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
-                        mk = pj.get('model_key')
-                        if isinstance(mk, str) and mk.strip():
-                            return mk.strip()
+                    from eggthreads import current_thread_model  # type: ignore
+                    return current_thread_model(self.db, tid)
                 except Exception:
-                    pass
-                th = self.db.get_thread(tid)
-                return th.initial_model_key if th else None
+                    th = self.db.get_thread(tid)
+                    imk = th.initial_model_key if th and isinstance(th.initial_model_key, str) else None
+                    return imk.strip() if imk and imk.strip() else None
 
             cur_model = _latest_model_for_thread(self.current_thread)
 
@@ -1323,20 +1315,16 @@ class EggDisplayApp:
             # Same as /spawn, but use spawn_agent_auto so the spawned
             # child has global tool auto-approval.
             def _latest_model_for_thread(tid: str) -> Optional[str]:
+                # Mirror _current_model_for_thread so that spawned
+                # children inherit the same effective model as their
+                # parent thread.
                 try:
-                    rows = self.db.conn.execute(
-                        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 200",
-                        (tid,)
-                    ).fetchall()
-                    for r in rows:
-                        pj = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
-                        mk = pj.get('model_key')
-                        if isinstance(mk, str) and mk.strip():
-                            return mk.strip()
+                    from eggthreads import current_thread_model  # type: ignore
+                    return current_thread_model(self.db, tid)
                 except Exception:
-                    pass
-                th = self.db.get_thread(tid)
-                return th.initial_model_key if th else None
+                    th = self.db.get_thread(tid)
+                    imk = th.initial_model_key if th and isinstance(th.initial_model_key, str) else None
+                    return imk.strip() if imk and imk.strip() else None
 
             cur_model = _latest_model_for_thread(self.current_thread)
 
@@ -1533,8 +1521,23 @@ class EggDisplayApp:
         elif cmd == 'model':
             arg2 = (arg or '').strip()
             if arg2:
-                self.db.append_event(event_id=os.urandom(10).hex(), thread_id=self.current_thread, type_='msg.create',
-                                     msg_id=os.urandom(10).hex(), payload={'role': 'system', 'content': f'[model:{arg2}]', 'model_key': arg2})
+                # Record a model.switch event as the authoritative source
+                # of model selection for this thread and append a
+                # user-level notification that is excluded from LLM
+                # context (no_api=True) but visible in the transcript.
+                from eggthreads import set_thread_model  # type: ignore
+                set_thread_model(self.db, self.current_thread, arg2, reason='ui /model')
+                self.db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=self.current_thread,
+                    type_='msg.create',
+                    msg_id=os.urandom(10).hex(),
+                    payload={
+                        'role': 'user',
+                        'content': f"/model {arg2}",
+                        'no_api': True,
+                    },
+                )
                 create_snapshot(self.db, self.current_thread)
                 self._log_system(f"Model set to: {arg2}")
             else:
