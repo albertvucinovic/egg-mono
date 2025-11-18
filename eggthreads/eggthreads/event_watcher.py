@@ -34,6 +34,13 @@ class EventWatcher:
                 idle = 0
                 yield rows
             else:
-                # lightweight backoff to reduce CPU when idle, but still responsive
-                idle = min(idle + 1, 5)
-            await asyncio.sleep(self.poll_sec if idle < 3 else self.poll_sec * 2)
+                # lightweight backoff to reduce CPU when idle, but still responsive.
+                # When idle, increase sleep up to ~1s to reduce CPU usage.
+                idle = min(idle + 1, 10)
+            # For the first few idle cycles, stay responsive; after that,
+            # back off more aggressively.
+            if idle < 3:
+                delay = self.poll_sec
+            else:
+                delay = min(self.poll_sec * (idle + 1), 1.0)
+            await asyncio.sleep(delay)
