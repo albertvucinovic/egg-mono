@@ -368,7 +368,7 @@ class EggDisplayApp:
         lines: List[str] = []
         if not msgs:
             return "No messages yet."
-        for m in msgs[-50:]:
+        for m in msgs:
             role = m.get('role')
             if role == 'assistant':
                 reas = (m.get('reasoning') or m.get('reasoning_content') or '').strip()
@@ -832,7 +832,7 @@ class EggDisplayApp:
         if not msgs:
             self.console.print(Panel('[dim]No messages yet[/dim]', border_style='blue'))
         else:
-            for m in msgs[-50:]:
+            for m in msgs:
                 if isinstance(m, dict):
                     self._console_print_message(m)
         # Update last-printed seq to the latest message event so we don't re-print
