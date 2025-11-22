@@ -112,16 +112,34 @@ class OpenAICompatAdapter(ProviderAdapter):
         clear error. If that variable *is* set, we fall back to the
         thread-bridged implementation from ProviderAdapter (which does
         not guarantee hard HTTP cancellation).
+
+        Additionally, if ``EGG_FORCE_WITHOUT_AIOHTTP`` is set, we will
+        prefer the synchronous ``requests``-based adapter even when
+        aiohttp is installed, so that advanced users can force the
+        simpler code path for debugging or environments where aiohttp's
+        behaviour is undesirable.
         """
+        # If the user explicitly requested to run without aiohttp, prefer
+        # the synchronous requests-based implementation even if aiohttp
+        # is present.
+        if os.environ.get("EGG_FORCE_WITHOUT_AIOHTTP"):
+            # Run the synchronous stream() in a thread and forward events
+            # into this async context.
+            import asyncio
+            loop = asyncio.get_running_loop()
+
+            def _run_sync():
+                return list(self.stream(url, headers, payload, timeout=timeout))
+
+            events = await loop.run_in_executor(None, _run_sync)
+            for evt in events:
+                yield evt
+            return
         try:
             import aiohttp
         except Exception as e:
-            if os.environ.get("EGG_FORCE_WITHOUT_AIOHTTP"):
-                # Degraded mode: rely on the generic async bridge which
-                # uses the synchronous stream() in a background thread.
-                async for evt in super().stream_async(url, headers, payload, timeout=timeout, session=session):
-                    yield evt
-                return
+            # aiohttp missing and no override flag -> require explicit
+            # acknowledgement from the user via EGG_FORCE_WITHOUT_AIOHTTP.
             raise RuntimeError(
                 "aiohttp is required for async streaming in eggllm. "
                 "Install it (e.g. `pip install aiohttp`), or set "
