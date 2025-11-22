@@ -959,8 +959,17 @@ class EggDisplayApp:
             self._log_system('Exiting on Ctrl+C (no active work and empty input).')
             self.running = False
             return False
-        # Send on Ctrl+D always
+        # Send on Ctrl+D always (but if we have a pending approval
+        # prompt, interpret it as an approval answer first, regardless
+        # of /enterMode).
         if key == ctrl_d or key == '\x04':
+            # First, try to handle any pending approval using the current
+            # input text as the answer. This works in both /enterMode
+            # send and newline.
+            if self._handle_pending_approval_answer(self.input_panel.get_text(), source='Ctrl+D'):
+                return True
+            # No pending approval (or unrecognized answer), treat Ctrl+D
+            # as normal send.
             text = self.input_panel.get_text().strip()
             if text:
                 try:
@@ -980,117 +989,11 @@ class EggDisplayApp:
             return True
         # Enter behavior depends on mode
         if key in (enter_key, '\r', '\n'):
-            # If we have a pending approval prompt, interpret single-line
-            # y/n/o answers here before treating them as normal messages.
-            try:
-                pending = getattr(self, '_pending_prompt', {}) or {}
-            except Exception:
-                pending = {}
-            if pending and self.enter_sends:
-                txt = self.input_panel.get_text().strip().lower()
-                kind = pending.get('kind')
-                ids = pending.get('tool_call_ids') or []
-                try:
-                    import os as _os
-                    from eggthreads import build_tool_call_states
-                except Exception:
-                    ids = []
-                # Exec approval: y = approve this set, n = deny this set,
-                # a = approve all tool calls in this user turn (RA2 and RA3)
-                if kind == 'exec' and ids and txt in ('y', 'n', 'a'):
-                    try:
-                        if txt in ('y', 'n'):
-                            approve = (txt == 'y')
-                            decision = 'granted' if approve else 'denied'
-                            for tcid in ids:
-                                self.db.append_event(
-                                    event_id=_os.urandom(10).hex(),
-                                    thread_id=self.current_thread,
-                                    type_='tool_call.approval',
-                                    msg_id=None,
-                                    invoke_id=None,
-                                    payload={
-                                        'tool_call_id': tcid,
-                                        'decision': decision,
-                                        'reason': 'Approved/denied by user from UI',
-                                    },
-                                )
-                            self._log_system(f"Tool calls {ids} approval decision: {decision}.")
-                        else:  # txt == 'a'
-                            # Approve all tool calls for the current user
-                            # turn. The exact interval (from previous user
-                            # message up to the next) is interpreted purely
-                            # from event positions inside build_tool_call_states.
-                            self.db.append_event(
-                                event_id=_os.urandom(10).hex(),
-                                thread_id=self.current_thread,
-                                type_='tool_call.approval',
-                                msg_id=None,
-                                invoke_id=None,
-                                payload={
-                                    'decision': 'all-in-turn',
-                                    'reason': 'Approved by user from UI',
-                                },
-                            )
-                            self._log_system(
-                                "Approved all tool calls for this user turn (decision=all-in-turn)."
-                            )
-                    except Exception as e:
-                        self._log_system(f'Error recording approval: {e}')
-                    # Clear prompt and input after handling
-                    self._pending_prompt = {}
-                    self.input_panel.clear_text()
-                    self.input_panel.increment_message_count()
-                    return True
-                # Output approval for very long tool outputs:
-                # y -> whole, n -> shortened preview, o -> omit.
-                if kind == 'output' and ids and txt in ('y', 'n', 'o'):
-                    try:
-                        states = build_tool_call_states(self.db, self.current_thread)
-                        if txt == 'y':
-                            decision = 'whole'
-                        elif txt == 'n':
-                            decision = 'partial'
-                        else:
-                            decision = 'omit'
-                        for tcid in ids:
-                            tc = states.get(str(tcid))
-                            if not tc or not tc.finished_output:
-                                continue
-                            full = tc.finished_output
-                            if not isinstance(full, str):
-                                full = str(full)
-                            line_count = len(full.splitlines())
-                            char_count = len(full)
-                            if decision == 'whole':
-                                preview = full
-                            elif decision == 'partial':
-                                preview = self._shorten_output_preview(full)
-                            else:
-                                preview = "Output omitted."
-                            self.db.append_event(
-                                event_id=_os.urandom(10).hex(),
-                                thread_id=self.current_thread,
-                                type_='tool_call.output_approval',
-                                msg_id=None,
-                                invoke_id=None,
-                                payload={
-                                    'tool_call_id': tcid,
-                                    'decision': decision,
-                                    'reason': 'User decided in UI',
-                                    'preview': preview,
-                                    'line_count': line_count,
-                                    'char_count': char_count,
-                                },
-                            )
-                        self._log_system(f"Tool calls {ids} output decision: {decision}.")
-                    except Exception as e:
-                        self._log_system(f'Error recording approval: {e}')
-                    # Clear prompt and input after handling
-                    self._pending_prompt = {}
-                    self.input_panel.clear_text()
-                    self.input_panel.increment_message_count()
-                    return True
+            # If we have a pending approval prompt and Enter-sends mode
+            # is active, interpret y/n/o/a answers via the same helper as
+            # Ctrl+D before treating Enter as a normal send.
+            if self.enter_sends and self._handle_pending_approval_answer(self.input_panel.get_text(), source='Enter'):
+                return True
             if self.enter_sends:
                 text = self.input_panel.get_text().strip()
                 if text:
@@ -1110,6 +1013,123 @@ class EggDisplayApp:
                 return True
         # delegate to editor engine
         return self.input_panel.editor._handle_key(key)
+
+    def _handle_pending_approval_answer(self, raw_text: str, source: str = 'Enter') -> bool:
+        """Handle a pending tool approval/output-approval answer.
+
+        raw_text: current input text (will be stripped/lowered)
+        source: human-readable origin (e.g. 'Enter', 'Ctrl+D') for logging.
+
+        Returns True if an approval was handled and the prompt/input were
+        cleared, False otherwise.
+        """
+        try:
+            pending = getattr(self, '_pending_prompt', {}) or {}
+        except Exception:
+            pending = {}
+        if not pending:
+            return False
+        txt = (raw_text or '').strip().lower()
+        if not txt:
+            return False
+        kind = pending.get('kind')
+        ids = pending.get('tool_call_ids') or []
+        try:
+            import os as _os
+            from eggthreads import build_tool_call_states
+        except Exception:
+            ids = []
+        # Exec approval: y = approve this set, n = deny this set,
+        # a = approve all tool calls in this user turn (RA2 and RA3)
+        if kind == 'exec' and ids and txt in ('y', 'n', 'a'):
+            try:
+                if txt in ('y', 'n'):
+                    approve = (txt == 'y')
+                    decision = 'granted' if approve else 'denied'
+                    for tcid in ids:
+                        self.db.append_event(
+                            event_id=_os.urandom(10).hex(),
+                            thread_id=self.current_thread,
+                            type_='tool_call.approval',
+                            msg_id=None,
+                            invoke_id=None,
+                            payload={
+                                'tool_call_id': tcid,
+                                'decision': decision,
+                                'reason': f'Approved/denied by user from UI ({source})',
+                            },
+                        )
+                    self._log_system(f"Tool calls {ids} approval decision: {decision}.")
+                else:  # txt == 'a'
+                    self.db.append_event(
+                        event_id=_os.urandom(10).hex(),
+                        thread_id=self.current_thread,
+                        type_='tool_call.approval',
+                        msg_id=None,
+                        invoke_id=None,
+                        payload={
+                            'decision': 'all-in-turn',
+                            'reason': f'Approved by user from UI ({source})',
+                        },
+                    )
+                    self._log_system(
+                        f"Approved all tool calls for this user turn (decision=all-in-turn, via {source})."
+                    )
+            except Exception as e:
+                self._log_system(f'Error recording approval: {e}')
+            self._pending_prompt = {}
+            self.input_panel.clear_text()
+            self.input_panel.increment_message_count()
+            return True
+        # Output approval for very long tool outputs:
+        # y -> whole, n -> shortened preview, o -> omit.
+        if kind == 'output' and ids and txt in ('y', 'n', 'o'):
+            try:
+                states = build_tool_call_states(self.db, self.current_thread)
+                if txt == 'y':
+                    decision = 'whole'
+                elif txt == 'n':
+                    decision = 'partial'
+                else:
+                    decision = 'omit'
+                for tcid in ids:
+                    tc = states.get(str(tcid))
+                    if not tc or not tc.finished_output:
+                        continue
+                    full = tc.finished_output
+                    if not isinstance(full, str):
+                        full = str(full)
+                    line_count = len(full.splitlines())
+                    char_count = len(full)
+                    if decision == 'whole':
+                        preview = full
+                    elif decision == 'partial':
+                        preview = self._shorten_output_preview(full)
+                    else:
+                        preview = "Output omitted."
+                    self.db.append_event(
+                        event_id=_os.urandom(10).hex(),
+                        thread_id=self.current_thread,
+                        type_='tool_call.output_approval',
+                        msg_id=None,
+                        invoke_id=None,
+                        payload={
+                            'tool_call_id': tcid,
+                            'decision': decision,
+                            'reason': f'User decided in UI ({source})',
+                            'preview': preview,
+                            'line_count': line_count,
+                            'char_count': char_count,
+                        },
+                    )
+                self._log_system(f"Tool calls {ids} output decision: {decision} (via {source}).")
+            except Exception as e:
+                self._log_system(f'Error recording approval: {e}')
+            self._pending_prompt = {}
+            self.input_panel.clear_text()
+            self.input_panel.increment_message_count()
+            return True
+        return False
 
     def _on_submit(self, text: str) -> None:
         # User command execution ($ / $$) is modeled as a user-originated
