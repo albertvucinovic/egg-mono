@@ -226,8 +226,9 @@ class EggDisplayApp:
         # ensure system log exists (double safety)
         if not hasattr(self, '_system_log'):
             self._system_log = []
-        # Input behavior: default to Enter sends (toggle with /enterMode)
-        self.enter_sends: bool = True
+        # Input behavior: default to Enter inserts newline (toggle with
+        # /enterMode). Ctrl+D always sends.
+        self.enter_sends: bool = False
         # Track last printed event sequence per thread for console output
         self._last_printed_seq_by_thread: Dict[str, int] = {}
 

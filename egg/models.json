@@ -8,14 +8,16 @@
 	        "model_name": "gpt-5.1",
 	        "max_tokens": 400000,
           "parameters": {
-                  "reasoning_effort": "high"
+                  "reasoning_effort": "high",
+                  "prompt_cache_retention": "24h"
 	         }
 	       },
 	      "GPT 5 high": {
 	        "model_name": "gpt-5",
 	        "max_tokens": 400000,
           "parameters": {
-                  "reasoning_effort": "high"
+                  "reasoning_effort": "high",
+                  "prompt_cache_retention": "24h"
 	         }
 	       },
          "GPT 5": {
