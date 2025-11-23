@@ -283,9 +283,26 @@ class EggDisplayApp:
     def _start_scheduler(self, root_tid: str) -> None:
         if root_tid in self.active_schedulers:
             return
-        sched = SubtreeScheduler(self.db, root_thread_id=root_tid,
-                                 models_path=str(MODELS_PATH), all_models_path=str(ALL_MODELS_PATH))
-        task = asyncio.create_task(sched.run_forever(poll_sec=0.05))
+        # The SubtreeScheduler scans the entire subtree looking for runnable
+        # threads. A very aggressive poll interval (e.g. 50ms) can keep a CPU
+        # core busy even when nothing is happening. Use a slightly more
+        # relaxed default and allow users to tune it via an environment
+        # variable if they need snappier or lazier behaviour.
+        try:
+            poll_env = os.environ.get("EGG_SCHEDULER_POLL_SEC")
+            poll_sec = float(poll_env) if poll_env is not None else 0.15
+            if poll_sec <= 0:
+                poll_sec = 0.15
+        except Exception:
+            poll_sec = 0.15
+
+        sched = SubtreeScheduler(
+            self.db,
+            root_thread_id=root_tid,
+            models_path=str(MODELS_PATH),
+            all_models_path=str(ALL_MODELS_PATH),
+        )
+        task = asyncio.create_task(sched.run_forever(poll_sec=poll_sec))
         self.active_schedulers[root_tid] = {"scheduler": sched, "task": task}
         self._log_system(f"Started scheduler for root {root_tid[-8:]}")
 
@@ -423,16 +440,25 @@ class EggDisplayApp:
         return "\n\n".join(lines)
 
     def _compose_chat_panel_text(self) -> str:
-        # Create/refresh snapshot when idle for readability
-        try:
-            row = self.db.current_open(self.current_thread)
-        except Exception:
-            row = None
-        if row is None:
-            try:
-                create_snapshot(self.db, self.current_thread)
-            except Exception:
-                pass
+        """Compose the text for the Chat Messages panel.
+
+        Earlier versions of Egg eagerly rebuilt the snapshot on every UI
+        refresh whenever the thread was "idle" (no open stream) by calling
+        ``create_snapshot`` here. Snapshot building walks *all* events for the
+        thread and JSON-decodes each payload; doing that 5–10 times per second
+        on a long-running thread is surprisingly expensive and shows up as
+        high CPU usage even when nothing new is happening.
+
+        Snapshots are already maintained in cheaper places:
+          - right after we append a user message or user command,
+          - in the watcher when new msg.create/edit/delete events arrive,
+          - when switching threads (/thread, /child, /new) via
+            ``_print_static_view_current``.
+
+        So we avoid rebuilding here and just read whatever snapshot is
+        present. This keeps the chat panel up to date while eliminating a
+        large amount of idle CPU work.
+        """
         base = self._format_messages_text(self.current_thread)
         ls = self._live_state
         parts: List[str] = [base]

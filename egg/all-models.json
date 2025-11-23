@@ -682,6 +682,25 @@
         "models/gemini-2.5-flash-native-audio-preview-09-2025",
         "models/lyria-realtime-exp"
       ]
+    },
+    "moonshotai": {
+      "fetched_at": 1763867156,
+      "source": "https://api.moonshot.ai/v1/models",
+      "models": [
+        "kimi-latest",
+        "moonshot-v1-auto",
+        "moonshot-v1-128k-vision-preview",
+        "moonshot-v1-8k",
+        "kimi-k2-turbo-preview",
+        "kimi-k2-thinking-turbo",
+        "kimi-k2-thinking",
+        "moonshot-v1-32k-vision-preview",
+        "moonshot-v1-128k",
+        "moonshot-v1-8k-vision-preview",
+        "kimi-k2-0905-preview",
+        "moonshot-v1-32k",
+        "kimi-k2-0711-preview"
+      ]
     }
   }
 }
