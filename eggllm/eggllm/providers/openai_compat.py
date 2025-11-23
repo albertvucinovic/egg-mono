@@ -43,8 +43,23 @@ class OpenAICompatAdapter(ProviderAdapter):
             try:
                 payload = json.loads(data_str)
             except Exception:
+                # Ignore malformed JSON chunks; the provider may send
+                # non-JSON keep-alives or comments.
                 continue
-            delta = (payload.get("choices", [{}])[0] or {}).get("delta", {})
+
+            # Some providers occasionally send streaming events with an
+            # empty "choices" list. Our previous implementation assumed
+            # at least one element (choices[0]) which caused an IndexError
+            # ("list index out of range") and bubbled up as a runner
+            # error. To make Egg robust against such deviations, we now
+            # explicitly check that choices is a non-empty list before
+            # attempting to read choices[0]. Events with no choices are
+            # simply ignored.
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+
+            delta = (choices[0] or {}).get("delta", {})
             if not isinstance(delta, dict):
                 continue
 
@@ -174,8 +189,18 @@ class OpenAICompatAdapter(ProviderAdapter):
                     try:
                         pj = json.loads(data_str)
                     except Exception:
+                        # Ignore malformed JSON chunks; some servers send
+                        # blank comments/keep-alives in the SSE channel.
                         continue
-                    delta = (pj.get("choices", [{}])[0] or {}).get("delta", {})
+
+                    # See synchronous stream() above for rationale. We
+                    # must guard against empty "choices" arrays to avoid
+                    # IndexError when accessing choices[0].
+                    choices = pj.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+
+                    delta = (choices[0] or {}).get("delta", {})
                     if not isinstance(delta, dict):
                         continue
                     if (content := delta.get("content")):
