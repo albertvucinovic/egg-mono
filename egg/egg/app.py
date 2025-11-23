@@ -439,6 +439,65 @@ class EggDisplayApp:
                     lines.append(f"[System]\n{content}")
         return "\n\n".join(lines)
 
+    # ---------------- Chat panel caching ----------------
+    def _truncate_for_chat_panel(self, text: str, max_lines: int = 100) -> str:
+        """Return a shortened view of ``text`` suitable for the chat panel.
+
+        The static console view printed by ``_print_static_view_current``
+        continues to render the *full* history; this helper only affects the
+        scrolling "Chat Messages" panel inside the live UI.
+        """
+        if not text:
+            return "No messages yet."
+        lines = text.splitlines()
+        if len(lines) <= max_lines:
+            return "\n".join(lines)
+        omitted = len(lines) - max_lines
+        tail = lines[-max_lines:]
+        notice = (
+            f"... ({omitted} earlier lines omitted from Chat Messages; use /threads or "
+            f"static view for full history) ..."
+        )
+        return "\n".join([notice] + tail)
+
+    def _rebuild_chat_cache_for_current(self) -> None:
+        """Ensure the cached base chat text for the current thread is fresh.
+
+        We key the cache by (thread_id, snapshot_last_event_seq) so that we
+        only walk the full snapshot when it actually changes. This eliminates
+        a large amount of idle CPU work on long threads, where repeatedly
+        calling ``_format_messages_text`` every 100ms used to be expensive.
+        """
+        # Lazily create cache dict the first time we are called.
+        if not hasattr(self, "_chat_cache"):
+            self._chat_cache = {
+                "thread_id": None,
+                "snapshot_seq": -1,
+                "base_full": "",
+                "base_tail": "",
+            }
+
+        try:
+            th = self.db.get_thread(self.current_thread)
+        except Exception:
+            th = None
+        snap_seq = getattr(th, "snapshot_last_event_seq", -1) if th else -1
+
+        if (
+            self._chat_cache.get("thread_id") == self.current_thread
+            and self._chat_cache.get("snapshot_seq") == snap_seq
+        ):
+            return
+
+        base_full = self._format_messages_text(self.current_thread)
+        base_tail = self._truncate_for_chat_panel(base_full)
+        self._chat_cache = {
+            "thread_id": self.current_thread,
+            "snapshot_seq": snap_seq,
+            "base_full": base_full,
+            "base_tail": base_tail,
+        }
+
     def _compose_chat_panel_text(self) -> str:
         """Compose the text for the Chat Messages panel.
 
@@ -458,8 +517,15 @@ class EggDisplayApp:
         So we avoid rebuilding here and just read whatever snapshot is
         present. This keeps the chat panel up to date while eliminating a
         large amount of idle CPU work.
+
+        Additionally, we cache the formatted snapshot text per
+        (thread_id, snapshot_last_event_seq) so that we don't repeatedly walk
+        and format a large history on every UI refresh when the snapshot
+        hasn't changed.
         """
-        base = self._format_messages_text(self.current_thread)
+        # Ensure cache is up to date for the current thread / snapshot.
+        self._rebuild_chat_cache_for_current()
+        base = self._chat_cache.get("base_tail", "No messages yet.")
         ls = self._live_state
         parts: List[str] = [base]
         if ls.get('active_invoke'):
@@ -477,24 +543,11 @@ class EggDisplayApp:
 
         head = f"Thread {self.current_thread[-8:]} | Model: {self._current_model_for_thread(self.current_thread) or 'default'}"
 
-        # Combine historical + streaming text, but only keep a tail window of
-        # recent lines for the live "Chat Messages" panel. The static
-        # console view printed by _print_static_view_current continues to
-        # render the full thread; this truncation only affects the scrolling
-        # panel used during interactive chats.
-        body_full = "\n".join(parts).strip() or "No messages yet."
-
-        max_lines = 100
-        lines = body_full.splitlines()
-        if len(lines) > max_lines:
-            omitted = len(lines) - max_lines
-            # Keep only the last max_lines, and prepend a small notice so
-            # users know older context exists in the thread history.
-            tail = lines[-max_lines:]
-            notice = f"... ({omitted} earlier lines omitted from Chat Messages; use /threads or static view for full history) ..."
-            body = "\n".join([notice] + tail)
-        else:
-            body = "\n".join(lines)
+        # Combine historical + streaming text. The historical part is already
+        # truncated to a tail window by ``_truncate_for_chat_panel`` so we do
+        # not need to re-apply truncation here; streaming contributions are
+        # typically small.
+        body = "\n".join(parts).strip() or "No messages yet."
 
         return head + "\n" + body
 
@@ -542,8 +595,6 @@ class EggDisplayApp:
         else:
             # Empty content makes the panel effectively invisible
             self.approval_panel.set_content("")
-
-        self._compute_pending_prompt()
 
 
 
@@ -1801,6 +1852,14 @@ class EggDisplayApp:
             "tc_text": {},
             "tc_order": [],
         }
+        # When switching to a thread, compute any pending tool or output
+        # approvals once so that the Approval panel reflects existing
+        # state even if no new events arrive. We deliberately avoid doing
+        # this on every UI tick in _update_panels() for performance.
+        try:
+            self._compute_pending_prompt()
+        except Exception:
+            pass
         self._watch_task = asyncio.create_task(self._watch_thread(self.current_thread))
 
     async def _watch_thread(self, thread_id: str):
@@ -1860,6 +1919,7 @@ class EggDisplayApp:
                 except Exception:
                     pass
                 await self._ingest_event_for_live(e, thread_id)
+
             # If we saw message-level events, refresh snapshot to include them
             if saw_non_stream_msg:
                 try:
@@ -1889,8 +1949,15 @@ class EggDisplayApp:
                             pass
                 except Exception:
                     pass
-            # Update panels after each batch
-            self._update_panels()
+
+            # Recompute approval prompts when new events arrive so the
+            # Approval panel content stays in sync, but avoid doing this on
+            # every UI tick in _update_panels(), which is costly on long
+            # threads.
+            try:
+                self._compute_pending_prompt()
+            except Exception:
+                pass
 
     async def _ingest_event_for_live(self, e, thread_id: str):
         if thread_id != self.current_thread:
