@@ -474,8 +474,29 @@ class EggDisplayApp:
                     parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
             if ls.get('content'):
                 parts.append(f"\n[Assistant (streaming)]\n{ls['content']}")
+
         head = f"Thread {self.current_thread[-8:]} | Model: {self._current_model_for_thread(self.current_thread) or 'default'}"
-        return head + "\n" + ("\n".join(parts).strip() or "No messages yet.")
+
+        # Combine historical + streaming text, but only keep a tail window of
+        # recent lines for the live "Chat Messages" panel. The static
+        # console view printed by _print_static_view_current continues to
+        # render the full thread; this truncation only affects the scrolling
+        # panel used during interactive chats.
+        body_full = "\n".join(parts).strip() or "No messages yet."
+
+        max_lines = 100
+        lines = body_full.splitlines()
+        if len(lines) > max_lines:
+            omitted = len(lines) - max_lines
+            # Keep only the last max_lines, and prepend a small notice so
+            # users know older context exists in the thread history.
+            tail = lines[-max_lines:]
+            notice = f"... ({omitted} earlier lines omitted from Chat Messages; use /threads or static view for full history) ..."
+            body = "\n".join([notice] + tail)
+        else:
+            body = "\n".join(lines)
+
+        return head + "\n" + body
 
     def _update_panels(self) -> None:
         self.chat_output.set_content(self._compose_chat_panel_text())
