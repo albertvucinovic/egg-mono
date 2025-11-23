@@ -408,7 +408,12 @@ def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[Runner
         tc for tc in all_states.values()
         if tc.parent_role == 'assistant'
         and tc.state in ("TC2.1", "TC2.2", "TC5")
-        and tc.parent_event_seq <= last_close
+        # Consider assistant tool calls that have already been approved,                                                                         │ │ │
+        # denied, or are ready to be published. RA2 operates purely on tool                                                                      │ │ │
+        # call state; we do not need to gate by last LLM boundary here                                                                           │ │ │
+        # because the per-thread lease (open_streams) ensures that RA2 does                                                                      │ │ │
+        # not run concurrently with an active RA1 stream.
+        #and tc.parent_event_seq <= last_close
     ]
     if assistant_tcs:
         assistant_tcs.sort(key=lambda tc: tc.parent_event_seq)
@@ -422,6 +427,18 @@ def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[Runner
             msg_id=msg_id,
             tool_calls=tcs_for_msg,
         )
+
+    # Before we consider a new LLM turn (RA1), ensure there are no
+    # assistant-originated tool calls that are still unresolved from the
+    # provider's point of view. The OpenAI tools protocol requires that
+    # every assistant tool_call has a corresponding tool message before
+    # the next assistant call.
+    has_unpublished_assistant_tool = any(
+        tc.parent_role == 'assistant' and not tc.published
+        for tc in all_states.values()
+    )
+    if has_unpublished_assistant_tool:
+        return None
 
     # -------- RA1: LLM call --------
     # Scan messages after the last stream.close to find a user or tool
