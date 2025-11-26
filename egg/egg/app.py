@@ -709,7 +709,7 @@ class EggDisplayApp:
             require further approval.
         """
         try:
-            from eggthreads import build_tool_call_states  # type: ignore
+            from eggthreads import build_tool_call_states, create_snapshot  # type: ignore
         except Exception:
             return
         try:
@@ -719,8 +719,14 @@ class EggDisplayApp:
         if not states:
             return
         import os as _os
+        any_tool_msg = False
         for tcid, tc in states.items():
             try:
+                # Skip tool calls that already have a published tool
+                # message; they are protocol-complete.
+                if getattr(tc, 'published', False):
+                    continue
+
                 tool_call_id = str(tcid)
                 # TC1: needs approval -> deny execution entirely.
                 if tc.state == 'TC1':
@@ -736,6 +742,31 @@ class EggDisplayApp:
                             'reason': 'Cancelled by user via Ctrl+C',
                         },
                     )
+                    # For assistant-originated tool calls, also emit a
+                    # synthetic tool response so that every assistant
+                    # message with tool_calls has a corresponding tool
+                    # message, even though execution never ran.
+                    if getattr(tc, 'parent_role', None) == 'assistant':
+                        name = getattr(tc, 'name', '') or tool_call_id
+                        content = (
+                            f"Tool call '{name}' was cancelled before it ran. "
+                            "Reason: cancelled by user via Ctrl+C."
+                        )
+                        payload = {
+                            'role': 'tool',
+                            'content': content,
+                            'tool_call_id': tool_call_id,
+                            'name': name,
+                        }
+                        self.db.append_event(
+                            event_id=_os.urandom(10).hex(),
+                            thread_id=self.current_thread,
+                            type_='msg.create',
+                            msg_id=_os.urandom(10).hex(),
+                            invoke_id=None,
+                            payload=payload,
+                        )
+                        any_tool_msg = True
                 # TC2.1 (approved), TC3 (executing), TC4 (finished, waiting
                 # for output approval): mark output as omitted so the
                 # runner will not auto-approve or surface it.
@@ -753,8 +784,44 @@ class EggDisplayApp:
                             'preview': 'Output omitted (cancelled by user).',
                         },
                     )
+                    # Assistant-originated tool calls should still get a
+                    # tool message so that the tools protocol invariant
+                    # holds and future LLM calls do not fail with
+                    # missing responses for tool_call_ids.
+                    if getattr(tc, 'parent_role', None) == 'assistant':
+                        name = getattr(tc, 'name', '') or tool_call_id
+                        content = (
+                            f"Tool call '{name}' was interrupted and its output was omitted. "
+                            "Reason: cancelled by user via Ctrl+C."
+                        )
+                        payload = {
+                            'role': 'tool',
+                            'content': content,
+                            'tool_call_id': tool_call_id,
+                            'name': name,
+                        }
+                        self.db.append_event(
+                            event_id=_os.urandom(10).hex(),
+                            thread_id=self.current_thread,
+                            type_='msg.create',
+                            msg_id=_os.urandom(10).hex(),
+                            invoke_id=None,
+                            payload=payload,
+                        )
+                        any_tool_msg = True
             except Exception:
                 continue
+
+        # If we synthesized any tool messages, rebuild the snapshot so
+        # that subsequent LLM turns see a history that already contains
+        # those tool responses. This avoids provider errors complaining
+        # about missing tool messages for previously declared
+        # tool_call_ids.
+        if any_tool_msg:
+            try:
+                create_snapshot(self.db, self.current_thread)
+            except Exception:
+                pass
 
     def _render_group(self) -> Group:
         # Left: chat; right: vertical stack of system + children panels
