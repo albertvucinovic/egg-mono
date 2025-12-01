@@ -285,19 +285,94 @@ class ThreadRunner:
         role = payload.get('role')
         user_content = payload.get('content', '')
 
-        # Build base_messages from snapshot, respecting no_api
+        # Build base_messages from snapshot, respecting no_api and
+        # applying per-model thinking-content policy/options.
         th = self.db.get_thread(self.thread_id)
         base_messages: List[Dict[str, Any]] = []
+        thinking_policy: Optional[str] = None
+        thinking_key: Optional[str] = None
+        # Resolve per-model options from the registry if possible.
+        try:
+            if self.llm is not None and current_model:
+                from eggllm import LLMClient as _LLMClient  # type: ignore
+                # We only access the registry via the concrete eggllm
+                # client; other implementations may not expose it.
+                if isinstance(self.llm, _LLMClient):
+                    opts = self.llm.registry.model_options(current_model)  # type: ignore[attr-defined]
+                    if isinstance(opts, dict):
+                        tp = opts.get('thinking_content_policy')
+                        if isinstance(tp, str) and tp.strip():
+                            thinking_policy = tp.strip().lower()
+                        tk = opts.get('thinking_content_key')
+                        if isinstance(tk, str) and tk.strip():
+                            thinking_key = tk.strip()
+        except Exception:
+            thinking_policy = None
+            thinking_key = None
+
         if th and th.snapshot_json:
             try:
                 snap = json.loads(th.snapshot_json)
-                for m in snap.get('messages', []):
+                msgs = snap.get('messages', []) or []
+
+                # If the model wants only the last assistant turn's
+                # thinking, identify the index of the last user message
+                # so we can treat messages after that as the "tail".
+                last_user_idx = -1
+                if thinking_policy == 'last assistant turn':
+                    for i, m in enumerate(msgs):
+                        try:
+                            if m.get('role') == 'user' and isinstance(m.get('content'), str):
+                                last_user_idx = i
+                        except Exception:
+                            continue
+
+                def _maybe_include_reasoning(m: Dict[str, Any], idx: int) -> Optional[str]:
+                    """Return reasoning text to send for this message, or None.
+
+                    The snapshot uses ``reasoning`` to store thinking.
+                    The provider may expect it under a different key,
+                    configured via thinking_content_key.  We return the
+                    thinking string here and let the caller attach it
+                    under the appropriate key on the outbound message.
+                    """
+                    raw = m.get('reasoning') or m.get('reasoning_content')
+                    if not isinstance(raw, str) or not raw:
+                        return None
+                    if thinking_policy == 'send all':
+                        return raw
+                    if thinking_policy == 'last assistant turn':
+                        # Only include thinking for messages in the
+                        # "tail" after the last user content.
+                        if last_user_idx == -1 or idx <= last_user_idx:
+                            return None
+                        return raw
+                    # Default / "strip all": never send.
+                    return None
+
+                for idx, m in enumerate(msgs):
                     if m.get('no_api'):
                         continue
                     r = m.get('role')
                     content = m.get('content', '')
+                    # Compute optional thinking text according to policy
+                    thinking_text = _maybe_include_reasoning(m, idx)
+                    # Determine the outbound thinking key, defaulting
+                    # to the provider's native "reasoning_content" if
+                    # no explicit key was configured.
+                    out_thinking_key = thinking_key or 'reasoning_content'
+
                     if r == 'assistant' and m.get('tool_calls'):
-                        base_messages.append({'role': 'assistant', 'tool_calls': m.get('tool_calls')})
+                        # Assistant messages with tool_calls may also
+                        # carry thinking. We forward tool_calls plus any
+                        # allowed thinking under the configured key.
+                        msg_out: Dict[str, Any] = {
+                            'role': 'assistant',
+                            'tool_calls': m.get('tool_calls'),
+                        }
+                        if thinking_text is not None:
+                            msg_out[out_thinking_key] = thinking_text
+                        base_messages.append(msg_out)
                     elif r == 'tool':
                         obj = {'role': 'tool', 'content': content}
                         if m.get('name'):
@@ -311,7 +386,10 @@ class ThreadRunner:
                             obj['user_tool_call'] = m.get('user_tool_call')
                         base_messages.append(obj)
                     elif r in ('system', 'user', 'assistant'):
-                        base_messages.append({'role': r, 'content': content})
+                        msg_out: Dict[str, Any] = {'role': r, 'content': content}
+                        if r == 'assistant' and thinking_text is not None:
+                            msg_out[out_thinking_key] = thinking_text
+                        base_messages.append(msg_out)
             except Exception:
                 pass
 
