@@ -68,6 +68,37 @@ class ModelRegistry:
     def get_model_config(self, display_key: str) -> Dict[str, Any]:
         return self.models_config.get(display_key) or {}
 
+    def model_options(self, display_key: str) -> Dict[str, Any]:
+        """Return per-model options dict for the given display key.
+
+        The models.json schema allows an optional ``"options"`` object
+        per model entry, e.g.::
+
+            {
+              "providers": {
+                "openai": {
+                  "models": {
+                    "GPT 5.1 high": {
+                      "model_name": "gpt-5.1-high",
+                      "options": {
+                        "thinking_content_policy": "last assistant turn",
+                        "thinking_content_key": "thinking_content"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+        This helper returns that ``options`` mapping (or ``{}`` if
+        absent / malformed) so that callers such as eggthreads can
+        adjust behaviour (e.g. thinking-content handling) on a
+        per-model basis.
+        """
+        cfg = self.get_model_config(display_key)
+        opts = cfg.get("options") if isinstance(cfg, dict) else None
+        return opts if isinstance(opts, dict) else {}
+
     def merge_parameters(self, display_key: str) -> Dict[str, Any]:
         m = self.get_model_config(display_key)
         prov = m.get("provider")
