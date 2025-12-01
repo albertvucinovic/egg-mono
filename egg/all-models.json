@@ -583,7 +583,7 @@
       ]
     },
     "deepseek": {
-      "fetched_at": 1755776953,
+      "fetched_at": 1764626907,
       "source": "https://api.deepseek.com/models",
       "models": [
         "deepseek-chat",

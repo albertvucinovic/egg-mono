@@ -89,7 +89,11 @@
       "models": {
         "openai 120b Local": {
           "model_name": "openai-120b",
-          "max_tokens": 130000
+          "max_tokens": 130000,
+          "options": {
+            "thinking_content_policy": "last assistant turn",
+            "thinking_content_key": "reasoning_content"
+          }
         },
         "Qwen3 Coder Local": {
           "model_name": "Qwen3-Coder-30B-A3B-Instruct-UD-Q8_K_XL.gguf",
@@ -218,7 +222,11 @@
         },
         "deepseek-reasoner": {
           "model_name": "deepseek-reasoner",
-          "max_tokens": 128000
+          "max_tokens": 128000,
+          "options": {
+            "thinking_content_policy": "last assistant turn",
+            "thinking_content_key": "reasoning_content"
+          }
         }
       }
     },
