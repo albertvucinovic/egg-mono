@@ -30,6 +30,9 @@ from .tools_config import (
     set_thread_tools_enabled,
     disable_tool_for_thread,
     enable_tool_for_thread,
+    set_subtree_tools_enabled,
+    disable_tool_for_subtree,
+    enable_tool_for_subtree,
 )
 
 __all__ = [
@@ -39,4 +42,5 @@ __all__ = [
     'create_snapshot', 'interrupt_thread', 'pause_thread', 'resume_thread', 'set_thread_model', 'current_thread_model',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',
+    'set_subtree_tools_enabled', 'disable_tool_for_subtree', 'enable_tool_for_subtree',
 ]
