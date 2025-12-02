@@ -1412,7 +1412,7 @@ class EggDisplayApp:
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
-            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /spawn_auto <text>, /wait <threads>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /toggle_auto_approval, /quit')
+            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /spawn_auto <text>, /wait <threads>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /toggle_auto_approval, /toolson, /toolsoff, /disabletool <name>, /enabletool <name>, /quit')
         elif cmd == 'quit':
             self.running = False
         elif cmd == 'pause':
@@ -1832,6 +1832,47 @@ class EggDisplayApp:
                 )
             except Exception as e:
                 self._log_system(f'Error toggling auto-approval: {e}')
+        elif cmd == 'toolson':
+            # Thread-wide toggle: allow RA1 to expose tools again.
+            try:
+                from eggthreads import set_thread_tools_enabled  # type: ignore
+                set_thread_tools_enabled(self.db, self.current_thread, True)
+                self._log_system('Tools enabled for this thread (LLM may call tools).')
+            except Exception as e:
+                self._log_system(f'/toolson error: {e}')
+        elif cmd == 'toolsoff':
+            # Thread-wide toggle: RA1 will not expose tools to the LLM
+            # for this thread. User-initiated commands ($, $$, /wait)
+            # still work as they are modelled as explicit tool calls.
+            try:
+                from eggthreads import set_thread_tools_enabled  # type: ignore
+                set_thread_tools_enabled(self.db, self.current_thread, False)
+                self._log_system('Tools disabled for this thread (LLM tool calls suppressed).')
+            except Exception as e:
+                self._log_system(f'/toolsoff error: {e}')
+        elif cmd == 'disabletool':
+            # Per-thread blacklist of individual tool names.
+            name = (arg or '').strip()
+            if not name:
+                self._log_system('Usage: /disabletool <tool_name>')
+                return
+            try:
+                from eggthreads import disable_tool_for_thread  # type: ignore
+                disable_tool_for_thread(self.db, self.current_thread, name)
+                self._log_system(f"Tool '{name}' disabled for this thread.")
+            except Exception as e:
+                self._log_system(f'/disabletool error: {e}')
+        elif cmd == 'enabletool':
+            name = (arg or '').strip()
+            if not name:
+                self._log_system('Usage: /enabletool <tool_name>')
+                return
+            try:
+                from eggthreads import enable_tool_for_thread  # type: ignore
+                enable_tool_for_thread(self.db, self.current_thread, name)
+                self._log_system(f"Tool '{name}' enabled for this thread.")
+            except Exception as e:
+                self._log_system(f'/enabletool error: {e}')
         else:
             self._log_system('Unknown command')
 

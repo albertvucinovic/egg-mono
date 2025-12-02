@@ -209,6 +209,21 @@
         }
       }
     },
+    "deepseek-speciale": {
+      "api_base": "https://api.deepseek.com/v3.2_speciale_expires_on_20251215/chat/completions",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "parameters" : {
+        "cache_prompt": true
+      },
+      "models": {
+        "deepseek-reasoner-speciale": {
+          "model_name": "deepseek-reasoner",
+          "max_tokens": 128000,
+          "thinking_content_policy": "last assistant turn",
+          "thinking_content_key": "reasoning_content"
+        }
+      }
+    },
     "deepseek": {
       "api_base": "https://api.deepseek.com/chat/completions",
       "api_key_env": "DEEPSEEK_API_KEY",
