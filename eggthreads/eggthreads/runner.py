@@ -14,6 +14,7 @@ except Exception:
 from .db import ThreadsDB
 from .tools import ToolRegistry, create_default_tools
 from .tool_state import ToolCallState, RunnerActionable, discover_runner_actionable, thread_state, build_tool_call_states
+from .tools_config import get_thread_tools_config
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -433,21 +434,45 @@ class ThreadRunner:
         chunk_seq = self.db.max_chunk_seq(invoke_id)
 
         # Final sanitation step before calling the provider: make sure that
-        # user messages never carry "tool_calls" fields. User commands are
-        # modelled as tool calls attached to user messages in the event log,
-        # but when we send context to the API we want these to appear as
-        # ordinary user messages (see ../egg/temp/approval-prompt.md).
-        #
-        # Most of this is already guaranteed by how we build base_messages
-        # from the snapshot (we only copy role + content for user messages),
-        # but we apply a dedicated sanitizer here so that any future changes
-        # or external callers that add tool_calls to user messages cannot
-        # accidentally leak them to the model.
+        # user messages never carry "tool_calls" fields and that tool
+        # exposure honours any per-thread tools configuration (e.g.
+        # thread-wide tool disable, per-tool blacklists).
         base_messages = self._sanitize_messages_for_api(base_messages)
+
+        # Apply per-thread tools configuration: this governs which tools
+        # the LLM is allowed to see in this thread. User-initiated tools
+        # (RA3) are still modelled as tool calls but are handled elsewhere
+        # when executed.
+        tools_cfg = get_thread_tools_config(self.db, self.thread_id)
+        tools_spec = self.tools.tools_spec() or None
+        if tools_spec is not None:
+            # Filter out disabled tool names from the spec before
+            # exposing them to the LLM.
+            enabled_specs = []
+            disabled_set = {n.lower() for n in tools_cfg.disabled_tools}
+            for spec in tools_spec:
+                try:
+                    fn = (spec or {}).get('function') or {}
+                    name = str(fn.get('name') or '').lower()
+                    if name and name in disabled_set:
+                        continue
+                    enabled_specs.append(spec)
+                except Exception:
+                    enabled_specs.append(spec)
+            tools_spec = enabled_specs or None
+
+        # If thread-wide tools are disabled, suppress tools entirely for
+        # this RA1 turn.
+        if not tools_cfg.llm_tools_enabled:
+            tools_spec_to_use = None
+            tool_choice = None
+        else:
+            tools_spec_to_use = tools_spec
+            tool_choice = 'auto'
 
         interrupted = False
         try:
-            async for raw in self.llm.astream_chat(base_messages, tools=self.tools.tools_spec() or None, tool_choice='auto'):
+            async for raw in self.llm.astream_chat(base_messages, tools=tools_spec_to_use, tool_choice=tool_choice):
                 try:
                     if recorder is not None:
                         recorder.write(json.dumps(raw, ensure_ascii=False) + "\n")
@@ -806,6 +831,10 @@ class ThreadRunner:
         """Handle RA2/RA3: process tool calls that are already approved or denied
         (TC2.1/TC2.2/TC5) and advance them along the state machine."""
         tool_calls = ra.tool_calls or []
+        # Thread-level tools configuration (disables, etc.) is respected
+        # both for assistant-originated tool calls (RA2) and
+        # user-initiated ones (RA3).
+        tools_cfg = get_thread_tools_config(self.db, self.thread_id)
         for tc in tool_calls:
             # Denied -> publish denial message and move to TC6
             if tc.state == 'TC2.2' and not tc.published:
@@ -829,6 +858,46 @@ class ThreadRunner:
 
             # Approved, not yet executed -> execution_started -> finished
             if tc.state == 'TC2.1':
+                # Respect per-thread disabled tools: instead of
+                # executing the tool, immediately mark it finished with
+                # a synthetic "disabled" output. This applies equally
+                # to assistant- and user-originated calls.
+                if tc.name in tools_cfg.disabled_tools:
+                    import os as _os
+                    disabled_msg = (
+                        f"Tool '{tc.name}' is disabled for this thread and "
+                        "was not executed."
+                    )
+                    self.db.append_event(
+                        event_id=_os.urandom(10).hex(),
+                        thread_id=self.thread_id,
+                        type_='tool_call.finished',
+                        msg_id=None,
+                        invoke_id=invoke_id,
+                        payload={
+                            'tool_call_id': tc.tool_call_id,
+                            'reason': 'disabled',
+                            'output': disabled_msg,
+                        },
+                    )
+                    # Immediately approve the small synthetic output so
+                    # it can be published as a tool message on the next
+                    # RA2/RA3 pass without user interaction.
+                    self.db.append_event(
+                        event_id=_os.urandom(10).hex(),
+                        thread_id=self.thread_id,
+                        type_='tool_call.output_approval',
+                        msg_id=None,
+                        invoke_id=None,
+                        payload={
+                            'tool_call_id': tc.tool_call_id,
+                            'decision': 'whole',
+                            'reason': 'Auto: tool disabled for this thread',
+                            'preview': disabled_msg,
+                        },
+                    )
+                    continue
+
                 # Special-case bash so we can terminate the underlying
                 # subprocess on Ctrl+C / lease loss.
                 if tc.name == 'bash':
