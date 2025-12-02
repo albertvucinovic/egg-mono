@@ -556,7 +556,7 @@ class EggDisplayApp:
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
             "Send: Enter or Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
-            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /quit",
+            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /toolson /toolsoff /disabletool <name> /enabletool <name> /toolstatus /quit",
         ]
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
         self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
@@ -1412,7 +1412,14 @@ class EggDisplayApp:
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
-            self._log_system('Commands: /model <key>, /updateAllModels <provider>, /pause, /resume, /spawn <text>, /spawn_auto <text>, /wait <threads>, /child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /schedulers, /enterMode <send|newline>, /toggle_auto_approval, /toolson, /toolsoff, /disabletool <name>, /enabletool <name>, /quit')
+            self._log_system(
+                'Commands: '
+                '/model <key>, /updateAllModels <provider>, /pause, /resume, '
+                '/spawn <text>, /spawn_auto <text>, /wait <threads>, '
+                '/child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, '
+                '/schedulers, /enterMode <send|newline>, /toggle_auto_approval, '
+                '/toolson, /toolsoff, /disabletool <name>, /enabletool <name>, /toolstatus, /quit'
+            )
         elif cmd == 'quit':
             self.running = False
         elif cmd == 'pause':
@@ -1873,6 +1880,23 @@ class EggDisplayApp:
                 self._log_system(f"Tool '{name}' enabled for this thread.")
             except Exception as e:
                 self._log_system(f'/enabletool error: {e}')
+        elif cmd == 'toolstatus':
+            # Report effective tools configuration for the current
+            # thread: whether LLM tools are enabled and which tools are
+            # currently disabled.
+            try:
+                from eggthreads import get_thread_tools_config  # type: ignore
+                cfg = get_thread_tools_config(self.db, self.current_thread)
+            except Exception as e:
+                self._log_system(f'/toolstatus error: {e}')
+                return
+            status = 'enabled' if cfg.llm_tools_enabled else 'disabled'
+            disabled = sorted(cfg.disabled_tools) if cfg.disabled_tools else []
+            lines = [
+                f"Tools for this thread: {status}",
+                "Disabled tools: " + (", ".join(disabled) if disabled else "(none)"),
+            ]
+            self._log_system("\n".join(lines))
         else:
             self._log_system('Unknown command')
 

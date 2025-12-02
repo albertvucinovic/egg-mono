@@ -494,7 +494,14 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name
-            cmds = ['/help', '/model', '/updateAllModels', '/pause', '/resume', '/spawn', '/spawn_auto', '/wait', '/child', '/parent', '/children', '/threads', '/thread', '/delete', '/new', '/schedulers', '/enterMode', '/toggle_auto_approval', '/quit']
+            cmds = [
+                '/help', '/model', '/updateAllModels', '/pause', '/resume',
+                '/spawn', '/spawn_auto', '/wait', '/child', '/parent',
+                '/children', '/threads', '/thread', '/delete', '/new',
+                '/schedulers', '/enterMode', '/toggle_auto_approval',
+                '/toolson', '/toolsoff', '/disabletool', '/enabletool', '/toolstatus',
+                '/quit',
+            ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 
         cmd = prefix[:sp]
@@ -626,6 +633,27 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         # /spawn and /spawn_auto -> filesystem suggestions for arg
         if cmd in ('/spawn', '/spawn_auto'):
             return _mk_items(_fs_suggestions(arg_tok), arg_tok)
+
+        # /disabletool and /enabletool: suggest known tool names from
+        # the default ToolRegistry. We keep this best-effort and
+        # local-only; if anything fails we simply return no suggestions.
+        if cmd in ('/disabletool', '/enabletool'):
+            try:
+                from eggthreads.tools import create_default_tools  # type: ignore
+                reg = create_default_tools()
+                specs = reg.tools_spec()
+                names: list[str] = []
+                for spec in specs or []:
+                    try:
+                        fn = (spec or {}).get('function') or {}
+                        nm = fn.get('name')
+                        if isinstance(nm, str) and nm and nm not in names:
+                            names.append(nm)
+                    except Exception:
+                        continue
+            except Exception:
+                names = []
+            return _mk_items(names, arg_tok)
 
         # Other commands: no specific suggestions
         return []
