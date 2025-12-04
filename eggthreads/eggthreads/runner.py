@@ -433,6 +433,14 @@ class ThreadRunner:
         saw_reason_delta = False
         chunk_seq = self.db.max_chunk_seq(invoke_id)
 
+        # Track tool_call arguments as they stream so we can emit
+        # incremental deltas into events for live UI rendering.  The
+        # OpenAI-compatible adapter accumulates full ``arguments``
+        # strings per tool_call; we compute the incremental tail per
+        # invoke_id/tool_call_id and store only that tail in
+        # stream.delta payloads.
+        tool_calls_args_so_far: Dict[str, str] = {}
+
         # Final sanitation step before calling the provider: make sure that
         # user messages never carry "tool_calls" fields and that tool
         # exposure honours any per-thread tools configuration (e.g.
@@ -524,6 +532,54 @@ class ThreadRunner:
                                 payload={'reason': reason, 'model_key': current_model},
                             )
                             await asyncio.sleep(0)
+                    elif et == 'tool_calls_delta':
+                        # Stream tool_call arguments so that the live
+                        # chat panel can display them as they arrive.
+                        tcs = evt.get('delta') or []
+                        if not isinstance(tcs, list):
+                            tcs = []
+                        for tc_delta in tcs:
+                            if not isinstance(tc_delta, dict):
+                                continue
+                            tcid = str(tc_delta.get('id') or '')
+                            fn = tc_delta.get('function') or {}
+                            name = fn.get('name') or ''
+                            args_full = fn.get('arguments') or ''
+                            if not isinstance(args_full, str):
+                                try:
+                                    args_full = json.dumps(args_full, ensure_ascii=False)
+                                except Exception:
+                                    args_full = str(args_full)
+                            prev = tool_calls_args_so_far.get(tcid, '')
+                            if len(args_full) <= len(prev):
+                                continue
+                            delta_text = args_full[len(prev):]
+                            if not delta_text:
+                                continue
+                            tool_calls_args_so_far[tcid] = args_full
+                            # Heartbeat and stop if we lose the lease.
+                            if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                                interrupted = True
+                                break
+                            chunk_seq += 1
+                            self.db.append_event(
+                                event_id=os.urandom(10).hex(),
+                                thread_id=self.thread_id,
+                                type_='stream.delta',
+                                invoke_id=invoke_id,
+                                chunk_seq=chunk_seq,
+                                payload={
+                                    'tool_call': {
+                                        'id': tcid,
+                                        'name': name,
+                                        'arguments_delta': delta_text,
+                                    },
+                                    'model_key': current_model,
+                                },
+                            )
+                            await asyncio.sleep(0)
+                        if interrupted:
+                            break
                     elif et == 'done':
                         final = evt.get('message') or {}
                         if not saw_content_delta:
