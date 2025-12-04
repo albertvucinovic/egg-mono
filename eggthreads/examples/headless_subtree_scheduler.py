@@ -34,6 +34,7 @@ from eggthreads import (
     append_message,
     create_snapshot,
     is_thread_runnable,
+    set_subtree_tools_enabled,
 )
 
 SYSTEM_PROMPT_DEFAULT = "You are a helpful assistant."
@@ -321,6 +322,44 @@ async def main():
         append_message(db, child, "system", system_prompt)
         append_message(db, child, "user", task)
         create_snapshot(db, child)
+
+    # Allow threads in this subtree to use tools for this batch run.
+    # This ensures that, even if a global default disables tools, each
+    # agent may perform tool-assisted reasoning (bash/python/search,
+    # etc.) for its work during this single scheduler invocation.
+    try:
+        set_subtree_tools_enabled(db, root_id, True)
+    except Exception as e:
+        print(f"[status] warning: failed to enable tools for subtree: {e}")
+
+    # Also auto-approve tool calls *for the first user turn* in this
+    # batch so that assistant-originated tools do not get stuck
+    # waiting for interactive approval (e.g. from an attached TUI).
+    #
+    # We emit a single ``tool_call.approval`` event with decision
+    # "all-in-turn" for each thread; build_tool_call_states will then
+    # auto-grant TC1 approvals for tool calls whose parent assistant
+    # messages fall between that thread's last user message before the
+    # event and the next user message. Since this example seeds one
+    # user message per child thread and does not add more, this
+    # effectively gives each agent a *single* tool-using turn.
+    try:
+        import os as _os
+        subtree_ids = collect_subtree(db, root_id)
+        for tid in subtree_ids:
+            db.append_event(
+                event_id=_os.urandom(10).hex(),
+                thread_id=tid,
+                type_='tool_call.approval',
+                msg_id=None,
+                invoke_id=None,
+                payload={
+                    'decision': 'all-in-turn',
+                    'reason': 'headless_subtree_scheduler: auto-approve tools for the initial user turn',
+                },
+            )
+    except Exception as e:
+        print(f"[status] warning: failed to enable per-turn tool auto-approval: {e}")
 
     # Start a scheduler for the entire subtree rooted at 'root_id'
     max_concurrent = int(os.environ.get("MAX_CONCURRENT", "8") or "8")
