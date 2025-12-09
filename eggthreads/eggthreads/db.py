@@ -99,6 +99,23 @@ class ThreadsDB:
                                 (thread_id, after_seq))
         yield from cur
 
+    def max_event_seq(self, thread_id: str) -> int:
+        """Return the maximum event_seq for a thread, or -1 if none.
+
+        This small helper centralises the common
+        ``SELECT MAX(event_seq) FROM events`` pattern so callers do not
+        duplicate SQL text and error handling in multiple modules.
+        """
+        try:
+            cur = self.conn.execute(
+                "SELECT MAX(event_seq) FROM events WHERE thread_id=?",
+                (thread_id,),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else -1
+        except Exception:
+            return -1
+
     # Open streams (per-thread lease) ----------------------------------
     def try_open_stream(self, thread_id: str, invoke_id: str, lease_until_iso: str,
                         owner: Optional[str] = None, purpose: Optional[str] = None) -> bool:

@@ -159,8 +159,9 @@ def is_thread_runnable(db: ThreadsDB, thread_id: str) -> bool:
     ThreadRunner and external callers share the same notion of
     runnable work (RA1/RA2/RA3).
     """
-    from .tool_state import discover_runner_actionable
-    return discover_runner_actionable(db, thread_id) is not None
+    from .tool_state import discover_runner_actionable_cached
+
+    return discover_runner_actionable_cached(db, thread_id) is not None
 
 
 # --------- Query helpers (expose common SQL as API) -------------------------

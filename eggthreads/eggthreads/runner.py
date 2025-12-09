@@ -13,7 +13,14 @@ except Exception:
     LLMClient = None  # type: ignore
 from .db import ThreadsDB
 from .tools import ToolRegistry, create_default_tools
-from .tool_state import ToolCallState, RunnerActionable, discover_runner_actionable, thread_state, build_tool_call_states
+from .tool_state import (
+    ToolCallState,
+    RunnerActionable,
+    discover_runner_actionable,
+    discover_runner_actionable_cached,
+    thread_state,
+    build_tool_call_states,
+)
 from .tools_config import get_thread_tools_config
 
 
@@ -65,8 +72,10 @@ class ThreadRunner:
         if th and th.status == 'paused':
             return False
 
-        # Determine what kind of work (if any) is pending
-        ra = discover_runner_actionable(self.db, self.thread_id)
+        # Determine what kind of work (if any) is pending.  The cached
+        # variant avoids repeatedly rebuilding tool-call state when the
+        # event log has not changed for this thread.
+        ra = discover_runner_actionable_cached(self.db, self.thread_id)
         if not ra:
             return False
 
@@ -1266,32 +1275,59 @@ class SubtreeScheduler:
 
     async def run_forever(self, poll_sec: float = 0.5):
         sem = asyncio.Semaphore(self.cfg.max_concurrent_threads)
+
         # Track currently running threads to avoid creating duplicate tasks
         running_threads = set()
+
+        # Cheap per-thread event watermark to short-circuit expensive
+        # runnable checks when a thread's event log has not changed
+        # since the last iteration.
+        last_checked_seq: Dict[str, int] = {}
 
         async def drive(tid: str):
             try:
                 async with sem:
-                    runner = ThreadRunner(self.db, tid, llm=self.llm, owner=self.owner, purpose="assistant_stream", config=self.cfg,
-                                          tools=self.tools)
+                    runner = ThreadRunner(
+                        self.db,
+                        tid,
+                        llm=self.llm,
+                        owner=self.owner,
+                        purpose="assistant_stream",
+                        config=self.cfg,
+                        tools=self.tools,
+                    )
                     try:
                         await runner.run_once()
                     except Exception:
-                        # swallow to keep loop alive; production would log event
+                        # Swallow to keep loop alive; production code
+                        # would log this event.
                         pass
             finally:
                 # Remove from running set when done
-                if tid in running_threads:
-                    running_threads.remove(tid)
+                running_threads.discard(tid)
+
+        from .api import is_thread_runnable
 
         while True:
-            # Only create tasks for threads that aren't already being processed AND are runnable
             for tid in self._collect_subtree(self.root):
-                if tid not in running_threads:
-                    # Check if thread is actually runnable before creating task
-                    # This avoids creating tasks for threads that don't need processing
-                    from .api import is_thread_runnable
-                    if is_thread_runnable(self.db, tid):
-                        running_threads.add(tid)
-                        asyncio.create_task(drive(tid))
+                if tid in running_threads:
+                    continue
+
+                # Quick cheap check: skip threads whose event log has
+                # not changed since the last scheduler iteration.  This
+                # avoids repeatedly running the relatively expensive
+                # is_thread_runnable()/discover_runner_actionable logic
+                # on completely idle threads.
+                try:
+                    max_seq = self.db.max_event_seq(tid)
+                except Exception:
+                    max_seq = -1
+                if max_seq == last_checked_seq.get(tid, -1):
+                    continue
+                last_checked_seq[tid] = max_seq
+
+                if is_thread_runnable(self.db, tid):
+                    running_threads.add(tid)
+                    asyncio.create_task(drive(tid))
+
             await asyncio.sleep(poll_sec)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .db import ThreadsDB
 
@@ -396,6 +396,44 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
         yield dict(row)
 
 
+_RA_CACHE: Dict[Tuple[str, int], Optional[RunnerActionable]] = {}
+
+
+def discover_runner_actionable_cached(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
+    """Cached wrapper around :func:`discover_runner_actionable`.
+
+    The underlying implementation walks the full event log and
+    reconstructs tool-call state, which is relatively expensive.  For a
+    given thread the result only changes when new events are appended,
+    so we key the cache by ``(thread_id, max_event_seq)`` and reuse the
+    previously computed value when possible.
+
+    The cache is deliberately local to this module (process-local, not
+    persisted) and is safe to keep very small: on each write we evict
+    any older entry for the same ``thread_id``.
+    """
+
+    try:
+        max_seq = db.max_event_seq(thread_id)
+    except Exception:
+        max_seq = -1
+
+    cache_key = (thread_id, max_seq)
+    if cache_key in _RA_CACHE:
+        return _RA_CACHE[cache_key]
+
+    result = discover_runner_actionable(db, thread_id)
+    _RA_CACHE[cache_key] = result
+
+    # Evict stale entries for this thread so the cache does not grow
+    # unbounded if long-lived processes see many generations.
+    for k in list(_RA_CACHE.keys()):
+        if k[0] == thread_id and k != cache_key:
+            del _RA_CACHE[k]
+
+    return result
+
+
 def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
     """Determine the next actionable work item for a thread.
 
@@ -532,7 +570,7 @@ def thread_state(db: ThreadsDB, thread_id: str) -> str:
         return "running"
 
     # Any actionable RA -> running
-    if discover_runner_actionable(db, thread_id) is not None:
+    if discover_runner_actionable_cached(db, thread_id) is not None:
         return "running"
 
     # Otherwise, inspect tool call states
