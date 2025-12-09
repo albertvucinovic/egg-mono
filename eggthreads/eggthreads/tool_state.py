@@ -317,6 +317,13 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
     """
     last_close = -1
     llm_invokes: set[str] = set()
+    # Fallback for threads that have assistant messages but no
+    # associated LLM streams (e.g. imported transcripts, sync-only
+    # completions, or duplicated threads that copied msg.create events
+    # but not stream.*). In that case, we treat the last assistant
+    # message as the effective RA1 boundary so that RA1 does not
+    # re-trigger on already-answered user messages.
+    last_assistant_seq = -1
 
     # Single pass over events in order: mark invoke_ids that have LLM
     # deltas, then record the last stream.close/control.interrupt for any
@@ -355,6 +362,28 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
                     last_close = int(ev.get("event_seq"))
                 except Exception:
                     continue
+        elif t == "msg.create":
+            # Track the last assistant message as a potential fallback
+            # RA1 boundary when no LLM streams are present.
+            try:
+                pj = ev.get("payload_json")
+                payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+            except Exception:
+                payload = {}
+            role = payload.get("role")
+            no_api = bool(payload.get("no_api"))
+            if role == "assistant" and not no_api:
+                try:
+                    last_assistant_seq = int(ev.get("event_seq"))
+                except Exception:
+                    continue
+    # If we never observed an LLM stream boundary but we did see an
+    # assistant message, treat the last assistant msg.create as the
+    # effective RA1 boundary. This prevents RA1 from re-triggering on
+    # historical user/tool messages in threads that were populated
+    # without streaming metadata (e.g. duplicates, imports).
+    if last_close == -1 and last_assistant_seq != -1:
+        last_close = last_assistant_seq
     return last_close
 
 

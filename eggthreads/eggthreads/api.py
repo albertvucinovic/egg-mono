@@ -40,6 +40,81 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     return tid
 
 
+def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] = None) -> str:
+    """Duplicate a thread's event log into a new root thread.
+
+    This creates a new *root* thread whose events and snapshot are a
+    copy of ``source_thread_id`` at the time of invocation. The new
+    thread shares no open stream with the original (no rows are added
+    to ``open_streams``) but otherwise has identical history: all
+    ``msg.create``, ``stream.*``, and ``tool_call.*`` events are
+    replayed with fresh event_ids, preserving msg_id and invoke_id so
+    that runner/actionable semantics (RA1/RA2/RA3, tool states, etc.)
+    behave as if the thread had been executed separately.
+
+    The duplicate is intended as a "checkpoint" copy: a frozen backup
+    of the conversation that can be inspected or resumed independently
+    of the original.
+    """
+
+    # Look up source metadata to derive a sensible name and model.
+    src = db.get_thread(source_thread_id)
+    if not src:
+        raise ValueError(f"Source thread not found: {source_thread_id}")
+
+    base_name = src.name or src.short_recap or "Thread"
+    new_name = name or f"{base_name} [copy]"
+
+    # Always create the duplicate as a new root thread so it is
+    # independent from any existing parent/children relationships.
+    new_tid = _ulid_like()
+    db.create_thread(
+        thread_id=new_tid,
+        name=new_name,
+        parent_id=None,
+        initial_model_key=src.initial_model_key,
+        depth=0,
+    )
+
+    # Replay all events from the source thread into the new thread with
+    # fresh event_ids. We keep msg_id/invoke_id/chunk_seq so that the
+    # duplicate's internal state (e.g. tool call history, stream
+    # boundaries) mirrors the original.
+    import json as _json
+
+    cur = db.conn.execute(
+        "SELECT type, msg_id, invoke_id, chunk_seq, payload_json FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (source_thread_id,),
+    )
+    rows = cur.fetchall()
+    for ev_type, msg_id, invoke_id, chunk_seq, pj in rows:
+        # Skip low-level streaming events; snapshots and runner logic
+        # derive their state from msg.create and tool_call.* events.
+        # Copying stream.open/delta/close as-is would also risk
+        # violating the UNIQUE(invoke_id, chunk_seq) constraint on
+        # stream.delta rows.
+        if ev_type in ('stream.open', 'stream.delta', 'stream.close'):
+            continue
+        try:
+            payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except Exception:
+            payload = {}
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=new_tid,
+            type_=ev_type,
+            payload=payload,
+            msg_id=msg_id,
+            invoke_id=invoke_id,
+            chunk_seq=chunk_seq,
+        )
+
+    # Build a fresh snapshot for the duplicate so UIs and runners see a
+    # consistent cached view of messages.
+    create_snapshot(db, new_tid)
+    return new_tid
+
+
 def append_message(db: ThreadsDB, thread_id: str, role: str, content: str, extra: Optional[Dict[str, Any]] = None) -> str:
     msg_id = _ulid_like()
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.create', payload={"role": role, "content": content, **(extra or {})}, msg_id=msg_id)
