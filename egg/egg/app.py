@@ -1758,10 +1758,18 @@ class EggDisplayApp:
                 self._log_system('Usage: /updateAllModels <provider>')
             else:
                 try:
-                    if not LLMClient:
-                        raise RuntimeError('eggllm not available')
-                    llm_tmp = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
-                    res = llm_tmp.update_all_models(provider)
+                    # Prefer to use the long-lived LLM client instance
+                    # so that its in-memory AllModelsCatalog is updated
+                    # and autocomplete (/model all:...<tab>) immediately
+                    # sees the new models. If no client is available in
+                    # this UI, fall back to a temporary one.
+                    if self.llm_client is not None:
+                        res = self.llm_client.update_all_models(provider)
+                    else:
+                        if not LLMClient:
+                            raise RuntimeError('eggllm not available')
+                        llm_tmp = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
+                        res = llm_tmp.update_all_models(provider)
                     self._log_system("Update All Models:\n" + res)
                 except Exception as e:
                     self._log_system(f"Update All Models error: {e}")

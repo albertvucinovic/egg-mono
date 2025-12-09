@@ -92,7 +92,7 @@
           "max_tokens": 130000,
           "options": {
             "thinking_content_policy": "last assistant turn",
-            "thinking_content_key": "reasoning_content"
+            "thinking_content_key": "thinking"
           }
         },
         "Qwen3 Coder Local": {
