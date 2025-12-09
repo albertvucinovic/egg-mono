@@ -1416,7 +1416,7 @@ class EggDisplayApp:
                 'Commands: '
                 '/model <key>, /updateAllModels <provider>, /pause, /resume, '
                 '/spawn <text>, /spawn_auto <text>, /wait <threads>, '
-                '/child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, '
+                '/child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /dup [name], '
                 '/schedulers, /enterMode <send|newline>, /toggle_auto_approval, '
                 '/toolson, /toolsoff, /disabletool <name>, /enabletool <name>, /toolstatus, /quit'
             )
@@ -1711,6 +1711,31 @@ class EggDisplayApp:
                 self._log_system(f"Thread {target_tid[-8:]} deleted.")
             except Exception as e:
                 self._log_system(f'Error deleting thread: {e}')
+        elif cmd == 'dup':
+            # Duplicate the current thread as a new root thread, acting
+            # as a "checkpoint" copy of the entire conversation up to
+            # this point. The new thread has the same history (events
+            # and snapshot) but no open stream and no parent/children
+            # links. This is useful for branching or backups.
+            try:
+                from eggthreads import duplicate_thread  # type: ignore
+            except Exception as e:
+                self._log_system(f'/dup not available: eggthreads import failed: {e}')
+                return
+            label = (arg or '').strip() or None
+            try:
+                new_tid = duplicate_thread(self.db, self.current_thread, name=label)
+            except Exception as e:
+                self._log_system(f'/dup error: {e}')
+                return
+            # Ensure a scheduler is running for the duplicate so it can
+            # be continued independently if desired.
+            self._ensure_scheduler_for(new_tid)
+            self._log_system(f"Duplicated current thread to new root: {new_tid[-8:]}")
+            # Switch to the duplicate so the user can inspect/continue it.
+            self.current_thread = new_tid
+            asyncio.get_running_loop().create_task(self._start_watching_current())
+            self._print_static_view_current(heading=f"Switched to duplicated thread: {self.current_thread}")
         elif cmd == 'model':
             arg2 = (arg or '').strip()
             if arg2:

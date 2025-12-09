@@ -497,7 +497,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             cmds = [
                 '/help', '/model', '/updateAllModels', '/pause', '/resume',
                 '/spawn', '/spawn_auto', '/wait', '/child', '/parent',
-                '/children', '/threads', '/thread', '/delete', '/new',
+                '/children', '/threads', '/thread', '/delete', '/new', '/dup',
                 '/schedulers', '/enterMode', '/toggle_auto_approval',
                 '/toolson', '/toolsoff', '/disabletool', '/enabletool', '/toolstatus',
                 '/quit',
