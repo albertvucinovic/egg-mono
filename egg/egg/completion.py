@@ -500,7 +500,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/children', '/threads', '/thread', '/delete', '/new', '/dup',
                 '/schedulers', '/enterMode', '/toggle_auto_approval',
                 '/toolson', '/toolsoff', '/disabletool', '/enabletool', '/toolstatus',
-                '/quit',
+                '/toolsecrets', '/quit',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 

@@ -556,7 +556,7 @@ class EggDisplayApp:
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
             "Send: Enter or Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
-            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /toolson /toolsoff /disabletool <name> /enabletool <name> /toolstatus /quit",
+            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /toolson /toolsoff /disabletool <name> /enabletool <name> /toolstatus /toolsecrets <on|off> /quit",
         ]
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
         self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
@@ -1385,28 +1385,6 @@ class EggDisplayApp:
         self._ensure_scheduler_for(self.current_thread)
         self._log_system(f"Queued bash command as tool_call {tc_id[-6:]} (hidden={hidden}).")
 
-    def _run_shell(self, bash_command: str, keep_user_turn: bool, hidden: bool) -> None:
-        import subprocess
-        try:
-            res = subprocess.run(bash_command, shell=True, capture_output=True, text=True, cwd=os.getcwd())
-            output = res.stdout or ''
-            if res.stderr:
-                output += f"\nSTDERR:\n{res.stderr}"
-            if res.returncode != 0:
-                output += f"\nReturn code: {res.returncode}"
-            message_content = f"Command: {bash_command}\n\nOutput:\n{output}"
-            extra = {'keep_user_turn': keep_user_turn}
-            if hidden:
-                extra['no_api'] = True
-            append_message(self.db, self.current_thread, 'user', message_content, extra=extra)
-            create_snapshot(self.db, self.current_thread)
-            self._log_system(("(hidden) " if hidden else "") + f"Executed: {bash_command}")
-        except Exception as e:
-            err = f"Error executing command: {e}"
-            append_message(self.db, self.current_thread, 'user', f"Command: {bash_command}\n\nError: {err}", extra={'keep_user_turn': keep_user_turn})
-            create_snapshot(self.db, self.current_thread)
-            self._log_system(err)
-
     def _handle_command(self, text: str) -> None:
         parts = text[1:].split(None, 1)
         cmd = parts[0]
@@ -1890,6 +1868,28 @@ class EggDisplayApp:
                 self._log_system('Tools disabled for this thread (LLM tool calls suppressed).')
             except Exception as e:
                 self._log_system(f'/toolsoff error: {e}')
+        elif cmd == 'toolsecrets':
+            # Toggle per-thread masking of potential secrets in tool
+            # outputs. When masking is enabled (default), outputs from
+            # tools such as bash/python are filtered to remove
+            # problematic control characters and, when the optional
+            # detect-secrets library is available, to mask values that
+            # look like API keys or credentials. "on" = allow raw
+            # output (no masking); "off" = mask secrets.
+            mode = (arg or '').strip().lower()
+            if mode not in ('on', 'off'):
+                self._log_system('Usage: /toolsecrets <on|off>  (on = allow raw tool output, off = mask secrets)')
+                return
+            allow_raw = (mode == 'on')
+            try:
+                from eggthreads import set_thread_allow_raw_tool_output  # type: ignore
+                set_thread_allow_raw_tool_output(self.db, self.current_thread, allow_raw)
+                if allow_raw:
+                    self._log_system('Tool output secrets: raw mode ENABLED (secrets will not be masked).')
+                else:
+                    self._log_system('Tool output secrets: masking ENABLED (attempting to mask detected secrets).')
+            except Exception as e:
+                self._log_system(f'/toolsecrets error: {e}')
         elif cmd == 'disabletool':
             # Per-thread blacklist of individual tool names.
             name = (arg or '').strip()
@@ -1925,9 +1925,12 @@ class EggDisplayApp:
                 return
             status = 'enabled' if cfg.llm_tools_enabled else 'disabled'
             disabled = sorted(cfg.disabled_tools) if cfg.disabled_tools else []
+            secrets_mode = 'raw (unmasked)' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked (default)'
+            secrets_mode = 'raw (unmasked)' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked (default)'
             lines = [
                 f"Tools for this thread: {status}",
                 "Disabled tools: " + (", ".join(disabled) if disabled else "(none)"),
+                f"Tool output secrets mode: {secrets_mode}",
             ]
             self._log_system("\n".join(lines))
         else:
