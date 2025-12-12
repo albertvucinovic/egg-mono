@@ -51,11 +51,21 @@ class ToolsConfig:
         event has been applied for this thread. This allows callers to
         decide whether to overlay model-level defaults when there is no
         explicit per-thread configuration.
+      - allow_raw_tool_output: when False (default), tool outputs are
+        *masked for secrets* when constructing the provider API request
+        (see ThreadRunner._sanitize_messages_for_api). When True, tool
+        outputs are sent to the provider as-is (still with control-char
+        sanitization for safety).
+
+        This flag does not prevent tool outputs from being stored in the
+        local database or shown in the local UI; its primary purpose is
+        to prevent accidental secret leakage to the LLM provider.
     """
 
     llm_tools_enabled: bool = True
     disabled_tools: Set[str] = field(default_factory=set)
     has_explicit_config: bool = False
+    allow_raw_tool_output: bool = False
 
 
 def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
@@ -86,6 +96,12 @@ def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
         if "llm_tools_enabled" in payload:
             try:
                 cfg.llm_tools_enabled = bool(payload["llm_tools_enabled"])
+            except Exception:
+                pass
+            cfg.has_explicit_config = True
+        if "allow_raw_tool_output" in payload:
+            try:
+                cfg.allow_raw_tool_output = bool(payload["allow_raw_tool_output"])
             except Exception:
                 pass
             cfg.has_explicit_config = True
@@ -134,6 +150,19 @@ def set_thread_tools_enabled(db: ThreadsDB, thread_id: str, enabled: bool) -> No
     """
 
     _append_tools_config_event(db, thread_id, {"llm_tools_enabled": bool(enabled)})
+
+
+def set_thread_allow_raw_tool_output(db: ThreadsDB, thread_id: str, allow: bool) -> None:
+    """Enable or disable raw (unfiltered) tool output for a thread.
+
+    When ``allow`` is False (default), tool outputs are masked for
+    secret-like values when constructing provider API messages.
+
+    When True, tool outputs are sent to the provider without secret
+    masking (but still with control-character sanitization).
+    """
+
+    _append_tools_config_event(db, thread_id, {"allow_raw_tool_output": bool(allow)})
 
 
 def disable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:

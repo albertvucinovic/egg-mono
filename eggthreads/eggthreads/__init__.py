@@ -34,6 +34,7 @@ from .tools_config import (
     set_subtree_tools_enabled,
     disable_tool_for_subtree,
     enable_tool_for_subtree,
+    set_thread_allow_raw_tool_output,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',
     'set_subtree_tools_enabled', 'disable_tool_for_subtree', 'enable_tool_for_subtree',
+    'set_thread_allow_raw_tool_output',
 ]

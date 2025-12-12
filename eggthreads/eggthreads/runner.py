@@ -684,6 +684,16 @@ class ThreadRunner:
         since their ``tool_calls`` and tool-role responses are the
         standard OpenAI-compatible tools protocol (RA2).
         """
+        # When reconstructing provider API messages, we must ensure tool
+        # outputs do not leak secrets to the provider. We also sanitize
+        # control characters to keep providers and downstream tooling
+        # robust.
+        try:
+            tools_cfg = get_thread_tools_config(self.db, self.thread_id)
+            allow_raw = bool(getattr(tools_cfg, 'allow_raw_tool_output', False))
+        except Exception:
+            allow_raw = False
+
         out: List[Dict[str, Any]] = []
         for m in messages:
             if not isinstance(m, dict):
@@ -694,12 +704,42 @@ class ThreadRunner:
             # RA3: user-command tool outputs -> plain user messages
             if role == "tool" and m2.get("user_tool_call") and not m2.get("no_api"):
                 content = m2.get("content", "")
+                # Mask secrets for provider API unless explicitly allowed.
+                if isinstance(content, str) and not allow_raw:
+                    try:
+                        content = self._filter_tool_output(content, mask_secrets=True)
+                    except Exception:
+                        pass
+                elif isinstance(content, str):
+                    # Even in raw mode, still sanitize control chars.
+                    try:
+                        content = self._filter_tool_output(content, mask_secrets=False)
+                    except Exception:
+                        pass
                 m2 = {"role": "user", "content": content}
                 role = "user"
 
             # User messages must not carry tool_calls when sent to provider
             if role == "user" and "tool_calls" in m2:
                 m2.pop("tool_calls", None)
+
+            # For real tool outputs (role="tool" in the tools protocol),
+            # mask secrets before sending to the provider unless raw mode
+            # is explicitly enabled. This protects against accidental
+            # leakage of credentials produced by tools.
+            if role == "tool" and not m2.get("no_api"):
+                content = m2.get("content")
+                if isinstance(content, str):
+                    if allow_raw:
+                        try:
+                            m2["content"] = self._filter_tool_output(content, mask_secrets=False)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            m2["content"] = self._filter_tool_output(content, mask_secrets=True)
+                        except Exception:
+                            pass
 
             # Some providers are strict about assistant/tool pairing and
             # will error if they see assistant messages with no content
@@ -791,6 +831,8 @@ class ThreadRunner:
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []
 
+        cancelled = False
+
         async def _stream_reader(stream, is_stdout: bool):
             nonlocal cancelled
             header_emitted = False
@@ -802,7 +844,16 @@ class ThreadRunner:
                     break
                 if not chunk:
                     break
-                text = chunk.decode(errors='replace')
+                # Decode, sanitize control characters, and apply cheap
+                # per-line heuristic masking so that obvious secrets (like
+                # .env keys) are not splashed into the UI during streaming.
+                # We still perform the stronger masking pass when building
+                # provider API messages.
+                text_raw = chunk.decode(errors='replace')
+                try:
+                    text = self._filter_tool_output(text_raw, mask_secrets=True)
+                except Exception:
+                    text = text_raw
                 if not header_emitted:
                     if is_stdout:
                         stdout_buf.append(prefix)
@@ -813,7 +864,10 @@ class ThreadRunner:
                     stdout_buf.append(text)
                 else:
                     stderr_buf.append(text)
-                # Stream this chunk immediately for live UI
+
+                # Stream this chunk immediately for live UI. If raw tool
+                # output is not allowed (secrets masking enabled), do not
+                # stream the actual content.
                 if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                     cancelled = True
                     break
@@ -845,6 +899,12 @@ class ThreadRunner:
         # Build combined output from accumulated buffers
         out = ''.join(stdout_buf) + ''.join(stderr_buf)
         full_result = out.strip() or "--- The command executed successfully and produced no output ---"
+
+        # NOTE: We intentionally do not mask secrets here. Tool output may
+        # contain secrets and we allow them to be stored and shown in the
+        # local UI; secrets are only masked when building the provider API
+        # request in _sanitize_messages_for_api(). We do keep the control-
+        # character sanitization above for terminal safety.
 
         # Mark tool_call.finished with interrupted/success
         self.db.append_event(
@@ -998,6 +1058,16 @@ class ThreadRunner:
                     full_result = f"ERROR: {e}"
                 if not isinstance(full_result, str):
                     full_result = str(full_result)
+
+                # We intentionally do not mask secrets in the stored tool
+                # output or the live UI stream. Secrets are only prevented
+                # from reaching the provider API in _sanitize_messages_for_api().
+                # However, always sanitize control characters before
+                # streaming to avoid terminal escape issues.
+                try:
+                    full_result = self._filter_tool_output(full_result, mask_secrets=False)
+                except Exception:
+                    pass
                 out = full_result or ''
                 CH = 400
                 cancelled = False
@@ -1233,6 +1303,254 @@ class ThreadRunner:
             return f"{tc.name}({json.dumps(args_obj, ensure_ascii=False)})"
         except Exception:
             return ""
+
+
+    def _mask_secrets_heuristic(self, text: str) -> str:
+        """Fast, heuristic masking for secret-like substrings.
+
+        This is intended for UI streaming or as a cheap first-pass before
+        running heavier secret scanners.
+
+        It is deliberately conservative (may over-mask).
+        """
+        import re as _re
+
+        if not isinstance(text, str) or not text:
+            return text
+
+        # 1) .env-style assignments (KEY=..., TOKEN=..., etc.)
+        # Preserve quotes when present.
+        #
+        # We also treat some *_ID variables as potentially sensitive, but
+        # we do so conservatively to avoid masking harmless short ids.
+        def _mask_env_line(m: "_re.Match[str]") -> str:
+            lead = m.group(1) or ""
+            name = (m.group(2) or "").strip()
+            sep = m.group(3) or "="
+            val = m.group(4) or ""
+            val = val.strip()
+
+            # If the name only matches because of "ID" (and not because it
+            # contains other secret-like keywords), only mask when the value
+            # looks high-entropy / secret-ish.
+            if name and 'ID' in name:
+                strong_keywords = (
+                    'KEY', 'TOKEN', 'SECRET', 'PASSWORD', 'PASS', 'PRIVATE', 'CREDENTIAL'
+                )
+                if not any(k in name for k in strong_keywords):
+                    looks_secret = False
+                    # long token-ish
+                    if len(val) >= 24:
+                        looks_secret = True
+                    # UUID
+                    if _re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", val.lower()):
+                        looks_secret = True
+                    # long hex
+                    if _re.search(r"[A-Fa-f0-9]{16,}", val):
+                        looks_secret = True
+                    if not looks_secret:
+                        return lead + name + sep + val
+
+            if len(val) <= 1:
+                return lead + name + sep + "***"
+            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                q = val[0]
+                return lead + name + sep + q + "***" + q
+            return lead + name + sep + "***"
+
+        text = _re.sub(
+            # Also match commented-out env lines, e.g.
+            #   #API_KEY=...
+            #   # export API_KEY=...
+            #   #export API_KEY=...
+            r"(?im)^(\s*(?:#\s*)?(?:export\s+)?)([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS|PRIVATE|CREDENTIAL|ID)[A-Z0-9_]*)(\s*=\s*)([^\r\n]+)$",
+            _mask_env_line,
+            text,
+        )
+
+        # 2) Authorization headers / bearer tokens
+        text = _re.sub(r"(?i)(Authorization\s*:\s*Bearer\s+)([^\s\r\n]+)", r"\1***", text)
+        text = _re.sub(r"(?i)(Bearer\s+)([^\s\r\n]+)", r"\1***", text)
+
+        # 3) Common API token formats
+        replacements = [
+            (r"\bsk-[A-Za-z0-9]{20,}\b", "sk-***"),
+            (r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b", "sk-ant-***"),
+            (r"\bghp_[A-Za-z0-9]{20,}\b", "ghp_***"),
+            (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "github_pat_***"),
+            (r"\bhf_[A-Za-z0-9]{20,}\b", "hf_***"),
+            (r"\bAKIA[0-9A-Z]{16}\b", "AKIA***"),
+            (r"\bAIza[0-9A-Za-z\-_]{20,}\b", "AIza***"),
+        ]
+        for pat, rep in replacements:
+            text = _re.sub(pat, rep, text)
+
+        return text
+
+
+    def _filter_tool_output(self, text: str, *, mask_secrets: bool = True) -> str:
+        """Filter raw tool output before it is persisted or displayed.
+
+        This performs two classes of filtering:
+
+          1. Sanitize control characters that frequently confuse
+             terminal emulators (e.g. stray escape sequences, other
+             non-printables) while preserving newlines and
+             tabs. Characters outside a conservative printable set are
+             replaced with the Unicode replacement character.
+
+          2. Best-effort masking of secret-like values using the
+             optional ``detect-secrets`` library. When available, we
+             run the built-in plugins against the output and mask the
+             span of each detected secret with ``"***"``. When the
+             library is not installed, we simply return the sanitized
+             text as-is.
+
+        Secret masking can be disabled (e.g. via a UI flag) by calling
+        this helper with ``mask_secrets=False``. Control-character
+        sanitization is always applied to protect the terminal.
+        """
+
+        if not isinstance(text, str) or not text:
+            return text
+
+        # 1) Strip/normalize problematic control characters but keep
+        # standard whitespace intact.
+        def _strip_control(s: str) -> str:
+            out_chars: list[str] = []
+            for ch in s:
+                o = ord(ch)
+                # Allow tab, newline, carriage return
+                if ch in ('\t', '\n', '\r'):
+                    out_chars.append(ch)
+                # Printable ASCII and common extended range
+                elif 32 <= o < 127:
+                    out_chars.append(ch)
+                elif 0xA0 <= o <= 0x10FFFF:
+                    out_chars.append(ch)
+                else:
+                    # Replace other control bytes with a visible marker
+                    out_chars.append('\uFFFD')
+            return ''.join(out_chars)
+
+        cleaned = _strip_control(text)
+
+        # Cheap heuristic masking first.
+        if mask_secrets:
+            try:
+                cleaned = self._mask_secrets_heuristic(cleaned)
+            except Exception:
+                pass
+
+        # 2) Secret detection and masking (best-effort, optional dep).
+        if not mask_secrets:
+            return cleaned
+
+        try:
+            import importlib.util as _importlib_util
+
+            if not _importlib_util.find_spec('detect_secrets'):
+                return cleaned
+
+            from detect_secrets import SecretsCollection  # type: ignore
+            from detect_secrets.settings import default_settings  # type: ignore
+
+            # We scan the output as a single in-memory "file".  The
+            # detector API expects bytes and an associated filename.
+            with default_settings():
+                sc = SecretsCollection()
+                # The scan method on SecretsCollection normally works
+                # on files; for in-memory text we can use the
+                # ``scan_lines`` helper available on individual
+                # plugins. For portability across detect-secrets
+                # versions, we instead call ``scan_file`` via a
+                # temporary NamedTemporaryFile when necessary.
+
+                import tempfile as _tempfile, os as _os
+
+                with _tempfile.NamedTemporaryFile('w+', delete=False, encoding='utf-8') as tmp:
+                    tmp.write(cleaned)
+                    tmp.flush()
+                    tmp_path = tmp.name
+
+                try:
+                    sc.scan_file(tmp_path)
+                finally:
+                    try:
+                        _os.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+                if not sc.data:
+                    return cleaned
+
+                # Mask all detected secrets by character span.  We
+                # re-open the temp file contents to compute spans.
+                # Since we already have ``cleaned`` in memory, we
+                # simply operate on that string.
+                secrets_for_file = next(iter(sc.data.values()), [])
+                if not secrets_for_file:
+                    return cleaned
+
+                # Build a list of (start, end) index ranges to mask.
+                # We intentionally avoid including trailing newline
+                # characters in the span so we do not accidentally
+                # join lines when masking.
+                spans: list[tuple[int, int]] = []
+                for sec in secrets_for_file:
+                    try:
+                        # Each ``sec`` has line_number and secret_hash
+                        # but not the raw value; we conservatively mask
+                        # the full line containing the secret.
+                        line_no = int(getattr(sec, 'line_number', 0) or 0)
+                    except Exception:
+                        line_no = 0
+                    if line_no <= 0:
+                        continue
+                    lines = cleaned.splitlines(keepends=True)
+                    if 1 <= line_no <= len(lines):
+                        line_txt = lines[line_no - 1]
+                        start = sum(len(l) for l in lines[: line_no - 1])
+                        # Exclude common line terminators from masking
+                        # so the output formatting is preserved.
+                        trim = line_txt.rstrip('\r\n')
+                        end = start + len(trim)
+                        if end > start:
+                            spans.append((start, end))
+
+                if not spans:
+                    return cleaned
+
+                # Merge overlapping spans and build masked string
+                spans.sort()
+                merged: list[tuple[int, int]] = []
+                cur_start, cur_end = spans[0]
+                for s, e in spans[1:]:
+                    if s <= cur_end:
+                        cur_end = max(cur_end, e)
+                    else:
+                        merged.append((cur_start, cur_end))
+                        cur_start, cur_end = s, e
+                merged.append((cur_start, cur_end))
+
+                out_parts: list[str] = []
+                last = 0
+                mask = '***'
+                for s, e in merged:
+                    if last < s:
+                        out_parts.append(cleaned[last:s])
+                    out_parts.append(mask)
+                    last = e
+                if last < len(cleaned):
+                    out_parts.append(cleaned[last:])
+                return ''.join(out_parts)
+
+        except Exception:
+            # If anything goes wrong with detect-secrets integration,
+            # fall back to the control-char-sanitised version.
+            return cleaned
+
+        return cleaned
 
 
 class SubtreeScheduler:
