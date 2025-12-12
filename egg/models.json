@@ -4,14 +4,30 @@
       "api_base": "https://api.openai.com/v1/chat/completions",
       "api_key_env": "OPENAI_API_KEY",
       "models": {
-         "GPT 5.1 high": {
+        "GPT 5.2 high": {
+          "model_name": "gpt-5.1",
+          "max_tokens": 400000,
+          "parameters": {
+                  "reasoning_effort": "high",
+                  "prompt_cache_retention": "24h"
+          }
+        },
+        "GPT 5.2 xhigh": {
+          "model_name": "gpt-5.1",
+          "max_tokens": 400000,
+          "parameters": {
+                  "reasoning_effort": "xhigh",
+                  "prompt_cache_retention": "24h"
+          }
+        },
+        "GPT 5.1 high": {
 	        "model_name": "gpt-5.1",
 	        "max_tokens": 400000,
           "parameters": {
                   "reasoning_effort": "high",
                   "prompt_cache_retention": "24h"
-	         }
-	       },
+	        }
+	      },
 	      "GPT 5 high": {
 	        "model_name": "gpt-5",
 	        "max_tokens": 400000,
