@@ -220,6 +220,27 @@ class EggCompleter(Completer):
                     yield Completion(p, start_position=-len(prefix))
             return
 
+        # /setSrtSandboxConfiguration: suggest config files from .egg/srt
+        if text.startswith('/setSrtSandboxConfiguration '):
+            prefix = text[len('/setSrtSandboxConfiguration '):]
+            try:
+                from eggthreads import get_srt_sandbox_configuration  # type: ignore
+                import os as _os
+                from pathlib import Path as _Path
+
+                cfg = get_srt_sandbox_configuration()
+                cfg_dir = _Path(cfg.settings_dir)
+                if cfg_dir.is_dir():
+                    files = [p.name for p in cfg_dir.glob('*.json')]
+                else:
+                    files = []
+            except Exception:
+                files = []
+            for name in sorted(files):
+                if name.startswith(prefix):
+                    yield Completion(name, start_position=-len(prefix))
+            return
+
         # 3) /thread: suggest thread ids (with name/recap meta)
         if text.startswith('/thread '):
             prefix = text[len('/thread '):]
@@ -353,6 +374,27 @@ class EggCompleter(Completer):
                     disp = f"{tid2[-8:]}  {name}" if name else tid2[-8:]
                     meta = recap if isinstance(recap, str) else ''
                     yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
+            return
+
+        # 9) /setSrtSandboxConfiguration: suggest available .json files
+        # from .egg/srt in the current working directory.
+        if text.startswith('/setSrtSandboxConfiguration '):
+            prefix = text[len('/setSrtSandboxConfiguration '):]
+            try:
+                from eggthreads import get_srt_sandbox_configuration  # type: ignore
+                from pathlib import Path as _Path
+
+                cfg = get_srt_sandbox_configuration()
+                cfg_dir = _Path(cfg.settings_dir)
+                if cfg_dir.is_dir():
+                    files = [p.name for p in cfg_dir.glob('*.json')]
+                else:
+                    files = []
+            except Exception:
+                files = []
+            for name in sorted(files):
+                if name.startswith(prefix):
+                    yield Completion(name, start_position=-len(prefix))
             return
 
         # 8) Generic filename completion for the last token when not a recognized command
@@ -500,7 +542,8 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/children', '/threads', '/thread', '/delete', '/new', '/dup',
                 '/schedulers', '/enterMode', '/toggle_auto_approval',
                 '/toolson', '/toolsoff', '/disabletool', '/enabletool', '/toolstatus',
-                '/toolsecrets', '/quit',
+                '/toolsecrets', '/toggleSandboxing', '/quit',
+                '/setSrtSandboxConfiguration',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 
@@ -654,6 +697,22 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             except Exception:
                 names = []
             return _mk_items(names, arg_tok)
+
+        if cmd == '/setSrtSandboxConfiguration':
+            # Suggest available .json files from .egg/srt
+            try:
+                from eggthreads import get_srt_sandbox_configuration  # type: ignore
+                from pathlib import Path as _Path
+
+                cfg = get_srt_sandbox_configuration()
+                cfg_dir = _Path(cfg.settings_dir)
+                if cfg_dir.is_dir():
+                    files = [p.name for p in cfg_dir.glob('*.json')]
+                else:
+                    files = []
+            except Exception:
+                files = []
+            return _mk_items(files, arg_tok)
 
         # Other commands: no specific suggestions
         return []

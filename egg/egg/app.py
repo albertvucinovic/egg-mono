@@ -47,6 +47,11 @@ from eggthreads import (  # type: ignore
     pause_thread,
     resume_thread,
 )
+from eggthreads import (  # type: ignore
+    get_srt_sandbox_status,
+    set_srt_sandbox_configuration,
+    set_sandbox_globally_enabled,
+)
 from eggthreads.event_watcher import EventWatcher  # type: ignore
 
 # eggdisplay UI components
@@ -154,6 +159,11 @@ class EggDisplayApp:
         self.system_prompt = _get_system_prompt()
         # Initialize system log early so _start_scheduler can log
         self._system_log: List[str] = []
+        # Sandbox status (updated on startup and whenever the user
+        # changes configuration).  Used by the System panel to surface
+        # a persistent warning when tools are running without a
+        # sandbox.
+        self._sandbox_status: Dict[str, Any] = {}
         self.current_thread: str = create_root_thread(self.db, name='Root')
         append_message(self.db, self.current_thread, 'system', self.system_prompt)
         create_snapshot(self.db, self.current_thread)
@@ -166,6 +176,13 @@ class EggDisplayApp:
         self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=2)
         # System panel
         self.system_output = OutputPanel(title="System", initial_height=8, max_height=16, columns_hint=2)
+        # For the System panel we want the sandboxing status to appear
+        # only in the panel title (border), not as a separate header
+        # line inside the content area.
+        try:
+            self.system_output.style.show_header = False
+        except Exception:
+            pass
         # Children panel: shows subtree of the current thread
         children_style = OutputPanel.PanelStyle(
             border_style="cyan",
@@ -236,6 +253,17 @@ class EggDisplayApp:
         self._pending_prompt: Dict[str, Any] = {}
         # Last time we refreshed the children tree panel (sec since epoch)
         self._last_children_refresh: float = 0.0
+
+        # Compute initial sandbox status and log any warnings.  We keep
+        # the warning message in the rolling system log so that it
+        # remains visible for the entire session.
+        try:
+            self._sandbox_status = get_srt_sandbox_status()
+            warn = self._sandbox_status.get('warning')
+            if isinstance(warn, str) and warn:
+                self._log_system(f"[bold red]Sandbox warning:[/bold red] {warn}")
+        except Exception:
+            self._sandbox_status = {}
 
     # ---------------- TTY helpers ----------------
     def _restore_tty(self) -> None:
@@ -553,10 +581,25 @@ class EggDisplayApp:
 
     def _update_panels(self) -> None:
         self.chat_output.set_content(self._compose_chat_panel_text())
+
+        # Update System panel title to reflect sandbox status so the
+        # user always has a prominent, persistent indicator.
+        sb = getattr(self, '_sandbox_status', {}) or {}
+        try:
+            effective = bool(sb.get('effective'))
+        except Exception:
+            effective = False
+        if effective:
+            # Green when sandboxing is active
+            self.system_output.title = "System  [green]Sandboxing[ON][/green]"
+        else:
+            # Red when sandboxing is disabled, degraded, or unavailable
+            self.system_output.title = "System  [red]Sandboxing[OFF][/red]"
+
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
             "Send: Enter or Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
-            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /toolson /toolsoff /disabletool <name> /enabletool <name> /toolstatus /toolsecrets <on|off> /quit",
+            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /toolson /toolsoff /disabletool <name> /enabletool <name> /toolstatus /toolsecrets <on|off> /setSrtSandboxConfiguration <file.json> /quit",
         ]
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
         self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
@@ -1396,7 +1439,7 @@ class EggDisplayApp:
                 '/spawn <text>, /spawn_auto <text>, /wait <threads>, '
                 '/child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /dup [name], '
                 '/schedulers, /enterMode <send|newline>, /toggle_auto_approval, '
-                '/toolson, /toolsoff, /disabletool <name>, /enabletool <name>, /toolstatus, /quit'
+                '/toolson, /toolsoff, /disabletool <name>, /enabletool <name>, /toolstatus, /toggleSandboxing, /setSrtSandboxConfiguration <file.json>, /quit'
             )
         elif cmd == 'quit':
             self.running = False
@@ -1925,14 +1968,81 @@ class EggDisplayApp:
                 return
             status = 'enabled' if cfg.llm_tools_enabled else 'disabled'
             disabled = sorted(cfg.disabled_tools) if cfg.disabled_tools else []
-            secrets_mode = 'raw (unmasked)' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked (default)'
-            secrets_mode = 'raw (unmasked)' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked (default)'
+            secrets_mode = 'raw' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked'
             lines = [
                 f"Tools for this thread: {status}",
                 "Disabled tools: " + (", ".join(disabled) if disabled else "(none)"),
                 f"Tool output secrets mode: {secrets_mode}",
             ]
             self._log_system("\n".join(lines))
+        elif cmd == 'toggleSandboxing':
+            # Toggle process-wide sandbox usage (srt wrapping).  This is
+            # a soft flag layered on top of EGG_SANDBOX_MODE: if the
+            # environment has sandboxing disabled, this command cannot
+            # force it on, but it can turn sandboxing off even when the
+            # base mode is "on".
+            try:
+                sb_before = get_srt_sandbox_status()
+            except Exception as e:
+                self._log_system(f'/toggleSandboxing error (status): {e}')
+                return
+
+            effective_before = bool(sb_before.get('effective'))
+
+            # If sandboxing is currently effective, disable it;
+            # otherwise, attempt to enable it (respecting base env).
+            try:
+                if effective_before:
+                    set_sandbox_globally_enabled(False)
+                else:
+                    set_sandbox_globally_enabled(True)
+            except Exception as e:
+                self._log_system(f'/toggleSandboxing error (set): {e}')
+                return
+
+            # Refresh and log a concise summary
+            try:
+                self._sandbox_status = get_srt_sandbox_status()
+            except Exception as e:
+                self._log_system(f'/toggleSandboxing error (refresh): {e}')
+                return
+
+            sb = self._sandbox_status
+            enabled = bool(sb.get('enabled'))
+            effective = bool(sb.get('effective'))
+            cfg_name = sb.get('config_name') or 'default.json'
+            warn = sb.get('warning')
+
+            if not enabled:
+                self._log_system(
+                    'Sandboxing is disabled by environment (EGG_SANDBOX_MODE=off); ' 
+                    '/toggleSandboxing cannot enable it. Set EGG_SANDBOX_MODE=on ' 
+                    'and restart Egg to use the sandbox.'
+                )
+            elif effective:
+                self._log_system(f"Sandboxing ENABLED (srt active, config={cfg_name}).")
+            else:
+                if isinstance(warn, str) and warn:
+                    self._log_system(f"Sandboxing DISABLED or degraded: {warn}")
+                else:
+                    self._log_system('Sandboxing DISABLED for this process (no srt wrapping).')
+        elif cmd == 'setSrtSandboxConfiguration':
+            name = (arg or '').strip()
+            if not name:
+                self._log_system('Usage: /setSrtSandboxConfiguration <file.json>')
+                return
+            try:
+                set_srt_sandbox_configuration(name)
+                # Refresh sandbox status and log a concise summary
+                self._sandbox_status = get_srt_sandbox_status()
+                cfg_path = self._sandbox_status.get('config_path') or ''
+                self._log_system(f"Sandbox configuration set to: {cfg_path}")
+                warn = self._sandbox_status.get('warning')
+                if isinstance(warn, str) and warn:
+                    self._log_system(f"[bold red]Sandbox warning:[/bold red] {warn}")
+            except Exception as e:
+                self._log_system(f'/setSrtSandboxConfiguration error: {e}')
+
         else:
             self._log_system('Unknown command')
 
