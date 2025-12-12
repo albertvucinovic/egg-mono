@@ -36,6 +36,13 @@ from .tools_config import (
     enable_tool_for_subtree,
     set_thread_allow_raw_tool_output,
 )
+from .sandbox import (
+    wrap_argv_for_sandbox,
+    set_srt_sandbox_configuration,
+    get_srt_sandbox_configuration,
+    get_srt_sandbox_status,
+    set_sandbox_globally_enabled,
+)
 
 __all__ = [
     'ThreadsDB', 'SubtreeScheduler', 'ThreadRunner', 'SnapshotBuilder',
@@ -46,4 +53,6 @@ __all__ = [
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',
     'set_subtree_tools_enabled', 'disable_tool_for_subtree', 'enable_tool_for_subtree',
     'set_thread_allow_raw_tool_output',
+    'wrap_argv_for_sandbox', 'set_srt_sandbox_configuration', 'get_srt_sandbox_configuration', 'get_srt_sandbox_status',
+    'set_sandbox_globally_enabled',
 ]

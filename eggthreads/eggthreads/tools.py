@@ -93,8 +93,14 @@ def create_default_tools() -> ToolRegistry:
 
     # bash
     def _bash(args: Dict[str, Any]):
+        from .sandbox import wrap_argv_for_sandbox
+
         script = args.get('script', '')
-        res = subprocess.run(script, shell=True, executable='/bin/bash', capture_output=True, text=True)
+        # Mirror the async runner: build an explicit argv and optionally
+        # wrap it in the sandbox instead of relying on shell=True.
+        base_argv = ['/bin/bash', '-lc', script]
+        argv = wrap_argv_for_sandbox(base_argv)
+        res = subprocess.run(argv, capture_output=True, text=True)
         out = ''
         if res.stdout:
             out += f"--- STDOUT ---\n{res.stdout.strip()}\n"

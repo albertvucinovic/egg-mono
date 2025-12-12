@@ -768,6 +768,8 @@ class ThreadRunner:
         import os as _os
         import signal as _signal
 
+        from .sandbox import wrap_argv_for_sandbox
+
         # Decode arguments into a script string
         args = tc.arguments
         if isinstance(args, str):
@@ -791,11 +793,17 @@ class ThreadRunner:
             payload={'tool_call_id': tc.tool_call_id},
         )
 
-        # Spawn bash subprocess in its own process group so we can kill
-        # the entire command (sleep, child processes, etc.) on interrupt.
-        proc = await _asyncio.create_subprocess_shell(
-            script,
-            executable='/bin/bash',
+        # Build base argv for bash and wrap it in the sandbox when
+        # enabled.  We intentionally avoid using ``shell=True`` so that
+        # the sandbox wrapper controls the executed binary directly.
+        base_argv = ['/bin/bash', '-lc', script]
+        argv = wrap_argv_for_sandbox(base_argv)
+
+        # Spawn bash (optionally under ``srt``) in its own process group
+        # so we can kill the entire command (sleep, child processes,
+        # etc.) on interrupt.
+        proc = await _asyncio.create_subprocess_exec(
+            *argv,
             stdout=_asyncio.subprocess.PIPE,
             stderr=_asyncio.subprocess.PIPE,
             preexec_fn=_os.setsid,
