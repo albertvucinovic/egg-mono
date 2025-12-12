@@ -1976,26 +1976,20 @@ class EggDisplayApp:
             ]
             self._log_system("\n".join(lines))
         elif cmd == 'toggleSandboxing':
-            # Toggle process-wide sandbox usage (srt wrapping).  This is
-            # a soft flag layered on top of EGG_SANDBOX_MODE: if the
-            # environment has sandboxing disabled, this command cannot
-            # force it on, but it can turn sandboxing off even when the
-            # base mode is "on".
+            # Toggle process-wide sandbox usage (srt wrapping).
             try:
                 sb_before = get_srt_sandbox_status()
             except Exception as e:
                 self._log_system(f'/toggleSandboxing error (status): {e}')
                 return
 
-            effective_before = bool(sb_before.get('effective'))
+            enabled_before = bool(sb_before.get('enabled'))
 
-            # If sandboxing is currently effective, disable it;
-            # otherwise, attempt to enable it (respecting base env).
+            # Flip the logical enabled flag for this process; the
+            # effective status may still be False if the srt binary is
+            # missing even when enabled=True.
             try:
-                if effective_before:
-                    set_sandbox_globally_enabled(False)
-                else:
-                    set_sandbox_globally_enabled(True)
+                set_sandbox_globally_enabled(not enabled_before)
             except Exception as e:
                 self._log_system(f'/toggleSandboxing error (set): {e}')
                 return
@@ -2013,19 +2007,15 @@ class EggDisplayApp:
             cfg_name = sb.get('config_name') or 'default.json'
             warn = sb.get('warning')
 
-            if not enabled:
-                self._log_system(
-                    'Sandboxing is disabled by environment (EGG_SANDBOX_MODE=off); ' 
-                    '/toggleSandboxing cannot enable it. Set EGG_SANDBOX_MODE=on ' 
-                    'and restart Egg to use the sandbox.'
-                )
-            elif effective:
+            if enabled and effective:
                 self._log_system(f"Sandboxing ENABLED (srt active, config={cfg_name}).")
-            else:
+            elif enabled and not effective:
                 if isinstance(warn, str) and warn:
-                    self._log_system(f"Sandboxing DISABLED or degraded: {warn}")
+                    self._log_system(f"Sandboxing ENABLED but not effective: {warn}")
                 else:
-                    self._log_system('Sandboxing DISABLED for this process (no srt wrapping).')
+                    self._log_system('Sandboxing ENABLED but not effective (no srt wrapping).')
+            else:
+                self._log_system('Sandboxing DISABLED for this process (no srt wrapping).')
         elif cmd == 'setSrtSandboxConfiguration':
             name = (arg or '').strip()
             if not name:
