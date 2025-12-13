@@ -266,8 +266,8 @@ class EggCompleter(Completer):
             return
 
         # 4) /delete: suggest thread ids to delete (exclude current thread)
-        if text.startswith('/delete '):
-            prefix = text[len('/delete '):]
+        if text.startswith('/deleteThread '):
+            prefix = text[len('/deleteThread '):]
             try:
                 rows = list_threads(self.db) if list_threads else []
             except Exception:
@@ -296,38 +296,9 @@ class EggCompleter(Completer):
                     yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
             return
 
-        # 5) /child: suggest direct children of current thread (ids with name/recap meta)
-        if text.startswith('/child'):
-            if text == '/child':
-                return
-            if text.startswith('/child '):
-                prefix = text[len('/child '):]
-                cur_id = None
-                try:
-                    cur_id = self.get_current_thread()
-                except Exception:
-                    cur_id = None
-                rows = []
-                if cur_id and list_children_with_meta:
-                    try:
-                        rows = list_children_with_meta(self.db, cur_id)
-                    except Exception:
-                        rows = []
-                pref_l = prefix.lower()
-                for r in rows:
-                    tid2, name, recap = (r[0] if isinstance(r, (list, tuple)) else getattr(r, 'thread_id', '')), (r[1] if isinstance(r, (list, tuple)) else getattr(r, 'name', '')), (r[2] if isinstance(r, (list, tuple)) else getattr(r, 'short_recap', ''))
-                    if (not prefix or
-                        tid2.lower().startswith(pref_l) or tid2.lower().endswith(pref_l) or pref_l in tid2.lower() or
-                        (isinstance(name, str) and pref_l in name.lower()) or
-                        (isinstance(recap, str) and pref_l in recap.lower())):
-                        disp = f"{tid2[-8:]}  {name}" if name else tid2[-8:]
-                        meta = recap if isinstance(recap, str) else ''
-                        yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
-                return
-
         # 6) /spawn: support filesystem paths and conversation words
-        if text.startswith('/spawn'):
-            input_after = text[len('/spawn'):].lstrip()
+        if text.startswith('/spawnChildThread'):
+            input_after = text[len('/spawnChildThread'):].lstrip()
             # current fragment according to prompt_toolkit WORD chars
             try:
                 current_fragment = document.get_word_before_cursor(WORD=True)
@@ -349,8 +320,8 @@ class EggCompleter(Completer):
             return
 
         # 7) /wait: suggest thread ids similarly to /thread
-        if text.startswith('/wait '):
-            prefix = text[len('/wait '):]
+        if text.startswith('/waitForThreads '):
+            prefix = text[len('/waitForThreads '):]
             try:
                 rows = list_threads(self.db) if list_threads else []
             except Exception:
@@ -537,12 +508,12 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         if sp == -1:
             # Complete command name
             cmds = [
-                '/help', '/model', '/updateAllModels', '/pause', '/resume',
-                '/spawn', '/spawn_auto', '/wait', '/child', '/parent',
-                '/children', '/threads', '/thread', '/delete', '/new', '/dup',
-                '/schedulers', '/enterMode', '/toggle_auto_approval',
-                '/toolson', '/toolsoff', '/disabletool', '/enabletool', '/toolstatus',
-                '/toolsecrets', '/toggleSandboxing', '/quit',
+                '/help', '/model', '/updateAllModels', 
+                '/spawnChildThread', '/spawnAutoApprovedChildThread', '/waitForThreads', '/parentThread',
+                '/listChildren', '/threads', '/thread', '/deleteThread', '/newThread', '/duplicateThread',
+                '/schedulers', '/enterMode', '/toggleAutoApproval',
+                '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus',
+                '/toolsSecrets', '/toggleSandboxing', '/quit',
                 '/setSrtSandboxConfiguration',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
@@ -656,31 +627,21 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             return out_items
 
         # /thread and /delete: rich suggestions id/name/recap
-        if cmd in ('/thread', '/delete'):
+        if cmd in ('/thread', '/deleteThread'):
             return _thread_arg_items(arg_tok)
 
         # /wait: thread selectors, same suggestions as /thread
-        if cmd == '/wait':
+        if cmd == '/waitForThreads':
             return _thread_arg_items(arg_tok)
 
-        # /child pattern -> show child ids
-        if cmd == '/child':
-            try:
-                tid = get_current_thread()
-                rows = list_children_with_meta(db, tid) if list_children_with_meta else []
-            except Exception:
-                rows = []
-            ids = [(r[0] if isinstance(r, (list, tuple)) else getattr(r, 'thread_id', '')) for r in rows]
-            return _mk_items(ids, arg_tok)
-
         # /spawn and /spawn_auto -> filesystem suggestions for arg
-        if cmd in ('/spawn', '/spawn_auto'):
+        if cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
             return _mk_items(_fs_suggestions(arg_tok), arg_tok)
 
         # /disabletool and /enabletool: suggest known tool names from
         # the default ToolRegistry. We keep this best-effort and
         # local-only; if anything fails we simply return no suggestions.
-        if cmd in ('/disabletool', '/enabletool'):
+        if cmd in ('/disableTool', '/enableTool'):
             try:
                 from eggthreads.tools import create_default_tools  # type: ignore
                 reg = create_default_tools()

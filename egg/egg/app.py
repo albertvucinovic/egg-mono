@@ -68,6 +68,25 @@ MODELS_PATH = _ROOT / 'models.json'
 ALL_MODELS_PATH = _ROOT / 'all-models.json'
 SYSTEM_PROMPT_PATH = _ROOT / 'systemPrompt'
 
+commandsText="""
+Commands: 
+  Model handling: 
+    /model <key>, /updateAllModels <provider> 
+  Thread management basic: 
+    /spawnChildThread <text>, /spawnAutoApprovedChildThread <text>, /waitForThreads <threads> 
+  Thread management other: 
+    /parentThread, /listChildren, /threads, /thread <selector>
+    /deleteThread <selector>, /newThread <name>, /duplicateThread <name>
+    /schedulers 
+  Tool management: 
+    /toggleAutoApproval, /toolsOn, /toolsOff, /disableTool <name>, /enableTool <name> 
+    /toggleSandboxing, /setSrtSandboxConfiguration <file.json>
+    /toolsSecrets <on|off>, /toolsStatus 
+  Other: 
+    /enterMode <send|newline>, /quit 
+    /help
+"""
+
 
 def _get_system_prompt() -> str:
     try:
@@ -175,7 +194,7 @@ class EggDisplayApp:
         # columns_hint=2 because chat/system panels are side-by-side
         self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=2)
         # System panel
-        self.system_output = OutputPanel(title="System", initial_height=8, max_height=16, columns_hint=2)
+        self.system_output = OutputPanel(title="System", initial_height=8, max_height=22, columns_hint=2)
         # For the System panel we want the sandboxing status to appear
         # only in the panel title (border), not as a separate header
         # line inside the content area.
@@ -599,7 +618,7 @@ class EggDisplayApp:
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
             "Send: Enter or Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
-            "Commands: /help /threads /thread <sel> /new [name] /spawn <text> /spawn_auto <text> /children /child <patt> /parent /delete <sel> /pause /resume /model [key] /updateAllModels <prov> /schedulers /enterMode /toggle_auto_approval /toolson /toolsoff /disabletool <name> /enabletool <name> /toolstatus /toolsecrets <on|off> /setSrtSandboxConfiguration <file.json> /quit",
+            commandsText
         ]
         tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
         self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
@@ -1433,23 +1452,10 @@ class EggDisplayApp:
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
-            self._log_system(
-                'Commands: '
-                '/model <key>, /updateAllModels <provider>, /pause, /resume, '
-                '/spawn <text>, /spawn_auto <text>, /wait <threads>, '
-                '/child <pattern>, /parent, /children, /threads, /thread <selector>, /delete <selector>, /new <name>, /dup [name], '
-                '/schedulers, /enterMode <send|newline>, /toggle_auto_approval, '
-                '/toolson, /toolsoff, /disabletool <name>, /enabletool <name>, /toolstatus, /toggleSandboxing, /setSrtSandboxConfiguration <file.json>, /quit'
-            )
+            self._log_system(commandsText)
         elif cmd == 'quit':
             self.running = False
-        elif cmd == 'pause':
-            pause_thread(self.db, self.current_thread)
-            self._log_system('Paused current thread')
-        elif cmd == 'resume':
-            resume_thread(self.db, self.current_thread)
-            self._log_system('Resumed current thread')
-        elif cmd == 'new':
+        elif cmd == 'newThread':
             new_name = (arg or '').strip() or 'Root'
             cur_model_key = self._current_model_for_thread(self.current_thread) or None
             new_root = create_root_thread(self.db, name=new_name, initial_model_key=cur_model_key)
@@ -1460,7 +1466,7 @@ class EggDisplayApp:
             asyncio.get_running_loop().create_task(self._start_watching_current())
             self._log_system(f"Created new root thread: {new_root[-8:]}")
             self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
-        elif cmd == 'spawn':
+        elif cmd == 'spawnChildThread':
             # Use the spawn_agent tool implementation from eggthreads so we
             # share the same semantics between UI (/spawn) and model tools.
             def _latest_model_for_thread(tid: str) -> Optional[str]:
@@ -1525,7 +1531,7 @@ class EggDisplayApp:
                 create_snapshot(self.db, self.current_thread)
             except Exception:
                 pass
-        elif cmd == 'spawn_auto':
+        elif cmd == 'spawnAutoApprovedChildThread':
             # Same as /spawn, but use spawn_agent_auto so the spawned
             # child has global tool auto-approval.
             def _latest_model_for_thread(tid: str) -> Optional[str]:
@@ -1565,7 +1571,7 @@ class EggDisplayApp:
             child = res
             self._ensure_scheduler_for(child)
             self._log_system(f"Spawned auto-approval thread: {child[-8:]}")
-        elif cmd == 'wait':
+        elif cmd == 'waitForThreads':
             # Treat /wait as a user command that enqueues a wait tool
             # call (RA3). The argument is a space-separated list of
             # thread selectors; use the same resolution logic as /thread
@@ -1630,7 +1636,7 @@ class EggDisplayApp:
                 pass
             self._ensure_scheduler_for(self.current_thread)
             self._log_system(f"Queued /wait for threads: {' '.join([tid[-8:] for tid in resolved])}.")
-        elif cmd == 'children':
+        elif cmd == 'listChildren':
             sub = _get_subtree(self.db, self.current_thread)
             if not sub:
                 self._log_system('No subthreads.')
@@ -1638,22 +1644,7 @@ class EggDisplayApp:
                 block = self._format_tree(self.current_thread)
                 self._log_system('Subtree (see console for full):')
                 self._console_print_block('Subtree', block, border_style='blue')
-        elif cmd == 'child':
-            patt = (arg or '').lower()
-            rows = list_children_with_meta(self.db, self.current_thread)
-            candidates: List[str] = []
-            for child_id, name, recap, _created in rows:
-                if not patt or patt in (name + ' ' + recap + ' ' + child_id).lower():
-                    candidates.append(child_id)
-            if candidates:
-                self._ensure_scheduler_for(candidates[0])
-                self.current_thread = candidates[0]
-                asyncio.get_running_loop().create_task(self._start_watching_current())
-                self._log_system(f"Switched to child: {self.current_thread[-8:]}")
-                self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
-            else:
-                self._log_system('No matching child.')
-        elif cmd == 'parent':
+        elif cmd == 'parentThread':
             pid = get_parent(self.db, self.current_thread)
             if pid:
                 self.current_thread = pid
@@ -1700,7 +1691,7 @@ class EggDisplayApp:
                     asyncio.get_running_loop().create_task(self._start_watching_current())
                     self._log_system(f"Switched to thread: {new_tid[-8:]}")
                     self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
-        elif cmd == 'delete':
+        elif cmd == 'deleteThread':
             selector = (arg or '').strip()
             if not selector:
                 self._log_system('Usage: /delete <thread-id|suffix|name|recap-fragment>')
@@ -1732,7 +1723,7 @@ class EggDisplayApp:
                 self._log_system(f"Thread {target_tid[-8:]} deleted.")
             except Exception as e:
                 self._log_system(f'Error deleting thread: {e}')
-        elif cmd == 'dup':
+        elif cmd == 'duplicateThread':
             # Duplicate the current thread as a new root thread, acting
             # as a "checkpoint" copy of the entire conversation up to
             # this point. The new thread has the same history (events
@@ -1741,13 +1732,13 @@ class EggDisplayApp:
             try:
                 from eggthreads import duplicate_thread  # type: ignore
             except Exception as e:
-                self._log_system(f'/dup not available: eggthreads import failed: {e}')
+                self._log_system(f'/duplicate_thread not available: eggthreads import failed: {e}')
                 return
             label = (arg or '').strip() or None
             try:
                 new_tid = duplicate_thread(self.db, self.current_thread, name=label)
             except Exception as e:
-                self._log_system(f'/dup error: {e}')
+                self._log_system(f'/duplicateThread error: {e}')
                 return
             # Ensure a scheduler is running for the duplicate so it can
             # be continued independently if desired.
@@ -1840,7 +1831,7 @@ class EggDisplayApp:
                 self._log_system('Enter mode: newline (Enter inserts newline, Ctrl+D sends).')
             else:
                 self._log_system('Usage: /enterMode <send|newline>')
-        elif cmd == 'toggle_auto_approval':
+        elif cmd == 'toggleAutoApproval':
             # Toggle per-thread global tool auto-approval by emitting a
             # tool_call.approval event with decision global_approval /
             # revoke_global_approval. This affects future tool calls in
@@ -1884,7 +1875,7 @@ class EggDisplayApp:
                     invoke_id=None,
                     payload={
                         'decision': decision,
-                        'reason': 'Toggled by user via /toggle_auto_approval',
+                        'reason': 'Toggled by user via /toggleAutoApproval',
                     },
                 )
                 self._log_system(
@@ -1893,7 +1884,7 @@ class EggDisplayApp:
                 )
             except Exception as e:
                 self._log_system(f'Error toggling auto-approval: {e}')
-        elif cmd == 'toolson':
+        elif cmd == 'toolsOn':
             # Thread-wide toggle: allow RA1 to expose tools again.
             try:
                 from eggthreads import set_thread_tools_enabled  # type: ignore
@@ -1901,7 +1892,7 @@ class EggDisplayApp:
                 self._log_system('Tools enabled for this thread (LLM may call tools).')
             except Exception as e:
                 self._log_system(f'/toolson error: {e}')
-        elif cmd == 'toolsoff':
+        elif cmd == 'toolsOff':
             # Thread-wide toggle: RA1 will not expose tools to the LLM
             # for this thread. User-initiated commands ($, $$, /wait)
             # still work as they are modelled as explicit tool calls.
@@ -1911,7 +1902,7 @@ class EggDisplayApp:
                 self._log_system('Tools disabled for this thread (LLM tool calls suppressed).')
             except Exception as e:
                 self._log_system(f'/toolsoff error: {e}')
-        elif cmd == 'toolsecrets':
+        elif cmd == 'toolsSecrets':
             # Toggle per-thread masking of potential secrets in tool
             # outputs. When masking is enabled (default), outputs from
             # tools such as bash/python are filtered to remove
@@ -1921,7 +1912,7 @@ class EggDisplayApp:
             # output (no masking); "off" = mask secrets.
             mode = (arg or '').strip().lower()
             if mode not in ('on', 'off'):
-                self._log_system('Usage: /toolsecrets <on|off>  (on = allow raw tool output, off = mask secrets)')
+                self._log_system('Usage: /toolsSecrets <on|off>  (on = allow raw tool output, off = mask secrets)')
                 return
             allow_raw = (mode == 'on')
             try:
@@ -1933,7 +1924,7 @@ class EggDisplayApp:
                     self._log_system('Tool output secrets: masking ENABLED (attempting to mask detected secrets).')
             except Exception as e:
                 self._log_system(f'/toolsecrets error: {e}')
-        elif cmd == 'disabletool':
+        elif cmd == 'disableTool':
             # Per-thread blacklist of individual tool names.
             name = (arg or '').strip()
             if not name:
@@ -1945,7 +1936,7 @@ class EggDisplayApp:
                 self._log_system(f"Tool '{name}' disabled for this thread.")
             except Exception as e:
                 self._log_system(f'/disabletool error: {e}')
-        elif cmd == 'enabletool':
+        elif cmd == 'enableTool':
             name = (arg or '').strip()
             if not name:
                 self._log_system('Usage: /enabletool <tool_name>')
@@ -1956,7 +1947,7 @@ class EggDisplayApp:
                 self._log_system(f"Tool '{name}' enabled for this thread.")
             except Exception as e:
                 self._log_system(f'/enabletool error: {e}')
-        elif cmd == 'toolstatus':
+        elif cmd == 'toolsStatus':
             # Report effective tools configuration for the current
             # thread: whether LLM tools are enabled and which tools are
             # currently disabled.
@@ -1964,7 +1955,7 @@ class EggDisplayApp:
                 from eggthreads import get_thread_tools_config  # type: ignore
                 cfg = get_thread_tools_config(self.db, self.current_thread)
             except Exception as e:
-                self._log_system(f'/toolstatus error: {e}')
+                self._log_system(f'/toolStatus error: {e}')
                 return
             status = 'enabled' if cfg.llm_tools_enabled else 'disabled'
             disabled = sorted(cfg.disabled_tools) if cfg.disabled_tools else []
