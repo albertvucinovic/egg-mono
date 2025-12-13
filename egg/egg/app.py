@@ -1248,18 +1248,40 @@ class EggDisplayApp:
         raw_text: current input text (will be stripped/lowered)
         source: human-readable origin (e.g. 'Enter', 'Ctrl+D') for logging.
 
-        Returns True if an approval was handled and the prompt/input were
-        cleared, False otherwise.
+        Returns True if the key press was *fully handled* as part of the
+        approval flow (whether the answer was valid or not). When this
+        method returns True, the caller MUST NOT treat the text as a
+        normal chat message.
+
+        This behaviour is important for correctness of the tools
+        protocol: if an assistant message with ``tool_calls`` is waiting
+        for execution or output approval, we must not accidentally send
+        arbitrary user messages to the model in between the assistant
+        tool call and its corresponding tool messages. Doing so would
+        violate the OpenAI tools protocol and cause hard provider
+        errors.
         """
         try:
             pending = getattr(self, '_pending_prompt', {}) or {}
         except Exception:
             pending = {}
+        # If there is no pending approval prompt, this key press is not
+        # part of the approval flow and the caller may treat it as a
+        # normal chat submission.
         if not pending:
             return False
         txt = (raw_text or '').strip().lower()
+        # With a pending prompt, *any* non-empty input should be
+        # interpreted as an attempt to answer that prompt, not as a
+        # standalone chat message.  Empty input is ignored but still
+        # considered handled so it does not accidentally create a blank
+        # user message.
         if not txt:
-            return False
+            try:
+                self._log_system('Approval pending: expected a response (e.g. y/n), empty input ignored.')
+            except Exception:
+                pass
+            return True
         kind = pending.get('kind')
         ids = pending.get('tool_call_ids') or []
         try:
@@ -1268,7 +1290,7 @@ class EggDisplayApp:
         except Exception:
             ids = []
         # Exec approval: y = approve this set, n = deny this set,
-        # a = approve all tool calls in this user turn (RA2 and RA3)
+        # a = approve all tool calls in this user turn (RA2 and RA3).
         if kind == 'exec' and ids and txt in ('y', 'n', 'a'):
             try:
                 if txt in ('y', 'n'):
@@ -1357,7 +1379,33 @@ class EggDisplayApp:
             self.input_panel.clear_text()
             self.input_panel.increment_message_count()
             return True
-        return False
+        # We had a pending prompt but the answer was not one of the
+        # recognised options. Treat this as an invalid approval answer,
+        # not as a chat message. Keep the pending prompt so the user can
+        # try again, but clear the input to avoid confusion.
+        try:
+            if kind == 'exec':
+                self._log_system(
+                    f"Unrecognised execution-approval answer {txt!r}; expected 'y', 'n', or 'a'. "
+                    "The message was *not* sent to the model."
+                )
+            elif kind == 'output':
+                self._log_system(
+                    f"Unrecognised output-approval answer {txt!r}; expected 'y', 'n', or 'o'. "
+                    "The message was *not* sent to the model."
+                )
+            else:
+                self._log_system(
+                    f"Unrecognised approval answer {txt!r}; the message was not sent as chat."
+                )
+        except Exception:
+            pass
+        try:
+            self.input_panel.clear_text()
+            self.input_panel.increment_message_count()
+        except Exception:
+            pass
+        return True
 
     def _on_submit(self, text: str) -> None:
         # User command execution ($ / $$) is modeled as a user-originated
