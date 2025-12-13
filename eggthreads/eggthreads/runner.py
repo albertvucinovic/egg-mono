@@ -753,6 +753,186 @@ class ThreadRunner:
                     continue
 
             out.append(m2)
+
+        # As a final safety net, enforce the OpenAI tools protocol
+        # invariant that every assistant message with ``tool_calls`` is
+        # immediately followed by tool-role messages responding to each
+        # ``tool_call_id``.  If history ever violated this (for example
+        # due to buggy older versions of the UI), we drop the offending
+        # assistant/tool messages from the provider view so that new
+        # turns can proceed instead of failing with a persistent
+        # "tool_calls must be followed by tool messages" error.
+        return self._enforce_assistant_toolcall_protocol(out)
+
+
+    def _enforce_assistant_toolcall_protocol(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ensure assistant tool_calls are followed by matching tool messages.
+
+        Provider APIs such as OpenAI require that an assistant message
+        with ``tool_calls`` is immediately followed by one or more
+        ``tool`` messages, each bearing a ``tool_call_id`` from that
+        assistant turn.  If other roles (user/system/assistant) are
+        interleaved before all tool_call_ids have received a response,
+        the provider will reject the request.
+
+        This helper walks the final, sanitized message list and:
+
+          * Keeps assistant tool_call turns whose immediately-following
+            tool messages form a complete, one-to-one response set for
+            their ``tool_call_id`` values.
+          * Drops assistant tool_call messages that do *not* have such
+            a contiguous tool-message block, and also drops any tool
+            messages whose ``tool_call_id`` does not belong to a kept
+            assistant turn.
+
+        The local event log remains untouched; this only affects what is
+        sent to the provider, allowing previously "broken" threads to
+        recover while preserving a faithful transcript for UIs.
+        """
+
+        if not messages:
+            return messages
+
+        n = len(messages)
+
+        # First pass: determine which assistant tool_call messages have
+        # a valid, contiguous block of tool responses immediately
+        # following them, and record the set of tool_call_ids that
+        # belong to such "good" turns.
+        good_assistant_idx = set()
+        good_tool_ids: set[str] = set()
+
+        i = 0
+        while i < n:
+            m = messages[i]
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                tcs = m.get("tool_calls") or []
+                if isinstance(tcs, list) and tcs:
+                    expected_ids: list[str] = []
+                    for tc in tcs:
+                        if not isinstance(tc, dict):
+                            continue
+                        # OpenAI-style tool calls: {"id": "...", "function": {...}}
+                        tcid = tc.get("id") or tc.get("tool_call_id")
+                        if not tcid and isinstance(tc.get("function"), dict):
+                            tcid = tc["function"].get("id")
+                        if isinstance(tcid, str) and tcid:
+                            expected_ids.append(tcid)
+                    if expected_ids:
+                        remaining = set(expected_ids)
+                        j = i + 1
+                        ok = True
+                        # Consume a contiguous block of tool messages
+                        # immediately following this assistant. Any
+                        # non-tool or unexpected tool_call_id breaks the
+                        # adjacency requirement.
+                        while j < n:
+                            mj = messages[j]
+                            if not isinstance(mj, dict) or mj.get("role") != "tool":
+                                break
+                            tcid2 = mj.get("tool_call_id")
+                            if not isinstance(tcid2, str) or not tcid2:
+                                ok = False
+                                break
+                            if tcid2 not in remaining:
+                                # Either duplicate or unmatched id;
+                                # treat this assistant turn as
+                                # malformed for provider purposes.
+                                ok = False
+                                break
+                            remaining.remove(tcid2)
+                            j += 1
+                        if ok and not remaining:
+                            good_assistant_idx.add(i)
+                            for tid in expected_ids:
+                                good_tool_ids.add(tid)
+                        # Skip over the tool block we just inspected
+                        i = j
+                        continue
+            i += 1
+
+        # Second pass: rebuild messages, keeping only:
+        #   - non-tool, non-assistant-tool_call messages as-is
+        #   - assistant tool_call messages whose index is in
+        #     good_assistant_idx, plus their immediately-following tool
+        #     messages for good_tool_ids
+        #   - tool messages whose tool_call_id is in good_tool_ids and
+        #     which are not part of a malformed assistant turn.
+        out: List[Dict[str, Any]] = []
+        i = 0
+        while i < n:
+            m = messages[i]
+            if not isinstance(m, dict):
+                out.append(m)
+                i += 1
+                continue
+
+            role = m.get("role")
+
+            if i in good_assistant_idx:
+                # Keep the assistant tool_call message and its
+                # contiguous block of tool responses that we
+                # already validated above.
+                out.append(m)
+                i += 1
+                while i < n:
+                    mj = messages[i]
+                    if not isinstance(mj, dict) or mj.get("role") != "tool":
+                        break
+                    tcid2 = mj.get("tool_call_id")
+                    if not isinstance(tcid2, str) or tcid2 not in good_tool_ids:
+                        break
+                    out.append(mj)
+                    i += 1
+                continue
+
+            if role == "assistant":
+                tcs = m.get("tool_calls") or []
+                if isinstance(tcs, list) and tcs:
+                    # Malformed assistant tool_call turn: drop the
+                    # assistant message itself and skip over any
+                    # immediately-following tool messages that belong
+                    # to its declared tool_call_ids. Any remaining
+                    # orphan tool messages for these ids will be
+                    # discarded by the generic tool-handling block
+                    # below.
+                    bad_ids: set[str] = set()
+                    for tc in tcs:
+                        if not isinstance(tc, dict):
+                            continue
+                        tcid = tc.get("id") or tc.get("tool_call_id")
+                        if not tcid and isinstance(tc.get("function"), dict):
+                            tcid = tc["function"].get("id")
+                        if isinstance(tcid, str) and tcid:
+                            bad_ids.add(tcid)
+                    i += 1
+                    while i < n:
+                        mj = messages[i]
+                        if not isinstance(mj, dict) or mj.get("role") != "tool":
+                            break
+                        tcid2 = mj.get("tool_call_id")
+                        if isinstance(tcid2, str) and tcid2 in bad_ids:
+                            # Skip tool message that belongs to this
+                            # malformed assistant turn.
+                            i += 1
+                            continue
+                        break
+                    continue
+
+            if role == "tool":
+                tcid = m.get("tool_call_id")
+                if isinstance(tcid, str) and tcid in good_tool_ids:
+                    out.append(m)
+                # Else: orphan or malformed tool message -> drop from
+                # provider view.
+                i += 1
+                continue
+
+            # All other messages (user/system/assistant without
+            # tool_calls) are passed through unchanged.
+            out.append(m)
+            i += 1
+
         return out
 
 

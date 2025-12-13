@@ -116,8 +116,24 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
 
 
 def append_message(db: ThreadsDB, thread_id: str, role: str, content: str, extra: Optional[Dict[str, Any]] = None) -> str:
+    """Append a user/assistant/system message to a thread.
+
+    This helper is intentionally thin: policy decisions about which
+    messages are sent to the provider (e.g. via ``no_api``) are handled
+    elsewhere, primarily in ``thread_state`` / ``discover_runner_actionable``
+    and ``ThreadRunner._sanitize_messages_for_api``.
+    """
+
+    payload_extra: Dict[str, Any] = dict(extra or {})
+
     msg_id = _ulid_like()
-    db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.create', payload={"role": role, "content": content, **(extra or {})}, msg_id=msg_id)
+    db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_='msg.create',
+        payload={"role": role, "content": content, **payload_extra},
+        msg_id=msg_id,
+    )
     return msg_id
 
 
