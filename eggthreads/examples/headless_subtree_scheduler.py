@@ -361,10 +361,19 @@ async def main():
     except Exception as e:
         print(f"[status] warning: failed to enable per-turn tool auto-approval: {e}")
 
-    # Start a scheduler for the entire subtree rooted at 'root_id'
+    # Start a scheduler for the entire subtree rooted at 'root_id'. We
+    # construct RunnerConfig via the public eggthreads namespace so the
+    # example works both when running from source and when eggthreads is
+    # installed as a package.
     max_concurrent = int(os.environ.get("MAX_CONCURRENT", "8") or "8")
-    from eggthreads.runner import RunnerConfig  # type: ignore
-    cfg = RunnerConfig(max_concurrent_threads=max_concurrent)
+    try:
+        from eggthreads import RunnerConfig as _RunnerConfig  # type: ignore
+    except Exception:
+        # Fallback: import from the internal module for local
+        # development installs where the aggregator may not expose
+        # RunnerConfig yet.
+        from eggthreads.eggthreads.runner import RunnerConfig as _RunnerConfig  # type: ignore
+    cfg = _RunnerConfig(max_concurrent_threads=max_concurrent)
     scheduler = SubtreeScheduler(db, root_thread_id=root_id, config=cfg, models_path=models_path, all_models_path=all_models_path)
 
     sched_task = asyncio.create_task(scheduler.run_forever(poll_sec=0.05))
