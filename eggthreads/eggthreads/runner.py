@@ -799,6 +799,17 @@ class ThreadRunner:
         base_argv = ['/bin/bash', '-lc', script]
         argv = wrap_argv_for_sandbox(base_argv)
 
+        # Resolve per-thread tools configuration so we can honour the
+        # "raw tool output" toggle for streaming as well.  When
+        # allow_raw_tool_output is True we still sanitize control
+        # characters but we skip any secret-masking heuristics, so the
+        # user sees exact tool output in the UI.
+        try:
+            tools_cfg = get_thread_tools_config(self.db, self.thread_id)
+            allow_raw_stream = bool(getattr(tools_cfg, 'allow_raw_tool_output', False))
+        except Exception:
+            allow_raw_stream = False
+
         # Spawn bash (optionally under ``srt``) in its own process group
         # so we can kill the entire command (sleep, child processes,
         # etc.) on interrupt.
@@ -852,14 +863,19 @@ class ThreadRunner:
                     break
                 if not chunk:
                     break
-                # Decode, sanitize control characters, and apply cheap
-                # per-line heuristic masking so that obvious secrets (like
-                # .env keys) are not splashed into the UI during streaming.
-                # We still perform the stronger masking pass when building
-                # provider API messages.
+                # Decode and sanitize control characters.  Secret
+                # masking is controlled by the per-thread
+                # allow_raw_tool_output flag: when raw output is
+                # allowed we *only* strip problematic control
+                # characters; otherwise we also apply heuristic
+                # secret-masking so things like API keys in .env-style
+                # lines are not splashed into the UI.
                 text_raw = chunk.decode(errors='replace')
                 try:
-                    text = self._filter_tool_output(text_raw, mask_secrets=True)
+                    text = self._filter_tool_output(
+                        text_raw,
+                        mask_secrets=not allow_raw_stream,
+                    )
                 except Exception:
                     text = text_raw
                 if not header_emitted:
@@ -1422,33 +1438,7 @@ class ThreadRunner:
         if not isinstance(text, str) or not text:
             return text
 
-        # 1) Strip/normalize problematic control characters but keep
-        # standard whitespace intact.
-        def _strip_control(s: str) -> str:
-            out_chars: list[str] = []
-            for ch in s:
-                o = ord(ch)
-                # Allow tab, newline, carriage return
-                if ch in ('\t', '\n', '\r'):
-                    out_chars.append(ch)
-                # Printable ASCII and common extended range
-                elif 32 <= o < 127:
-                    out_chars.append(ch)
-                elif 0xA0 <= o <= 0x10FFFF:
-                    out_chars.append(ch)
-                else:
-                    # Replace other control bytes with a visible marker
-                    out_chars.append('\uFFFD')
-            return ''.join(out_chars)
-
-        cleaned = _strip_control(text)
-
-        # Cheap heuristic masking first.
-        if mask_secrets:
-            try:
-                cleaned = self._mask_secrets_heuristic(cleaned)
-            except Exception:
-                pass
+        cleaned = text
 
         # 2) Secret detection and masking (best-effort, optional dep).
         if not mask_secrets:
@@ -1458,6 +1448,10 @@ class ThreadRunner:
             import importlib.util as _importlib_util
 
             if not _importlib_util.find_spec('detect_secrets'):
+                try:
+                    cleaned = self._mask_secrets_heuristic(cleaned)
+                except Exception:
+                    pass
                 return cleaned
 
             from detect_secrets import SecretsCollection  # type: ignore
@@ -1543,7 +1537,7 @@ class ThreadRunner:
 
                 out_parts: list[str] = []
                 last = 0
-                mask = '***'
+                mask = '<MASKED SECRET with detect-secrets>'
                 for s, e in merged:
                     if last < s:
                         out_parts.append(cleaned[last:s])

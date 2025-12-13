@@ -65,7 +65,7 @@ class ToolsConfig:
     llm_tools_enabled: bool = True
     disabled_tools: Set[str] = field(default_factory=set)
     has_explicit_config: bool = False
-    allow_raw_tool_output: bool = False
+    allow_raw_tool_output: bool = True
 
 
 def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
