@@ -166,23 +166,6 @@ def create_default_tools() -> ToolRegistry:
         impl=_javascript,
     )
 
-    # popContext (stub)
-    def _popContext(args: Dict[str, Any]):
-        # In chat.sh this signals returning a value to a parent agent. Here we just echo back.
-        return _json.dumps({"popContext": True, "args": args})
-
-    reg.register(
-        name='popContext',
-        description='Stub: return a result to the spawning agent (no-op in this app).',
-        parameters_schema={
-            "type": "object",
-            "properties": {"return_value": {"type": "string"}},
-            "required": ["return_value"],
-        },
-        impl=_popContext,
-        local_only=True,
-    )
-
     # spawn_agent: create a child thread under a given parent, mirroring
     # the behaviour of the /spawn UI command but in a UI-agnostic way.
     def _spawn_agent(args: Dict[str, Any]):

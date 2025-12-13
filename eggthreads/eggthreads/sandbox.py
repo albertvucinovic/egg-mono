@@ -160,7 +160,7 @@ def _default_config_path() -> Path:
 # ``EGG_SANDBOX_MODE`` environment variable so that configuration is
 # explicit in application logic instead of being hidden in the
 # environment.
-_SANDBOX_ENABLED: bool = True
+_SANDBOX_ENABLED: bool = False
 
 _SRT_BIN = (os.environ.get("EGG_SRT_BIN") or "srt").strip() or "srt"
 _SRT_AVAILABLE = shutil.which(_SRT_BIN) is not None
@@ -298,25 +298,84 @@ def is_sandbox_effective() -> bool:
     return sandbox_enabled() and sandbox_available()
 
 
-def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:
-    """Return ``argv`` wrapped with ``srt --settings`` when active.
+def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:                    
+    """Return ``argv`` wrapped with ``srt --settings`` when active.         
+                                                                            
+    Args:                                                                   
+        argv: The original command argv, e.g. ``["/bin/bash", "-lc", script]
+                                                                            
+    Returns:                                                                
+        A new argv list. If sandboxing is disabled or unavailable, this is  
+        identical to the input.                                             
+                                                                            
+        When sandboxing is enabled:                                         
+                                                                            
+        * For generic commands, we return::                                 
+                                                                            
+              ["srt", "--settings", "<path>", *argv]                        
+                                                                            
+        * For the specific ``/bin/bash -lc <script>`` pattern used by the   
+          bash tool, we adapt to how `srt` expects its command argument and 
+          delegate to :func:`wrap_bash_argv_for_sandbox`.                   
+    """                                                                     
+    if not is_sandbox_effective():                                          
+        return argv                                                         
+                                                                            
+    eff_path = _effective_config_path()                                     
+                                                                            
+    # Special handling for the bash tool: `/bin/bash -lc <script>`.         
+    # We want to emulate the working shell form:                            
+    #                                                                       
+    #   srt "/bin/bash -lc '<script>'"                                      
+    #                                                                       
+    # rather than the broken:                                               
+    #                                                                       
+    #   srt "/bin/bash -lc ls -la"                                          
+    #                                                                       
+    if (                                                                    
+        len(argv) >= 3                                                      
+        and argv[0] == "/bin/bash"                                          
+        and argv[1] in ("-lc", "-c")                                        
+    ):                                                                      
+        return wrap_bash_argv_for_sandbox(argv, eff_path)                   
+                                                                            
+    # Generic case: just prepend the sandbox launcher.                      
+    return [_SRT_BIN, "--settings", str(eff_path), *argv]                   
 
-    Args:
-        argv: The original command argv, e.g. ``["/bin/bash", "-lc",
-            script]``.
 
-    Returns:
-        A new argv list.  If sandboxing is disabled or unavailable, this
-        is identical to the input.  Otherwise it is of the form::
+def wrap_bash_argv_for_sandbox(argv: List[str], eff_path) -> List[str]:              
+    """Wrap a `/bin/bash -lc <script>` argv for execution under `srt`.               
+                                                                                     
+    This builds an argv equivalent to the working shell invocation:                  
+                                                                                     
+        srt "/bin/bash -lc '<script>'"                                               
+                                                                                     
+    so that `srt` receives the entire command as a single argument and               
+    preserves the intended `bash -lc 'script'` semantics.                            
+    """                                                                              
+    # Defensive: if we somehow don't have a script, fall back to generic wrap.       
+    if len(argv) <= 2:                                                               
+        return [_SRT_BIN, "--settings", str(eff_path), *argv]                        
+                                                                                     
+    # Everything after the -c/-lc flag is the script. For the bash tool this         
+    # will typically be a single element, but we join in case there are more.        
+    script = " ".join(argv[2:])                                                      
+                                                                                     
+    # Shell-style single quoting without using `shlex`:                              
+    # - Wrap the whole string in single quotes.                                      
+    # - Replace each internal single quote ' with '\'' (close, escaped quote, reopen)
+    if script:                                                                       
+        script_quoted = "'" + script.replace("'", "'\\''") + "'"                     
+    else:                                                                            
+        # Empty script: still represent it explicitly for the shell.                 
+        script_quoted = "''"                                                         
+                                                                                     
+    # Build a single command string for srt, e.g.:                                   
+    #   "/bin/bash -lc 'ls -la'"                                                     
+    cmd_str = f"{argv[0]} {argv[1]} {script_quoted}"                                 
+                                                                                     
+    return [_SRT_BIN, "--settings", str(eff_path), cmd_str]                          
 
-            ["srt", "--settings", "<path>", *argv]
-    """
-
-    if not is_sandbox_effective():
-        return argv
-
-    eff_path = _effective_config_path()
-    return [_SRT_BIN, "--settings", str(eff_path), *argv]
 
 
 def set_srt_sandbox_configuration(name: str) -> None:
