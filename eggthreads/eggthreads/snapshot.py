@@ -87,4 +87,18 @@ class SnapshotBuilder:
 
             messages.append(msg)
 
-        return {"messages": messages}
+        snap: Dict[str, Any] = {"messages": messages}
+
+        # Best-effort: attach approximate token statistics so that UIs
+        # and tools can display context length and per-message token
+        # counts without having to re-scan the snapshot on every
+        # request.  We deliberately ignore failures here so that token
+        # counting never interferes with core snapshot building.
+        try:
+            from .token_count import snapshot_token_stats  # type: ignore
+
+            snap["token_stats"] = snapshot_token_stats(snap)
+        except Exception:
+            pass
+
+        return snap
