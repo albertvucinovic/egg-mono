@@ -545,6 +545,36 @@ class EggDisplayApp:
             "base_tail": base_tail,
         }
 
+    def _current_token_stats(self) -> tuple[Optional[int], Dict[str, Any]]:
+        """Return (context_tokens, api_usage) for the current thread.
+
+        Values are derived from the latest snapshot's ``token_stats``
+        block when present.  On any error or when not available,
+        (None, {}) is returned.
+        """
+
+        ctx_tokens: Optional[int] = None
+        api_usage: Dict[str, Any] = {}
+        try:
+            th = self.db.get_thread(self.current_thread)
+            snap_raw = getattr(th, "snapshot_json", None) if th else None
+            if isinstance(snap_raw, str) and snap_raw:
+                import json as _json
+
+                snap = _json.loads(snap_raw)
+                ts = snap.get("token_stats") or {}
+                if isinstance(ts, dict):
+                    ct = ts.get("context_tokens")
+                    if isinstance(ct, int):
+                        ctx_tokens = ct
+                    au = ts.get("api_usage") or {}
+                    if isinstance(au, dict):
+                        api_usage = au
+        except Exception:
+            ctx_tokens = None
+            api_usage = {}
+        return ctx_tokens, api_usage
+
     def _compose_chat_panel_text(self) -> str:
         """Compose the text for the Chat Messages panel.
 
@@ -573,6 +603,9 @@ class EggDisplayApp:
         # Ensure cache is up to date for the current thread / snapshot.
         self._rebuild_chat_cache_for_current()
         base = self._chat_cache.get("base_tail", "No messages yet.")
+
+        # Load approximate token statistics for the header.
+        ctx_tokens, api_usage = self._current_token_stats()
         ls = self._live_state
         parts: List[str] = [base]
         if ls.get('active_invoke'):
@@ -588,7 +621,34 @@ class EggDisplayApp:
             if ls.get('content'):
                 parts.append(f"\n[Assistant (streaming)]\n{ls['content']}")
 
-        head = f"Thread {self.current_thread[-8:]} | Model: {self._current_model_for_thread(self.current_thread) or 'default'}"
+        # Build header with model and approximate token usage.
+        head_parts: List[str] = []
+        head_parts.append(f"Thread {self.current_thread[-8:]} | Model: {self._current_model_for_thread(self.current_thread) or 'default'}")
+
+        def _fmt_tok(v: int) -> str:
+            # Compact k-style formatting for large numbers, e.g. 1234 -> "1.23k".
+            if v < 1000:
+                return str(v)
+            return f"{v/1000:.2f}k"
+
+        if isinstance(ctx_tokens, int):
+            head_parts.append(f"ctx≈{_fmt_tok(ctx_tokens)}")
+
+        if isinstance(api_usage, dict) and api_usage:
+            ti = api_usage.get("total_input_tokens")
+            to = api_usage.get("total_output_tokens")
+            cc = api_usage.get("approx_call_count")
+            pieces: List[str] = []
+            if isinstance(ti, int):
+                pieces.append(f"in≈{_fmt_tok(ti)}")
+            if isinstance(to, int):
+                pieces.append(f"out≈{_fmt_tok(to)}")
+            if isinstance(cc, int):
+                pieces.append(f"calls={cc}")
+            if pieces:
+                head_parts.append(" ".join(pieces))
+
+        head = "  |  ".join(head_parts)
 
         # Combine historical + streaming text. The historical part is already
         # truncated to a tail window by ``_truncate_for_chat_panel`` so we do
@@ -599,7 +659,38 @@ class EggDisplayApp:
         return head + "\n" + body
 
     def _update_panels(self) -> None:
+        # Update Chat Messages panel content and title with aggregate
+        # token statistics derived from the current snapshot.
         self.chat_output.set_content(self._compose_chat_panel_text())
+
+        try:
+            ctx_tokens, api_usage = self._current_token_stats()
+
+            def _fmt_tok(v: int) -> str:
+                if v < 1000:
+                    return str(v)
+                return f"{v/1000:.2f}k"
+
+            title_parts: List[str] = ["Chat Messages"]
+            if isinstance(ctx_tokens, int):
+                title_parts.append(f"ctx≈{_fmt_tok(ctx_tokens)}")
+            if isinstance(api_usage, dict) and api_usage:
+                ti = api_usage.get("total_input_tokens")
+                to = api_usage.get("total_output_tokens")
+                cc = api_usage.get("approx_call_count")
+                segs: List[str] = []
+                if isinstance(ti, int):
+                    segs.append(f"in≈{_fmt_tok(ti)}")
+                if isinstance(to, int):
+                    segs.append(f"out≈{_fmt_tok(to)}")
+                if isinstance(cc, int):
+                    segs.append(f"calls={cc}")
+                if segs:
+                    title_parts.append(" ".join(segs))
+            self.chat_output.title = "  |  ".join(title_parts)
+        except Exception:
+            # Leave existing title unchanged on any error.
+            pass
 
         # Update System panel title to reflect sandbox status so the
         # user always has a prominent, persistent indicator.
@@ -942,6 +1033,34 @@ class EggDisplayApp:
         msg_id = m.get('msg_id') or ''
         ts_str = _fmt_ts(m.get('ts'))
 
+        # Best-effort lookup of per-message token stats from the
+        # current thread snapshot so we can annotate box titles in the
+        # static console view. We intentionally swallow any errors
+        # here so that missing snapshots or older data do not break
+        # message rendering.
+        pm_tokens: Dict[str, int] = {"content": 0, "reasoning": 0, "tool_calls": 0, "total": 0}
+        try:
+            if msg_id:
+                th = self.db.get_thread(self.current_thread)
+                snap_raw = getattr(th, 'snapshot_json', None) if th else None
+                if isinstance(snap_raw, str) and snap_raw:
+                    import json as _json
+
+                    snap = _json.loads(snap_raw)
+                    ts = snap.get('token_stats') or {}
+                    if isinstance(ts, dict):
+                        pm = ts.get('per_message') or {}
+                        if isinstance(pm, dict) and msg_id in pm:
+                            info = pm[msg_id] or {}
+                            pm_tokens["content"] = int(info.get('content_tokens') or 0)
+                            pm_tokens["reasoning"] = int(info.get('reasoning_tokens') or 0)
+                            pm_tokens["tool_calls"] = int(info.get('tool_calls_tokens') or 0)
+                            pm_tokens["total"] = int(info.get('total_tokens') or (
+                                pm_tokens["content"] + pm_tokens["reasoning"] + pm_tokens["tool_calls"]
+                            ))
+        except Exception:
+            pm_tokens = {"content": 0, "reasoning": 0, "tool_calls": 0, "total": 0}
+
         def _panel(renderable, title: str, border: str):
             # Build a unified title with optional timestamp and msg_id
             parts = [title]
@@ -971,6 +1090,9 @@ class EggDisplayApp:
             title = '[bold green]User[/bold green]'
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
+            # Attach content token count if available
+            if pm_tokens["content"]:
+                title += f" [dim](tok={pm_tokens['content']})[/dim]"
             _panel(Text(content, no_wrap=False, overflow='fold', style='green'), title, 'green')
             return
 
@@ -978,12 +1100,16 @@ class EggDisplayApp:
             title = '[bold cyan]Assistant[/bold cyan]'
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
+            if pm_tokens["content"]:
+                title += f" [dim](tok={pm_tokens['content']})[/dim]"
             # Prefer to show reasoning first if present
             reas = m.get('reasoning') or m.get('reasoning_content')
             if isinstance(reas, str) and reas.strip():
                 reason_title = '[bold magenta]Reasoning[/bold magenta]'
                 if model_key:
                     reason_title += f" [dim](model: {model_key})[/dim]"
+                if pm_tokens["reasoning"]:
+                    reason_title += f" [dim](tok={pm_tokens['reasoning']})[/dim]"
                 _panel(Text(reas, no_wrap=False, overflow='fold'), reason_title, 'magenta')
             if content:
                 if self._looks_markdown(content):
@@ -1006,7 +1132,10 @@ class EggDisplayApp:
                     else:
                         args_str = str(args or '')
                     lines.append(f"{name}({args_str})")
-                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold'), title='Tool Calls', border_style='yellow'))
+                tc_title = 'Tool Calls'
+                if pm_tokens["tool_calls"]:
+                    tc_title += f" [dim](tok={pm_tokens['tool_calls']})[/dim]"
+                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold'), title=tc_title, border_style='yellow'))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
             if isinstance(tstream, dict) and tstream:
@@ -1025,6 +1154,9 @@ class EggDisplayApp:
             title = f'[bold yellow]{name}[/bold yellow]'
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
+            # For tool messages, content tokens are the primary signal.
+            if pm_tokens["content"]:
+                title += f" [dim](tok={pm_tokens['content']})[/dim]"
             _panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             return
 
