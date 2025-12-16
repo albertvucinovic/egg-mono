@@ -48,8 +48,8 @@ from eggthreads import (  # type: ignore
     resume_thread,
 )
 from eggthreads import (  # type: ignore
-    get_srt_sandbox_status,
-    set_srt_sandbox_configuration,
+    get_sandbox_status,
+    set_sandbox_config,
     set_sandbox_globally_enabled,
 )
 from eggthreads.event_watcher import EventWatcher  # type: ignore
@@ -277,7 +277,7 @@ class EggDisplayApp:
         # the warning message in the rolling system log so that it
         # remains visible for the entire session.
         try:
-            self._sandbox_status = get_srt_sandbox_status()
+            self._sandbox_status = get_sandbox_status()
             warn = self._sandbox_status.get('warning')
             if isinstance(warn, str) and warn:
                 self._log_system(f"[bold red]Sandbox warning:[/bold red] {warn}")
@@ -2275,7 +2275,7 @@ class EggDisplayApp:
         elif cmd == 'toggleSandboxing':
             # Toggle process-wide sandbox usage (srt wrapping).
             try:
-                sb_before = get_srt_sandbox_status()
+                sb_before = get_sandbox_status()
             except Exception as e:
                 self._log_system(f'/toggleSandboxing error (status): {e}')
                 return
@@ -2293,7 +2293,7 @@ class EggDisplayApp:
 
             # Refresh and log a concise summary
             try:
-                self._sandbox_status = get_srt_sandbox_status()
+                self._sandbox_status = get_sandbox_status()
             except Exception as e:
                 self._log_system(f'/toggleSandboxing error (refresh): {e}')
                 return
@@ -2335,9 +2335,10 @@ class EggDisplayApp:
                 self._log_system('Usage: /setSrtSandboxConfiguration <file.json>')
                 return
             try:
-                set_srt_sandbox_configuration(name)
+                # Update process-wide config.
+                set_sandbox_config(enabled=bool(getattr(self, '_sandbox_status', {}).get('enabled', True)), config_name=name)
                 # Refresh sandbox status and log a concise summary
-                self._sandbox_status = get_srt_sandbox_status()
+                self._sandbox_status = get_sandbox_status()
                 cfg_path = self._sandbox_status.get('config_path') or ''
                 self._log_system(f"Sandbox configuration set to: {cfg_path}")
 
