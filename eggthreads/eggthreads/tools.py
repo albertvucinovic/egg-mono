@@ -93,7 +93,7 @@ def create_default_tools() -> ToolRegistry:
 
     # bash
     def _bash(args: Dict[str, Any]):
-        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_config
+        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
         from .db import ThreadsDB
 
         script = args.get('script', '')
@@ -107,15 +107,17 @@ def create_default_tools() -> ToolRegistry:
             try:
                 db = ThreadsDB()
                 sb = get_thread_sandbox_config(db, tid)
-                argv = wrap_argv_for_sandbox_with_config(
+                argv = wrap_argv_for_sandbox_with_settings(
                     base_argv,
                     enabled=sb.enabled,
-                    config_name=sb.config_name,
+                    settings=sb.settings,
                 )
             except Exception:
                 argv = base_argv
         else:
-            argv = wrap_argv_for_sandbox_with_config(base_argv, enabled=None, config_name=None)
+            # No thread context: default behaviour (use default policy).
+            from .sandbox import wrap_argv_for_sandbox
+            argv = wrap_argv_for_sandbox(base_argv)
         res = subprocess.run(argv, capture_output=True, text=True)
         out = ''
         if res.stdout:
@@ -144,7 +146,7 @@ def create_default_tools() -> ToolRegistry:
         global interpreter state.
         """
 
-        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_config
+        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
         from .db import ThreadsDB
 
         script = args.get('script', '')
@@ -158,16 +160,16 @@ def create_default_tools() -> ToolRegistry:
             try:
                 db = ThreadsDB()
                 sb = get_thread_sandbox_config(db, thread_id)
-                argv = wrap_argv_for_sandbox_with_config(
+                argv = wrap_argv_for_sandbox_with_settings(
                     base_argv,
                     enabled=sb.enabled,
-                    config_name=sb.config_name,
+                    settings=sb.settings,
                 )
             except Exception:
                 argv = base_argv
         else:
-            # No thread context: fall back to process-wide configuration.
-            argv = wrap_argv_for_sandbox_with_config(base_argv, enabled=None, config_name=None)
+            from .sandbox import wrap_argv_for_sandbox
+            argv = wrap_argv_for_sandbox(base_argv)
 
         res = subprocess.run(argv, capture_output=True, text=True)
         out = ''

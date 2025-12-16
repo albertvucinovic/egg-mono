@@ -10,26 +10,31 @@ Goals
 
 * Provide a **single place** where eggthreads decides whether tool
   executions (bash, python, etc.) should be wrapped in the sandbox.
-* Keep configuration **per working directory** (the directory from
-  which the process is started), under ``.egg/srt/``.
-* Offer a small public API so callers can control the sandbox
-  configuration and surface status in UIs.
+* Keep a **default** configuration per working directory (the directory
+  from which the process is started), under ``.egg/srt/default.json``.
+
+* Support **per-thread** sandbox configuration via DB events:
+
+  - A thread may have a ``sandbox.config`` event whose payload contains
+    the **full sandbox settings JSON**.
+  - If a thread has no config event, it inherits the nearest ancestor's
+    config event.
+  - If neither the thread nor any ancestor has a config event, the
+    default settings file ``.egg/srt/default.json`` is used.
+
+  There is intentionally **no process-wide** sandbox configuration.
 
 Key concepts
 ------------
 
-* The sandbox is considered **enabled by default** for the current
-  process.  Applications (or UIs such as Egg's ``/toggleSandboxing``
-  command) can enable or disable it at runtime via
-  :func:`set_sandbox_globally_enabled`.
-
 * The sandbox is considered **available** if an ``srt`` binary can be
   resolved.  The binary path can be overridden via ``EGG_SRT_BIN``.
 
-* Effective behaviour:
+* Effective behaviour (per tool invocation):
 
-  - If ``enabled`` *and* ``available`` → tool commands are wrapped as
-    ``srt --settings <effective-config> <original argv...>``.
+  - If the *effective thread config* has ``enabled=True`` *and* ``srt``
+    is available → tool commands are wrapped as
+    ``srt --settings <effective-config> <command>``.
   - Otherwise the original argv is returned unchanged and callers run
     tools directly (unsandboxed).
 
@@ -40,31 +45,26 @@ Key concepts
     - On the filesystem, only the current directory is allowed for
       reading and writing.
 
-* A *configuration name* selects which base config file to use from
-  ``.egg/srt/<name>``.  For example, the UI command::
+* Optional *named* configuration files may exist under ``.egg/srt/``
+  (e.g. ``.egg/srt/readall.json``). UIs may load such a file and store
+  the full JSON into a ``sandbox.config`` event.
 
-      /setSrtSandboxConfiguration readall.json
-
-  corresponds to the file ``.egg/srt/readall.json`` in the current
-  directory.  The active configuration name is process-local; callers
-  may change it at runtime via :func:`set_srt_sandbox_configuration`.
-
-* Regardless of which configuration is selected, **all files under
+* Regardless of which configuration is used, **all files under
   ``.egg/srt/`` are always off limits for writing inside the sandbox**.
-  We enforce this by augmenting every effective config with
-  ``filesystem.denyWrite`` entries for the ``.egg/srt`` directory.
+  In particular, ``.egg/srt/default.json`` must never be writable from
+  within the sandbox. We enforce this by augmenting every effective
+  config with mandatory ``filesystem.denyWrite`` entries.
 
 Public API
 ----------
 
-* :func:`wrap_argv_for_sandbox(argv)` – prepend ``srt --settings ...``
-  when sandboxing is active.  Used by tool implementations.
-* :func:`set_srt_sandbox_configuration(name)` – select a base config
-  file (relative name inside ``.egg/srt/``).
-* :func:`get_srt_sandbox_configuration()` – inspect current
-  configuration selection.
-* :func:`get_srt_sandbox_status()` – return a dict describing
-  enable/availability/effective status for UIs.
+* :func:`wrap_argv_for_sandbox_with_settings(argv, enabled, settings)` –
+  prepend ``srt --settings ...`` when sandboxing is effective.
+* :func:`get_thread_sandbox_config(db, thread_id)` – resolve the
+  effective per-thread configuration (including ancestor inheritance).
+* :func:`set_thread_sandbox_config(db, thread_id, ...)` – persist a
+  per-thread configuration as an event containing the full JSON.
+* :func:`get_thread_sandbox_status(db, thread_id)` – status dict for UIs.
 
 The implementation is deliberately self‑contained and avoids importing
 other eggthreads modules to prevent circular imports.
@@ -73,6 +73,7 @@ other eggthreads modules to prevent circular imports.
 from dataclasses import dataclass
 import json
 import os
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
@@ -118,36 +119,27 @@ def _default_config_dict() -> Dict[str, object]:
     ``.egg/srt/`` and select them via :func:`set_srt_sandbox_configuration`.
     """
 
+    # NOTE: sandbox-runtime currently supports a deny-only model for
+    # reads (``filesystem.denyRead``). That means we cannot express
+    # "allow reads only under ." in a portable way. We *can* express
+    # "allow writes only under ." (``filesystem.allowWrite``).
+
     return {
-        # Allow outbound network access to a reasonable set of common
-        # developer domains by default. Users who want tighter
-        # restrictions can supply their own config with a more
-        # constrained allowedDomains list.
+        # Secure-by-default network: empty allowlist means "deny all".
         "network": {
-            "allowedDomains": [
-                "github.com",
-                "*.github.com",
-                "api.github.com",
-                "npmjs.org",
-                "*.npmjs.org",
-                "pypi.org",
-                "*.pypi.org",
-            ],
-            # Required by the sandbox-runtime schema; leave empty by
-            # default so that only allowedDomains constraints apply.
+            "allowedDomains": [],
             "deniedDomains": [],
         },
         "filesystem": {
-            # Only allow reading/writing within the current directory by
-            # default.  Paths are resolved relative to the sandboxed
-            # process' CWD; we deliberately avoid absolute host paths
-            # here so the config remains portable.
-            "allowRead": ["."],
-            "allowWrite": ["."],
-            # denyRead/denyWrite will be extended at runtime to include
-            # our own config directory.
+            # Read restrictions are deny-only; we keep this empty by
+            # default. Users may add explicit denies for sensitive
+            # paths.
             "denyRead": [],
-            "denyWrite": [],
+            # Write restrictions are allow-only.
+            "allowWrite": ["."],
+            # Denies will be extended at runtime to always protect our
+            # settings directory and default.json.
+            "denyWrite": [".egg/srt"],
         },
     }
 
@@ -173,13 +165,9 @@ def _default_config_path() -> Path:
 # ``EGG_SANDBOX_MODE`` environment variable so that configuration is
 # explicit in application logic instead of being hidden in the
 # environment.
-_SANDBOX_ENABLED: bool = True
+_DEFAULT_ENABLED: bool = True
 
 _SRT_BIN = (os.environ.get("EGG_SRT_BIN") or "srt").strip() or "srt"
-_SRT_AVAILABLE = shutil.which(_SRT_BIN) is not None
-
-
-_CURRENT_CONFIG_NAME: str = "default.json"  # relative name inside .egg/srt
 
 
 def _normalize_name(name: str) -> str:
@@ -223,70 +211,33 @@ def _load_config(path: Path) -> Dict[str, object]:
     return _default_config_dict()
 
 
-def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
-    """Return a copy of *cfg* with mandatory protections applied.
-
-    In particular we ensure that the sandbox can never write into the
-    ``.egg/srt`` directory which holds configuration files for this
-    process, even if the user‑supplied config omitted such rules.
-    """
-
-    import copy
-
-    out = copy.deepcopy(cfg) if isinstance(cfg, dict) else {}
-    fs = out.setdefault("filesystem", {})
-    if not isinstance(fs, dict):
-        fs = {}
-        out["filesystem"] = fs
-
-    deny = fs.get("denyWrite")
-    if not isinstance(deny, list):
-        deny = []
-
-    protected_paths = {str(_ensure_srt_dir())}
-    for p in protected_paths:
-        if p not in deny:
-            deny.append(p)
-    fs["denyWrite"] = deny
-    return out
-
-
 def _effective_config_path(config_name: Optional[str] = None) -> Path:
-    """Return the path to the *effective* config used for sandbox runs.
+    """Backward compatible helper.
 
-    This function reads the currently selected source config
-    (``.egg/srt/<name>`` or ``default.json``), augments it with the
-    mandatory protections and writes the result to
-    ``.egg/srt/_effective.json``.  The returned path is passed to
-    ``srt --settings``.
+    We no longer have a process-wide active config. This function is
+    retained so older callers that expect a per-file effective config
+    can keep working.
     """
 
-    cfg_dir = _ensure_srt_dir()
-    norm_name = _normalize_name(config_name or _CURRENT_CONFIG_NAME)
-    src_path = _config_source_path(norm_name)
-    cfg = _load_config(src_path)
-    eff = _augment_with_protections(cfg)
-
-    # Use a per-config effective file name to avoid races between
-    # concurrently running tool invocations that use different configs.
-    eff_path = cfg_dir / f"_effective__{norm_name}"
     try:
-        eff_path.write_text(json.dumps(eff, indent=2), encoding="utf-8")
+        src_path = _config_source_path(_normalize_name(config_name or "default.json"))
+        cfg = _load_config(src_path)
     except Exception:
-        # Best-effort: if writing fails the sandbox wrapper will still
-        # try to reference this path, and srt will fail fast.
-        pass
-    return eff_path
+        cfg = _load_config(_default_config_path())
+    return _effective_config_path_from_settings(cfg)
 
 
 def sandbox_enabled() -> bool:
-    """Return whether sandboxing is logically enabled.
+    """Return the default sandbox-enabled policy.
 
-    This does **not** guarantee that ``srt`` is available; see
-    :func:`get_srt_sandbox_status`.
+    There is no process-wide sandbox *configuration*; however, Egg
+    historically supported disabling sandboxing globally via
+    ``EGG_SANDBOX_MODE``. We keep this as an emergency escape hatch.
+
+    Per-thread config can override this default via ``sandbox.config``
+    events.
     """
 
-    # Backwards compatibility: allow env var to force-disable.
     try:
         mode = str(os.environ.get("EGG_SANDBOX_MODE") or "").strip().lower()
         if mode in ("0", "off", "false", "no"):
@@ -295,92 +246,101 @@ def sandbox_enabled() -> bool:
             return True
     except Exception:
         pass
-
-    return _SANDBOX_ENABLED
+    return _DEFAULT_ENABLED
 
 
 def sandbox_available() -> bool:
     """Return whether an ``srt`` binary is available."""
-
-    return _SRT_AVAILABLE
+    try:
+        return shutil.which(_SRT_BIN) is not None
+    except Exception:
+        return False
 
 
 def set_sandbox_globally_enabled(enabled: bool) -> None:
-    """Enable or disable sandboxing for this process.
+    """Backward-compatible no-op.
 
-    When ``enabled`` is False, :func:`wrap_argv_for_sandbox` will
-    never inject ``srt`` and tools run unsandboxed.  When True,
-    sandboxing becomes active as long as the ``srt`` binary is
-    available.  This is the primary programmatic toggle used by UIs
-    such as Egg's ``/toggleSandboxing`` command.
+    Egg previously had a process-wide sandbox toggle. The current
+    architecture is thread/event based.
+
+    We keep this function so existing callers do not break, but it only
+    changes the default enable policy for threads *created in this
+    process* that do not have an explicit (or inherited) sandbox config.
     """
 
-    global _SANDBOX_ENABLED
-    _SANDBOX_ENABLED = bool(enabled)
+    global _DEFAULT_ENABLED
+    _DEFAULT_ENABLED = bool(enabled)
+
+
+def set_sandbox_config(*, enabled: bool, config_name: Optional[str] = None) -> None:
+    """Backward-compatible helper.
+
+    This does **not** implement a process-wide configuration anymore.
+    It only:
+
+      * sets the default enabled policy for the process, and
+      * validates that the named config exists under .egg/srt.
+
+    Callers that want a thread to actually use the config must store it
+    into the thread via :func:`set_thread_sandbox_config`.
+    """
+
+    set_sandbox_globally_enabled(bool(enabled))
+    if isinstance(config_name, str) and config_name.strip():
+        norm = _normalize_name(config_name)
+        cfg_dir = _ensure_srt_dir()
+        path = cfg_dir / norm
+        if not path.exists():
+            raise ValueError(f"srt configuration file not found: {path}")
+
+
+def set_srt_sandbox_configuration(name: str) -> None:
+    """Backward compatible alias."""
+
+    set_sandbox_config(enabled=sandbox_enabled(), config_name=name)
 
 
 def is_sandbox_effective() -> bool:
     """Return True if tool commands will actually be sandboxed."""
-
     return sandbox_enabled() and sandbox_available()
 
 
-def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:                    
-    """Return ``argv`` wrapped with ``srt --settings`` when active.         
-                                                                            
-    Args:                                                                   
-        argv: The original command argv, e.g. ``["/bin/bash", "-lc", script]
-                                                                            
-    Returns:                                                                
-        A new argv list. If sandboxing is disabled or unavailable, this is  
-        identical to the input.                                             
-                                                                            
-        When sandboxing is enabled:                                         
-                                                                            
-        * For generic commands, we return::                                 
-                                                                            
-              ["srt", "--settings", "<path>", *argv]                        
-                                                                            
-        * For the specific ``/bin/bash -lc <script>`` pattern used by the   
-          bash tool, we adapt to how `srt` expects its command argument and 
-          delegate to :func:`wrap_bash_argv_for_sandbox`.                   
-    """                                                                     
-    return wrap_argv_for_sandbox_with_config(argv, enabled=None, config_name=None)
+def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:
+    """Backward-compatible convenience wrapper.
 
-
-def wrap_argv_for_sandbox_with_config(
-    argv: List[str],
-    *,
-    enabled: Optional[bool],
-    config_name: Optional[str],
-) -> List[str]:
-    """Wrap an argv for sandbox execution, optionally overriding config.
-
-    ``srt`` effectively expects a *single command string* argument (it
-    executes the provided command via a shell-like layer). Passing
-    ``srt`` a list of argv tokens often breaks when tokens contain
-    characters that need quoting (parentheses, quotes, redirections,
-    etc.).
-
-    So when sandboxing is effective, we:
-
-      1) build the effective settings file, and
-      2) pass a single shell-escaped command string built from ``argv``.
+    If called without thread context, we use the default settings
+    (``.egg/srt/default.json``) and the default enabled policy.
     """
 
-    eff_enabled = sandbox_enabled() if enabled is None else bool(enabled)
-    if not (eff_enabled and sandbox_available()):
+    return wrap_argv_for_sandbox_with_settings(argv, enabled=sandbox_enabled(), settings=_load_config(_default_config_path()))
+
+
+def wrap_argv_for_sandbox_with_settings(
+    argv: List[str],
+    *,
+    enabled: bool,
+    settings: Dict[str, object],
+) -> List[str]:
+    """Wrap an argv for sandbox execution with explicit settings.
+
+    ``srt`` expects a single command string (it executes via a
+    shell-like layer). When sandboxing is effective, we:
+
+      1) write the effective settings file (augmented with mandatory
+         protections), and
+      2) pass a shell-escaped command string built from ``argv``.
+    """
+
+    if not (bool(enabled) and sandbox_available()):
         return argv
 
-    eff_path = _effective_config_path(config_name)
+    eff_path = _effective_config_path_from_settings(settings)
 
-    # Build a single command string for srt.
     try:
         import shlex
 
         cmd_str = shlex.join(list(argv))
     except Exception:
-        # Very conservative fallback.
         cmd_str = " ".join(str(x) for x in argv)
 
     return [_SRT_BIN, "--settings", str(eff_path), cmd_str]
@@ -389,13 +349,32 @@ def wrap_argv_for_sandbox_with_config(
 def wrap_bash_argv_for_sandbox(argv: List[str], eff_path) -> List[str]:  # pragma: no cover
     """Backward-compatible wrapper.
 
-    Historically we had a special bash quoting path. The generic
-    :func:`wrap_argv_for_sandbox_with_config` implementation now does
-    correct shell-escaping for all commands, so this is retained only
-    for callers that still import it.
+    Retained for callers that still import it.
     """
 
     return [_SRT_BIN, "--settings", str(eff_path), " ".join(argv)]
+
+
+def wrap_argv_for_sandbox_with_config(
+    argv: List[str],
+    *,
+    enabled: Optional[bool],
+    config_name: Optional[str],
+) -> List[str]:
+    """Backward compatible wrapper used by older callers.
+
+    We now store full settings JSON in thread events. This helper still
+    accepts a config name, loads that file (or default.json) and
+    delegates to :func:`wrap_argv_for_sandbox_with_settings`.
+    """
+
+    eff_enabled = sandbox_enabled() if enabled is None else bool(enabled)
+    try:
+        p = _config_source_path(_normalize_name(config_name or "default.json"))
+        settings = _load_config(p)
+    except Exception:
+        settings = _load_config(_default_config_path())
+    return wrap_argv_for_sandbox_with_settings(argv, enabled=eff_enabled, settings=settings)
 
 
 @dataclass
@@ -403,44 +382,92 @@ class ThreadSandboxConfig:
     """Effective sandbox selection for a thread."""
 
     enabled: bool
-    config_name: str
+    settings: Dict[str, object]
+    source: str
+
+
+def _parent_id(db: "ThreadsDB", thread_id: str) -> Optional[str]:
+    try:
+        row = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=? LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        if row and isinstance(row[0], str) and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    return None
+
+
+def _nearest_sandbox_event_payload(db: "ThreadsDB", thread_id: str) -> Optional[Dict[str, object]]:
+    """Return the nearest ancestor's sandbox.config payload (including self)."""
+
+    tid: Optional[str] = thread_id
+    seen: set[str] = set()
+    while tid and tid not in seen:
+        seen.add(tid)
+        try:
+            row = db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type='sandbox.config' ORDER BY event_seq DESC LIMIT 1",
+                (tid,),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row is not None:
+            try:
+                payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                return payload  # may be legacy (config_name-only)
+        tid = _parent_id(db, tid)
+    return None
 
 
 def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxConfig:
-    """Return the thread's sandbox config (falls back to process defaults).
+    """Return the effective sandbox config for a thread.
 
-    The config is stored as the latest ``sandbox.config`` event in the
-    thread. When absent, we fall back to this process' current sandbox
-    settings (global enable flag + selected config name).
+    Resolution order:
+
+    1) Latest ``sandbox.config`` event on the thread.
+    2) Latest ``sandbox.config`` event on the nearest ancestor.
+    3) ``.egg/srt/default.json`` (created if missing).
+
+    The returned config contains the full settings dict. Mandatory
+    protections (e.g. denying writes to ``.egg/srt``) are applied at
+    execution time when we write the *effective* settings file.
     """
 
     enabled = sandbox_enabled()
-    cfg_name = _normalize_name(_CURRENT_CONFIG_NAME)
+    settings: Dict[str, object] = _load_config(_default_config_path())
+    source = "default.json"
 
-    try:
-        cur = db.conn.execute(
-            "SELECT payload_json FROM events WHERE thread_id=? AND type='sandbox.config' ORDER BY event_seq DESC LIMIT 1",
-            (thread_id,),
-        )
-        row = cur.fetchone()
-    except Exception:
-        row = None
+    payload = _nearest_sandbox_event_payload(db, thread_id)
+    if isinstance(payload, dict) and payload:
+        # Enabled flag
+        if "enabled" in payload:
+            try:
+                enabled = bool(payload.get("enabled"))
+            except Exception:
+                pass
 
-    if row is not None:
-        try:
-            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-        except Exception:
-            payload = {}
-        if isinstance(payload, dict):
-            if "enabled" in payload:
+        # Preferred modern format: payload contains full settings JSON.
+        cfg = payload.get("settings") or payload.get("config")
+        if isinstance(cfg, dict) and cfg:
+            settings = cfg  # type: ignore[assignment]
+            source = str(payload.get("source") or payload.get("config_source") or "event")
+        else:
+            # Backward compatibility: payload only has a config_name.
+            nm = payload.get("config_name")
+            if isinstance(nm, str) and nm.strip():
                 try:
-                    enabled = bool(payload.get("enabled"))
+                    p = _config_source_path(_normalize_name(nm))
+                    settings = _load_config(p)
+                    source = f"file:{_normalize_name(nm)}"
                 except Exception:
                     pass
-            if isinstance(payload.get("config_name"), str) and payload.get("config_name").strip():
-                cfg_name = _normalize_name(payload.get("config_name"))
 
-    return ThreadSandboxConfig(enabled=bool(enabled), config_name=cfg_name)
+    return ThreadSandboxConfig(enabled=bool(enabled), settings=dict(settings), source=str(source))
 
 
 def set_thread_sandbox_config(
@@ -449,6 +476,7 @@ def set_thread_sandbox_config(
     *,
     enabled: bool,
     config_name: Optional[str] = None,
+    settings: Optional[Dict[str, object]] = None,
     reason: str = "user",
 ) -> None:
     """Persist sandbox configuration for a thread.
@@ -464,16 +492,32 @@ def set_thread_sandbox_config(
         "reason": reason,
     }
 
-    if isinstance(config_name, str) and config_name.strip():
-        norm = _normalize_name(config_name)
-        # Validate: config must exist under .egg/srt.
-        cfg_dir = _ensure_srt_dir()
-        path = cfg_dir / norm
-        if not path.exists():
-            raise ValueError(f"srt configuration file not found: {path}")
-        payload["config_name"] = norm
+    # Determine which settings JSON to persist.
+    src_name: str = ""
+
+    if isinstance(settings, dict) and settings:
+        payload["settings"] = settings
+        src_name = "inline"
     else:
-        payload["config_name"] = _normalize_name(_CURRENT_CONFIG_NAME)
+        # If a config file name was provided, load it and persist the
+        # full JSON in the event.
+        if isinstance(config_name, str) and config_name.strip():
+            norm = _normalize_name(config_name)
+            cfg_dir = _ensure_srt_dir()
+            path = cfg_dir / norm
+            if not path.exists():
+                raise ValueError(f"srt configuration file not found: {path}")
+            payload["settings"] = _load_config(path)
+            payload["source"] = f"file:{norm}"
+            src_name = norm
+        else:
+            # Default
+            payload["settings"] = _load_config(_default_config_path())
+            payload["source"] = "default.json"
+            src_name = "default.json"
+
+    if src_name and "source" not in payload:
+        payload["source"] = src_name
 
     try:
         db.append_event(
@@ -491,9 +535,9 @@ def set_thread_sandbox_config(
 def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, object]:
     """Return sandbox status for a specific thread.
 
-    This mirrors :func:`get_srt_sandbox_status` but derives the
-    *configured* enabled/config_name values from the thread's
-    ``sandbox.config`` event (falling back to process defaults).
+    This mirrors :func:`get_sandbox_status` but derives the configured
+    enabled/settings values from the thread's inherited
+    ``sandbox.config`` event.
     """
 
     cfg = get_thread_sandbox_config(db, thread_id)
@@ -506,9 +550,14 @@ def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, obje
             "with: npm install -g @anthropic-ai/sandbox-runtime."
         )
 
-    # Resolve source config path (falls back to default.json if missing).
+    # Best-effort: source_path is only meaningful for default.json or
+    # file:* sources.
     try:
-        src = _config_source_path(cfg.config_name)
+        if isinstance(cfg.source, str) and cfg.source.startswith("file:"):
+            nm = cfg.source.split(":", 1)[1]
+            src = _config_source_path(_normalize_name(nm))
+        else:
+            src = _default_config_path()
     except Exception:
         src = _default_config_path()
 
@@ -518,7 +567,7 @@ def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, obje
         "effective": effective,
         "mode": "on" if bool(cfg.enabled) else "off",
         "srt_bin": _SRT_BIN,
-        "config_name": _normalize_name(cfg.config_name),
+        "config_source": cfg.source,
         "config_path": str(src),
         "settings_dir": str(_ensure_srt_dir()),
         "warning": warning,
@@ -561,96 +610,98 @@ def set_subtree_sandbox_config(
         except Exception:
             continue
 
-
-
-def set_srt_sandbox_configuration(name: str) -> None:
-    """Backward compatible alias for :func:`set_sandbox_config`."""
-
-    set_sandbox_config(enabled=sandbox_enabled(), config_name=name)
-
-
-def set_sandbox_config(*, enabled: bool, config_name: Optional[str] = None) -> None:
-    """Set the process-wide sandbox configuration.
-
-    This is the single public entry point for configuring sandboxing
-    at process scope.
-    """
-
-    global _CURRENT_CONFIG_NAME
-    set_sandbox_globally_enabled(bool(enabled))
-    if isinstance(config_name, str) and config_name.strip():
-        norm = _normalize_name(config_name)
-        cfg_dir = _ensure_srt_dir()
-        path = cfg_dir / norm
-        if not path.exists():
-            raise ValueError(f"srt configuration file not found: {path}")
-        _CURRENT_CONFIG_NAME = norm
-
-
 @dataclass
 class SrtSandboxConfiguration:
-    """Simple struct describing the current configuration selection."""
+    """Metadata about the per-working-directory sandbox settings."""
 
-    name: str
     settings_dir: str
-    source_path: str
+    default_path: str
 
 
 def get_srt_sandbox_configuration() -> SrtSandboxConfiguration:
-    """Return the currently selected sandbox configuration metadata."""
+    """Return metadata for the working-directory settings folder."""
 
     cfg_dir = _ensure_srt_dir()
-    src = _config_source_path(_CURRENT_CONFIG_NAME)
     return SrtSandboxConfiguration(
-        name=_normalize_name(_CURRENT_CONFIG_NAME),
         settings_dir=str(cfg_dir),
-        source_path=str(src),
+        default_path=str(_default_config_path()),
     )
 
 
-def get_srt_sandbox_status() -> Dict[str, object]:
-    """Return a summary of sandbox status for UIs.
+def get_sandbox_status() -> Dict[str, object]:
+    """Return global sandbox *availability* status.
 
-    The returned dict contains at least:
-
-    - ``enabled`` (bool): sandboxing logically enabled.
-    - ``available`` (bool): ``srt`` binary was found.
-    - ``effective`` (bool): tools will actually be sandboxed.
-    - ``mode`` (str): "on" or "off" representing the current
-      process-wide sandbox toggle.
-    - ``srt_bin`` (str): binary name/path used for ``srt``.
-    - ``config_name`` (str): current configuration name.
-    - ``config_path`` (str): path to the selected source config file.
-    - ``settings_dir`` (str): directory holding configuration files.
-    - ``warning`` (Optional[str]): human-readable warning message when
-      sandboxing is enabled but not available.
+    There is no process-wide sandbox configuration; this is intended
+    for UIs to show whether sandboxing can be effective when enabled in
+    a thread.
     """
 
-    cfg = get_srt_sandbox_configuration()
-    effective = is_sandbox_effective()
     warning: Optional[str] = None
     if sandbox_enabled() and not sandbox_available():
         warning = (
-            "Sandboxing is enabled but the 'srt' CLI was not found. "
+            "Sandboxing is enabled by default but the 'srt' CLI was not found. "
             "Tool commands will run *without* a sandbox. Install it "
             "with: npm install -g @anthropic-ai/sandbox-runtime."
         )
 
+    cfg = get_srt_sandbox_configuration()
     return {
-        "enabled": sandbox_enabled(),
         "available": sandbox_available(),
-        "effective": effective,
-        "mode": "on" if sandbox_enabled() else "off",
         "srt_bin": _SRT_BIN,
-        "config_name": cfg.name,
-        "config_path": cfg.source_path,
         "settings_dir": cfg.settings_dir,
+        "default_config_path": cfg.default_path,
         "warning": warning,
     }
 
 
-def get_sandbox_status() -> Dict[str, object]:
-    """Preferred alias for :func:`get_srt_sandbox_status`."""
+# ---------------------------------------------------------------------------
+# Internal helpers (effective settings file)
+# ---------------------------------------------------------------------------
 
-    return get_srt_sandbox_status()
+
+def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
+    """Return a copy of *cfg* with mandatory protections applied."""
+
+    import copy
+
+    out = copy.deepcopy(cfg) if isinstance(cfg, dict) else {}
+    fs = out.setdefault("filesystem", {})
+    if not isinstance(fs, dict):
+        fs = {}
+        out["filesystem"] = fs
+
+    deny = fs.get("denyWrite")
+    if not isinstance(deny, list):
+        deny = []
+
+    # Always protect our settings directory and the default.json file.
+    srt_dir = _ensure_srt_dir()
+    protected = [str(srt_dir), str((srt_dir / "default.json").resolve())]
+    for p in protected:
+        if p not in deny:
+            deny.append(p)
+    fs["denyWrite"] = deny
+    return out
+
+
+def _effective_config_path_from_settings(settings: Dict[str, object]) -> Path:
+    """Write an augmented settings file and return its path."""
+
+    cfg_dir = _ensure_srt_dir()
+    eff = _augment_with_protections(settings if isinstance(settings, dict) else {})
+
+    # Content-addressed filename to avoid races between concurrent
+    # invocations using different settings.
+    try:
+        canon = json.dumps(eff, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        h = hashlib.sha256(canon).hexdigest()[:16]
+    except Exception:
+        h = os.urandom(8).hex()
+
+    eff_path = cfg_dir / f"_effective__{h}.json"
+    try:
+        eff_path.write_text(json.dumps(eff, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return eff_path
 
