@@ -49,8 +49,6 @@ from eggthreads import (  # type: ignore
 )
 from eggthreads import (  # type: ignore
     get_sandbox_status,
-    set_sandbox_config,
-    set_sandbox_globally_enabled,
 )
 from eggthreads.event_watcher import EventWatcher  # type: ignore
 
@@ -273,9 +271,7 @@ class EggDisplayApp:
         # Last time we refreshed the children tree panel (sec since epoch)
         self._last_children_refresh: float = 0.0
 
-        # Compute initial sandbox status and log any warnings.  We keep
-        # the warning message in the rolling system log so that it
-        # remains visible for the entire session.
+        # Log any global sandbox availability warning.
         try:
             self._sandbox_status = get_sandbox_status()
             warn = self._sandbox_status.get('warning')
@@ -284,23 +280,10 @@ class EggDisplayApp:
         except Exception:
             self._sandbox_status = {}
 
-        # Persist the current process sandbox selection as the initial
-        # sandbox config for the newly created root thread. This ensures
-        # that child threads spawned later can inherit the *thread*
-        # configuration (event-sourced) rather than relying on whatever
-        # happens to be configured in a future process.
-        try:
-            from eggthreads import set_thread_sandbox_config  # type: ignore
-
-            set_thread_sandbox_config(
-                self.db,
-                self.current_thread,
-                enabled=bool(getattr(self, '_sandbox_status', {}).get('enabled')),
-                config_name=str(getattr(self, '_sandbox_status', {}).get('config_name') or 'default.json'),
-                reason='Egg startup',
-            )
-        except Exception:
-            pass
+        # We intentionally do not persist any sandbox configuration at
+        # startup. Sandboxing is per-thread and inherited from ancestors;
+        # a thread will fall back to .egg/srt/default.json when no
+        # sandbox.config event is present in its ancestry.
 
     # ---------------- TTY helpers ----------------
     def _restore_tty(self) -> None:
@@ -738,7 +721,12 @@ class EggDisplayApp:
 
         # Update System panel title to reflect sandbox status so the
         # user always has a prominent, persistent indicator.
-        sb = getattr(self, '_sandbox_status', {}) or {}
+        try:
+            from eggthreads import get_thread_sandbox_status  # type: ignore
+
+            sb = get_thread_sandbox_status(self.db, self.current_thread)
+        except Exception:
+            sb = {}
         try:
             effective = bool(sb.get('effective'))
         except Exception:
@@ -2273,91 +2261,59 @@ class EggDisplayApp:
             ]
             self._log_system("\n".join(lines))
         elif cmd == 'toggleSandboxing':
-            # Toggle process-wide sandbox usage (srt wrapping).
+            # Toggle sandboxing for the *current thread subtree*.
             try:
-                sb_before = get_sandbox_status()
-            except Exception as e:
-                self._log_system(f'/toggleSandboxing error (status): {e}')
-                return
+                from eggthreads import get_thread_sandbox_status  # type: ignore
 
-            enabled_before = bool(sb_before.get('enabled'))
+                st = get_thread_sandbox_status(self.db, self.current_thread)
+                enabled_before = bool(st.get('enabled'))
+                new_enabled = not enabled_before
 
-            # Flip the logical enabled flag for this process; the
-            # effective status may still be False if the srt binary is
-            # missing even when enabled=True.
-            try:
-                set_sandbox_globally_enabled(not enabled_before)
-            except Exception as e:
-                self._log_system(f'/toggleSandboxing error (set): {e}')
-                return
+                # Toggle only the enabled flag while keeping the current
+                # effective settings. We do this by storing an explicit
+                # sandbox.config event on the current thread.
+                from eggthreads import get_thread_sandbox_config, set_thread_sandbox_config  # type: ignore
 
-            # Refresh and log a concise summary
-            try:
-                self._sandbox_status = get_sandbox_status()
-            except Exception as e:
-                self._log_system(f'/toggleSandboxing error (refresh): {e}')
-                return
-
-            # Persist the toggle for the current thread subtree so that
-            # tools can honour it even when executed from a different
-            # process later.
-            try:
-                from eggthreads import set_subtree_sandbox_config  # type: ignore
-
-                set_subtree_sandbox_config(
+                cfg = get_thread_sandbox_config(self.db, self.current_thread)
+                set_thread_sandbox_config(
                     self.db,
-                    self._thread_root_id(self.current_thread),
-                    enabled=bool(self._sandbox_status.get('enabled')),
-                    config_name=str(self._sandbox_status.get('config_name') or 'default.json'),
+                    self.current_thread,
+                    enabled=new_enabled,
+                    settings=cfg.settings,
                     reason='/toggleSandboxing',
                 )
-            except Exception:
-                pass
 
-            sb = self._sandbox_status
-            enabled = bool(sb.get('enabled'))
-            effective = bool(sb.get('effective'))
-            cfg_name = sb.get('config_name') or 'default.json'
-            warn = sb.get('warning')
-
-            if enabled and effective:
-                self._log_system(f"Sandboxing ENABLED (srt active, config={cfg_name}).")
-            elif enabled and not effective:
-                if isinstance(warn, str) and warn:
-                    self._log_system(f"Sandboxing ENABLED but not effective: {warn}")
+                st2 = get_thread_sandbox_status(self.db, self.current_thread)
+                if bool(st2.get('effective')):
+                    self._log_system('Sandboxing ENABLED for this thread subtree.')
                 else:
-                    self._log_system('Sandboxing ENABLED but not effective (no srt wrapping).')
-            else:
-                self._log_system('Sandboxing DISABLED for this process (no srt wrapping).')
+                    warn = st2.get('warning')
+                    if isinstance(warn, str) and warn:
+                        self._log_system(f"Sandboxing ENABLED but not effective: {warn}")
+                    else:
+                        self._log_system('Sandboxing ENABLED but not effective.')
+            except Exception as e:
+                self._log_system(f'/toggleSandboxing error: {e}')
         elif cmd == 'setSrtSandboxConfiguration':
             name = (arg or '').strip()
             if not name:
                 self._log_system('Usage: /setSrtSandboxConfiguration <file.json>')
                 return
             try:
-                # Update process-wide config.
-                set_sandbox_config(enabled=bool(getattr(self, '_sandbox_status', {}).get('enabled', True)), config_name=name)
-                # Refresh sandbox status and log a concise summary
-                self._sandbox_status = get_sandbox_status()
-                cfg_path = self._sandbox_status.get('config_path') or ''
-                self._log_system(f"Sandbox configuration set to: {cfg_path}")
+                from eggthreads import set_subtree_sandbox_config  # type: ignore
 
-                # Persist the new selection for the current subtree.
-                try:
-                    from eggthreads import set_subtree_sandbox_config  # type: ignore
+                # Apply to this thread from now on. Children without
+                # explicit configs will inherit it.
+                from eggthreads import set_thread_sandbox_config  # type: ignore
 
-                    set_subtree_sandbox_config(
-                        self.db,
-                        self._thread_root_id(self.current_thread),
-                        enabled=bool(self._sandbox_status.get('enabled')),
-                        config_name=str(self._sandbox_status.get('config_name') or 'default.json'),
-                        reason='/setSrtSandboxConfiguration',
-                    )
-                except Exception:
-                    pass
-                warn = self._sandbox_status.get('warning')
-                if isinstance(warn, str) and warn:
-                    self._log_system(f"[bold red]Sandbox warning:[/bold red] {warn}")
+                set_thread_sandbox_config(
+                    self.db,
+                    self.current_thread,
+                    enabled=True,
+                    config_name=name,
+                    reason='/setSrtSandboxConfiguration',
+                )
+                self._log_system(f"Sandbox configuration applied to this thread: {name}")
             except Exception as e:
                 self._log_system(f'/setSrtSandboxConfiguration error: {e}')
 

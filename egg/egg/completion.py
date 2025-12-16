@@ -225,7 +225,6 @@ class EggCompleter(Completer):
             prefix = text[len('/setSrtSandboxConfiguration '):]
             try:
                 from eggthreads import get_srt_sandbox_configuration  # type: ignore
-                import os as _os
                 from pathlib import Path as _Path
 
                 cfg = get_srt_sandbox_configuration()
@@ -347,26 +346,7 @@ class EggCompleter(Completer):
                     yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
             return
 
-        # 9) /setSrtSandboxConfiguration: suggest available .json files
-        # from .egg/srt in the current working directory.
-        if text.startswith('/setSrtSandboxConfiguration '):
-            prefix = text[len('/setSrtSandboxConfiguration '):]
-            try:
-                from eggthreads import get_srt_sandbox_configuration  # type: ignore
-                from pathlib import Path as _Path
-
-                cfg = get_srt_sandbox_configuration()
-                cfg_dir = _Path(cfg.settings_dir)
-                if cfg_dir.is_dir():
-                    files = [p.name for p in cfg_dir.glob('*.json')]
-                else:
-                    files = []
-            except Exception:
-                files = []
-            for name in sorted(files):
-                if name.startswith(prefix):
-                    yield Completion(name, start_position=-len(prefix))
-            return
+        # (handled above)
 
         # 8) Generic filename completion for the last token when not a recognized command
         if text and not text.startswith('/'):
