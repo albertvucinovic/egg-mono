@@ -10,6 +10,11 @@
           "parameters": {
                   "reasoning_effort": "high",
                   "prompt_cache_retention": "24h"
+          },
+          "cost": {
+            "input_tokens": 0.175,
+            "cached_input": 0.0175,
+            "output_tokens": 1.4
           }
         },
         "GPT 5.2 xhigh": {
@@ -114,7 +119,12 @@
         "Qwen3 Coder Local": {
           "model_name": "Qwen3-Coder-30B-A3B-Instruct-UD-Q8_K_XL.gguf",
           "max_tokens": 250000,
-          "parameters": {}
+          "parameters": {},
+          "cost": {
+            "input_tokens": 0.0025,
+            "cached_input": 0.0005,
+            "output_tokens": 0.0100
+          }
         },
         "Qwen3 30B Thinking 2507": {
           "model_name": "../vllm/Models/Qwen/Qwen3-30B-A3B-Thinking-2507-UD-Q6_K_XL.gguf",

@@ -83,7 +83,7 @@ Commands:
     /toggleSandboxing, /setSrtSandboxConfiguration <file.json>
     /toolsSecrets <on|off>, /toolsStatus 
   Other: 
-    /enterMode <send|newline>, /quit 
+    /enterMode <send|newline>, /cost, /quit 
     /help
 """
 
@@ -671,23 +671,49 @@ class EggDisplayApp:
                     return str(v)
                 return f"{v/1000:.2f}k"
 
-            title_parts: List[str] = ["Chat Messages"]
-            if isinstance(ctx_tokens, int):
-                title_parts.append(f"ctx≈{_fmt_tok(ctx_tokens)}")
-            if isinstance(api_usage, dict) and api_usage:
-                ti = api_usage.get("total_input_tokens")
-                to = api_usage.get("total_output_tokens")
-                cc = api_usage.get("approx_call_count")
-                segs: List[str] = []
-                if isinstance(ti, int):
-                    segs.append(f"in≈{_fmt_tok(ti)}")
-                if isinstance(to, int):
-                    segs.append(f"out≈{_fmt_tok(to)}")
-                if isinstance(cc, int):
-                    segs.append(f"calls={cc}")
-                if segs:
-                    title_parts.append(" ".join(segs))
-            self.chat_output.title = "  |  ".join(title_parts)
+            # If we have no token stats yet for this thread, keep the
+            # existing title so that we do not clear previously
+            # computed information while a new turn is streaming.
+            have_ctx = isinstance(ctx_tokens, int)
+            have_api = isinstance(api_usage, dict) and bool(api_usage)
+            if not (have_ctx or have_api):
+                pass  # leave title unchanged
+            else:
+                title_parts: List[str] = ["Chat Messages"]
+                if have_ctx:
+                    title_parts.append(f"ctx≈{_fmt_tok(int(ctx_tokens))}")
+                cost_str = ""
+                if have_api:
+                    ti = api_usage.get("total_input_tokens")
+                    to = api_usage.get("total_output_tokens")
+                    cc = api_usage.get("approx_call_count")
+                    cached_in = api_usage.get("cached_input_tokens")
+                    segs: List[str] = []
+                    if isinstance(ti, int):
+                        segs.append(f"in≈{_fmt_tok(ti)}")
+                    if isinstance(to, int):
+                        segs.append(f"out≈{_fmt_tok(to)}")
+                    if isinstance(cached_in, int) and cached_in > 0:
+                        segs.append(f"cached≈{_fmt_tok(cached_in)}")
+                    if isinstance(cc, int):
+                        segs.append(f"calls={cc}")
+                    if segs:
+                        title_parts.append(" ".join(segs))
+
+                    # Best-effort approximate cost via eggllm if available.
+                    try:
+                        if self.llm_client is not None:
+                            mk = self._current_model_for_thread(self.current_thread) or None
+                            cost = self.llm_client.approximate_thread_cost(api_usage, mk)  # type: ignore[attr-defined]
+                            total_cost = float(cost.get("total") or 0.0)
+                            if total_cost > 0:
+                                cost_str = f"${total_cost:.4f}"
+                    except Exception:
+                        cost_str = ""
+
+                if cost_str:
+                    title_parts.append(f"cost≈{cost_str}")
+                self.chat_output.title = "  |  ".join(title_parts)
         except Exception:
             # Leave existing title unchanged on any error.
             pass
@@ -1840,6 +1866,88 @@ class EggDisplayApp:
                 self._console_print_block('Threads', text, border_style='blue')
             except Exception as e:
                 self._log_system(f"Error listing threads: {e}")
+        elif cmd == 'cost':
+            # Show token usage and approximate cost for the current thread.
+            # Reuse _current_token_stats so that /cost and the Chat
+            # Messages title always agree on the underlying numbers.
+            ctx_tokens, api = self._current_token_stats()
+            if not (isinstance(ctx_tokens, int) or (isinstance(api, dict) and api)):
+                self._log_system('No snapshot/token statistics available for this thread yet; send a message first.')
+                return
+
+            if not isinstance(api, dict):
+                api = {}
+
+            ti = api.get('total_input_tokens') or 0
+            to = api.get('total_output_tokens') or 0
+            cached_ctx = api.get('cached_tokens') or 0
+            cached_in = api.get('cached_input_tokens') or 0
+            calls = api.get('approx_call_count') or 0
+
+            def _fmt_tok(n: int) -> str:
+                try:
+                    n = int(n)
+                except Exception:
+                    return str(n)
+                if n < 1000:
+                    return str(n)
+                return f"{n/1000:.2f}k"
+
+            lines: List[str] = []
+            lines.append(f"Thread {self.current_thread[-8:]} token usage:")
+            if isinstance(ctx_tokens, int):
+                lines.append(f"  context_tokens:        {ctx_tokens} ({_fmt_tok(ctx_tokens)})")
+            else:
+                lines.append(f"  context_tokens:        (n/a)")
+            lines.append(f"  total_input_tokens:    {ti} ({_fmt_tok(ti)})")
+            lines.append(f"  cached_input_tokens:   {cached_in} ({_fmt_tok(cached_in)})")
+            lines.append(f"  cached_tokens (last):  {cached_ctx} ({_fmt_tok(cached_ctx)})")
+            lines.append(f"  total_output_tokens:   {to} ({_fmt_tok(to)})")
+            lines.append(f"  approx_call_count:     {calls}")
+
+            # Best-effort cost breakdown via eggllm if available and
+            # the current model has a cost config.
+            cost_lines: List[str] = []
+            model_key = self._current_model_for_thread(self.current_thread) or ''
+            if self.llm_client is not None:
+                try:
+                    cost_cfg = self.llm_client.current_model_cost_config(model_key)  # type: ignore[attr-defined]
+                    has_any_rate = any((cost_cfg.get('input_tokens') or 0.0,
+                                        cost_cfg.get('cached_input') or 0.0,
+                                        cost_cfg.get('output_tokens') or 0.0))
+                    if has_any_rate:
+                        cost = self.llm_client.approximate_thread_cost(api, model_key)  # type: ignore[attr-defined]
+                        cin = float(cost.get('input') or 0.0)
+                        cc = float(cost.get('cached') or 0.0)
+                        cout = float(cost.get('output') or 0.0)
+                        ctot = float(cost.get('total') or 0.0)
+                        cost_lines.append("")
+                        if model_key:
+                            cost_lines.append(f"Model for cost: {model_key}")
+                        cost_lines.append("Per-1K token rates (cents):")
+                        cost_lines.append(
+                            f"  input:  {cost_cfg.get('input_tokens', 0.0)*100:.3f}, "
+                            f"cached_input: {cost_cfg.get('cached_input', 0.0)*100:.3f}, "
+                            f"output: {cost_cfg.get('output_tokens', 0.0)*100:.3f}"
+                        )
+                        cost_lines.append("Approximate cost (USD):")
+                        cost_lines.append(f"  input:   ${cin:.4f}")
+                        cost_lines.append(f"  cached:  ${cc:.4f}")
+                        cost_lines.append(f"  output:  ${cout:.4f}")
+                        cost_lines.append(f"  total:   ${ctot:.4f}")
+                    else:
+                        cost_lines.append("")
+                        cost_lines.append('No per-model cost config found (cost field missing in models.json).')
+                except Exception as e:
+                    cost_lines.append("")
+                    cost_lines.append(f'Error computing cost via eggllm: {e}')
+            else:
+                cost_lines.append("")
+                cost_lines.append('LLM client not available; only token counts shown.')
+
+            block = "\n".join(lines + cost_lines)
+            self._log_system('Token usage / cost for current thread (see console for full details).')
+            self._console_print_block('Cost', block, border_style='green')
         elif cmd == 'thread':
             sel = (arg or '').strip()
             if not sel:
