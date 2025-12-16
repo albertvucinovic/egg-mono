@@ -74,24 +74,37 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 import shutil
 
 
-_CWD = Path(os.getcwd()).resolve()
-_SRT_DIR = (_CWD / ".egg" / "srt").resolve()
+if TYPE_CHECKING:  # pragma: no cover
+    from .db import ThreadsDB
+
+
+def _srt_dir() -> Path:
+    """Return the per-working-directory settings dir (``.egg/srt``).
+
+    We intentionally compute this dynamically from :func:`Path.cwd`
+    instead of capturing the CWD at import time. This keeps the module
+    robust in test suites (which often chdir) and in interactive usage
+    where callers may change directories.
+    """
+
+    return (Path.cwd() / ".egg" / "srt").resolve()
 
 
 def _ensure_srt_dir() -> Path:
     """Ensure ``.egg/srt`` exists and return its path."""
 
+    srt_dir = _srt_dir()
     try:
-        _SRT_DIR.mkdir(parents=True, exist_ok=True)
+        srt_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         # Best-effort; callers may still try to write configs and fail.
         pass
-    return _SRT_DIR
+    return srt_dir
 
 
 def _default_config_dict() -> Dict[str, object]:
@@ -140,18 +153,18 @@ def _default_config_dict() -> Dict[str, object]:
 
 
 def _default_config_path() -> Path:
-	"""Return the path to the default config, creating it if needed."""
+    """Return the path to the default config, creating it if needed."""
 
-	cfg_dir = _ensure_srt_dir()
-	path = cfg_dir / "default.json"
-	if not path.exists():
-		try:
-			path.write_text(json.dumps(_default_config_dict(), indent=2), encoding="utf-8")
-		except Exception:
-			# If writing fails we still return the path; callers will
-			# fall back to an in‑memory default when loading.
-			pass
-	return path
+    cfg_dir = _ensure_srt_dir()
+    path = cfg_dir / "default.json"
+    if not path.exists():
+        try:
+            path.write_text(json.dumps(_default_config_dict(), indent=2), encoding="utf-8")
+        except Exception:
+            # If writing fails we still return the path; callers will
+            # fall back to an in‑memory default when loading.
+            pass
+    return path
 
 
 # Global enable flag for this process.  Sandboxing starts out enabled
@@ -160,7 +173,7 @@ def _default_config_path() -> Path:
 # ``EGG_SANDBOX_MODE`` environment variable so that configuration is
 # explicit in application logic instead of being hidden in the
 # environment.
-_SANDBOX_ENABLED: bool = False
+_SANDBOX_ENABLED: bool = True
 
 _SRT_BIN = (os.environ.get("EGG_SRT_BIN") or "srt").strip() or "srt"
 _SRT_AVAILABLE = shutil.which(_SRT_BIN) is not None
@@ -238,7 +251,7 @@ def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
     return out
 
 
-def _effective_config_path() -> Path:
+def _effective_config_path(config_name: Optional[str] = None) -> Path:
     """Return the path to the *effective* config used for sandbox runs.
 
     This function reads the currently selected source config
@@ -249,10 +262,14 @@ def _effective_config_path() -> Path:
     """
 
     cfg_dir = _ensure_srt_dir()
-    src_path = _config_source_path(_CURRENT_CONFIG_NAME)
+    norm_name = _normalize_name(config_name or _CURRENT_CONFIG_NAME)
+    src_path = _config_source_path(norm_name)
     cfg = _load_config(src_path)
     eff = _augment_with_protections(cfg)
-    eff_path = cfg_dir / "_effective.json"
+
+    # Use a per-config effective file name to avoid races between
+    # concurrently running tool invocations that use different configs.
+    eff_path = cfg_dir / f"_effective__{norm_name}"
     try:
         eff_path.write_text(json.dumps(eff, indent=2), encoding="utf-8")
     except Exception:
@@ -268,6 +285,16 @@ def sandbox_enabled() -> bool:
     This does **not** guarantee that ``srt`` is available; see
     :func:`get_srt_sandbox_status`.
     """
+
+    # Backwards compatibility: allow env var to force-disable.
+    try:
+        mode = str(os.environ.get("EGG_SANDBOX_MODE") or "").strip().lower()
+        if mode in ("0", "off", "false", "no"):
+            return False
+        if mode in ("1", "on", "true", "yes"):
+            return True
+    except Exception:
+        pass
 
     return _SANDBOX_ENABLED
 
@@ -318,63 +345,177 @@ def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:
           bash tool, we adapt to how `srt` expects its command argument and 
           delegate to :func:`wrap_bash_argv_for_sandbox`.                   
     """                                                                     
-    if not is_sandbox_effective():                                          
-        return argv                                                         
-                                                                            
-    eff_path = _effective_config_path()                                     
-                                                                            
-    # Special handling for the bash tool: `/bin/bash -lc <script>`.         
-    # We want to emulate the working shell form:                            
-    #                                                                       
-    #   srt "/bin/bash -lc '<script>'"                                      
-    #                                                                       
-    # rather than the broken:                                               
-    #                                                                       
-    #   srt "/bin/bash -lc ls -la"                                          
-    #                                                                       
-    if (                                                                    
-        len(argv) >= 3                                                      
-        and argv[0] == "/bin/bash"                                          
-        and argv[1] in ("-lc", "-c")                                        
-    ):                                                                      
-        return wrap_bash_argv_for_sandbox(argv, eff_path)                   
-                                                                            
-    # Generic case: just prepend the sandbox launcher.                      
-    return [_SRT_BIN, "--settings", str(eff_path), *argv]                   
+    return wrap_argv_for_sandbox_with_config(argv, enabled=None, config_name=None)
 
 
-def wrap_bash_argv_for_sandbox(argv: List[str], eff_path) -> List[str]:              
-    """Wrap a `/bin/bash -lc <script>` argv for execution under `srt`.               
-                                                                                     
-    This builds an argv equivalent to the working shell invocation:                  
-                                                                                     
-        srt "/bin/bash -lc '<script>'"                                               
-                                                                                     
-    so that `srt` receives the entire command as a single argument and               
-    preserves the intended `bash -lc 'script'` semantics.                            
-    """                                                                              
-    # Defensive: if we somehow don't have a script, fall back to generic wrap.       
-    if len(argv) <= 2:                                                               
-        return [_SRT_BIN, "--settings", str(eff_path), *argv]                        
-                                                                                     
-    # Everything after the -c/-lc flag is the script. For the bash tool this         
-    # will typically be a single element, but we join in case there are more.        
-    script = " ".join(argv[2:])                                                      
-                                                                                     
-    # Shell-style single quoting without using `shlex`:                              
-    # - Wrap the whole string in single quotes.                                      
-    # - Replace each internal single quote ' with '\'' (close, escaped quote, reopen)
-    if script:                                                                       
-        script_quoted = "'" + script.replace("'", "'\\''") + "'"                     
-    else:                                                                            
-        # Empty script: still represent it explicitly for the shell.                 
-        script_quoted = "''"                                                         
-                                                                                     
-    # Build a single command string for srt, e.g.:                                   
-    #   "/bin/bash -lc 'ls -la'"                                                     
-    cmd_str = f"{argv[0]} {argv[1]} {script_quoted}"                                 
-                                                                                     
-    return [_SRT_BIN, "--settings", str(eff_path), cmd_str]                          
+def wrap_argv_for_sandbox_with_config(
+    argv: List[str],
+    *,
+    enabled: Optional[bool],
+    config_name: Optional[str],
+) -> List[str]:
+    """Wrap an argv for sandbox execution, optionally overriding config.
+
+    ``srt`` effectively expects a *single command string* argument (it
+    executes the provided command via a shell-like layer). Passing
+    ``srt`` a list of argv tokens often breaks when tokens contain
+    characters that need quoting (parentheses, quotes, redirections,
+    etc.).
+
+    So when sandboxing is effective, we:
+
+      1) build the effective settings file, and
+      2) pass a single shell-escaped command string built from ``argv``.
+    """
+
+    eff_enabled = sandbox_enabled() if enabled is None else bool(enabled)
+    if not (eff_enabled and sandbox_available()):
+        return argv
+
+    eff_path = _effective_config_path(config_name)
+
+    # Build a single command string for srt.
+    try:
+        import shlex
+
+        cmd_str = shlex.join(list(argv))
+    except Exception:
+        # Very conservative fallback.
+        cmd_str = " ".join(str(x) for x in argv)
+
+    return [_SRT_BIN, "--settings", str(eff_path), cmd_str]
+
+
+def wrap_bash_argv_for_sandbox(argv: List[str], eff_path) -> List[str]:  # pragma: no cover
+    """Backward-compatible wrapper.
+
+    Historically we had a special bash quoting path. The generic
+    :func:`wrap_argv_for_sandbox_with_config` implementation now does
+    correct shell-escaping for all commands, so this is retained only
+    for callers that still import it.
+    """
+
+    return [_SRT_BIN, "--settings", str(eff_path), " ".join(argv)]
+
+
+@dataclass
+class ThreadSandboxConfig:
+    """Effective sandbox selection for a thread."""
+
+    enabled: bool
+    config_name: str
+
+
+def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxConfig:
+    """Return the thread's sandbox config (falls back to process defaults).
+
+    The config is stored as the latest ``sandbox.config`` event in the
+    thread. When absent, we fall back to this process' current sandbox
+    settings (global enable flag + selected config name).
+    """
+
+    enabled = sandbox_enabled()
+    cfg_name = _normalize_name(_CURRENT_CONFIG_NAME)
+
+    try:
+        cur = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='sandbox.config' ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+    except Exception:
+        row = None
+
+    if row is not None:
+        try:
+            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            if "enabled" in payload:
+                try:
+                    enabled = bool(payload.get("enabled"))
+                except Exception:
+                    pass
+            if isinstance(payload.get("config_name"), str) and payload.get("config_name").strip():
+                cfg_name = _normalize_name(payload.get("config_name"))
+
+    return ThreadSandboxConfig(enabled=bool(enabled), config_name=cfg_name)
+
+
+def set_thread_sandbox_config(
+    db: "ThreadsDB",
+    thread_id: str,
+    *,
+    enabled: bool,
+    config_name: Optional[str] = None,
+    reason: str = "user",
+) -> None:
+    """Persist sandbox configuration for a thread.
+
+    This appends a ``sandbox.config`` event so that the effective
+    sandbox choice is reproducible across processes.
+    """
+
+    import os as _os
+
+    payload: Dict[str, object] = {
+        "enabled": bool(enabled),
+        "reason": reason,
+    }
+    if isinstance(config_name, str) and config_name.strip():
+        payload["config_name"] = _normalize_name(config_name)
+    else:
+        payload["config_name"] = _normalize_name(_CURRENT_CONFIG_NAME)
+
+    try:
+        db.append_event(
+            event_id=_os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="sandbox.config",
+            msg_id=None,
+            invoke_id=None,
+            payload=payload,
+        )
+    except Exception:
+        pass
+
+
+def set_subtree_sandbox_config(
+    db: "ThreadsDB",
+    root_thread_id: str,
+    *,
+    enabled: bool,
+    config_name: Optional[str] = None,
+    reason: str = "user",
+) -> None:
+    """Apply sandbox configuration to all threads in a subtree."""
+
+    # Local BFS to avoid importing other modules (and potential cycles).
+    q: List[str] = [root_thread_id]
+    seen: set[str] = set()
+    while q:
+        tid = q.pop(0)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        set_thread_sandbox_config(
+            db,
+            tid,
+            enabled=enabled,
+            config_name=config_name,
+            reason=reason,
+        )
+        try:
+            cur = db.conn.execute(
+                "SELECT child_id FROM children WHERE parent_id=? ORDER BY child_id",
+                (tid,),
+            )
+            for (cid,) in cur.fetchall():
+                if isinstance(cid, str) and cid:
+                    q.append(cid)
+        except Exception:
+            continue
 
 
 

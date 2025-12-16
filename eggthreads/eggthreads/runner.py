@@ -948,7 +948,7 @@ class ThreadRunner:
         import os as _os
         import signal as _signal
 
-        from .sandbox import wrap_argv_for_sandbox
+        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_config
 
         # Decode arguments into a script string
         args = tc.arguments
@@ -977,7 +977,19 @@ class ThreadRunner:
         # enabled.  We intentionally avoid using ``shell=True`` so that
         # the sandbox wrapper controls the executed binary directly.
         base_argv = ['/bin/bash', '-lc', script]
-        argv = wrap_argv_for_sandbox(base_argv)
+
+        # Honour per-thread sandbox settings. This makes tool execution
+        # reproducible across processes because the config is stored as
+        # events in the thread.
+        try:
+            sb = get_thread_sandbox_config(self.db, self.thread_id)
+            argv = wrap_argv_for_sandbox_with_config(
+                base_argv,
+                enabled=sb.enabled,
+                config_name=sb.config_name,
+            )
+        except Exception:
+            argv = wrap_argv_for_sandbox_with_config(base_argv, enabled=None, config_name=None)
 
         # Resolve per-thread tools configuration so we can honour the
         # "raw tool output" toggle for streaming as well.  When

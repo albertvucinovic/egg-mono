@@ -37,6 +37,23 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     depth = (parent.depth + 1) if parent else 1
     tid = _ulid_like()
     db.create_thread(thread_id=tid, name=name, parent_id=parent_id, initial_model_key=initial_model_key, depth=depth)
+
+    # Inherit sandbox configuration from the parent so the child's tool
+    # execution policy reflects the currently effective parent policy.
+    try:
+        from .sandbox import get_thread_sandbox_config, set_thread_sandbox_config
+
+        sb = get_thread_sandbox_config(db, parent_id)
+        set_thread_sandbox_config(
+            db,
+            tid,
+            enabled=bool(getattr(sb, 'enabled', False)),
+            config_name=str(getattr(sb, 'config_name', 'default.json')),
+            reason='inherit from parent (create_child_thread)',
+        )
+    except Exception:
+        pass
+
     return tid
 
 

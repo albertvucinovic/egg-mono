@@ -93,13 +93,29 @@ def create_default_tools() -> ToolRegistry:
 
     # bash
     def _bash(args: Dict[str, Any]):
-        from .sandbox import wrap_argv_for_sandbox
+        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_config
+        from .db import ThreadsDB
 
         script = args.get('script', '')
         # Mirror the async runner: build an explicit argv and optionally
         # wrap it in the sandbox instead of relying on shell=True.
         base_argv = ['/bin/bash', '-lc', script]
-        argv = wrap_argv_for_sandbox(base_argv)
+
+        # Honour per-thread sandbox settings when available.
+        tid = (args.get('_thread_id') or '').strip()
+        if tid:
+            try:
+                db = ThreadsDB()
+                sb = get_thread_sandbox_config(db, tid)
+                argv = wrap_argv_for_sandbox_with_config(
+                    base_argv,
+                    enabled=sb.enabled,
+                    config_name=sb.config_name,
+                )
+            except Exception:
+                argv = base_argv
+        else:
+            argv = wrap_argv_for_sandbox_with_config(base_argv, enabled=None, config_name=None)
         res = subprocess.run(argv, capture_output=True, text=True)
         out = ''
         if res.stdout:
@@ -121,21 +137,44 @@ def create_default_tools() -> ToolRegistry:
 
     # python
     def _python(args: Dict[str, Any]):
+        """Execute Python in a subprocess (sandboxed when enabled).
+
+        We intentionally avoid ``exec()`` in-process because sandboxing
+        must be enforceable and because in-process execution can mutate
+        global interpreter state.
+        """
+
+        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_config
+        from .db import ThreadsDB
+
         script = args.get('script', '')
-        old_stdout, old_stderr = sys.stdout, sys.stderr
-        redirected_stdout = sys.stdout = StringIO()
-        redirected_stderr = sys.stderr = StringIO()
-        try:
-            exec(script, {})
-        except Exception as e:
-            print(f"Error executing Python script: {e}")
-        finally:
-            sys.stdout, sys.stderr = old_stdout, old_stderr
+        thread_id = (args.get('_thread_id') or '').strip()
+
+        # Build argv for python -c.
+        base_argv = [sys.executable or 'python3', '-c', script]
+
+        # Apply sandbox wrapper, respecting per-thread sandbox config.
+        if thread_id:
+            try:
+                db = ThreadsDB()
+                sb = get_thread_sandbox_config(db, thread_id)
+                argv = wrap_argv_for_sandbox_with_config(
+                    base_argv,
+                    enabled=sb.enabled,
+                    config_name=sb.config_name,
+                )
+            except Exception:
+                argv = base_argv
+        else:
+            # No thread context: fall back to process-wide configuration.
+            argv = wrap_argv_for_sandbox_with_config(base_argv, enabled=None, config_name=None)
+
+        res = subprocess.run(argv, capture_output=True, text=True)
         out = ''
-        if redirected_stdout.getvalue().strip():
-            out += f"--- STDOUT ---\n{redirected_stdout.getvalue().strip()}\n"
-        if redirected_stderr.getvalue().strip():
-            out += f"--- STDERR ---\n{redirected_stderr.getvalue().strip()}\n"
+        if res.stdout:
+            out += f"--- STDOUT ---\n{res.stdout.strip()}\n"
+        if res.stderr:
+            out += f"--- STDERR ---\n{res.stderr.strip()}\n"
         return out.strip() or "--- The script executed successfully and produced no output ---"
 
     reg.register(
@@ -231,6 +270,9 @@ def create_default_tools() -> ToolRegistry:
             child = create_child_thread(db, parent_id, name=label, initial_model_key=initial_model_key)
         except Exception as e:
             return f"Error: failed to create child thread: {e}"
+
+        # Sandbox configuration inheritance is handled by
+        # eggthreads.api.create_child_thread.
 
         # Seed the child with the resolved system prompt.
         try:
@@ -346,6 +388,9 @@ def create_default_tools() -> ToolRegistry:
             child = create_child_thread(db, parent_id, name=label, initial_model_key=initial_model_key)
         except Exception as e:
             return f"Error: failed to create child thread: {e}"
+
+        # Sandbox configuration inheritance is handled by
+        # eggthreads.api.create_child_thread.
 
         # Seed system prompt and user text
         try:

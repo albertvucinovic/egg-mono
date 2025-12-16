@@ -90,7 +90,15 @@ def collect_subtree(db: ThreadsDB, root_id: str) -> List[str]:
 
 
 def word_count_from_snapshot(db: ThreadsDB, tid: str) -> int:
-    """Count words in all string values throughout the thread snapshot, excluding JSON structure."""
+    """Count words in all string values throughout the thread snapshot.
+
+    This is a deliberately simple "size" heuristic for the headless example.
+
+    Note: snapshots may include a ``token_stats`` block (added by
+    eggthreads) which contains repeated role strings etc. For this example
+    we ignore that block so the word count remains stable and reflects the
+    message payloads rather than derived metadata.
+    """
     row = db.get_thread(tid)
     if not row or not row.snapshot_json:
         return 0
@@ -103,15 +111,18 @@ def word_count_from_snapshot(db: ThreadsDB, tid: str) -> int:
 
     def count_words(obj):
         """Recursively count words in all string values."""
+
         total = 0
         if isinstance(obj, dict):
-            for v in obj.values():
+            for k, v in obj.items():
+                # Ignore derived metadata to keep example stable.
+                if k == "token_stats":
+                    continue
                 total += count_words(v)
         elif isinstance(obj, list):
             for item in obj:
                 total += count_words(item)
         elif isinstance(obj, str):
-            # Simple word count - split by whitespace
             total += len(obj.split())
         return total
 
