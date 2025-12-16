@@ -51,6 +51,119 @@ class LLMClient:
         os.environ["DEFAULT_MODEL"] = resolved
         return resolved
 
+    # -------- Cost helpers -------------------------------------------------
+    def current_model_cost_config(self, model_key: Optional[str] = None) -> Dict[str, Any]:
+        """Return the per-1K-token cost configuration for a model.
+
+        ``models.json`` may include an optional ``"cost"`` object per
+        model entry::
+
+            {
+              "providers": {
+                "openai": {
+                  "models": {
+                    "OpenAI GPT-4o": {
+                      "model_name": "gpt-4o-mini",
+                      "cost": {
+                        "input_tokens": 0.25,
+                        "cached_input": 0.05,
+                        "output_tokens": 1.00
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+        Each value is interpreted as *cents per 1K tokens* in the
+        corresponding tier.  We convert these to dollars internally by
+        dividing by 100.
+        """
+
+        key = model_key or self.current_model_key
+        try:
+            mc = self.registry.get_model_config(key)
+        except Exception:
+            mc = {}
+        cost = mc.get("cost") or {}
+        if not isinstance(cost, dict):
+            cost = {}
+
+        def _cents_to_usd(v: Any) -> float:
+            try:
+                cents = float(v)
+            except Exception:
+                return 0.0
+            return cents / 100.0
+
+        out = {
+            "input_tokens": _cents_to_usd(cost.get("input_tokens") or 0.0),
+            "cached_input": _cents_to_usd(cost.get("cached_input") or 0.0),
+            "output_tokens": _cents_to_usd(cost.get("output_tokens") or 0.0),
+        }
+        return out
+
+    def approximate_thread_cost(self, api_usage: Dict[str, Any], model_key: Optional[str] = None) -> Dict[str, float]:
+        """Approximate dollar cost for a thread given API token usage.
+
+        ``api_usage`` is expected to be the structure produced by
+        eggthreads' token counting, with at least::
+
+            {
+              "total_input_tokens": int,
+              "total_output_tokens": int,
+              "cached_tokens": int,
+            }
+
+        We apply the current model's cost config (per 1K tokens) and
+        return::
+
+            {
+              "input":  <float dollars>,
+              "output": <float dollars>,
+              "cached": <float dollars>,
+              "total":  <float dollars>,
+            }
+
+        Missing cost config or malformed api_usage yields zeros.
+        """
+
+        try:
+            # Total logical input tokens seen across all calls.
+            cin_total = int(api_usage.get("total_input_tokens") or 0)
+            cout = int(api_usage.get("total_output_tokens") or 0)
+            # Heuristic estimate of how many of those input tokens
+            # were served from KV cache rather than re-sent in full.
+            ccached = int(api_usage.get("cached_input_tokens") or 0)
+        except Exception:
+            cin_total = cout = ccached = 0
+
+        cost_cfg = self.current_model_cost_config(model_key)
+        pin = float(cost_cfg.get("input_tokens") or 0.0)
+        pcached = float(cost_cfg.get("cached_input") or 0.0)
+        pout = float(cost_cfg.get("output_tokens") or 0.0)
+
+        def _usd(tokens: int, price_per_1k: float) -> float:
+            if tokens <= 0 or price_per_1k <= 0.0:
+                return 0.0
+            return float(tokens) * (price_per_1k / 1000.0)
+
+        # To avoid double-counting, we treat cached input tokens as a
+        # separate, cheaper tier. The remaining "new" tokens are
+        # billed at the full input rate.
+        new_input_tokens = max(cin_total - ccached, 0)
+
+        c_in = _usd(new_input_tokens, pin)
+        c_cached = _usd(ccached, pcached)
+        c_out = _usd(cout, pout)
+        total = c_in + c_cached + c_out
+        return {
+            "input": c_in,
+            "cached": c_cached,
+            "output": c_out,
+            "total": total,
+        }
+
     def current_provider_and_url(self) -> tuple[str, str, Dict[str, str]]:
         mc = self.registry.get_model_config(self.current_model_key)
         provider_name = mc.get("provider")
