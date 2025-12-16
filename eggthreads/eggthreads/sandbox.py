@@ -463,8 +463,15 @@ def set_thread_sandbox_config(
         "enabled": bool(enabled),
         "reason": reason,
     }
+
     if isinstance(config_name, str) and config_name.strip():
-        payload["config_name"] = _normalize_name(config_name)
+        norm = _normalize_name(config_name)
+        # Validate: config must exist under .egg/srt.
+        cfg_dir = _ensure_srt_dir()
+        path = cfg_dir / norm
+        if not path.exists():
+            raise ValueError(f"srt configuration file not found: {path}")
+        payload["config_name"] = norm
     else:
         payload["config_name"] = _normalize_name(_CURRENT_CONFIG_NAME)
 
@@ -479,6 +486,43 @@ def set_thread_sandbox_config(
         )
     except Exception:
         pass
+
+
+def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, object]:
+    """Return sandbox status for a specific thread.
+
+    This mirrors :func:`get_srt_sandbox_status` but derives the
+    *configured* enabled/config_name values from the thread's
+    ``sandbox.config`` event (falling back to process defaults).
+    """
+
+    cfg = get_thread_sandbox_config(db, thread_id)
+    effective = bool(cfg.enabled) and sandbox_available()
+    warning: Optional[str] = None
+    if bool(cfg.enabled) and not sandbox_available():
+        warning = (
+            "Sandboxing is enabled but the 'srt' CLI was not found. "
+            "Tool commands will run *without* a sandbox. Install it "
+            "with: npm install -g @anthropic-ai/sandbox-runtime."
+        )
+
+    # Resolve source config path (falls back to default.json if missing).
+    try:
+        src = _config_source_path(cfg.config_name)
+    except Exception:
+        src = _default_config_path()
+
+    return {
+        "enabled": bool(cfg.enabled),
+        "available": sandbox_available(),
+        "effective": effective,
+        "mode": "on" if bool(cfg.enabled) else "off",
+        "srt_bin": _SRT_BIN,
+        "config_name": _normalize_name(cfg.config_name),
+        "config_path": str(src),
+        "settings_dir": str(_ensure_srt_dir()),
+        "warning": warning,
+    }
 
 
 def set_subtree_sandbox_config(
@@ -520,25 +564,27 @@ def set_subtree_sandbox_config(
 
 
 def set_srt_sandbox_configuration(name: str) -> None:
-    """Select a sandbox configuration file for this process.
+    """Backward compatible alias for :func:`set_sandbox_config`."""
 
-    ``name`` is interpreted as a file name inside ``.egg/srt`` relative
-    to the current working directory.  For example, ``"readall.json"``
-    refers to ``.egg/srt/readall.json``.
+    set_sandbox_config(enabled=sandbox_enabled(), config_name=name)
 
-    If the file does not exist, :class:`ValueError` is raised and the
-    active configuration is left unchanged.
+
+def set_sandbox_config(*, enabled: bool, config_name: Optional[str] = None) -> None:
+    """Set the process-wide sandbox configuration.
+
+    This is the single public entry point for configuring sandboxing
+    at process scope.
     """
 
     global _CURRENT_CONFIG_NAME
-
-    norm = _normalize_name(name)
-    cfg_dir = _ensure_srt_dir()
-    path = cfg_dir / norm
-    if not path.exists():
-        raise ValueError(f"srt configuration file not found: {path}")
-
-    _CURRENT_CONFIG_NAME = norm
+    set_sandbox_globally_enabled(bool(enabled))
+    if isinstance(config_name, str) and config_name.strip():
+        norm = _normalize_name(config_name)
+        cfg_dir = _ensure_srt_dir()
+        path = cfg_dir / norm
+        if not path.exists():
+            raise ValueError(f"srt configuration file not found: {path}")
+        _CURRENT_CONFIG_NAME = norm
 
 
 @dataclass
@@ -601,4 +647,10 @@ def get_srt_sandbox_status() -> Dict[str, object]:
         "settings_dir": cfg.settings_dir,
         "warning": warning,
     }
+
+
+def get_sandbox_status() -> Dict[str, object]:
+    """Preferred alias for :func:`get_srt_sandbox_status`."""
+
+    return get_srt_sandbox_status()
 
