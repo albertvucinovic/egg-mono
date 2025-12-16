@@ -247,11 +247,32 @@ def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Opt
     no longer exists. A new runner can immediately acquire a fresh
     lease for the thread.
     """
+    """Interrupt or cancel the current (or pending) work for a thread.
+
+    Behaviour:
+      - If the thread currently has an open stream lease (open_streams row),
+        we delete that row so the active runner loses its lease.
+        We also append a ``control.interrupt`` event containing the
+        ``old_invoke_id`` and the stream ``purpose``.
+
+      - If there is *no* open stream lease, we still want Ctrl+C-like
+        interactions to be able to cancel a *pending* RA1 LLM turn
+        (a runnable user message that has not yet been picked up by a
+        runner). In that case we best-effort infer whether RA1 is
+        currently pending and, if so, append a ``control.interrupt``
+        boundary event with ``purpose='llm'``.
+
+    The purpose of the boundary event is to advance RA1's
+    ``_last_stream_close_seq`` so the same user message does not
+    repeatedly re-trigger an LLM call after an interruption.
+    """
+
     cur = db.conn.execute("SELECT invoke_id, purpose FROM open_streams WHERE thread_id=?", (thread_id,))
     row = cur.fetchone()
     old = row[0] if row else None
     purpose = row[1] if row else None
     new_inv = _ulid_like()
+
     if old:
         # Remove the existing open_streams row so that:
         #  - the current runner loses its lease (heartbeat will fail), and
@@ -266,7 +287,30 @@ def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Opt
             type_='control.interrupt',
             payload={"reason": reason, "old_invoke_id": old, "new_invoke_id": new_inv, "purpose": purpose},
         )
-    return old
+        return old
+
+    # No active lease: best-effort cancel a pending RA1 LLM invocation.
+    try:
+        from .tool_state import discover_runner_actionable_cached
+
+        ra = discover_runner_actionable_cached(db, thread_id)
+        if ra and getattr(ra, 'kind', None) == 'RA1_llm':
+            db.append_event(
+                event_id=_ulid_like(),
+                thread_id=thread_id,
+                type_='control.interrupt',
+                payload={
+                    "reason": reason,
+                    "old_invoke_id": None,
+                    "new_invoke_id": new_inv,
+                    "purpose": "llm",
+                    "note": "Cancelled pending RA1 turn (no active open_stream lease)",
+                },
+            )
+    except Exception:
+        pass
+
+    return None
 
 
 def pause_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:

@@ -364,13 +364,32 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
         elif t == "control.interrupt":
             # Treat an explicit interrupt of an LLM invoke as a boundary
             # equivalent to a stream.close for RA1 purposes.
+            #
+            # Note: Ctrl+C may happen *before* a runner acquires a lease
+            # and emits any stream.open/delta events ("pending RA1"). In
+            # that case, old_invoke_id may be None. If the payload
+            # explicitly marks purpose=='llm', we still advance the
+            # boundary so the same triggering user message does not
+            # re-trigger RA1 immediately.
             try:
                 payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
             except Exception:
                 payload = {}
             old_inv = payload.get("old_invoke_id")
             purpose = payload.get('purpose')
-            if (isinstance(old_inv, str) and old_inv in llm_invokes) or (isinstance(old_inv, str) and purpose == 'llm'):
+
+            # If the interrupt is explicitly for an LLM step, always
+            # treat it as a boundary.
+            if purpose == 'llm':
+                try:
+                    last_close = int(ev.get("event_seq"))
+                except Exception:
+                    continue
+                continue
+
+            # Otherwise, only treat it as a boundary when it refers to a
+            # known LLM invoke_id.
+            if isinstance(old_inv, str) and old_inv in llm_invokes:
                 try:
                     last_close = int(ev.get("event_seq"))
                 except Exception:
