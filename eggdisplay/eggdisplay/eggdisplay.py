@@ -646,6 +646,15 @@ class LiveEditorBase:
                                  autocomplete_callback=autocomplete_callback)
         self.console = Console()
         self.running = False
+        # Bracketed paste mode support (xterm compatible): terminals can wrap
+        # paste payload between ESC[200~ and ESC[201~ so applications can
+        # distinguish paste from typed input.
+        self._bracketed_paste_active: bool = False
+        self._bracketed_paste_buffer: str = ""
+        # Some input stacks (notably readchar on POSIX) split ESC[200~ into
+        # two deliveries: "\x1b[200" and then "~". Track a pending marker
+        # prefix so we can join it.
+        self._bracketed_paste_marker_pending: str = ""
 
     # ------------ Shared rendering ------------
     def _render(self) -> Text:
@@ -695,6 +704,86 @@ class LiveEditorBase:
             ctrl_c = readchar.key.CTRL_C
         except Exception:
             ctrl_c = "\x03"
+
+        # --- Bracketed paste handling ---
+        # Some terminals (especially when pasting via Ctrl+Shift+V) send
+        # bracketed paste sequences. When enabled, the paste comes as:
+        #   ESC[200~ <payload> ESC[201~
+        # The payload can be very large and may arrive in multiple chunks.
+        PASTE_START = "\x1b[200~"
+        PASTE_END = "\x1b[201~"
+
+        if isinstance(key, str):
+            # Handle split marker prefixes as produced by readchar.readkey().
+            # Example: "\x1b[200" then "~".
+            if self._bracketed_paste_marker_pending:
+                if key.startswith("~"):
+                    marker = self._bracketed_paste_marker_pending + "~"
+                    rest = key[1:]
+                    self._bracketed_paste_marker_pending = ""
+                    if marker == PASTE_START:
+                        self._bracketed_paste_active = True
+                        self._bracketed_paste_buffer = ""
+                        if rest:
+                            return self._handle_key(rest)
+                        return True
+                    if marker == PASTE_END:
+                        # End paste and flush buffer.
+                        if self._bracketed_paste_buffer:
+                            self.editor.insert_text_block(self._bracketed_paste_buffer)
+                        self._bracketed_paste_active = False
+                        self._bracketed_paste_buffer = ""
+                        if rest:
+                            return self._handle_key(rest)
+                        return True
+                else:
+                    # Unexpected char after pending prefix: drop the prefix and
+                    # continue processing current key normally.
+                    self._bracketed_paste_marker_pending = ""
+
+            # Enter bracketed paste mode (and optionally handle same-chunk end)
+            if not self._bracketed_paste_active and PASTE_START in key:
+                _pre, _rest = key.split(PASTE_START, 1)
+                # We intentionally ignore anything before PASTE_START.
+                if PASTE_END in _rest:
+                    payload, trailing = _rest.split(PASTE_END, 1)
+                    if payload:
+                        self.editor.insert_text_block(payload)
+                    # If there is trailing data in the same key chunk, feed it
+                    # back into the normal handler.
+                    if trailing:
+                        return self._handle_key(trailing)
+                    return True
+                # Start buffering
+                self._bracketed_paste_active = True
+                self._bracketed_paste_buffer = _rest
+                return True
+
+            # Handle readchar-split start marker prefix
+            if not self._bracketed_paste_active and key == "\x1b[200":
+                self._bracketed_paste_marker_pending = key
+                return True
+
+            # While in bracketed paste mode, treat everything as literal text
+            # until we see PASTE_END.
+            if self._bracketed_paste_active:
+                # Handle readchar-split end marker prefix
+                if key == "\x1b[201":
+                    self._bracketed_paste_marker_pending = key
+                    return True
+                if PASTE_END in key:
+                    payload, trailing = key.split(PASTE_END, 1)
+                    self._bracketed_paste_buffer += payload
+                    if self._bracketed_paste_buffer:
+                        self.editor.insert_text_block(self._bracketed_paste_buffer)
+                    self._bracketed_paste_active = False
+                    self._bracketed_paste_buffer = ""
+                    if trailing:
+                        return self._handle_key(trailing)
+                    return True
+                else:
+                    self._bracketed_paste_buffer += key
+                    return True
 
         if key == ctrl_c:
             return False
@@ -1156,6 +1245,8 @@ class InputPanel:
         self._scroll_top: int = 0
         # Viewport state for suggestions list.
         self._suggestion_scroll_top: int = 0
+        # Horizontal scroll offset (columns) for long lines.
+        self._hscroll_left: int = 0
         
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on editor content.
@@ -1222,6 +1313,32 @@ class InputPanel:
             self._suggestion_scroll_top = 0
         if self._suggestion_scroll_top > max_top:
             self._suggestion_scroll_top = max_top
+
+    def _ensure_cursor_visible_horizontal(self, *, text_width: int) -> None:
+        """Keep the cursor column visible by adjusting horizontal scroll."""
+        text_width = max(1, int(text_width))
+        row = int(self.editor.editor.cursor.row)
+        col = int(self.editor.editor.cursor.col)
+        try:
+            line_len = len(self.editor.editor.lines[row])
+        except Exception:
+            line_len = 0
+
+        max_left = max(0, line_len - text_width)
+        if self._hscroll_left < 0:
+            self._hscroll_left = 0
+        if self._hscroll_left > max_left:
+            self._hscroll_left = max_left
+
+        if col < self._hscroll_left:
+            self._hscroll_left = col
+        elif col >= self._hscroll_left + text_width:
+            self._hscroll_left = col - text_width + 1
+
+        if self._hscroll_left < 0:
+            self._hscroll_left = 0
+        if self._hscroll_left > max_left:
+            self._hscroll_left = max_left
     
     def get_text(self) -> str:
         """Get the current text from the editor."""
@@ -1232,6 +1349,7 @@ class InputPanel:
         self.editor.editor.set_text("")
         self._scroll_top = 0
         self._suggestion_scroll_top = 0
+        self._hscroll_left = 0
     
     def increment_message_count(self) -> None:
         """Increment the message counter."""
@@ -1254,6 +1372,26 @@ class InputPanel:
         lines = self.editor.editor.lines
         cursor_row, cursor_col = self.editor.editor.cursor.row, self.editor.editor.cursor.col
 
+        # Estimate available text width for the editor line body (not counting
+        # the line number prefix). We disable wrapping by cropping to this width
+        # and provide horizontal scrolling by adjusting _hscroll_left.
+        # Prefer the same Console instance that's used for live rendering, if
+        # available, so width estimates match what Rich will actually use.
+        try:
+            term_cols = int(getattr(getattr(self.editor, "console", None), "size").width)  # type: ignore[union-attr]
+        except Exception:
+            try:
+                term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+            except Exception:
+                term_cols = 100
+        # Panel has 2 border cols and typically 2 padding cols. We don't know
+        # the exact padding from Panel here, so use a conservative estimate.
+        inner_width_est = max(10, term_cols - 10)
+        line_prefix_width = len(f"{max(1, len(lines)):2d}: ")
+        text_width = max(1, inner_width_est - line_prefix_width)
+
+        self._ensure_cursor_visible_horizontal(text_width=text_width)
+
         # Check autocomplete popup state
         try:
             ed = self.editor.editor
@@ -1268,8 +1406,8 @@ class InputPanel:
 
         # Optional header at top
         if self.style.show_header:
-            rows.append(Text(f" {self.title} ", style=self.style.header_style))
-            rows.append(Text(self.style.header_separator_char * 70, style=self.style.header_separator_style))
+            rows.append(Text(f" {self.title} ", style=self.style.header_style, no_wrap=True))
+            rows.append(Text(self.style.header_separator_char * 70, style=self.style.header_separator_style, no_wrap=True))
 
         header_lines = len(rows)
 
@@ -1296,25 +1434,36 @@ class InputPanel:
 
         for i in range(viewport_start, viewport_end):
             line_num = f"{i+1:2d}: "
-            row = Text()
+            row = Text(no_wrap=True)
             if i == cursor_row:
                 row.append(line_num, style=self.style.current_line_num_style)
                 line_content = lines[i]
-                before_cursor = line_content[:cursor_col]
-                cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
-                after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
+                # Horizontal window
+                left = self._hscroll_left
+                right = left + text_width
+                window = line_content[left:right]
+                rel_col = max(0, cursor_col - left)
+                # Show cursor at the correct relative column inside window
+                before_cursor = window[:rel_col]
+                cursor_char = window[rel_col:rel_col+1] if rel_col < len(window) else "█"
+                after_cursor = window[rel_col+1:] if rel_col < len(window) else ""
                 row.append(before_cursor)
                 row.append(cursor_char, style=self.style.cursor_style)
                 row.append(after_cursor)
             else:
                 row.append(line_num, style=self.style.line_num_style)
-                row.append(lines[i])
+                left = self._hscroll_left if i == cursor_row else 0
+                # Non-cursor lines: keep it simple and show from column 0.
+                # (We could also scroll them, but cursor-focused scrolling is
+                # the primary usability requirement.)
+                window = lines[i][:text_width]
+                row.append(window)
             rows.append(row)
 
         # Fill remaining editor viewport space (editor area only)
         lines_shown = viewport_end - viewport_start
         for _ in range(max(0, editor_lines_budget - lines_shown)):
-            rows.append(Text(""))
+            rows.append(Text("", no_wrap=True))
 
         # -------- Suggestions popup (scrolling) --------
         if comp_active and comp_items and suggestion_lines >= 2:
@@ -1328,7 +1477,7 @@ class InputPanel:
                 total_items=total_items,
             )
 
-            rows.append(Text("Suggestions:", style="bold cyan"))
+            rows.append(Text("Suggestions:", style="bold cyan", no_wrap=True))
             start = self._suggestion_scroll_top
             end = min(total_items, start + items_viewport)
 
@@ -1337,11 +1486,11 @@ class InputPanel:
                 disp = item.get("display", str(item)) if isinstance(item, dict) else str(item)
                 marker = "> " if idx == comp_index else "  "
                 style = "black on white" if idx == comp_index else ""
-                rows.append(Text(f"{marker}{disp}", style=style))
+                rows.append(Text(f"{marker}{disp}", style=style, no_wrap=True))
 
             # Fill remaining suggestion viewport space
             for _ in range(max(0, items_viewport - (end - start))):
-                rows.append(Text(""))
+                rows.append(Text("", no_wrap=True))
         else:
             # If suggestions are active but we couldn't allocate enough space to
             # render them, reset suggestion scroll state so the next render doesn't
@@ -1357,18 +1506,19 @@ class InputPanel:
             Text(
                 f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send",
                 style=self.style.status_style,
+                no_wrap=True,
             )
         )
 
         # Final assembly: exactly inner_height rows.
         if len(rows) < inner_height:
-            rows.extend(Text("") for _ in range(inner_height - len(rows)))
+            rows.extend(Text("", no_wrap=True) for _ in range(inner_height - len(rows)))
         elif len(rows) > inner_height:
             # Prefer keeping the status line (last). Trim from the middle.
             tail = rows[-1:]
             rows = rows[: max(0, inner_height - 1)] + tail
 
-        editor_content = Text()
+        editor_content = Text(no_wrap=True)
         for i, row in enumerate(rows):
             editor_content.append(row)
             if i != len(rows) - 1:
