@@ -127,6 +127,11 @@ class TextEditor:
         """Insert text at current cursor position."""
         if not text:
             return
+        # If callers pass multi-line text, route through the block insert
+        # implementation so we don't embed raw newlines inside a single line.
+        if "\n" in text or "\r" in text:
+            self.insert_text_block(text)
+            return
         # Perform insertion first so refresh sees the updated token
         current_line = self.lines[self.cursor.row]
         new_line = current_line[:self.cursor.col] + text + current_line[self.cursor.col:]
@@ -136,6 +141,55 @@ class TextEditor:
         if self._completion_active:
             self._refresh_completion()
         self._trigger_event('text_change', 'insert', self.cursor.row, self.cursor.col - len(text), text)
+
+    def insert_text_block(self, text: str) -> None:
+        """Insert a (possibly multi-line) text block at the cursor.
+
+        This is used for pastes and any other bulk insertion.
+
+        - Handles ``\n``/``\r\n``/``\r`` newlines.
+        - Updates cursor position to the end of the inserted block.
+        - Dismisses autocomplete popup if the inserted text contains a newline
+          (newlines typically terminate the current token).
+        """
+        if not text:
+            return
+
+        # Normalize newlines to \n
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Fast path: single-line insert
+        if "\n" not in normalized:
+            self.insert_text(normalized)
+            return
+
+        # Multi-line insert
+        if self._completion_active:
+            self._completion_active = False
+            self._completion_items = []
+            self._completion_index = 0
+
+        row = self.cursor.row
+        col = self.cursor.col
+        current_line = self.lines[row]
+        before = current_line[:col]
+        after = current_line[col:]
+
+        parts = normalized.split("\n")
+        first = parts[0]
+        middle = parts[1:-1]
+        last = parts[-1]
+
+        replacement = [before + first, *middle, last + after]
+        # Replace the current line with the new block.
+        self.lines[row:row + 1] = replacement
+
+        # Cursor ends at end of inserted text (before the original "after")
+        self.cursor.row = row + len(replacement) - 1
+        self.cursor.col = len(last)
+        self._clamp_cursor()
+
+        self._trigger_event('text_change', 'insert_block', row, col, text)
     
     def delete_char(self) -> None:
         """Delete character at cursor position."""
@@ -269,6 +323,10 @@ class TextEditor:
             return True
         elif key == "tab":
             return self._handle_tab()
+        elif isinstance(key, str) and len(key) > 1 and not key.startswith('\x1b'):
+            # Treat multi-character printable strings as a paste chunk.
+            self.insert_text_block(key)
+            return True
         elif len(key) == 1 and key.isprintable():
             self.insert_text(key)
             return True
@@ -322,7 +380,9 @@ class TextEditor:
             return accepted
         # If multiple, open selection UI
         if len(completions) > 1:
-            self._completion_items = completions[:10]  # show top 10
+            # Keep a reasonably sized list for scrolling in the UI.
+            # Rendering code is responsible for windowing the list.
+            self._completion_items = completions[:200]
             self._completion_index = 0
             self._completion_active = True
             # Fire autocomplete event with no insertion
@@ -364,7 +424,7 @@ class TextEditor:
                     ins = str(c[1])
                     items.append({"display": disp, "insert": ins})
             if items:
-                self._completion_items = items[:10]
+                self._completion_items = items[:200]
                 if self._completion_index >= len(self._completion_items):
                     self._completion_index = 0
                 self._completion_active = True
@@ -661,6 +721,11 @@ class LiveEditorBase:
             self.editor.handle_key('enter')
         elif key == getattr(readchar.key, 'TAB', '\t') or key == '\t':
             self.editor.handle_key('tab')
+        elif isinstance(key, str) and len(key) > 1 and not key.startswith('\x1b'):
+            # Treat multi-character printable input as a paste. Some terminal
+            # configurations (and some remote shells) deliver paste chunks as
+            # multi-character strings.
+            self.editor.insert_text_block(key)
         elif isinstance(key, str) and len(key) == 1 and key.isprintable():
             self.editor.handle_key(key)
         # Unknown escape sequences are ignored
@@ -1087,6 +1152,10 @@ class InputPanel:
             )
         self.message_count = 0
         self.style = style or InputPanel.PanelStyle()
+        # Viewport state for long edits / scrolling.
+        self._scroll_top: int = 0
+        # Viewport state for suggestions list.
+        self._suggestion_scroll_top: int = 0
         
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on editor content.
@@ -1096,18 +1165,63 @@ class InputPanel:
         without a slow line-by-line animation.
         """
         editor_lines = len(self.editor.editor.lines)
-        # Account for autocomplete popup height when active
+
+        # The input panel height is bounded. We still include some extra room
+        # for the suggestions list, but the renderer will scroll if there are
+        # too many suggestions.
         extra = 0
         try:
             if getattr(self.editor.editor, "_completion_active", False):
                 items = getattr(self.editor.editor, "_completion_items", []) or []
                 if items:
-                    extra = min(1 + len(items[:10]), 12)  # 1 title + up to 10 items
+                    extra = min(1 + len(items), 8)  # title + up to 7 visible items
         except Exception:
             extra = 0
+
+        # 4 = line numbers + status line etc. (legacy sizing)
         target_height = max(6, min(self.max_height, editor_lines + 4 + extra))
         self.current_height = float(target_height)
         return target_height
+
+    def _clamp_scroll(self, *, viewport_size: int) -> None:
+        """Clamp the main editor scroll position."""
+        total = len(self.editor.editor.lines)
+        viewport_size = max(1, int(viewport_size))
+        max_top = max(0, total - viewport_size)
+        if self._scroll_top < 0:
+            self._scroll_top = 0
+        if self._scroll_top > max_top:
+            self._scroll_top = max_top
+
+    def _ensure_cursor_visible(self, *, viewport_size: int) -> None:
+        """Adjust scroll so the cursor row is visible in the viewport."""
+        viewport_size = max(1, int(viewport_size))
+        cur = int(self.editor.editor.cursor.row)
+        if cur < self._scroll_top:
+            self._scroll_top = cur
+        elif cur >= self._scroll_top + viewport_size:
+            self._scroll_top = cur - viewport_size + 1
+        self._clamp_scroll(viewport_size=viewport_size)
+
+    def _ensure_suggestion_visible(self, *, viewport_size: int, selected_index: int, total_items: int) -> None:
+        viewport_size = max(1, int(viewport_size))
+        total_items = max(0, int(total_items))
+        selected_index = max(0, min(int(selected_index), max(0, total_items - 1)))
+        max_top = max(0, total_items - viewport_size)
+        if self._suggestion_scroll_top < 0:
+            self._suggestion_scroll_top = 0
+        if self._suggestion_scroll_top > max_top:
+            self._suggestion_scroll_top = max_top
+
+        if selected_index < self._suggestion_scroll_top:
+            self._suggestion_scroll_top = selected_index
+        elif selected_index >= self._suggestion_scroll_top + viewport_size:
+            self._suggestion_scroll_top = selected_index - viewport_size + 1
+
+        if self._suggestion_scroll_top < 0:
+            self._suggestion_scroll_top = 0
+        if self._suggestion_scroll_top > max_top:
+            self._suggestion_scroll_top = max_top
     
     def get_text(self) -> str:
         """Get the current text from the editor."""
@@ -1116,6 +1230,8 @@ class InputPanel:
     def clear_text(self) -> None:
         """Clear the editor text."""
         self.editor.editor.set_text("")
+        self._scroll_top = 0
+        self._suggestion_scroll_top = 0
     
     def increment_message_count(self) -> None:
         """Increment the message counter."""
@@ -1131,21 +1247,14 @@ class InputPanel:
     def render(self) -> Panel:
         """Render the input panel."""
         height = self.calculate_height()
-        
-        editor_content = Text()
+        # Rich's Panel(height=...) includes the border lines. The renderable
+        # content sits inside those borders.
+        inner_height = max(1, int(height) - 2)
+
         lines = self.editor.editor.lines
         cursor_row, cursor_col = self.editor.editor.cursor.row, self.editor.editor.cursor.col
-        
-        # Optional header at top
-        header_lines = 0
-        if self.style.show_header:
-            editor_content.append(f" {self.title} ", style=self.style.header_style)
-            editor_content.append("\n")
-            sep = self.style.header_separator_char * 70
-            editor_content.append(sep + "\n", style=self.style.header_separator_style)
-            header_lines = 2
 
-        # Check autocomplete popup and reserve space for it
+        # Check autocomplete popup state
         try:
             ed = self.editor.editor
             comp_active = bool(getattr(ed, "_completion_active", False))
@@ -1153,67 +1262,118 @@ class InputPanel:
             comp_index = int(getattr(ed, "_completion_index", 0))
         except Exception:
             comp_active, comp_items, comp_index = False, [], 0
+
+        # We'll build rows (without trailing newlines) to keep height accounting exact.
+        rows: List[Text] = []
+
+        # Optional header at top
+        if self.style.show_header:
+            rows.append(Text(f" {self.title} ", style=self.style.header_style))
+            rows.append(Text(self.style.header_separator_char * 70, style=self.style.header_separator_style))
+
+        header_lines = len(rows)
+
+        # Layout budgeting (within the inner content region)
+        status_lines = 1
+
+        # Header + editor + suggestions + status must fit in inner_height.
+        available_body = inner_height - header_lines - status_lines
+        available_body = max(1, available_body)
+
+        # Allocate lines to suggestions (if active) but never starve editor below 1 line.
+        # We allow suggestions to use *all* remaining space because the editor
+        # itself has its own scrolling.
+        min_editor_lines = 1
         suggestion_lines = 0
-        if comp_active and comp_items:
-            suggestion_lines = 1 + min(10, len(comp_items))  # title + items
+        if comp_active and comp_items and available_body > min_editor_lines:
+            suggestion_lines = min(1 + len(comp_items), available_body - min_editor_lines)
+        editor_lines_budget = max(min_editor_lines, available_body - suggestion_lines)
 
-        # Panel height includes content + suggestions + status line (and optional header)
-        available_content_lines = height - (1 + header_lines + suggestion_lines)
-        
-        # Calculate viewport
-        viewport_size = max(1, available_content_lines)
-        viewport_start = max(0, cursor_row - viewport_size // 2)
-        viewport_end = min(len(lines), viewport_start + viewport_size)
-        
-        if viewport_end - viewport_start < viewport_size:
-            viewport_start = max(0, viewport_end - viewport_size)
-        
-        # Show lines in viewport
+        # -------- Main editor viewport (scrolling) --------
+        self._ensure_cursor_visible(viewport_size=editor_lines_budget)
+        viewport_start = self._scroll_top
+        viewport_end = min(len(lines), viewport_start + editor_lines_budget)
+
         for i in range(viewport_start, viewport_end):
-            if i < len(lines):
-                line_num = f"{i+1:2d}: "
-                
-                if i == cursor_row:
-                    editor_content.append(line_num, style=self.style.current_line_num_style)
-                    line_content = lines[i]
-                    
-                    before_cursor = line_content[:cursor_col]
-                    cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
-                    after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
-                    
-                    editor_content.append(before_cursor)
-                    editor_content.append(cursor_char, style=self.style.cursor_style)
-                    editor_content.append(after_cursor)
-                else:
-                    editor_content.append(line_num, style=self.style.line_num_style)
-                    editor_content.append(lines[i])
-                
-                editor_content.append("\n")
-        
-        # Fill empty space (leave room for suggestions block and status line)
-        lines_shown = viewport_end - viewport_start
-        empty_lines_needed = int(available_content_lines - lines_shown)
-        for _ in range(empty_lines_needed):
-            editor_content.append("\n")
-        
-        if comp_active and comp_items:
-            editor_content.append("Suggestions:\n", style="bold cyan")
-            for i, item in enumerate(comp_items[:10]):
-                # Support dict form {display, insert}
-                disp = item.get("display", str(item)) if isinstance(item, dict) else str(item)
-                marker = "> " if i == comp_index else "  "
-                style = "black on white" if i == comp_index else ""
-                editor_content.append(f"{marker}{disp}\n", style=style)
+            line_num = f"{i+1:2d}: "
+            row = Text()
+            if i == cursor_row:
+                row.append(line_num, style=self.style.current_line_num_style)
+                line_content = lines[i]
+                before_cursor = line_content[:cursor_col]
+                cursor_char = line_content[cursor_col:cursor_col+1] if cursor_col < len(line_content) else "█"
+                after_cursor = line_content[cursor_col+1:] if cursor_col < len(line_content) else ""
+                row.append(before_cursor)
+                row.append(cursor_char, style=self.style.cursor_style)
+                row.append(after_cursor)
+            else:
+                row.append(line_num, style=self.style.line_num_style)
+                row.append(lines[i])
+            rows.append(row)
 
-        # Status line
+        # Fill remaining editor viewport space (editor area only)
+        lines_shown = viewport_end - viewport_start
+        for _ in range(max(0, editor_lines_budget - lines_shown)):
+            rows.append(Text(""))
+
+        # -------- Suggestions popup (scrolling) --------
+        if comp_active and comp_items and suggestion_lines >= 2:
+            # One line is the title; remaining are items.
+            items_viewport = suggestion_lines - 1
+            total_items = len(comp_items)
+
+            self._ensure_suggestion_visible(
+                viewport_size=items_viewport,
+                selected_index=comp_index,
+                total_items=total_items,
+            )
+
+            rows.append(Text("Suggestions:", style="bold cyan"))
+            start = self._suggestion_scroll_top
+            end = min(total_items, start + items_viewport)
+
+            for idx in range(start, end):
+                item = comp_items[idx]
+                disp = item.get("display", str(item)) if isinstance(item, dict) else str(item)
+                marker = "> " if idx == comp_index else "  "
+                style = "black on white" if idx == comp_index else ""
+                rows.append(Text(f"{marker}{disp}", style=style))
+
+            # Fill remaining suggestion viewport space
+            for _ in range(max(0, items_viewport - (end - start))):
+                rows.append(Text(""))
+        else:
+            # If suggestions are active but we couldn't allocate enough space to
+            # render them, reset suggestion scroll state so the next render doesn't
+            # try to reuse an out-of-range offset.
+            self._suggestion_scroll_top = 0
+
+        # -------- Status line --------
         total_lines = len(lines)
-        showing_range = f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > available_content_lines else f"{total_lines}"
-        
-        editor_content.append(
-            f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send",
-            style=self.style.status_style
+        showing_range = (
+            f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > editor_lines_budget else f"{total_lines}"
         )
-        
+        rows.append(
+            Text(
+                f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send",
+                style=self.style.status_style,
+            )
+        )
+
+        # Final assembly: exactly inner_height rows.
+        if len(rows) < inner_height:
+            rows.extend(Text("") for _ in range(inner_height - len(rows)))
+        elif len(rows) > inner_height:
+            # Prefer keeping the status line (last). Trim from the middle.
+            tail = rows[-1:]
+            rows = rows[: max(0, inner_height - 1)] + tail
+
+        editor_content = Text()
+        for i, row in enumerate(rows):
+            editor_content.append(row)
+            if i != len(rows) - 1:
+                editor_content.append("\n")
+
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
         return Panel(
             editor_content,
