@@ -284,6 +284,24 @@ class EggDisplayApp:
         except Exception:
             self._sandbox_status = {}
 
+        # Persist the current process sandbox selection as the initial
+        # sandbox config for the newly created root thread. This ensures
+        # that child threads spawned later can inherit the *thread*
+        # configuration (event-sourced) rather than relying on whatever
+        # happens to be configured in a future process.
+        try:
+            from eggthreads import set_thread_sandbox_config  # type: ignore
+
+            set_thread_sandbox_config(
+                self.db,
+                self.current_thread,
+                enabled=bool(getattr(self, '_sandbox_status', {}).get('enabled')),
+                config_name=str(getattr(self, '_sandbox_status', {}).get('config_name') or 'default.json'),
+                reason='Egg startup',
+            )
+        except Exception:
+            pass
+
     # ---------------- TTY helpers ----------------
     def _restore_tty(self) -> None:
         """Best-effort restoration of terminal settings (echo / canonical).
@@ -2280,6 +2298,22 @@ class EggDisplayApp:
                 self._log_system(f'/toggleSandboxing error (refresh): {e}')
                 return
 
+            # Persist the toggle for the current thread subtree so that
+            # tools can honour it even when executed from a different
+            # process later.
+            try:
+                from eggthreads import set_subtree_sandbox_config  # type: ignore
+
+                set_subtree_sandbox_config(
+                    self.db,
+                    self._thread_root_id(self.current_thread),
+                    enabled=bool(self._sandbox_status.get('enabled')),
+                    config_name=str(self._sandbox_status.get('config_name') or 'default.json'),
+                    reason='/toggleSandboxing',
+                )
+            except Exception:
+                pass
+
             sb = self._sandbox_status
             enabled = bool(sb.get('enabled'))
             effective = bool(sb.get('effective'))
@@ -2306,6 +2340,20 @@ class EggDisplayApp:
                 self._sandbox_status = get_srt_sandbox_status()
                 cfg_path = self._sandbox_status.get('config_path') or ''
                 self._log_system(f"Sandbox configuration set to: {cfg_path}")
+
+                # Persist the new selection for the current subtree.
+                try:
+                    from eggthreads import set_subtree_sandbox_config  # type: ignore
+
+                    set_subtree_sandbox_config(
+                        self.db,
+                        self._thread_root_id(self.current_thread),
+                        enabled=bool(self._sandbox_status.get('enabled')),
+                        config_name=str(self._sandbox_status.get('config_name') or 'default.json'),
+                        reason='/setSrtSandboxConfiguration',
+                    )
+                except Exception:
+                    pass
                 warn = self._sandbox_status.get('warning')
                 if isinstance(warn, str) and warn:
                     self._log_system(f"[bold red]Sandbox warning:[/bold red] {warn}")
