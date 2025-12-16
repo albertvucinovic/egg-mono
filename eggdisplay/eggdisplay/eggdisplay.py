@@ -900,14 +900,14 @@ class OutputPanel:
         # Add optional header with stats inside content area
         content_lines = self.content.count('\n') + 1 if self.content else 0
         header_lines = 0
-        if self.style.show_header:
-            content_text.append(f" {self.title} ", style=self.style.header_style)
-            content_text.append(f" | Lines: {content_lines}")
-            content_text.append(f" | Height: {height}")
-            content_text.append("\n")
-            sep = self.style.header_separator_char * 70
-            content_text.append(sep + "\n", style=self.style.header_separator_style)
-            header_lines = 2
+        #No header for now
+        #if self.style.show_header:
+        #    content_text.append(f"Lines: {content_lines}")
+        #    content_text.append(f" | Height: {height}")
+        #    content_text.append("\n")
+        #    sep = self.style.header_separator_char * 70
+        #    content_text.append(sep + "\n", style=self.style.header_separator_style)
+        #    header_lines = 2
 
         # Calculate available lines for content (after header). For
         # crop-mode panels we reserve slightly less padding so that the
