@@ -5,7 +5,7 @@
       "api_key_env": "OPENAI_API_KEY",
       "models": {
         "GPT 5.2 high": {
-          "model_name": "gpt-5.1",
+          "model_name": "gpt-5.2",
           "max_tokens": 400000,
           "parameters": {
                   "reasoning_effort": "high",
@@ -18,7 +18,7 @@
           }
         },
         "GPT 5.2 xhigh": {
-          "model_name": "gpt-5.1",
+          "model_name": "gpt-5.2",
           "max_tokens": 400000,
           "parameters": {
                   "reasoning_effort": "xhigh",
@@ -267,6 +267,11 @@
           "options": {
             "thinking_content_policy": "last assistant turn",
             "thinking_content_key": "reasoning_content"
+          },
+          "cost": {
+            "input_tokens": 0.028,
+            "cache_prompt": 0.0028,
+            "output_tokens": 0.042
           }
         }
       }
@@ -320,9 +325,18 @@
       "api_key_env": "MOONSHOTAI_API_KEY",
       "models": {
         "kimi-k2-0905-preview": {
-		"model_name": "kimi-k2-0905-preview",
-		"max_tokens": 256000
-	}
+      		"model_name": "kimi-k2-0905-preview",
+      		"max_tokens": 256000
+      	},
+        "kimi-k2-thinking": {
+          "model_name": "kimi-k2-thinking",
+          "max_tokens": 256000,
+          "cost": {
+            "input_tokens": 0.06,
+            "output_tokens": 0.25,
+            "cache_prompt": 0.015
+          }
+        }
       }
     },
     "zai": {
