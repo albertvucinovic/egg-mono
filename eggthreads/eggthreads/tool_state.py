@@ -336,7 +336,19 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
         ev = dict(row)
         t = ev.get("type")
         inv = ev.get("invoke_id")
-        if t == "stream.delta":
+        if t == "stream.open":
+            # Newer runners tag stream.open with stream_kind so we can
+            # identify an LLM invoke even if it was interrupted before
+            # the first delta.
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and payload.get('stream_kind') == 'llm':
+                if isinstance(inv, str) and inv:
+                    llm_invokes.add(inv)
+
+        elif t == "stream.delta":
             try:
                 payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
             except Exception:
@@ -357,7 +369,8 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
             except Exception:
                 payload = {}
             old_inv = payload.get("old_invoke_id")
-            if isinstance(old_inv, str) and old_inv in llm_invokes:
+            purpose = payload.get('purpose')
+            if (isinstance(old_inv, str) and old_inv in llm_invokes) or (isinstance(old_inv, str) and purpose == 'llm'):
                 try:
                     last_close = int(ev.get("event_seq"))
                 except Exception:

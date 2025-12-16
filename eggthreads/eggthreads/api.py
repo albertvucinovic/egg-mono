@@ -247,9 +247,10 @@ def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Opt
     no longer exists. A new runner can immediately acquire a fresh
     lease for the thread.
     """
-    cur = db.conn.execute("SELECT invoke_id FROM open_streams WHERE thread_id=?", (thread_id,))
+    cur = db.conn.execute("SELECT invoke_id, purpose FROM open_streams WHERE thread_id=?", (thread_id,))
     row = cur.fetchone()
     old = row[0] if row else None
+    purpose = row[1] if row else None
     new_inv = _ulid_like()
     if old:
         # Remove the existing open_streams row so that:
@@ -263,7 +264,7 @@ def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Opt
             event_id=_ulid_like(),
             thread_id=thread_id,
             type_='control.interrupt',
-            payload={"reason": reason, "old_invoke_id": old, "new_invoke_id": new_inv},
+            payload={"reason": reason, "old_invoke_id": old, "new_invoke_id": new_inv, "purpose": purpose},
         )
     return old
 

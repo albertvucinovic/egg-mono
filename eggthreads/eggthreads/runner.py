@@ -82,7 +82,14 @@ class ThreadRunner:
         # Acquire lease with fresh invoke_id
         invoke_id = os.urandom(10).hex()
         lease_until = _now_plus(self.cfg.lease_ttl_sec)
-        if not self.db.try_open_stream(self.thread_id, invoke_id, lease_until, owner=self.owner, purpose=self.purpose):
+
+        # Important: purpose is per-invoke, not per-process. We use it
+        # to distinguish LLM streaming (RA1) from tool execution
+        # streaming (RA2/RA3) so Ctrl+C interrupts can advance the RA1
+        # boundary even when interrupted before the first delta.
+        purpose = 'llm' if ra.kind == 'RA1_llm' else 'tool'
+
+        if not self.db.try_open_stream(self.thread_id, invoke_id, lease_until, owner=self.owner, purpose=purpose):
             return False
 
         # Resolve current model for this turn from eggthreads API so that
@@ -109,14 +116,16 @@ class ThreadRunner:
             except Exception:
                 pass
 
-        # Open streaming event tagged with model_key
+        # Open streaming event tagged with model_key and kind so that
+        # downstream boundary detection can distinguish RA1 from
+        # tool streaming.
         self.db.append_event(
             event_id=os.urandom(10).hex(),
             thread_id=self.thread_id,
             type_='stream.open',
             msg_id=os.urandom(10).hex(),
             invoke_id=invoke_id,
-            payload={'model_key': current_model},
+            payload={'model_key': current_model, 'stream_kind': purpose, 'ra_kind': ra.kind},
         )
 
         # Heartbeat loop to keep lease alive
