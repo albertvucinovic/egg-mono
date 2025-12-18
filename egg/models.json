@@ -105,8 +105,30 @@
           "options": {
             "thinking_content_policy": "send all encrypted gemini",
             "thinking_content_key": "extra_content"
+          },
+          "cost": {
+            "input_tokens": 0.05,
+            "output_tokens": 0.3,
+            "cached_input": 0.005
           }
         },
+        "Google Gemini 3 Pro Preview High": {
+          "model_name": "gemini-3-pro-preview",
+          "max_tokens": 2000000,
+          "parameters": {
+            "reasoning_effort": "high"
+          },
+          "options": {
+            "thinking_content_policy": "send all encrypted gemini",
+            "thinking_content_key": "extra_content"
+          },
+          "cost": {
+            "input_tokens": 0.2,
+            "output_tokens": 1.2,
+            "cached_input": 0.005
+          }
+        },
+ 
         "Google Gemini 2.5 Flash": {
           "model_name": "gemini-2.5-flash",
           "max_tokens": 1000000
