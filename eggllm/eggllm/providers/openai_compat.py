@@ -26,6 +26,9 @@ class OpenAICompatAdapter(ProviderAdapter):
         assistant_text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls_buf: Dict[int, Dict[str, Any]] = {}
+        # Provider-specific message-level fields that we do not interpret
+        # but must preserve (e.g. Gemini thought signatures).
+        extra_message_fields: Dict[str, Any] = {}
 
         def tool_calls_values():
             # Preserve insertion order of indices
@@ -63,6 +66,16 @@ class OpenAICompatAdapter(ProviderAdapter):
             if not isinstance(delta, dict):
                 continue
 
+            # Preserve any provider-specific delta fields (other than the
+            # standard OpenAI ones) so callers can round-trip them.
+            for k, v in delta.items():
+                if k in ("role", "content", "reasoning_content", "tool_calls"):
+                    continue
+                if v is None:
+                    continue
+                # Keep the latest non-empty value.
+                extra_message_fields[k] = v
+
             if (content := delta.get("content")):
                 assistant_text_parts.append(content)
                 yield {"type": "content_delta", "text": content}
@@ -87,6 +100,20 @@ class OpenAICompatAdapter(ProviderAdapter):
                             "type": "function",
                             "function": {"name": "", "arguments": ""},
                         }
+
+                    # Preserve any provider-specific per-tool-call fields
+                    # (e.g. Gemini 3 thought signatures under
+                    # tool_call.extra_content).
+                    for k, v in tc_delta.items():
+                        if k in ("index", "id", "type", "function"):
+                            continue
+                        if v is None:
+                            continue
+                        # Do not merge: signatures must remain in their
+                        # original position and cannot be combined.
+                        # Overwrite with the latest value if the provider
+                        # repeats the field across multiple chunks.
+                        tool_calls_buf[idx][k] = v
                     if tc_delta.get("id"):
                         tool_calls_buf[idx]["id"] = tc_delta["id"]
                     if f_delta := tc_delta.get("function"):
@@ -105,6 +132,11 @@ class OpenAICompatAdapter(ProviderAdapter):
         reasoning = "".join(reasoning_parts)
         if reasoning.strip():
             final_message["reasoning_content"] = reasoning
+
+        # Attach any provider-specific message-level fields we observed.
+        for k, v in extra_message_fields.items():
+            if k not in final_message and v is not None:
+                final_message[k] = v
 
         yield {"type": "done", "message": final_message}
 
@@ -165,6 +197,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         assistant_text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls_buf: Dict[int, Dict[str, Any]] = {}
+        extra_message_fields: Dict[str, Any] = {}
 
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
@@ -203,6 +236,14 @@ class OpenAICompatAdapter(ProviderAdapter):
                     delta = (choices[0] or {}).get("delta", {})
                     if not isinstance(delta, dict):
                         continue
+
+                    # Preserve any provider-specific delta fields.
+                    for k, v in delta.items():
+                        if k in ("role", "content", "reasoning_content", "tool_calls"):
+                            continue
+                        if v is None:
+                            continue
+                        extra_message_fields[k] = v
                     if (content := delta.get("content")):
                         assistant_text_parts.append(content)
                         yield {"type": "content_delta", "text": content}
@@ -224,6 +265,14 @@ class OpenAICompatAdapter(ProviderAdapter):
                                     "type": "function",
                                     "function": {"name": "", "arguments": ""},
                                 }
+
+                            # Preserve provider-specific per-tool-call fields.
+                            for k, v in tc_delta.items():
+                                if k in ("index", "id", "type", "function"):
+                                    continue
+                                if v is None:
+                                    continue
+                                tool_calls_buf[idx][k] = v
                             if tc_delta.get("id"):
                                 tool_calls_buf[idx]["id"] = tc_delta["id"]
                             if f_delta := tc_delta.get("function"):
@@ -242,6 +291,10 @@ class OpenAICompatAdapter(ProviderAdapter):
         reasoning = "".join(reasoning_parts)
         if reasoning.strip():
             final_message["reasoning_content"] = reasoning
+
+        for k, v in extra_message_fields.items():
+            if k not in final_message and v is not None:
+                final_message[k] = v
 
         yield {"type": "done", "message": final_message}
 
