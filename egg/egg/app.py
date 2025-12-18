@@ -1637,9 +1637,12 @@ class EggDisplayApp:
         if text.startswith('$') and len(text) > 1:
             self._enqueue_bash_tool(text[1:].strip(), hidden=False)
             return False
-        if text.startswith('/'):
+        if text.startswith('/paste'):
             self._handle_command(text)
             return False
+        if text.startswith('/'):
+            self._handle_command(text)
+            return True
         append_message(self.db, self.current_thread, 'user', text)
         create_snapshot(self.db, self.current_thread)
         self._ensure_scheduler_for(self.current_thread)
