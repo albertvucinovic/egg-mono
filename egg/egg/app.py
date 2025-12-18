@@ -18,6 +18,7 @@ from rich.markdown import Markdown
 
 # Local development: add sibling libraries to sys.path
 import sys as _sys
+import subprocess
 _ROOT = Path(__file__).resolve().parent
 _sys.path.insert(0, str(_ROOT.parent / 'eggthreads'))
 _sys.path.insert(0, str(_ROOT.parent / 'eggllm'))
@@ -81,7 +82,7 @@ Commands:
     /toggleSandboxing, /setSrtSandboxConfiguration <file.json>
     /toolsSecrets <on|off>, /toolsStatus 
   Other: 
-    /enterMode <send|newline>, /cost, /quit 
+    /enterMode <send|newline>, /cost, /paste, /quit 
     /help
 """
 
@@ -319,8 +320,49 @@ class EggDisplayApp:
         except Exception:
             pass
 
-    # ---------------- Scheduler & thread helpers ----------------
-    def _thread_root_id(self, tid: str) -> str:
+    def _read_clipboard(self) -> Optional[str]:
+        """Return clipboard content as string, or None on failure."""
+        # Try pyperclip first
+        try:
+            import pyperclip
+            return pyperclip.paste()
+        except ImportError:
+            pass
+        # Fallback to platform-specific commands with timeout
+        platform = _sys.platform
+        def run_clipboard_cmd(cmd, **kwargs):
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=2, **kwargs)
+                if result.returncode == 0:
+                    return result.stdout
+                else:
+                    return None
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, 
+                    FileNotFoundError, UnicodeDecodeError):
+                return None
+            except Exception:
+                return None
+        
+        if platform == "darwin":  # macOS
+            out = run_clipboard_cmd(["pbpaste"])
+            if out is not None:
+                return out
+        elif platform == "win32":  # Windows
+            out = run_clipboard_cmd(["clip"], shell=True)
+            if out is not None:
+                return out
+        else:  # Linux/BSD
+            # Try wl-paste (Wayland) first, then xclip, then xsel
+            out = run_clipboard_cmd(["wl-paste"])
+            if out is not None:
+                return out
+            out = run_clipboard_cmd(["xclip", "-selection", "clipboard", "-o"])
+            if out is not None:
+                return out
+            out = run_clipboard_cmd(["xsel", "--clipboard", "--output"])
+            if out is not None:
+                return out
+        return None
         cur = tid
         while True:
             row = self.db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (cur,)).fetchone()
@@ -1365,11 +1407,15 @@ class EggDisplayApp:
             text = self.input_panel.get_text().strip()
             if text:
                 try:
-                    self._on_submit(text)
+                    should_clear = self._on_submit(text)
                 except Exception as e:
                     self._log_system(f"Submit error: {e}")
-            self.input_panel.clear_text()
-            self.input_panel.increment_message_count()
+                    should_clear = True
+            else:
+                should_clear = True
+            if should_clear:
+                self.input_panel.clear_text()
+                self.input_panel.increment_message_count()
             return True
         # Clear input on Ctrl+E
         if key == ctrl_e or key == '\x05':
@@ -1390,11 +1436,15 @@ class EggDisplayApp:
                 text = self.input_panel.get_text().strip()
                 if text:
                     try:
-                        self._on_submit(text)
+                        should_clear = self._on_submit(text)
                     except Exception as e:
                         self._log_system(f"Submit error: {e}")
-                self.input_panel.clear_text()
-                self.input_panel.increment_message_count()
+                        should_clear = True
+                else:
+                    should_clear = True
+                if should_clear:
+                    self.input_panel.clear_text()
+                    self.input_panel.increment_message_count()
                 return True
             else:
                 # Insert newline in editor
@@ -1571,7 +1621,11 @@ class EggDisplayApp:
             pass
         return True
 
-    def _on_submit(self, text: str) -> None:
+    def _on_submit(self, text: str) -> bool:
+        """
+        Process user-submitted text.
+        Returns True if the input panel should be cleared, False otherwise.
+        """
         # User command execution ($ / $$) is modeled as a user-originated
         # tool call (RA3). We enqueue a user message with tool_calls and
         # an automatic tool_call.approval so that the ThreadRunner executes
@@ -1579,18 +1633,18 @@ class EggDisplayApp:
         # machine, rather than running it locally in the UI.
         if text.startswith('$$') and len(text) > 2:
             self._enqueue_bash_tool(text[2:].strip(), hidden=True)
-            return
+            return False
         if text.startswith('$') and len(text) > 1:
             self._enqueue_bash_tool(text[1:].strip(), hidden=False)
-            return
+            return False
         if text.startswith('/'):
             self._handle_command(text)
-            return
+            return False
         append_message(self.db, self.current_thread, 'user', text)
         create_snapshot(self.db, self.current_thread)
         self._ensure_scheduler_for(self.current_thread)
         self._log_system("User message queued; scheduler will stream the response.")
-
+        return True
 
     def _enqueue_bash_tool(self, script: str, hidden: bool) -> None:
         """Enqueue a bash command as a user tool call (RA3).
@@ -1665,6 +1719,22 @@ class EggDisplayApp:
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
             self._log_system(commandsText)
+        elif cmd == 'paste':
+            content = self._read_clipboard()
+            if content is None:
+                self._log_system('Failed to read clipboard.')
+            elif content == '':
+                self._log_system('Clipboard is empty.')
+            else:
+                self.input_panel.editor.editor.set_text(content)
+                # Move cursor to start of pasted text so user sees beginning
+                self.input_panel.editor.editor.cursor.row = 0
+                self.input_panel.editor.editor.cursor.col = 0
+                self.input_panel.editor.editor._clamp_cursor()
+                # Reset scroll positions to show from start
+                self.input_panel._scroll_top = 0
+                self.input_panel._hscroll_left = 0
+                self._log_system(f'Pasted {len(content)} characters from clipboard.')
         elif cmd == 'quit':
             self.running = False
         elif cmd == 'newThread':

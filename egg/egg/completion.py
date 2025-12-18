@@ -493,7 +493,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/listChildren', '/threads', '/thread', '/deleteThread', '/newThread', '/duplicateThread',
                 '/schedulers', '/enterMode', '/toggleAutoApproval',
                 '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus',
-                '/toolsSecrets', '/toggleSandboxing', '/quit',
+                '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
                 '/setSrtSandboxConfiguration',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
