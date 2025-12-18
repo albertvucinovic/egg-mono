@@ -23,10 +23,15 @@
           "parameters": {
                   "reasoning_effort": "xhigh",
                   "prompt_cache_retention": "24h"
+          },
+          "cost": {
+            "input_tokens": 0.175,
+            "cached_input": 0.0175,
+            "output_tokens": 3.0
           }
-        },
-        "GPT 5.1 high": {
-	        "model_name": "gpt-5.1",
+        }, 
+        "GP#T 5.1 high": {
+	        "#model_name": "gpt-5.1",
 	        "max_tokens": 400000,
           "parameters": {
                   "reasoning_effort": "high",
@@ -91,6 +96,14 @@
       "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       "api_key_env": "GOOGLE_API_KEY",
       "models": {
+        "Google Gemini 3 Flash Preview High": {
+          "model_name": "gemini-3-flash-preview",
+          "max_tokens": 2000000,
+          "options": {
+            "thinking_content_policy": "send all encrypted gemini",
+            "thinking_content_key": "extra_content"
+          }
+        },
         "Google Gemini 2.5 Flash": {
           "model_name": "gemini-2.5-flash",
           "max_tokens": 1000000
