@@ -99,6 +99,9 @@
         "Google Gemini 3 Flash Preview High": {
           "model_name": "gemini-3-flash-preview",
           "max_tokens": 2000000,
+          "parameters": {
+            "reasoning_effort": "high"
+          },
           "options": {
             "thinking_content_policy": "send all encrypted gemini",
             "thinking_content_key": "extra_content"
