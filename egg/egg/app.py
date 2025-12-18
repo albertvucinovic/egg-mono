@@ -1296,11 +1296,13 @@ class EggDisplayApp:
             ctrl_d = getattr(readchar.key, 'CTRL_D', '\x04')
             ctrl_c = getattr(readchar.key, 'CTRL_C', '\x03')
             ctrl_e = getattr(readchar.key, 'CTRL_E', '\x05')
+            ctrl_p = getattr(readchar.key, 'CTRL_P', '\x10')
             enter_key = getattr(readchar.key, 'ENTER', '\r')
         except Exception:
             ctrl_d = '\x04'
             ctrl_c = '\x03'
             ctrl_e = '\x05'
+            ctrl_p = '\x10'
             enter_key = '\r'
         # Esc handling: log and forward a logical 'escape' to the editor.
         # Some terminals send a single ESC ('\x1b'), others double ('\x1b\x1b').
@@ -1424,6 +1426,24 @@ class EggDisplayApp:
                 self._log_system('Input cleared.')
             except Exception:
                 pass
+            return True
+        # Paste clipboard on Ctrl+P
+        if key == ctrl_p or key == '\x10':
+            content = self._read_clipboard()
+            if content is None:
+                self._log_system('Failed to read clipboard.')
+            elif content == '':
+                self._log_system('Clipboard is empty.')
+            else:
+                self.input_panel.editor.editor.set_text(content)
+                # Move cursor to start of pasted text so user sees beginning
+                self.input_panel.editor.editor.cursor.row = 0
+                self.input_panel.editor.editor.cursor.col = 0
+                self.input_panel.editor.editor._clamp_cursor()
+                # Reset scroll positions to show from start
+                self.input_panel._scroll_top = 0
+                self.input_panel._hscroll_left = 0
+                self._log_system(f'Pasted {len(content)} characters from clipboard.')
             return True
         # Enter behavior depends on mode
         if key in (enter_key, '\r', '\n'):
@@ -2634,7 +2654,7 @@ class EggDisplayApp:
         await self._start_watching_current()
 
         self.console.print("[bold blue]Egg Chat (eggdisplay UI)[/bold blue]")
-        self.console.print("Press Enter or Ctrl+D to send (configurable). Ctrl+E clears input. Ctrl+C to quit. Type /help for commands.\n")
+        self.console.print("Press Enter or Ctrl+D to send (configurable). Ctrl+E clears input. Ctrl+P paste, Ctrl+C to quit. Type /help for commands.\n")
         # Print initial static view to console so history is visible above live panels
         self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
 
