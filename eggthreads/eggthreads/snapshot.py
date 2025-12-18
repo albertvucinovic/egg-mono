@@ -45,45 +45,23 @@ class SnapshotBuilder:
             except Exception:
                 payload = {}
 
+            # Preserve the full msg.create payload so provider-specific
+            # fields (e.g. Gemini thought signatures) survive round-trips.
+            #
+            # Snapshot messages are still considered a UI-friendly cache,
+            # but they must remain faithful enough to reconstruct provider
+            # requests for advanced models.
             role = payload.get("role")
-            msg: Dict[str, Any] = {
-                "msg_id": _get(e, "msg_id"),
-                "role": role,
-            }
+            msg: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {}
+            msg["msg_id"] = _get(e, "msg_id")
+            msg["role"] = role
             # Preserve the original event timestamp if available so UIs
             # can display when a message was created.
             ts_val = _get(e, "ts")
             if ts_val is not None:
                 msg["ts"] = ts_val
-            # Preserve model_key if present so UIs can display the model for each message
-            if isinstance(payload, dict) and payload.get("model_key"):
-                msg["model_key"] = payload.get("model_key")
-            # Copy content if present
-            if "content" in payload:
-                msg["content"] = payload.get("content")
-            # Preserve special flags for API filtering and turn management
-            if isinstance(payload, dict):
-                if payload.get("no_api"):
-                    msg["no_api"] = payload.get("no_api")
-                if payload.get("keep_user_turn"):
-                    msg["keep_user_turn"] = payload.get("keep_user_turn")
-            # Tool messages
-            if role == "tool":
-                if payload.get("name"):
-                    msg["name"] = payload.get("name")
-                if payload.get("tool_call_id"):
-                    msg["tool_call_id"] = payload.get("tool_call_id")
-                # Preserve user_tool_call so that user-initiated
-                # command outputs can be distinguished from genuine
-                # assistant tool outputs when rebuilding API context.
-                if payload.get("user_tool_call"):
-                    msg["user_tool_call"] = payload.get("user_tool_call")
-            # Assistant messages
-            if role == "assistant":
-                if payload.get("tool_calls"):
-                    msg["tool_calls"] = payload.get("tool_calls")
-                if payload.get("reasoning"):
-                    msg["reasoning"] = payload.get("reasoning")
+            # The selective field copying above was replaced by payload
+            # passthrough. We intentionally keep all payload keys.
 
             messages.append(msg)
 

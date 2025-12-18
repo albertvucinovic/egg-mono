@@ -310,6 +310,12 @@ class ThreadRunner:
         base_messages: List[Dict[str, Any]] = []
         thinking_policy: Optional[str] = None
         thinking_key: Optional[str] = None
+        # Some providers (e.g. Gemini 3) require that we round-trip
+        # encrypted thought/signature blobs exactly as received.  These
+        # blobs are carried under a provider-defined key configured via
+        # thinking_content_key.
+        # 'send all' | 'last assistant turn'
+        encrypted_thinking_mode: Optional[str] = None
         # Resolve per-model options from the registry if possible.
         try:
             if self.llm is not None and current_model:
@@ -334,11 +340,17 @@ class ThreadRunner:
                 snap = json.loads(th.snapshot_json)
                 msgs = snap.get('messages', []) or []
 
+                # Recognize encrypted-Gemini thinking policies.
+                if thinking_policy in ('send all encrypted gemini', 'send_all_encrypted_gemini'):
+                    encrypted_thinking_mode = 'send all'
+                elif thinking_policy in ('last assistant turn encrypted gemini', 'last_assistant_turn_encrypted_gemini'):
+                    encrypted_thinking_mode = 'last assistant turn'
+
                 # If the model wants only the last assistant turn's
                 # thinking, identify the index of the last user message
                 # so we can treat messages after that as the "tail".
                 last_user_idx = -1
-                if thinking_policy == 'last assistant turn':
+                if thinking_policy == 'last assistant turn' or encrypted_thinking_mode == 'last assistant turn':
                     for i, m in enumerate(msgs):
                         try:
                             if m.get('role') == 'user' and isinstance(m.get('content'), str):
@@ -358,6 +370,12 @@ class ThreadRunner:
                     raw = m.get('reasoning') or m.get('reasoning_content')
                     if not isinstance(raw, str) or not raw:
                         return None
+                    # Encrypted-Gemini modes do not send plaintext reasoning
+                    # derived from the provider stream; instead they round-trip
+                    # a provider-supplied opaque field under
+                    # thinking_content_key.
+                    if encrypted_thinking_mode is not None:
+                        return None
                     if thinking_policy == 'send all':
                         return raw
                     if thinking_policy == 'last assistant turn':
@@ -369,6 +387,62 @@ class ThreadRunner:
                     # Default / "strip all": never send.
                     return None
 
+                def _maybe_include_encrypted_thinking(m: Dict[str, Any], idx: int) -> Optional[Any]:
+                    """Return opaque provider thinking/signature content to round-trip.
+
+                    The returned value is attached under the configured
+                    thinking_content_key without any interpretation.
+                    """
+                    if encrypted_thinking_mode is None:
+                        return None
+                    out_thinking_key = thinking_key or 'reasoning_content'
+                    if out_thinking_key not in m:
+                        return None
+                    val = m.get(out_thinking_key)
+                    if val is None:
+                        return None
+                    if encrypted_thinking_mode == 'send all':
+                        return val
+                    if encrypted_thinking_mode == 'last assistant turn':
+                        if last_user_idx == -1 or idx <= last_user_idx:
+                            return None
+                        return val
+                    return None
+
+                def _passthrough_provider_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
+                    """Copy provider-specific fields from a snapshot message.
+
+                    For "encrypted gemini" modes we must be able to
+                    round-trip provider-returned blobs (e.g.
+                    thought_signature / extra_content) exactly as
+                    received.
+
+                    We copy only keys that are *not* eggthreads
+                    bookkeeping fields.
+                    """
+                    if encrypted_thinking_mode is None:
+                        return
+                    if not isinstance(src, dict) or not isinstance(dst, dict):
+                        return
+                    ignore = {
+                        # OpenAI message protocol keys we always set explicitly
+                        'role', 'content', 'tool_calls',
+                        # eggthreads snapshot/DB metadata
+                        'msg_id', 'ts',
+                        # eggthreads-only flags
+                        'no_api', 'keep_user_turn',
+                        # eggthreads local annotations
+                        'model_key', 'reasoning',
+                    }
+                    for k, v in src.items():
+                        if k in ignore:
+                            continue
+                        if k in dst:
+                            continue
+                        if v is None:
+                            continue
+                        dst[k] = v
+
                 for idx, m in enumerate(msgs):
                     if m.get('no_api'):
                         continue
@@ -376,6 +450,7 @@ class ThreadRunner:
                     content = m.get('content', '')
                     # Compute optional thinking text according to policy
                     thinking_text = _maybe_include_reasoning(m, idx)
+                    encrypted_thinking_val = _maybe_include_encrypted_thinking(m, idx)
                     # Determine the outbound thinking key, defaulting
                     # to the provider's native "reasoning_content" if
                     # no explicit key was configured.
@@ -391,6 +466,9 @@ class ThreadRunner:
                         }
                         if thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
+                        if encrypted_thinking_val is not None:
+                            msg_out[out_thinking_key] = encrypted_thinking_val
+                        _passthrough_provider_fields(m, msg_out)
                         base_messages.append(msg_out)
                     elif r == 'tool':
                         obj = {'role': 'tool', 'content': content}
@@ -408,6 +486,10 @@ class ThreadRunner:
                         msg_out: Dict[str, Any] = {'role': r, 'content': content}
                         if r == 'assistant' and thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
+                        if r == 'assistant' and encrypted_thinking_val is not None:
+                            msg_out[out_thinking_key] = encrypted_thinking_val
+                        if r == 'assistant':
+                            _passthrough_provider_fields(m, msg_out)
                         base_messages.append(msg_out)
             except Exception:
                 pass
@@ -618,6 +700,23 @@ class ThreadRunner:
                             assistant_msg['reasoning'] = ''.join(reasoning_parts)
                         if current_model:
                             assistant_msg['model_key'] = current_model
+
+                        # Preserve any provider-specific fields returned
+                        # by eggllm (e.g. Gemini thought signatures).
+                        #
+                        # We *do not* interpret these fields here; we
+                        # simply persist them so that the next provider
+                        # request can round-trip them when required by
+                        # the model/protocol.
+                        if isinstance(final, dict):
+                            for k, v in final.items():
+                                if k == 'role':
+                                    continue
+                                if k in assistant_msg:
+                                    continue
+                                if v is None:
+                                    continue
+                                assistant_msg[k] = v
                         # If the provider returned an entirely empty
                         # assistant message (no content, no tools, no
                         # reasoning), skip creating a blank assistant
@@ -755,11 +854,31 @@ class ThreadRunner:
             # between an assistant(tool_calls) and a tool message.  Blank
             # assistant messages carry no information, so we drop them
             # here to avoid confusing such templates.
+            #
+            # However, some providers (notably Gemini 3) may return an
+            # *empty-content* assistant message that still carries
+            # provider-specific fields (e.g. thought signatures) that must
+            # be preserved verbatim for the next request. In that case we
+            # must keep the message even if content is blank.
             if role == "assistant":
                 text = m2.get("content")
-                if (text is None or (isinstance(text, str) and not text.strip())) \
-                        and not m2.get("tool_calls"):
-                    continue
+                is_blank = (text is None or (isinstance(text, str) and not text.strip()))
+                if is_blank and not m2.get("tool_calls"):
+                    # Keep if any non-trivial fields remain (e.g.
+                    # reasoning_content, thought_signature, extra_content).
+                    ignore = {
+                        "role",
+                        "content",
+                        # Removed by eggllm's provider-layer sanitization
+                        "model_key",
+                        "local_tool",
+                        # Eggthreads-local control flags
+                        "no_api",
+                        "keep_user_turn",
+                    }
+                    extra_keys = [k for k in m2.keys() if k not in ignore]
+                    if not extra_keys:
+                        continue
 
             out.append(m2)
 
