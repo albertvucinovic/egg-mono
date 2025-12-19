@@ -363,14 +363,62 @@ class EggDisplayApp:
             if out is not None:
                 return out
         return None
+
+    def _thread_root_id(self, tid: str) -> str:
+        """Return the root thread id for any thread id.
+
+        Egg's SubtreeScheduler is keyed by *root* thread id. The UI
+        needs a reliable way to map any thread in a subtree to its root
+        so we can accurately mark threads as "scheduled" in the tree.
+
+        We primarily use the backend's get_parent() helper (shared
+        semantics with eggthreads). We also keep a tiny SQL fallback in
+        case get_parent is unavailable or fails.
+        """
+
         cur = tid
-        while True:
-            row = self.db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (cur,)).fetchone()
-            if not row or not row[0]:
+        seen: set[str] = set()
+        # Hard cap to avoid infinite loops in case of corrupted parent
+        # links.
+        for _ in range(2048):
+            if not cur:
+                break
+            if cur in seen:
+                # Cycle detected; best-effort: treat the current node as
+                # the root to avoid crashing the UI.
                 return cur
-            cur = row[0]
+            seen.add(cur)
+
+            parent: Optional[str] = None
+            try:
+                parent = get_parent(self.db, cur)
+            except Exception:
+                parent = None
+            if parent is None:
+                # Fallback (should be equivalent to get_parent)
+                try:
+                    row = self.db.conn.execute(
+                        'SELECT parent_id FROM children WHERE child_id=?',
+                        (cur,),
+                    ).fetchone()
+                    parent = row[0] if row and row[0] else None
+                except Exception:
+                    parent = None
+
+            if not parent:
+                return cur
+            cur = parent
+
+        return cur or tid
+
+    def _is_thread_scheduled(self, tid: str) -> bool:
+        """True if tid's root has an entry in active_schedulers."""
+        rid = self._thread_root_id(tid)
+        return rid in (self.active_schedulers or {})
 
     def _start_scheduler(self, root_tid: str) -> None:
+        # Scheduler lifecycle is managed elsewhere; here we only avoid
+        # starting duplicate schedulers for the same root.
         if root_tid in self.active_schedulers:
             return
         # The SubtreeScheduler scans the entire subtree looking for runnable
@@ -430,7 +478,7 @@ class EggDisplayApp:
         id_short = tid[-8:]
         sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
         cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == self.current_thread else ''
-        sched_tag = '[bold cyan][SCHED][/bold cyan] ' if self._thread_root_id(tid) in self.active_schedulers else ''
+        sched_tag = '[bold cyan][SCHED][/bold cyan] ' if self._is_thread_scheduled(tid) else ''
         # Color status
         if status == 'active':
             status_tag = f"[bold green]{status}[/]"
