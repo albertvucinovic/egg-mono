@@ -83,6 +83,7 @@ Commands:
     /toolsSecrets <on|off>, /toolsStatus 
   Display:
     /togglePanel (chat|children|system)
+    /redraw
   Other: 
     /enterMode <send|newline>, /cost, /paste, /quit 
     /help
@@ -258,6 +259,12 @@ class EggDisplayApp:
             'children': True,
             'chat': True,
         }
+
+        # Auto redraw static console view when terminal is resized.
+        # This is debounced so that we redraw once after resizing settles.
+        self._auto_redraw_on_resize: bool = True
+        self._last_term_size: Optional[tuple[int, int]] = None
+        self._resize_dirty_since: Optional[float] = None
 
         # Streaming/watch state
         self._live_state: Dict[str, Any] = {
@@ -1364,6 +1371,28 @@ class EggDisplayApp:
         except Exception:
             self._last_printed_seq_by_thread[tid] = self._last_printed_seq_by_thread.get(tid, -1)
 
+    def _print_banner(self) -> None:
+        """Print the static console banner (above the live panels)."""
+        try:
+            self.console.print("[bold blue]Egg Chat (eggdisplay UI)[/bold blue]")
+            self.console.print(
+                "Press Enter or Ctrl+D to send (configurable). Ctrl+E clears input. Ctrl+P paste, "
+                "Ctrl+C to quit. Type /help for commands.\n"
+            )
+        except Exception:
+            pass
+
+    def _redraw_static_view(self, *, reason: str = '') -> None:
+        """Clear terminal and reprint static transcript for current thread."""
+        try:
+            # Clear the terminal so Rich can rewrap content at the new width.
+            self.console.clear()
+        except Exception:
+            pass
+        self._print_banner()
+        heading = f"Redraw: {reason}\nSwitched to thread: {self.current_thread}" if reason else f"Switched to thread: {self.current_thread}"
+        self._print_static_view_current(heading=heading)
+
     def _console_print_block(self, title: str, text: str, border_style: str = 'blue') -> None:
         try:
             # Parse rich markup within the text for colored segments
@@ -1737,10 +1766,10 @@ class EggDisplayApp:
         # machine, rather than running it locally in the UI.
         if text.startswith('$$') and len(text) > 2:
             self._enqueue_bash_tool(text[2:].strip(), hidden=True)
-            return False
+            return True
         if text.startswith('$') and len(text) > 1:
             self._enqueue_bash_tool(text[1:].strip(), hidden=False)
-            return False
+            return True
         if text.startswith('/paste'):
             self._handle_command(text)
             return False
@@ -1852,6 +1881,13 @@ class EggDisplayApp:
                 self._log_system(f'Pasted {len(content)} characters from clipboard.')
         elif cmd == 'quit':
             self.running = False
+        elif cmd == 'redraw':
+            # Redraw the static transcript to reflect current terminal width.
+            self._log_system('Redrawing transcript (see console).')
+            try:
+                self._redraw_static_view(reason='manual')
+            except Exception as e:
+                self._log_system(f'/redraw error: {e}')
         elif cmd == 'newThread':
             new_name = (arg or '').strip() or 'Root'
             cur_model_key = self._current_model_for_thread(self.current_thread) or None
@@ -2800,8 +2836,7 @@ class EggDisplayApp:
         self.running = True
         await self._start_watching_current()
 
-        self.console.print("[bold blue]Egg Chat (eggdisplay UI)[/bold blue]")
-        self.console.print("Press Enter or Ctrl+D to send (configurable). Ctrl+E clears input. Ctrl+P paste, Ctrl+C to quit. Type /help for commands.\n")
+        self._print_banner()
         # Print initial static view to console so history is visible above live panels
         self._print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
 
@@ -2832,6 +2867,34 @@ class EggDisplayApp:
                     # Update panels and live region
                     self._update_panels()
                     live.update(self._render_group())
+
+                    # Optional: auto-redraw static view on terminal resize.
+                    # We keep this low-overhead by only sampling terminal size
+                    # and debouncing redraw to happen after resizing settles.
+                    if self._auto_redraw_on_resize:
+                        try:
+                            import shutil as _shutil
+
+                            sz = _shutil.get_terminal_size(fallback=(100, 24))
+                            cur_sz = (int(sz.columns), int(sz.lines))
+                            if self._last_term_size is None:
+                                self._last_term_size = cur_sz
+                            elif cur_sz != self._last_term_size:
+                                self._last_term_size = cur_sz
+                                self._resize_dirty_since = time.time()
+                            else:
+                                if self._resize_dirty_since is not None and (time.time() - self._resize_dirty_since) > 0.75:
+                                    self._resize_dirty_since = None
+                                    # Don't do expensive redraw while actively streaming.
+                                    try:
+                                        row_open = self.db.current_open(self.current_thread)
+                                    except Exception:
+                                        row_open = None
+                                    if row_open is None:
+                                        self._redraw_static_view(reason='resize')
+                        except Exception:
+                            pass
+
                     try:
                         await asyncio.sleep(0.1)
                     except asyncio.CancelledError:

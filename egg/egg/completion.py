@@ -496,6 +496,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
                 '/setSrtSandboxConfiguration',
                 '/togglePanel',
+                '/redraw',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 
