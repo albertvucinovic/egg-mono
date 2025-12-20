@@ -682,8 +682,20 @@ def _cost_for_usage(usage: Dict[str, Any], *, model_key: str, llm: Any) -> Dict[
     if llm is None:
         return {"input": 0.0, "cached": 0.0, "output": 0.0, "total": 0.0}
 
+    # Resolve aliases / provider-prefix keys to a canonical registry key
+    # when possible (eggllm supports e.g. "baseten:Openai-120b").
+    resolved_key = model_key
     try:
-        cfg = llm.current_model_cost_config(model_key)  # type: ignore[attr-defined]
+        reg = getattr(llm, 'registry', None)
+        if reg is not None and hasattr(reg, 'resolve'):
+            rk = reg.resolve(model_key)  # type: ignore[attr-defined]
+            if isinstance(rk, str) and rk:
+                resolved_key = rk
+    except Exception:
+        resolved_key = model_key
+
+    try:
+        cfg = llm.current_model_cost_config(resolved_key)  # type: ignore[attr-defined]
     except Exception:
         cfg = {}
 
@@ -737,7 +749,18 @@ def _attach_costs(stats: Dict[str, Any], *, llm: Any = None) -> Dict[str, Any]:
         if float(c.get('total') or 0.0) <= 0.0:
             # Heuristic: most likely no cost config.
             try:
-                cfg = llm.current_model_cost_config(mk)  # type: ignore[attr-defined]
+                # Best-effort: resolve aliases/provider-prefix keys.
+                resolved_key = mk
+                try:
+                    reg = getattr(llm, 'registry', None)
+                    if reg is not None and hasattr(reg, 'resolve'):
+                        rk = reg.resolve(mk)  # type: ignore[attr-defined]
+                        if isinstance(rk, str) and rk:
+                            resolved_key = rk
+                except Exception:
+                    resolved_key = mk
+
+                cfg = llm.current_model_cost_config(resolved_key)  # type: ignore[attr-defined]
                 has_any = bool(
                     float((cfg or {}).get('input_tokens') or 0.0)
                     or float((cfg or {}).get('cached_input') or 0.0)
