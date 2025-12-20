@@ -2050,28 +2050,83 @@ class EggDisplayApp:
 
             # Cost breakdown (computed by eggthreads.total_token_stats).
             cost_lines: List[str] = []
-            model_key = self._current_model_for_thread(self.current_thread) or ''
+
+            # total_token_stats() attaches both per-model usage (tokens) and
+            # per-model cost breakdown (USD) onto api_usage.
+            by_model_usage = api.get('by_model') if isinstance(api.get('by_model'), dict) else {}
             cu = api.get('cost_usd') if isinstance(api.get('cost_usd'), dict) else {}
             total_cost = float(cu.get('total') or 0.0)
-            by_model = cu.get('by_model') if isinstance(cu.get('by_model'), dict) else {}
+            by_model_cost = cu.get('by_model') if isinstance(cu.get('by_model'), dict) else {}
             warnings = cu.get('warnings') if isinstance(cu.get('warnings'), list) else []
 
             cost_lines.append("")
-            if total_cost > 0:
-                cost_lines.append("Approximate cost (USD):")
-                cost_lines.append(f"  total:   ${total_cost:.4f}")
-                if by_model:
-                    cost_lines.append("  by_model:")
-                    for mk, c in by_model.items():
-                        try:
-                            ctot = float((c or {}).get('total') or 0.0)
-                        except Exception:
-                            ctot = 0.0
-                        cost_lines.append(f"    {mk}: ${ctot:.4f}")
-            else:
-                cost_lines.append('No cost estimate available (missing per-model cost config).')
+            cost_lines.append("Approximate cost (USD):")
+            cost_lines.append(f"  total:   ${total_cost:.4f}")
+
+            # Per-model breakdown: show tokens + cost.
+            if by_model_usage or by_model_cost:
+                cost_lines.append("")
+                cost_lines.append("Per-model breakdown:")
+
+                def _model_sort_key(mk: str) -> tuple[float, str]:
+                    # Highest cost first, then name.
+                    try:
+                        ctot = float((by_model_cost.get(mk) or {}).get('total') or 0.0)
+                    except Exception:
+                        ctot = 0.0
+                    return (-ctot, mk)
+
+                model_keys: set[str] = set()
+                for mk in (by_model_usage.keys() if isinstance(by_model_usage, dict) else []):
+                    if isinstance(mk, str):
+                        model_keys.add(mk)
+                for mk in (by_model_cost.keys() if isinstance(by_model_cost, dict) else []):
+                    if isinstance(mk, str):
+                        model_keys.add(mk)
+
+                for mk in sorted(model_keys, key=_model_sort_key):
+                    u = by_model_usage.get(mk) if isinstance(by_model_usage, dict) else {}
+                    c = by_model_cost.get(mk) if isinstance(by_model_cost, dict) else {}
+                    if not isinstance(u, dict):
+                        u = {}
+                    if not isinstance(c, dict):
+                        c = {}
+
+                    try:
+                        mcalls = int(u.get('approx_call_count') or 0)
+                    except Exception:
+                        mcalls = 0
+                    try:
+                        tin = int(u.get('total_input_tokens') or 0)
+                    except Exception:
+                        tin = 0
+                    try:
+                        tcached = int(u.get('cached_input_tokens') or 0)
+                    except Exception:
+                        tcached = 0
+                    try:
+                        tout = int(u.get('total_output_tokens') or 0)
+                    except Exception:
+                        tout = 0
+
+                    try:
+                        cin = float(c.get('input') or 0.0)
+                        ccached = float(c.get('cached') or 0.0)
+                        cout = float(c.get('output') or 0.0)
+                        ctot = float(c.get('total') or 0.0)
+                    except Exception:
+                        cin = ccached = cout = ctot = 0.0
+
+                    cost_lines.append(f"  {mk}:")
+                    cost_lines.append(
+                        f"    calls={mcalls}  in={tin}({_fmt_tok(tin)})  cached_in={tcached}({_fmt_tok(tcached)})  out={tout}({_fmt_tok(tout)})"
+                    )
+                    cost_lines.append(
+                        f"    cost: input=${cin:.4f}  cached=${ccached:.4f}  output=${cout:.4f}  total=${ctot:.4f}"
+                    )
 
             if warnings:
+                cost_lines.append("")
                 for w in warnings[:10]:
                     cost_lines.append(f"  note: {w}")
 
