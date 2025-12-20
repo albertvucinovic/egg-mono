@@ -18,7 +18,7 @@ import sys
 import json
 from pathlib import Path
 import asyncio
-from typing import List, Optional
+from typing import Any, Dict, List
 
 # Allow running this file directly: add project root to sys.path
 try:
@@ -35,6 +35,7 @@ from eggthreads import (
     create_snapshot,
     is_thread_runnable,
     set_subtree_tools_enabled,
+    total_token_stats,
 )
 
 SYSTEM_PROMPT_DEFAULT = "You are a helpful assistant."
@@ -86,159 +87,29 @@ def collect_subtree(db: ThreadsDB, root_id: str) -> List[str]:
     return out
 
 
- # use API is_thread_runnable from eggthreads
+def _thread_token_report(db: ThreadsDB, tid: str, *, llm=None) -> tuple[int, int, float]:
+    """Return (context_tokens, approx_llm_call_count, cost_usd_total).
 
-
-def word_count_from_snapshot(db: ThreadsDB, tid: str) -> int:
-    """Count words in all string values throughout the thread snapshot.
-
-    This is a deliberately simple "size" heuristic for the headless example.
-
-    Note: snapshots may include a ``token_stats`` block (added by
-    eggthreads) which contains repeated role strings etc. For this example
-    we ignore that block so the word count remains stable and reflects the
-    message payloads rather than derived metadata.
+    Uses eggthreads.total_token_stats() so counts increase during streaming.
     """
-    row = db.get_thread(tid)
-    if not row or not row.snapshot_json:
-        return 0
+
+    ts = total_token_stats(db, tid, llm=llm)
     try:
-        snap = json.loads(row.snapshot_json)
+        ctx = int(ts.get('context_tokens') or 0)
     except Exception:
-        return 0
-    if not isinstance(snap, dict):
-        return 0
-
-    def count_words(obj):
-        """Recursively count words in all string values."""
-
-        total = 0
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                # Ignore derived metadata to keep example stable.
-                if k == "token_stats":
-                    continue
-                total += count_words(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                total += count_words(item)
-        elif isinstance(obj, str):
-            total += len(obj.split())
-        return total
-
-    return count_words(snap)
-
-
-
-
-
-def word_count_from_events(db: ThreadsDB, tid: str) -> int:
-    """Approximate real-time word count from events:
-    total = words(snapshot) + words(streaming deltas for open invoke) + words(other events since snapshot).
-    We count only user-visible text fields: content/text/reasoning/reason and tool/tool_call text.
-    This avoids counting metadata like model_key, ids, names.
-    """
-    import json as _json
-
-    def _strings_from_payload(payload: dict) -> list[str]:
-        out: list[str] = []
-        if not isinstance(payload, dict):
-            return out
-        # content/reason top-level
-        for k in ('text', 'content', 'reason', 'reasoning'):
-            v = payload.get(k)
-            if isinstance(v, str) and v:
-                out.append(v)
-        # tool streaming outputs
-        tl = payload.get('tool')
-        if isinstance(tl, dict):
-            tv = tl.get('text')
-            if isinstance(tv, str) and tv:
-                out.append(tv)
-        # tool-call streaming arguments
-        tc = payload.get('tool_call')
-        if isinstance(tc, dict):
-            tv = tc.get('text')
-            if isinstance(tv, str) and tv:
-                out.append(tv)
-        return out
-
-    def _count_words_from_payload(payload: dict) -> int:
-        total = 0
-        for s in _strings_from_payload(payload):
-            total += len(s.split())
-        return total
-
-    base = word_count_from_snapshot(db, tid)
-    extra = 0
-
-    # Current open stream: count its deltas (not yet folded into snapshot)
-    open_row = None
+        ctx = 0
+    api = ts.get('api_usage') if isinstance(ts.get('api_usage'), dict) else {}
     try:
-        open_row = db.current_open(tid)
+        calls = int(api.get('approx_call_count') or 0)
     except Exception:
-        open_row = None
-    open_invoke = (open_row["invoke_id"] if open_row else None)
-
-    if open_invoke:
-        try:
-            cur = db.conn.execute(
-                "SELECT payload_json FROM events WHERE invoke_id=? AND type='stream.delta' ORDER BY event_seq ASC",
-                (open_invoke,),
-            )
-            for r in cur.fetchall():
-                pj = r[0]
-                try:
-                    payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
-                except Exception:
-                    payload = {}
-                extra += _count_words_from_payload(payload)
-        except Exception:
-            pass
-
-    # After-snapshot events: count new words while avoiding obvious double counts
-    last_seq = -1
+        calls = 0
+    cost = 0.0
     try:
-        th = db.get_thread(tid)
-        if th and isinstance(th.snapshot_last_event_seq, int):
-            last_seq = th.snapshot_last_event_seq
+        cu = api.get('cost_usd') if isinstance(api.get('cost_usd'), dict) else {}
+        cost = float(cu.get('total') or 0.0)
     except Exception:
-        pass
-
-    try:
-        cur = db.conn.execute(
-            "SELECT type, invoke_id, payload_json FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
-            (tid, last_seq),
-        )
-        for t, inv, pj in cur.fetchall():
-            try:
-                payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
-            except Exception:
-                payload = {}
-            # Skip stream.delta for the currently open invoke (already counted above)
-            if t == 'stream.delta' and open_invoke and inv == open_invoke:
-                continue
-            if t == 'stream.delta':
-                extra += _count_words_from_payload(payload)
-            elif t == 'msg.create':
-                # Count user/tool messages; skip assistant content to avoid doubling deltas
-                role = payload.get('role')
-                if role in ('user', 'tool'):
-                    content = payload.get('content')
-                    if isinstance(content, str) and content:
-                        extra += len(content.split())
-                    # For tool messages we only count content above
-                elif role == 'assistant':
-                    # Only count reasoning text if present (assistant reasoning may not be fully streamed)
-                    reas = payload.get('reasoning')
-                    if isinstance(reas, str) and reas:
-                        extra += len(reas.split())
-                # else: ignore other roles
-            # ignore other event types
-    except Exception:
-        pass
-
-    return base + extra
+        cost = 0.0
+    return (ctx, calls, cost)
 
 def list_active_threads(db: ThreadsDB, subtree: List[str]) -> List[str]:
     active: List[str] = []
@@ -253,44 +124,58 @@ def list_active_threads(db: ThreadsDB, subtree: List[str]) -> List[str]:
     return active
 
 
-async def periodic_reporter(db: ThreadsDB, root_id: str, interval_sec: float = 2.0) -> None:
-    """Every interval_sec, print summary of active threads and word counts per thread."""
-    import time
-    next_report_time = time.time()
-    
+async def periodic_reporter(db: ThreadsDB, root_id: str, interval_sec: float = 2.0, *, llm=None) -> None:
+    """Every interval_sec, print summary of active threads and token counts.
+
+    The token counts are computed by eggthreads.snapshot_token_stats and
+    embedded into each thread snapshot by create_snapshot().
+    """
     while True:
         try:
-            # Calculate time until next report
-            current_time = time.time()
-            sleep_time = max(0.1, next_report_time - current_time)
-            
-            # Sleep until next report time
-            await asyncio.sleep(sleep_time)
+            await asyncio.sleep(interval_sec)
             
             # Create snapshots for all children threads before reporting
             subtree = collect_subtree(db, root_id)
             children = [t for t in subtree if t != root_id]
             active = list_active_threads(db, children)
             
-            # Create snapshots for all children threads
+            # Refresh snapshots only when there are *new messages*.
+            #
+            # Stream deltas (stream.delta) can arrive at very high
+            # frequency while a thread is running. Rebuilding snapshots
+            # for every delta is expensive and unnecessary for live
+            # monitoring, because total_token_stats() accounts for the
+            # streaming tail directly.
             for tid in children:
                 try:
-                    create_snapshot(db, tid)
+                    th = db.get_thread(tid)
+                    last_snap = int(th.snapshot_last_event_seq) if th else -1
+                    # Only rebuild if there is at least one msg.create
+                    # beyond the last snapshot.
+                    row = db.conn.execute(
+                        "SELECT 1 FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? LIMIT 1",
+                        (tid, last_snap),
+                    ).fetchone()
+                    if row is not None:
+                        create_snapshot(db, tid)
                 except Exception as e:
                     print(f"[status] failed to snapshot {tid[-8:]}: {e}")
             
             # Now do the report
-            counts = {tid: word_count_from_events(db, tid) for tid in children}
-            active_summary = ", ".join(f"{tid[-8:]}({counts.get(tid,0)})" for tid in active) or "-"
-            total_words = sum(counts.values())
-            print(f"[status] active {len(active)}/{len(children)} | total_words={total_words} | active: {active_summary}")
-            
-            # Schedule next report
-            next_report_time += interval_sec
+            stats = {tid: _thread_token_report(db, tid, llm=llm) for tid in children}
+
+            active_summary = ", ".join(
+                f"{tid[-8:]}({stats.get(tid, (0, 0, 0.0))[0]}t,{stats.get(tid, (0, 0, 0.0))[1]}c,${stats.get(tid, (0, 0, 0.0))[2]:.4f})"
+                for tid in active
+            ) or "-"
+            total_ctx_tokens = sum(ctx for (ctx, _calls, _cost) in stats.values())
+            total_cost = sum(cost for (_ctx, _calls, cost) in stats.values())
+            print(
+                f"[status] active {len(active)}/{len(children)} | "
+                f"total_ctx_tokens={total_ctx_tokens} | total_cost≈${total_cost:.4f} | active: {active_summary}"
+            )
         except Exception as e:
             print(f"[status] reporter error: {e}")
-            # Reset timing on error
-            next_report_time = time.time() + interval_sec
 
 
 async def wait_subtree_idle(db: ThreadsDB, root_id: str, poll_sec: float = 0.1, quiet_checks: int = 3) -> None:
@@ -300,7 +185,9 @@ async def wait_subtree_idle(db: ThreadsDB, root_id: str, poll_sec: float = 0.1, 
     while True:
         any_run = False
         for tid in subtree:
-            if is_thread_runnable(db, tid):
+            # Treat "currently streaming" as running even if no new RA is
+            # discoverable yet.
+            if db.current_open(tid) is not None or is_thread_runnable(db, tid):
                 any_run = True
                 break
         if any_run:
@@ -323,13 +210,16 @@ async def main():
     all_models_path = _env_path("EGG_ALL_MODELS_PATH", "all-models.json")
     print(f"models_path={models_path}")
 
-    # Create root and 10 children with tasks
+    # Create root and children with tasks
     root_id = create_root_thread(db, name="Batch Root")
-    num_tasks=20
-    tasks = [f"Write a story named story_#{i} into a file story_#{i}.md . It should be at least 400 words long." for i in range(1, num_tasks)]
+    num_tasks = 5
+    tasks = [
+        f"Write a story named story_#{i} into a file story_#{i}.md . It should be at least 400 words long."
+        for i in range(1, num_tasks + 1)
+    ]
 
     for i, task in enumerate(tasks, start=1):
-        child = create_child_thread(db, root_id, name=f"agent-{i:03d}", initial_model_key = "baseten:Openai-120b")
+        child = create_child_thread(db, root_id, name=f"agent-{i:03d}")#, initial_model_key="baseten:Openai-120b")
         append_message(db, child, "system", system_prompt)
         append_message(db, child, "user", task)
         create_snapshot(db, child)
@@ -377,18 +267,19 @@ async def main():
     # example works both when running from source and when eggthreads is
     # installed as a package.
     max_concurrent = int(os.environ.get("MAX_CONCURRENT", "8") or "8")
-    try:
-        from eggthreads import RunnerConfig as _RunnerConfig  # type: ignore
-    except Exception:
-        # Fallback: import from the internal module for local
-        # development installs where the aggregator may not expose
-        # RunnerConfig yet.
-        from eggthreads.eggthreads.runner import RunnerConfig as _RunnerConfig  # type: ignore
-    cfg = _RunnerConfig(max_concurrent_threads=max_concurrent)
+    # RunnerConfig is part of the public eggthreads API.
+    # (If you are running from a source checkout, ensure eggthreads/__init__.py
+    # re-exports it.)
+    from eggthreads import RunnerConfig
+
+    cfg = RunnerConfig(max_concurrent_threads=max_concurrent)
     scheduler = SubtreeScheduler(db, root_thread_id=root_id, config=cfg, models_path=models_path, all_models_path=all_models_path)
 
+    # Use the scheduler's eggllm client for cost lookups.
+    llm_client = getattr(scheduler, 'llm', None)
+
     sched_task = asyncio.create_task(scheduler.run_forever(poll_sec=0.05))
-    report_task = asyncio.create_task(periodic_reporter(db, root_id, 2.0))
+    report_task = asyncio.create_task(periodic_reporter(db, root_id, 2.0, llm=llm_client))
     print("Created tasks!")
 
     # Wait until subtree becomes idle (no runnable threads)
