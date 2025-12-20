@@ -25,6 +25,10 @@ Run from the project root:
 python3 -u examples/headless_subtree_scheduler.py
 ```
 
+Note: this example requires the optional ``eggllm`` dependency (used via
+``eggthreads.create_llm_client``). Make sure it is importable in your
+environment.
+
 This will create/update the SQLite DB at:
 
 ```text

@@ -26,9 +26,11 @@ try:
 except Exception:
     pass
 
+
 from eggthreads import (
     ThreadsDB,
     SubtreeScheduler,
+    create_llm_client,
     create_root_thread,
     create_child_thread,
     append_message,
@@ -273,10 +275,16 @@ async def main():
     from eggthreads import RunnerConfig
 
     cfg = RunnerConfig(max_concurrent_threads=max_concurrent)
-    scheduler = SubtreeScheduler(db, root_thread_id=root_id, config=cfg, models_path=models_path, all_models_path=all_models_path)
-
-    # Use the scheduler's eggllm client for cost lookups.
-    llm_client = getattr(scheduler, 'llm', None)
+    # Construct the LLM client via eggthreads public API.
+    llm_client = create_llm_client(models_path=models_path, all_models_path=all_models_path)
+    scheduler = SubtreeScheduler(
+        db,
+        root_thread_id=root_id,
+        llm=llm_client,
+        config=cfg,
+        models_path=models_path,
+        all_models_path=all_models_path,
+    )
 
     sched_task = asyncio.create_task(scheduler.run_forever(poll_sec=0.05))
     report_task = asyncio.create_task(periodic_reporter(db, root_id, 2.0, llm=llm_client))

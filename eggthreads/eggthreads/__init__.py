@@ -63,6 +63,8 @@ from .sandbox import (
 
 from .tools import ToolRegistry, create_default_tools
 
+from .llm import create_llm_client
+
 __all__ = [
     'ThreadsDB', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
     'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable',
@@ -78,5 +80,6 @@ __all__ = [
     'set_sandbox_globally_enabled', 'set_sandbox_config',
     'get_thread_sandbox_config', 'set_thread_sandbox_config', 'set_subtree_sandbox_config', 'get_thread_sandbox_status',
     'ToolRegistry', 'create_default_tools',
+    'create_llm_client',
     'snapshot_token_stats', 'streaming_token_stats', 'total_token_stats',
 ]
