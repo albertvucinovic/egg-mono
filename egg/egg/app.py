@@ -81,6 +81,8 @@ Commands:
     /toggleAutoApproval, /toolsOn, /toolsOff, /disableTool <name>, /enableTool <name> 
     /toggleSandboxing, /setSrtSandboxConfiguration <file.json>
     /toolsSecrets <on|off>, /toolsStatus 
+  Display:
+    /togglePanel (chat|children|system)
   Other: 
     /enterMode <send|newline>, /cost, /paste, /quit 
     /help
@@ -190,10 +192,12 @@ class EggDisplayApp:
         self._start_scheduler(self.current_thread)
 
         # Panels
-        # columns_hint=2 because chat/system panels are side-by-side
-        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=2)
-        # System panel
-        self.system_output = OutputPanel(title="System", initial_height=8, max_height=22, columns_hint=2)
+        # Single-column layout (system, children, chat, input)
+        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=1)
+        # System panel: keep compact by default (~5 content lines).
+        # OutputPanel height includes borders; with wrap-mode padding this
+        # corresponds to ~5 content lines.
+        self.system_output = OutputPanel(title="System", initial_height=7, max_height=7, columns_hint=1)
         # For the System panel we want the sandboxing status to appear
         # only in the panel title (border), not as a separate header
         # line inside the content area.
@@ -217,7 +221,7 @@ class EggDisplayApp:
             title="Children",
             initial_height=5,
             max_height=24,
-            columns_hint=2,
+            columns_hint=1,
             style=children_style,
         )
         # Approval panel: appears between the output panels and the input
@@ -246,6 +250,14 @@ class EggDisplayApp:
             return get_autocomplete_items(line, col, self.db, lambda: self.current_thread, self.llm_client)
         self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12,
                                       autocomplete_callback=_adapter, io_mode=io_mode)
+
+        # Panel visibility (single-column layout).
+        # Users can toggle these at runtime via /togglePanel.
+        self._panel_visible: Dict[str, bool] = {
+            'system': True,
+            'children': True,
+            'chat': True,
+        }
 
         # Streaming/watch state
         self._live_state: Dict[str, Any] = {
@@ -824,13 +836,31 @@ class EggDisplayApp:
             # Red when sandboxing is disabled, degraded, or unavailable
             self.system_output.title = "System  [red]Sandboxing[OFF][/red]"
 
+        # Keep the System panel intentionally compact so it doesn't dominate
+        # the single-column layout.
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
-            "Send: Enter or Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
-            commandsText
+            "Send: Enter/Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
+            "Commands: /help  |  Display: /togglePanel chat|children|system",
         ]
-        tail = "\n".join(self._system_log[-20:]) if self._system_log else ""
-        self.system_output.set_content("\n".join(status_lines + (["", tail] if tail else [])))
+
+        # Show only a couple of recent system log entries, and only their
+        # first line (multi-line logs belong in the console output).
+        tail_lines: List[str] = []
+        try:
+            recent = (self._system_log or [])[-2:]
+            for msg in recent:
+                if not isinstance(msg, str) or not msg:
+                    continue
+                first = msg.splitlines()[0].rstrip()
+                # Indicate truncation if the message had more lines.
+                if msg.count('\n'):
+                    first = first + " …"
+                tail_lines.append(first)
+        except Exception:
+            tail_lines = []
+
+        self.system_output.set_content("\n".join(status_lines + tail_lines))
 
         # Children panel: refresh at most once every 2 seconds
         try:
@@ -1095,17 +1125,27 @@ class EggDisplayApp:
                 pass
 
     def _render_group(self) -> Group:
-        # Left: chat; right: vertical stack of system + children panels
-        right = VStack([self.system_output, self.children_output]).render()
-        row1 = HStack([self.chat_output, right]).render()
-        # Compose rows: top output row, optional approval panel, then input.
-        children: List[Any] = [row1]
+        # Single-column layout, top-to-bottom:
+        #   System
+        #   Children
+        #   Chat Messages
+        #   (optional) Approval
+        #   Input
+        children: List[Any] = []
+        if self._panel_visible.get('system', True):
+            children.append(self.system_output.render())
+        if self._panel_visible.get('children', True):
+            children.append(self.children_output.render())
+        if self._panel_visible.get('chat', True):
+            children.append(self.chat_output.render())
+
         pending = getattr(self, '_pending_prompt', {}) or {}
         # Only render the approval panel when there is a pending prompt
         # and it has non-empty content. Otherwise, omit it entirely so it
         # visually disappears from the layout.
         if pending and getattr(self.approval_panel, 'content', ''):
             children.append(self.approval_panel.render())
+
         children.append(self.input_panel.render())
         return Group(*children)
 
@@ -1785,7 +1825,15 @@ class EggDisplayApp:
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
         if cmd == 'help':
-            self._log_system(commandsText)
+            # Mirror /threads behaviour: show the full help text in the
+            # console (above the live panels) and keep the System panel
+            # message short.
+            try:
+                self._log_system('Help (see console for full).')
+                self._console_print_block('Help', commandsText.strip(), border_style='blue')
+            except Exception:
+                # Fallback: at least log it.
+                self._log_system(commandsText)
         elif cmd == 'paste':
             content = self._read_clipboard()
             if content is None:
@@ -2495,6 +2543,19 @@ class EggDisplayApp:
                 self._log_system(f"Sandbox configuration applied to this thread: {name}")
             except Exception as e:
                 self._log_system(f'/setSrtSandboxConfiguration error: {e}')
+
+        elif cmd == 'togglePanel':
+            which = (arg or '').strip().lower()
+            valid = {'chat', 'children', 'system'}
+            if not which or which not in valid:
+                states = ", ".join(
+                    f"{k}={'on' if self._panel_visible.get(k, True) else 'off'}" for k in sorted(valid)
+                )
+                self._log_system(f"Usage: /togglePanel (chat|children|system)   (current: {states})")
+                return
+            cur = bool(self._panel_visible.get(which, True))
+            self._panel_visible[which] = not cur
+            self._log_system(f"Panel '{which}' is now {'shown' if self._panel_visible[which] else 'hidden'}. ")
 
         else:
             self._log_system('Unknown command')

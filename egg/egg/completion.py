@@ -495,6 +495,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus',
                 '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
                 '/setSrtSandboxConfiguration',
+                '/togglePanel',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 
@@ -654,6 +655,15 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             except Exception:
                 files = []
             return _mk_items(files, arg_tok)
+
+        if cmd == '/togglePanel':
+            opts = ['chat', 'children', 'system']
+            atok = (arg_tok or '').lower()
+            if atok:
+                pref = [o for o in opts if o.startswith(atok)]
+                cont = [o for o in opts if atok in o and o not in pref]
+                opts = pref + cont
+            return _mk_items(opts, arg_tok)
 
         # Other commands: no specific suggestions
         return []
