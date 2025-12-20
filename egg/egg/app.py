@@ -194,7 +194,7 @@ class EggDisplayApp:
 
         # Panels
         # Single-column layout (system, children, chat, input)
-        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=28, columns_hint=1)
+        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=12, columns_hint=1)
         # System panel: keep compact by default (~5 content lines).
         # OutputPanel height includes borders; with wrap-mode padding this
         # corresponds to ~5 content lines.
