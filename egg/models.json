@@ -152,6 +152,11 @@
           "options": {
             "thinking_content_policy": "last assistant turn",
             "thinking_content_key": "thinking"
+          },
+          "cost": {
+            "input_tokens": 0.03,
+            "cached_input": 0.01,
+            "output_tokens": 0.06
           }
         },
         "Qwen3 Coder Local": {
@@ -159,9 +164,9 @@
           "max_tokens": 250000,
           "parameters": {},
           "cost": {
-            "input_tokens": 0.0025,
-            "cached_input": 0.0005,
-            "output_tokens": 0.0100
+            "input_tokens": 0.03,
+            "cached_input": 0.01,
+            "output_tokens": 0.06
           }
         },
         "Qwen3 30B Thinking 2507": {
