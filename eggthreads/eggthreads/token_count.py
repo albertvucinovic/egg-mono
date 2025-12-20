@@ -25,6 +25,10 @@ Design goals
   - We infer API turns from the *sequence of messages* in the
     snapshot: every assistant message is treated as the result of one
     LLM call whose input is all earlier, non‑``no_api`` messages.
+  - Cached-input is a heuristic. We estimate cached input tokens by
+    comparing the current call to the most recent prior call for the
+    *same model key* (so modelA → modelB → modelA can still count
+    caching when providers keep per-model KV caches warm).
 
 Public API
 ----------
@@ -207,6 +211,7 @@ def _token_stats_for_messages(
     base_context_tokens: int = 0,
     base_prev_call_input_tokens: Optional[int] = None,
     base_prev_call_model_key: Optional[str] = None,
+    base_prev_call_input_tokens_by_model: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Compute token stats for a list of messages.
 
@@ -217,10 +222,17 @@ def _token_stats_for_messages(
     calls in this list: the input for an assistant call is treated as
     ``base_context_tokens + tokens(before that assistant within this list)``.
 
-    ``base_prev_call_input_tokens`` and ``base_prev_call_model_key`` allow
-    the cached-input heuristic to continue across boundaries (e.g. from
-    snapshot -> streaming tail). Cached-input is only attributed when the
-    model key stays the same.
+    Cached input heuristic
+    ----------------------
+    We estimate cached input tokens by comparing the current call's input
+    length to the most recent prior call *for the same model key*.
+
+    This allows patterns like modelA -> modelB -> modelA to still benefit
+    from caching when providers keep per-model KV cache warm.
+
+    ``base_prev_call_input_tokens_by_model`` (and the legacy
+    ``base_prev_call_input_tokens``/``base_prev_call_model_key``) allow this
+    heuristic to continue across boundaries (e.g. snapshot -> streaming tail).
     """
 
     msgs = messages or []
@@ -275,8 +287,28 @@ def _token_stats_for_messages(
     cached_tokens = 0
 
     cached_input_tokens = 0
-    prev_call_input_tokens: Optional[int] = base_prev_call_input_tokens
-    prev_call_model: Optional[str] = base_prev_call_model_key
+
+    # Track the last observed input token count per model so we can
+    # estimate cached tokens even when models switch and later switch
+    # back.
+    last_input_tokens_by_model: Dict[str, int] = {}
+    if isinstance(base_prev_call_input_tokens_by_model, dict):
+        for k, v in base_prev_call_input_tokens_by_model.items():
+            try:
+                if isinstance(k, str) and k and isinstance(v, int) and v >= 0:
+                    last_input_tokens_by_model[k] = int(v)
+            except Exception:
+                continue
+    # Backward compatible seed.
+    if (
+        base_prev_call_model_key
+        and isinstance(base_prev_call_model_key, str)
+        and base_prev_call_input_tokens is not None
+        and isinstance(base_prev_call_input_tokens, int)
+        and base_prev_call_input_tokens >= 0
+        and base_prev_call_model_key not in last_input_tokens_by_model
+    ):
+        last_input_tokens_by_model[str(base_prev_call_model_key)] = int(base_prev_call_input_tokens)
 
     # Per-model usage breakdown (respects model.switch by attributing each
     # assistant message to its model_key, when provided).
@@ -314,20 +346,15 @@ def _token_stats_for_messages(
         # Determine the model key for attribution.
         mk = _model_key_from_message(m)
 
-        # Cached-input heuristic only applies if we stay on the same model.
+        # Cached-input heuristic: compare against the most recent prior call
+        # for the *same model*.
         cached_for_call = 0
-        if (
-            prev_call_input_tokens is not None
-            and prev_call_input_tokens > 0
-            and prev_call_model
-            and mk
-            and prev_call_model == mk
-        ):
-            cached_for_call = min(int(prev_call_input_tokens), int(input_tok))
-            cached_input_tokens += cached_for_call
-
-        prev_call_input_tokens = input_tok
-        prev_call_model = mk
+        if mk:
+            prev_for_model = last_input_tokens_by_model.get(mk)
+            if isinstance(prev_for_model, int) and prev_for_model > 0:
+                cached_for_call = min(int(prev_for_model), int(input_tok))
+                cached_input_tokens += cached_for_call
+            last_input_tokens_by_model[mk] = int(input_tok)
 
         msg_id = m.get("msg_id")
         if not isinstance(msg_id, str) or not msg_id:
@@ -356,6 +383,7 @@ def _token_stats_for_messages(
         # accounting across snapshot->tail boundaries.
         "last_call_input_tokens": int(last_call_input_tokens) if last_call_input_tokens is not None else None,
         "last_call_model_key": last_call_model_key,
+        "last_call_input_tokens_by_model": dict(last_input_tokens_by_model),
     }
 
     return {
@@ -401,6 +429,7 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
     base_ctx_tokens = 0
     base_prev_call_input_tokens: Optional[int] = None
     base_prev_call_model_key: Optional[str] = None
+    base_prev_call_by_model: Optional[Dict[str, int]] = None
     after_seq = -1
 
     # Read snapshot boundary and (if available) cached token stats.
@@ -436,6 +465,20 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
                         lmk = au.get("last_call_model_key")
                         if isinstance(lmk, str) and lmk.strip():
                             base_prev_call_model_key = lmk.strip()
+                        lcbm = au.get('last_call_input_tokens_by_model')
+                        if isinstance(lcbm, dict):
+                            # Coerce values to ints.
+                            bm: Dict[str, int] = {}
+                            for k, v in lcbm.items():
+                                if not isinstance(k, str) or not k:
+                                    continue
+                                try:
+                                    iv = int(v)
+                                except Exception:
+                                    continue
+                                if iv >= 0:
+                                    bm[k] = iv
+                            base_prev_call_by_model = bm
 
     # Resolve active invoke (if any).
     open_invoke: Optional[str] = None
@@ -598,6 +641,7 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
         base_context_tokens=base_ctx_tokens,
         base_prev_call_input_tokens=base_prev_call_input_tokens,
         base_prev_call_model_key=base_prev_call_model_key,
+        base_prev_call_input_tokens_by_model=base_prev_call_by_model,
     )
 
 
@@ -640,6 +684,14 @@ def _merge_token_stats(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
         au_b.get("last_call_model_key") if _int(au_b.get("approx_call_count")) > 0 else au_a.get("last_call_model_key")
     )
 
+    # Merge last_call_input_tokens_by_model (best-effort): prefer b's
+    # mapping when present, otherwise a's.
+    lcbm = None
+    if isinstance(au_b.get('last_call_input_tokens_by_model'), dict) and _int(au_b.get('approx_call_count')) > 0:
+        lcbm = au_b.get('last_call_input_tokens_by_model')
+    elif isinstance(au_a.get('last_call_input_tokens_by_model'), dict):
+        lcbm = au_a.get('last_call_input_tokens_by_model')
+
     # Merge by_model usage.
     by_model: Dict[str, Dict[str, int]] = {}
     for src in (au_a.get("by_model"), au_b.get("by_model")):
@@ -666,6 +718,7 @@ def _merge_token_stats(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
         "by_model": by_model,
         "last_call_input_tokens": last_call_input_tokens,
         "last_call_model_key": last_call_model_key,
+        "last_call_input_tokens_by_model": lcbm if isinstance(lcbm, dict) else {},
     }
 
     return out
