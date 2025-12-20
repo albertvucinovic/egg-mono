@@ -639,28 +639,26 @@ class EggDisplayApp:
     def _current_token_stats(self) -> tuple[Optional[int], Dict[str, Any]]:
         """Return (context_tokens, api_usage) for the current thread.
 
-        Values are derived from the latest snapshot's ``token_stats``
-        block when present.  On any error or when not available,
-        (None, {}) is returned.
+        Uses eggthreads' ``total_token_stats`` so that token usage (and
+        cost, when configured) updates during streaming instead of only
+        after snapshots are rebuilt.
+
+        On any error or when not available, (None, {}) is returned.
         """
 
         ctx_tokens: Optional[int] = None
         api_usage: Dict[str, Any] = {}
         try:
-            th = self.db.get_thread(self.current_thread)
-            snap_raw = getattr(th, "snapshot_json", None) if th else None
-            if isinstance(snap_raw, str) and snap_raw:
-                import json as _json
+            from eggthreads import total_token_stats  # type: ignore
 
-                snap = _json.loads(snap_raw)
-                ts = snap.get("token_stats") or {}
-                if isinstance(ts, dict):
-                    ct = ts.get("context_tokens")
-                    if isinstance(ct, int):
-                        ctx_tokens = ct
-                    au = ts.get("api_usage") or {}
-                    if isinstance(au, dict):
-                        api_usage = au
+            ts = total_token_stats(self.db, self.current_thread, llm=self.llm_client)
+            if isinstance(ts, dict):
+                ct = ts.get('context_tokens')
+                if isinstance(ct, int):
+                    ctx_tokens = ct
+                au = ts.get('api_usage')
+                if isinstance(au, dict):
+                    api_usage = au
         except Exception:
             ctx_tokens = None
             api_usage = {}
@@ -791,14 +789,12 @@ class EggDisplayApp:
                     if segs:
                         title_parts.append(" ".join(segs))
 
-                    # Best-effort approximate cost via eggllm if available.
+                    # Approximate cost (computed by eggthreads.total_token_stats).
                     try:
-                        if self.llm_client is not None:
-                            mk = self._current_model_for_thread(self.current_thread) or None
-                            cost = self.llm_client.approximate_thread_cost(api_usage, mk)  # type: ignore[attr-defined]
-                            total_cost = float(cost.get("total") or 0.0)
-                            if total_cost > 0:
-                                cost_str = f"${total_cost:.4f}"
+                        cu = api_usage.get('cost_usd') if isinstance(api_usage.get('cost_usd'), dict) else {}
+                        total_cost = float(cu.get('total') or 0.0)
+                        if total_cost > 0:
+                            cost_str = f"${total_cost:.4f}"
                     except Exception:
                         cost_str = ""
 
@@ -2052,45 +2048,32 @@ class EggDisplayApp:
             lines.append(f"  total_output_tokens:   {to} ({_fmt_tok(to)})")
             lines.append(f"  approx_call_count:     {calls}")
 
-            # Best-effort cost breakdown via eggllm if available and
-            # the current model has a cost config.
+            # Cost breakdown (computed by eggthreads.total_token_stats).
             cost_lines: List[str] = []
             model_key = self._current_model_for_thread(self.current_thread) or ''
-            if self.llm_client is not None:
-                try:
-                    cost_cfg = self.llm_client.current_model_cost_config(model_key)  # type: ignore[attr-defined]
-                    has_any_rate = any((cost_cfg.get('input_tokens') or 0.0,
-                                        cost_cfg.get('cached_input') or 0.0,
-                                        cost_cfg.get('output_tokens') or 0.0))
-                    if has_any_rate:
-                        cost = self.llm_client.approximate_thread_cost(api, model_key)  # type: ignore[attr-defined]
-                        cin = float(cost.get('input') or 0.0)
-                        cc = float(cost.get('cached') or 0.0)
-                        cout = float(cost.get('output') or 0.0)
-                        ctot = float(cost.get('total') or 0.0)
-                        cost_lines.append("")
-                        if model_key:
-                            cost_lines.append(f"Model for cost: {model_key}")
-                        cost_lines.append("Per-1K token rates (cents):")
-                        cost_lines.append(
-                            f"  input:  {cost_cfg.get('input_tokens', 0.0)*100:.3f}, "
-                            f"cached_input: {cost_cfg.get('cached_input', 0.0)*100:.3f}, "
-                            f"output: {cost_cfg.get('output_tokens', 0.0)*100:.3f}"
-                        )
-                        cost_lines.append("Approximate cost (USD):")
-                        cost_lines.append(f"  input:   ${cin:.4f}")
-                        cost_lines.append(f"  cached:  ${cc:.4f}")
-                        cost_lines.append(f"  output:  ${cout:.4f}")
-                        cost_lines.append(f"  total:   ${ctot:.4f}")
-                    else:
-                        cost_lines.append("")
-                        cost_lines.append('No per-model cost config found (cost field missing in models.json).')
-                except Exception as e:
-                    cost_lines.append("")
-                    cost_lines.append(f'Error computing cost via eggllm: {e}')
+            cu = api.get('cost_usd') if isinstance(api.get('cost_usd'), dict) else {}
+            total_cost = float(cu.get('total') or 0.0)
+            by_model = cu.get('by_model') if isinstance(cu.get('by_model'), dict) else {}
+            warnings = cu.get('warnings') if isinstance(cu.get('warnings'), list) else []
+
+            cost_lines.append("")
+            if total_cost > 0:
+                cost_lines.append("Approximate cost (USD):")
+                cost_lines.append(f"  total:   ${total_cost:.4f}")
+                if by_model:
+                    cost_lines.append("  by_model:")
+                    for mk, c in by_model.items():
+                        try:
+                            ctot = float((c or {}).get('total') or 0.0)
+                        except Exception:
+                            ctot = 0.0
+                        cost_lines.append(f"    {mk}: ${ctot:.4f}")
             else:
-                cost_lines.append("")
-                cost_lines.append('LLM client not available; only token counts shown.')
+                cost_lines.append('No cost estimate available (missing per-model cost config).')
+
+            if warnings:
+                for w in warnings[:10]:
+                    cost_lines.append(f"  note: {w}")
 
             block = "\n".join(lines + cost_lines)
             self._log_system('Token usage / cost for current thread (see console for full details).')
