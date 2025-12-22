@@ -32,8 +32,7 @@ from .api import (
     word_count_from_events,
     set_subtree_working_directory,
     approve_tool_calls_for_thread,
-
-    duplicate_thread,
+    duplicate_thread
 )  # type: ignore
 from .tool_state import (
     list_tool_calls_for_thread,

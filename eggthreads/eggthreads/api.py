@@ -542,22 +542,28 @@ def word_count_from_events(db: ThreadsDB, thread_id: str) -> int:
     return base + extra
 
 
-def approve_tool_calls_for_thread(db, thread_id, decision='all-in-turn', reason=None):
+def approve_tool_calls_for_thread(db, thread_id, decision='all-in-turn', reason=None, tool_call_id=None):
     """Approve tool calls for a thread with a given decision.
-    
+
     Creates a tool_call.approval event that can be used by the runner to
     automatically approve tool calls according to the decision.
-    
+
     Args:
         db: ThreadsDB instance
         thread_id: target thread
-        decision: one of 'all-in-turn', 'allow', 'deny', 'prompt'
+        decision: one of 'all-in-turn', 'granted', 'denied', 'global_approval',
+                  'revoke_global_approval', 'prompt'
         reason: optional human-readable reason for the decision
+        tool_call_id: optional specific tool call ID to approve/deny.
+                      If omitted, the decision applies to the whole thread
+                      (or to the current turn, depending on the decision).
     """
     import os
     payload = {'decision': decision}
     if reason is not None:
         payload['reason'] = reason
+    if tool_call_id is not None:
+        payload['tool_call_id'] = tool_call_id
     db.append_event(
         event_id=os.urandom(10).hex(),
         thread_id=thread_id,
