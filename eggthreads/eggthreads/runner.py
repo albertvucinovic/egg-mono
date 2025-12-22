@@ -1075,6 +1075,7 @@ class ThreadRunner:
         import asyncio as _asyncio
         import os as _os
         import signal as _signal
+        from .api import get_thread_working_directory
 
         from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
 
@@ -1105,6 +1106,7 @@ class ThreadRunner:
         # enabled.  We intentionally avoid using ``shell=True`` so that
         # the sandbox wrapper controls the executed binary directly.
         base_argv = ['/bin/bash', '-lc', script]
+        cwd = get_thread_working_directory(self.db, self.thread_id)
 
         # Honour per-thread sandbox settings. This makes tool execution
         # reproducible across processes because the config is stored as
@@ -1115,6 +1117,7 @@ class ThreadRunner:
                 base_argv,
                 enabled=sb.enabled,
                 settings=sb.settings,
+                working_dir=cwd
             )
         except Exception:
             from .sandbox import wrap_argv_for_sandbox
@@ -1139,6 +1142,7 @@ class ThreadRunner:
             stdout=_asyncio.subprocess.PIPE,
             stderr=_asyncio.subprocess.PIPE,
             preexec_fn=_os.setsid,
+            cwd=cwd,
         )
         # True iff we lost the lease and explicitly interrupted via
         # heartbeat failure; used to tag tool_call.finished.reason.
@@ -1972,3 +1976,4 @@ class SubtreeScheduler:
                     asyncio.create_task(drive(tid))
 
             await asyncio.sleep(poll_sec)
+

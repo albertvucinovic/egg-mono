@@ -94,7 +94,9 @@ def create_default_tools() -> ToolRegistry:
     # bash
     def _bash(args: Dict[str, Any]):
         from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
+        from .api import get_thread_working_directory
         from .db import ThreadsDB
+        import subprocess
 
         script = args.get('script', '')
         # Mirror the async runner: build an explicit argv and optionally
@@ -103,14 +105,17 @@ def create_default_tools() -> ToolRegistry:
 
         # Honour per-thread sandbox settings when available.
         tid = (args.get('_thread_id') or '').strip()
+        cwd = None
         if tid:
             try:
                 db = ThreadsDB()
                 sb = get_thread_sandbox_config(db, tid)
+                cwd = get_thread_working_directory(db, tid)
                 argv = wrap_argv_for_sandbox_with_settings(
                     base_argv,
                     enabled=sb.enabled,
                     settings=sb.settings,
+                    working_dir=cwd
                 )
             except Exception:
                 argv = base_argv
@@ -118,7 +123,7 @@ def create_default_tools() -> ToolRegistry:
             # No thread context: default behaviour (use default policy).
             from .sandbox import wrap_argv_for_sandbox
             argv = wrap_argv_for_sandbox(base_argv)
-        res = subprocess.run(argv, capture_output=True, text=True)
+        res = subprocess.run(argv, capture_output=True, text=True, cwd=cwd)
         out = ''
         if res.stdout:
             out += f"--- STDOUT ---\n{res.stdout.strip()}\n"
@@ -147,7 +152,9 @@ def create_default_tools() -> ToolRegistry:
         """
 
         from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
+        from .api import get_thread_working_directory
         from .db import ThreadsDB
+        import subprocess, sys
 
         script = args.get('script', '')
         thread_id = (args.get('_thread_id') or '').strip()
@@ -155,15 +162,18 @@ def create_default_tools() -> ToolRegistry:
         # Build argv for python -c.
         base_argv = [sys.executable or 'python3', '-c', script]
 
+        cwd = None
         # Apply sandbox wrapper, respecting per-thread sandbox config.
         if thread_id:
             try:
                 db = ThreadsDB()
                 sb = get_thread_sandbox_config(db, thread_id)
+                cwd = get_thread_working_directory(db, thread_id)
                 argv = wrap_argv_for_sandbox_with_settings(
                     base_argv,
                     enabled=sb.enabled,
                     settings=sb.settings,
+                    working_dir=cwd
                 )
             except Exception:
                 argv = base_argv
@@ -171,7 +181,7 @@ def create_default_tools() -> ToolRegistry:
             from .sandbox import wrap_argv_for_sandbox
             argv = wrap_argv_for_sandbox(base_argv)
 
-        res = subprocess.run(argv, capture_output=True, text=True)
+        res = subprocess.run(argv, capture_output=True, text=True, cwd=cwd)
         out = ''
         if res.stdout:
             out += f"--- STDOUT ---\n{res.stdout.strip()}\n"
@@ -185,7 +195,6 @@ def create_default_tools() -> ToolRegistry:
         parameters_schema={
             "type": "object",
             "properties": {"script": {"type": "string"}},
-            "required": ["script"],
         },
         impl=_python,
     )
@@ -650,4 +659,5 @@ def create_default_tools() -> ToolRegistry:
     # to prevent unintended tool calls in basic chats. The UI layer can register them explicitly.
 
     return reg
+
 

@@ -320,6 +320,7 @@ def wrap_argv_for_sandbox_with_settings(
     *,
     enabled: bool,
     settings: Dict[str, object],
+    working_dir: Optional[str | Path] = None,
 ) -> List[str]:
     """Wrap an argv for sandbox execution with explicit settings.
 
@@ -333,6 +334,30 @@ def wrap_argv_for_sandbox_with_settings(
 
     if not (bool(enabled) and sandbox_available()):
         return argv
+
+    # If a working_dir is provided, ensure it's relative to CWD for the sandbox
+    # and adjust the settings to allow writing to it.
+    if working_dir:
+        working_dir = Path(working_dir).resolve()
+        cwd = Path.cwd().resolve()
+        try:
+            rel_wd = working_dir.relative_to(cwd)
+            # Add to allowWrite if it's a subdirectory
+            import copy
+            settings = copy.deepcopy(settings)
+            fs = settings.setdefault("filesystem", {})
+            if not isinstance(fs, dict):
+                fs = {}
+                settings["filesystem"] = fs
+            aw = fs.get("allowWrite")
+            if not isinstance(aw, list):
+                aw = ["."]
+            if str(rel_wd) not in aw:
+                aw.append(str(rel_wd))
+            fs["allowWrite"] = aw
+        except ValueError:
+            # Not a subdirectory, keep settings as is (srt may deny it)
+            pass
 
     eff_path = _effective_config_path_from_settings(settings)
 
@@ -704,4 +729,5 @@ def _effective_config_path_from_settings(settings: Dict[str, object]) -> Path:
     except Exception:
         pass
     return eff_path
+
 

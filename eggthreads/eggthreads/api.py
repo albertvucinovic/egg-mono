@@ -382,3 +382,70 @@ def current_thread_model(db: ThreadsDB, thread_id: str) -> Optional[str]:
             model_key = imk.strip()
 
     return model_key
+
+def set_thread_working_directory(db: ThreadsDB, thread_id: str, working_dir: str, reason: str = "user") -> None:
+    """Set the working directory for a thread.
+    
+    This appends a 'thread.config' event with the requested working directory.
+    The directory must be a subdirectory of the current process working directory
+    to maintain sandboxing constraints.
+    """
+    import os
+    from pathlib import Path
+
+    # Security/Sanity check: ensure working_dir is within current CWD
+    cwd = Path.cwd().resolve()
+    target = Path(working_dir).resolve()
+    
+    if not str(target).startswith(str(cwd)):
+         raise ValueError(f"Working directory {working_dir} must be a subdirectory of {cwd}")
+
+    # Ensure it exists
+    target.mkdir(parents=True, exist_ok=True)
+    
+    # Store as relative path from CWD for portability
+    rel_path = os.path.relpath(target, cwd)
+
+    db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_='thread.config',
+        payload={
+            'working_dir': rel_path,
+            'reason': reason
+        }
+    )
+
+def get_thread_working_directory(db: ThreadsDB, thread_id: str) -> Path:
+    """Get the effective working directory for a thread.
+    
+    Inherits from the nearest ancestor if not explicitly set on the thread.
+    Returns an absolute Path.
+    """
+    tid: Optional[str] = thread_id
+    seen: set[str] = set()
+    cwd = Path.cwd().resolve()
+    
+    while tid and tid not in seen:
+        seen.add(tid)
+        try:
+            row = db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type='thread.config' ORDER BY event_seq DESC LIMIT 1",
+                (tid,),
+            ).fetchone()
+            if row:
+                payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+                wd = payload.get('working_dir')
+                if wd:
+                    return (cwd / wd).resolve()
+        except Exception:
+            pass
+            
+        # Move to parent
+        try:
+            row = db.conn.execute("SELECT parent_id FROM children WHERE child_id=? LIMIT 1", (tid,)).fetchone()
+            tid = row[0] if row and row[0] else None
+        except Exception:
+            tid = None
+            
+    return cwd
