@@ -384,7 +384,17 @@
     "zai": {
       "api_base": "https://api.z.ai/api/paas/v4/chat/completions",
       "api_key_env": "ZAI_API_KEY",
-      "models": {}
+      "models": {
+        "GLM-4.6": {
+          "model_name": "glm-4.6",
+          "max_tokens": 200000,
+          "cost": {
+            "input_tokens": 0.06,
+            "cached_input": 0.011,
+            "output_tokens": 0.22
+          }
+        }
+      }
     }
   },
   "default_model": "Qwen3 Coder Local"

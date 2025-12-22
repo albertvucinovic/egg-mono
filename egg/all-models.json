@@ -611,7 +611,7 @@
       ]
     },
     "zai": {
-      "fetched_at": 1759618104,
+      "fetched_at": 1766381695,
       "source": "https://api.z.ai/api/paas/v4/models",
       "models": [
         "glm-4.5",
