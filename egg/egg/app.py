@@ -45,6 +45,7 @@ from eggthreads import (  # type: ignore
     list_children_with_meta,
     list_children_ids,
     create_snapshot,
+    approve_tool_calls_for_thread,
     pause_thread,
     resume_thread,
 )
@@ -1038,17 +1039,12 @@ class EggDisplayApp:
                 tool_call_id = str(tcid)
                 # TC1: needs approval -> deny execution entirely.
                 if tc.state == 'TC1':
-                    self.db.append_event(
-                        event_id=_os.urandom(10).hex(),
-                        thread_id=self.current_thread,
-                        type_='tool_call.approval',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'tool_call_id': tool_call_id,
-                            'decision': 'denied',
-                            'reason': 'Cancelled by user via Ctrl+C',
-                        },
+                    approve_tool_calls_for_thread(
+                        self.db,
+                        self.current_thread,
+                        decision='denied',
+                        reason='Cancelled by user via Ctrl+C',
+                        tool_call_id=tool_call_id,
                     )
                     # For assistant-originated tool calls, also emit a
                     # synthetic tool response so that every assistant
@@ -1644,30 +1640,20 @@ class EggDisplayApp:
                     approve = (txt == 'y')
                     decision = 'granted' if approve else 'denied'
                     for tcid in ids:
-                        self.db.append_event(
-                            event_id=_os.urandom(10).hex(),
-                            thread_id=self.current_thread,
-                            type_='tool_call.approval',
-                            msg_id=None,
-                            invoke_id=None,
-                            payload={
-                                'tool_call_id': tcid,
-                                'decision': decision,
-                                'reason': f'Approved/denied by user from UI ({source})',
-                            },
+                        approve_tool_calls_for_thread(
+                            self.db,
+                            self.current_thread,
+                            decision=decision,
+                            reason=f'Approved/denied by user from UI ({source})',
+                            tool_call_id=tcid,
                         )
                     self._log_system(f"Tool calls {ids} approval decision: {decision}.")
                 else:  # txt == 'a'
-                    self.db.append_event(
-                        event_id=_os.urandom(10).hex(),
-                        thread_id=self.current_thread,
-                        type_='tool_call.approval',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'decision': 'all-in-turn',
-                            'reason': f'Approved by user from UI ({source})',
-                        },
+                    approve_tool_calls_for_thread(
+                        self.db,
+                        self.current_thread,
+                        decision='all-in-turn',
+                        reason=f'Approved by user from UI ({source})',
                     )
                     self._log_system(
                         f"Approved all tool calls for this user turn (decision=all-in-turn, via {source})."
@@ -1827,20 +1813,15 @@ class EggDisplayApp:
         msg_id = append_message(self.db, self.current_thread, 'user', f"{prefix}{cmd}", extra=extra)
         # Automatically approve this tool call so it starts in TC2.1
         try:
-            self.db.append_event(
-                event_id=_os.urandom(10).hex(),
-                thread_id=self.current_thread,
-                type_='tool_call.approval',
-                msg_id=None,
-                invoke_id=None,
-                payload={
-                    'tool_call_id': tc_id,
-                    'decision': 'granted',
-                    'reason': 'Approved as user-initiated command',
-                },
+            approve_tool_calls_for_thread(
+                self.db,
+                self.current_thread,
+                decision='granted',
+                reason='Approved as user-initiated command',
+                tool_call_id=tc_id,
             )
         except Exception as e:
-            self._log_system(f'Error recording tool_call.approval for bash: {e}')
+            self._log_system(f'Error approving tool call for bash command: {e}')
         # Snapshot and ensure scheduler so that RA3 will pick this up.
         try:
             create_snapshot(self.db, self.current_thread)
@@ -2049,20 +2030,15 @@ class EggDisplayApp:
             msg_id = append_message(self.db, self.current_thread, 'user', f"/wait {arg_txt}", extra=extra)
             # Auto-approve this user-initiated tool call
             try:
-                self.db.append_event(
-                    event_id=_os.urandom(10).hex(),
-                    thread_id=self.current_thread,
-                    type_='tool_call.approval',
-                    msg_id=None,
-                    invoke_id=None,
-                    payload={
-                        'tool_call_id': tc_id,
-                        'decision': 'granted',
-                        'reason': 'Approved as user-initiated /wait command',
-                    },
+                approve_tool_calls_for_thread(
+                    self.db,
+                    self.current_thread,
+                    decision='granted',
+                    reason='Approved as user-initiated /wait command',
+                    tool_call_id=tc_id,
                 )
             except Exception as e:
-                self._log_system(f'Error recording tool_call.approval for wait: {e}')
+                self._log_system(f'Error approving tool call for wait command: {e}')
             try:
                 create_snapshot(self.db, self.current_thread)
             except Exception:
@@ -2424,16 +2400,11 @@ class EggDisplayApp:
 
             decision = 'global_approval' if enable else 'revoke_global_approval'
             try:
-                self.db.append_event(
-                    event_id=_os.urandom(10).hex(),
-                    thread_id=self.current_thread,
-                    type_='tool_call.approval',
-                    msg_id=None,
-                    invoke_id=None,
-                    payload={
-                        'decision': decision,
-                        'reason': 'Toggled by user via /toggleAutoApproval',
-                    },
+                approve_tool_calls_for_thread(
+                    self.db,
+                    self.current_thread,
+                    decision=decision,
+                    reason='Toggled by user via /toggleAutoApproval',
                 )
                 self._log_system(
                     'Global tool auto-approval ENABLED for this thread.' if enable
