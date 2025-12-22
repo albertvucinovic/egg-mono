@@ -25,6 +25,12 @@ from .api import (
     duplicate_thread,
     get_thread_working_directory,
     set_thread_working_directory,
+    collect_subtree,
+    list_active_threads,
+    wait_subtree_idle,
+    word_count_from_snapshot,
+    word_count_from_events,
+    set_subtree_working_directory,
 
     duplicate_thread,
 )  # type: ignore
@@ -74,6 +80,9 @@ __all__ = [
     'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable',
     'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'current_open_invoke',
     'create_snapshot', 'interrupt_thread', 'pause_thread', 'resume_thread', 'set_thread_model', 'current_thread_model', 'duplicate_thread', 'get_thread_working_directory', 'set_thread_working_directory',
+    'collect_subtree', 'list_active_threads', 'wait_subtree_idle',
+    'word_count_from_snapshot', 'word_count_from_events',
+    'set_subtree_working_directory',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
     'discover_runner_actionable',
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',

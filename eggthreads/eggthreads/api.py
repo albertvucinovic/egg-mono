@@ -443,3 +443,105 @@ def _ensure_thread_working_directory(db: ThreadsDB, thread_id: str) -> Path:
     if wd and not wd.exists():
         wd.mkdir(parents=True, exist_ok=True)
     return wd
+
+def collect_subtree(db: ThreadsDB, root_id: str) -> list[str]:
+    """Return all thread_ids in the subtree rooted at ``root_id`` (BFS)."""
+    out: list[str] = []
+    q: list[str] = [root_id]
+    seen = set()
+    while q:
+        t = q.pop(0)
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        try:
+            cur = db.conn.execute("SELECT child_id FROM children WHERE parent_id=?", (t,))
+            for row in cur.fetchall():
+                q.append(row[0])
+        except Exception:
+            continue
+    return out
+
+
+def list_active_threads(db: ThreadsDB, subtree: list[str]) -> list[str]:
+    """Return list of thread_ids that are currently running or runnable."""
+    active: list[str] = []
+    for tid in subtree:
+        row_open = None
+        try:
+            row_open = db.current_open(tid)
+        except Exception:
+            row_open = None
+        if row_open is not None or is_thread_runnable(db, tid):
+            active.append(tid)
+    return active
+
+
+async def wait_subtree_idle(db: ThreadsDB, root_id: str, poll_sec: float = 0.1, quiet_checks: int = 3) -> None:
+    """Wait until no threads in the subtree are running or runnable for N checks."""
+    import asyncio
+    subtree = collect_subtree(db, root_id)
+    stable = 0
+    while True:
+        if not list_active_threads(db, subtree):
+            stable += 1
+            if stable >= quiet_checks:
+                return
+        else:
+            stable = 0
+        await asyncio.sleep(poll_sec)
+        # Refresh subtree in case new children were spawned
+        subtree = collect_subtree(db, root_id)
+
+def word_count_from_snapshot(db: ThreadsDB, thread_id: str) -> int:
+    """Return the word count of all messages in the thread snapshot."""
+    row = db.get_thread(thread_id)
+    if not row or not row.snapshot_json:
+        return 0
+    try:
+        msgs = json.loads(row.snapshot_json).get("messages", [])
+        return sum(len(str(m.get("content") or "").split()) for m in msgs)
+    except Exception:
+        return 0
+
+
+def word_count_from_events(db: ThreadsDB, thread_id: str) -> int:
+    """Return word count of thread, including events after last snapshot."""
+    base = word_count_from_snapshot(db, thread_id)
+    row = db.get_thread(thread_id)
+    last_seq = int(row.snapshot_last_event_seq) if row else -1
+    cur = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND event_seq>?",
+        (thread_id, last_seq),
+    )
+    extra = 0
+    for (pj,) in cur.fetchall():
+        try:
+            p = json.loads(pj) if isinstance(pj, str) else (pj or {})
+            # Content
+            c = p.get("content")
+            if isinstance(c, str):
+                extra += len(c.split())
+            # Reasoning (msg.create)
+            r = p.get("reasoning")
+            if isinstance(r, str):
+                extra += len(r.split())
+            # Stream deltas (text or reason)
+            t = p.get("text") or p.get("reason")
+            if isinstance(t, str):
+                extra += len(t.split())
+            # Tool args
+            tc = p.get("tool_call")
+            if isinstance(tc, dict):
+                a = tc.get("arguments_delta")
+                if isinstance(a, str):
+                    extra += len(a.split())
+        except Exception:
+            pass
+    return base + extra
+
+def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_dir: str, reason: str = "user") -> None:
+    """Apply working directory configuration to all threads in a subtree."""
+    for tid in collect_subtree(db, root_thread_id):
+        set_thread_working_directory(db, tid, working_dir, reason=reason)
