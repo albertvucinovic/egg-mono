@@ -55,7 +55,7 @@ def test_collect_subtree_bfs_order(tmp_path) -> None:
     c2 = ts.create_child_thread(db, root, name="c2")
     gc = ts.create_child_thread(db, c1, name="gc")
 
-    subtree = hs.collect_subtree(db, root)
+    subtree = ts.collect_subtree(db, root)
 
     assert subtree[0] == root
     # All nodes in the tree must appear exactly once.
@@ -81,8 +81,8 @@ def test_word_count_snapshot_and_events_consistent_without_streaming(tmp_path) -
     ts.append_message(db, tid, "user", "hello world")
     ts.create_snapshot(db, tid)
 
-    base = hs.word_count_from_snapshot(db, tid)
-    total = hs.word_count_from_events(db, tid)
+    base = ts.word_count_from_snapshot(db, tid)
+    total = ts.word_count_from_events(db, tid)
     assert total == base
 
 
@@ -98,7 +98,7 @@ def test_word_count_events_includes_post_snapshot_messages(tmp_path) -> None:
     tid = ts.create_root_thread(db, name="t")
     ts.append_message(db, tid, "user", "base")
     ts.create_snapshot(db, tid)
-    base = hs.word_count_from_snapshot(db, tid)
+    base = ts.word_count_from_snapshot(db, tid)
 
     # Append a user message *after* the snapshot; we intentionally do
     # not call create_snapshot() again so that word_count_from_events
@@ -106,7 +106,7 @@ def test_word_count_events_includes_post_snapshot_messages(tmp_path) -> None:
     extra_text = "three extra words"
     ts.append_message(db, tid, "user", extra_text)
 
-    total = hs.word_count_from_events(db, tid)
+    total = ts.word_count_from_events(db, tid)
     # The difference should be exactly the number of words in the new
     # message content, as the post-snapshot logic only counts
     # payload['content'] for role in ('user', 'tool').
@@ -124,14 +124,14 @@ def test_list_active_threads_marks_open_streams(tmp_path) -> None:
     subtree = [c1, c2]
 
     # No open streams and no runnable work -> no active threads.
-    active_initial = hs.list_active_threads(db, subtree)
+    active_initial = ts.list_active_threads(db, subtree)
     assert active_initial == []
 
     # Mark c1 as having an open stream (simulating a running runner).
     lease_until = "2099-01-01 00:00:00"
     assert db.try_open_stream(c1, "invoke-1", lease_until, owner="test", purpose="test")
 
-    active = hs.list_active_threads(db, subtree)
+    active = ts.list_active_threads(db, subtree)
     assert active == [c1]
 
 
@@ -145,7 +145,7 @@ def test_wait_subtree_idle_returns_when_no_runnable_threads(tmp_path) -> None:
     # No events and no open streams -> is_thread_runnable() is False
     # for all threads, so wait_subtree_idle should return after the
     # required number of quiet checks.
-    asyncio.run(hs.wait_subtree_idle(db, root_id=root, poll_sec=0.01, quiet_checks=1))
+    asyncio.run(ts.wait_subtree_idle(db, root_id=root, poll_sec=0.01, quiet_checks=1))
 
 
 def test_main_creates_expected_subtree(tmp_path, monkeypatch) -> None:
@@ -413,7 +413,7 @@ def test_word_count_includes_streaming_deltas(tmp_path) -> None:
     tid = ts.create_root_thread(db, name="t")
     ts.append_message(db, tid, "user", "base")
     ts.create_snapshot(db, tid)
-    base = hs.word_count_from_snapshot(db, tid)
+    base = ts.word_count_from_snapshot(db, tid)
 
     # Add a stream.delta event (simulating an LLM streaming response)
     import os
@@ -427,7 +427,7 @@ def test_word_count_includes_streaming_deltas(tmp_path) -> None:
         chunk_seq=0,
     )
 
-    total = hs.word_count_from_events(db, tid)
+    total = ts.word_count_from_events(db, tid)
     # Should count the 3 words from the delta
     assert total - base == 3
 
@@ -452,17 +452,17 @@ def test_word_count_from_snapshot_edge_cases(tmp_path) -> None:
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="t")
     # No snapshot yet -> 0
-    assert hs.word_count_from_snapshot(db, tid) == 0
+    assert ts.word_count_from_snapshot(db, tid) == 0
     # Empty snapshot JSON -> 0
     ts.create_snapshot(db, tid)
     # snapshot_json is now a valid JSON with empty messages list
     # Should still count 0 words
-    assert hs.word_count_from_snapshot(db, tid) == 0
+    assert ts.word_count_from_snapshot(db, tid) == 0
     # Add a message with content
     ts.append_message(db, tid, "user", "hello world")
     ts.create_snapshot(db, tid)
     # snapshot includes msg_id, role, ts, content -> total 5 words
-    assert hs.word_count_from_snapshot(db, tid) == 2
+    assert ts.word_count_from_snapshot(db, tid) == 2
 
 
 def test_word_count_from_events_tool_call_arguments(tmp_path) -> None:
@@ -471,7 +471,7 @@ def test_word_count_from_events_tool_call_arguments(tmp_path) -> None:
     tid = ts.create_root_thread(db, name="t")
     ts.append_message(db, tid, "user", "base")
     ts.create_snapshot(db, tid)
-    base = hs.word_count_from_snapshot(db, tid)
+    base = ts.word_count_from_snapshot(db, tid)
 
     # Simulate a tool_call argument streaming delta
     import os
@@ -492,7 +492,7 @@ def test_word_count_from_events_tool_call_arguments(tmp_path) -> None:
         chunk_seq=0,
     )
 
-    total = hs.word_count_from_events(db, tid)
+    total = ts.word_count_from_events(db, tid)
     # The delta contains words: script, echo, hello (3 words)
     # However the function counts only the 'text' field inside tool_call,
     # which we set to the same JSON string. The JSON string contains
@@ -508,7 +508,7 @@ def test_word_count_from_events_assistant_reasoning(tmp_path) -> None:
     tid = ts.create_root_thread(db, name="t")
     ts.append_message(db, tid, "user", "base")
     ts.create_snapshot(db, tid)
-    base = hs.word_count_from_snapshot(db, tid)
+    base = ts.word_count_from_snapshot(db, tid)
 
     # Add an assistant message with reasoning (no content)
     import os
@@ -524,7 +524,7 @@ def test_word_count_from_events_assistant_reasoning(tmp_path) -> None:
         msg_id=os.urandom(10).hex(),
     )
 
-    total = hs.word_count_from_events(db, tid)
+    total = ts.word_count_from_events(db, tid)
     # reasoning words: "I", "will", "think", "step", "by", "step." (6 words)
     assert total - base == 6
 
@@ -537,12 +537,12 @@ def test_list_active_threads_runnable_no_open_stream(tmp_path) -> None:
     # Add a user message to make child runnable (RA1)
     ts.append_message(db, child, "user", "hello")
     # No open stream, but thread is runnable
-    active = hs.list_active_threads(db, [child])
+    active = ts.list_active_threads(db, [child])
     assert active == [child]
     # If we also open a stream, still active
     lease_until = "2099-01-01 00:00:00"
     assert db.try_open_stream(child, "invoke-1", lease_until, owner="test", purpose="test")
-    active = hs.list_active_threads(db, [child])
+    active = ts.list_active_threads(db, [child])
     assert active == [child]
 
 
@@ -555,11 +555,11 @@ def test_wait_subtree_idle_with_runnable_threads(tmp_path, monkeypatch) -> None:
     # Mock is_thread_runnable to return False immediately, quiet_checks=1
     def mock_false(db, thread_id):
         return False
-    monkeypatch.setattr(hs, "is_thread_runnable", mock_false)
-    monkeypatch.setattr(ts, "is_thread_runnable", mock_false)
+    import eggthreads.api
+    monkeypatch.setattr(eggthreads.api, "is_thread_runnable", mock_false)
     import asyncio
     # Should return quickly
-    asyncio.run(hs.wait_subtree_idle(db, root, poll_sec=0.01, quiet_checks=1))
+    asyncio.run(ts.wait_subtree_idle(db, root, poll_sec=0.01, quiet_checks=1))
 
 
 def test_periodic_reporter_output_format(tmp_path, capsys) -> None:
