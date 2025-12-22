@@ -312,7 +312,7 @@
           },
           "cost": {
             "input_tokens": 0.028,
-            "cache_prompt": 0.0028,
+            "cached_input": 0.0028,
             "output_tokens": 0.042
           }
         }
