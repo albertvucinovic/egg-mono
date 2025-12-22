@@ -146,7 +146,7 @@ class LLMClient:
         def _usd(tokens: int, price_per_1k: float) -> float:
             if tokens <= 0 or price_per_1k <= 0.0:
                 return 0.0
-            return float(tokens) * (price_per_1k / 1000.0)
+            return float(tokens/1000.) * price_per_1k
 
         # To avoid double-counting, we treat cached input tokens as a
         # separate, cheaper tier. The remaining "new" tokens are
