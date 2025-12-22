@@ -36,6 +36,7 @@ from eggthreads import (
     create_snapshot,
     set_subtree_tools_enabled,
     collect_subtree,
+    approve_tool_calls_for_thread,
     wait_subtree_idle,
 )
 from examples.reporting import periodic_reporter
@@ -106,19 +107,13 @@ async def main():
 
     # Also auto-approve tool calls *for the first user turn*
     try:
-        import os as _os
         subtree_ids = collect_subtree(db, root_id)
         for tid in subtree_ids:
-            db.append_event(
-                event_id=_os.urandom(10).hex(),
-                thread_id=tid,
-                type_='tool_call.approval',
-                msg_id=None,
-                invoke_id=None,
-                payload={
-                    'decision': 'all-in-turn',
-                    'reason': 'headless_subtree_scheduler: auto-approve tools for the initial user turn',
-                },
+            approve_tool_calls_for_thread(
+                db,
+                tid,
+                decision='all-in-turn',
+                reason='headless_subtree_scheduler: auto-approve tools for the initial user turn',
             )
     except Exception as e:
         print(f"[status] warning: failed to enable per-turn tool auto-approval: {e}")

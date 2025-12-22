@@ -31,6 +31,7 @@ from .api import (
     word_count_from_snapshot,
     word_count_from_events,
     set_subtree_working_directory,
+    approve_tool_calls_for_thread,
 
     duplicate_thread,
 )  # type: ignore
@@ -83,6 +84,7 @@ __all__ = [
     'collect_subtree', 'list_active_threads', 'wait_subtree_idle',
     'word_count_from_snapshot', 'word_count_from_events',
     'set_subtree_working_directory',
+    'approve_tool_calls_for_thread',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
     'discover_runner_actionable',
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',

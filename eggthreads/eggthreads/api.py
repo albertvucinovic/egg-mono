@@ -541,6 +541,33 @@ def word_count_from_events(db: ThreadsDB, thread_id: str) -> int:
             pass
     return base + extra
 
+
+def approve_tool_calls_for_thread(db, thread_id, decision='all-in-turn', reason=None):
+    """Approve tool calls for a thread with a given decision.
+    
+    Creates a tool_call.approval event that can be used by the runner to
+    automatically approve tool calls according to the decision.
+    
+    Args:
+        db: ThreadsDB instance
+        thread_id: target thread
+        decision: one of 'all-in-turn', 'allow', 'deny', 'prompt'
+        reason: optional human-readable reason for the decision
+    """
+    import os
+    payload = {'decision': decision}
+    if reason is not None:
+        payload['reason'] = reason
+    db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_='tool_call.approval',
+        msg_id=None,
+        invoke_id=None,
+        payload=payload,
+    )
+
+
 def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_dir: str, reason: str = "user") -> None:
     """Apply working directory configuration to all threads in a subtree."""
     for tid in collect_subtree(db, root_thread_id):
