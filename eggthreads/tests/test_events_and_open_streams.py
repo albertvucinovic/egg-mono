@@ -10,7 +10,7 @@ import json
 from typing import Any, Dict
 
 from eggthreads import ThreadsDB
-from eggthreads.eggthreads import events as events_module
+from eggthreads import events as events_module
 
 
 def _make_temp_db(tmp_path) -> ThreadsDB:

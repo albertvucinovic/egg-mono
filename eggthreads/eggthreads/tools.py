@@ -110,7 +110,8 @@ def create_default_tools() -> ToolRegistry:
             try:
                 db = ThreadsDB()
                 sb = get_thread_sandbox_config(db, tid)
-                cwd = get_thread_working_directory(db, tid)
+                from .api import _ensure_thread_working_directory
+                cwd = _ensure_thread_working_directory(db, tid)
                 argv = wrap_argv_for_sandbox_with_settings(
                     base_argv,
                     enabled=sb.enabled,
@@ -168,7 +169,8 @@ def create_default_tools() -> ToolRegistry:
             try:
                 db = ThreadsDB()
                 sb = get_thread_sandbox_config(db, thread_id)
-                cwd = get_thread_working_directory(db, thread_id)
+                from .api import _ensure_thread_working_directory
+                cwd = _ensure_thread_working_directory(db, thread_id)
                 argv = wrap_argv_for_sandbox_with_settings(
                     base_argv,
                     enabled=sb.enabled,
@@ -659,5 +661,4 @@ def create_default_tools() -> ToolRegistry:
     # to prevent unintended tool calls in basic chats. The UI layer can register them explicitly.
 
     return reg
-
 

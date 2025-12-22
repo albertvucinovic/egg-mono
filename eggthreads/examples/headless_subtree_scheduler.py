@@ -317,3 +317,39 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+def word_count_from_snapshot(db, thread_id):
+    row = db.get_thread(thread_id)
+    if not row or not row.snapshot_json: return 0
+    try:
+        msgs = json.loads(row.snapshot_json).get("messages", [])
+        return sum(len(str(m.get("content") or "").split()) for m in msgs)
+    except: return 0
+
+
+def word_count_from_events(db, thread_id):
+    base = word_count_from_snapshot(db, thread_id)
+    row = db.get_thread(thread_id)
+    last_seq = int(row.snapshot_last_event_seq) if row else -1
+    import json
+    cur = db.conn.execute("SELECT payload_json FROM events WHERE thread_id=? AND event_seq>?", (thread_id, last_seq))
+    extra = 0
+    for (pj,) in cur.fetchall():
+        try:
+            p = json.loads(pj) if isinstance(pj, str) else (pj or {})
+            # Content
+            c = p.get("content")
+            if isinstance(c, str): extra += len(c.split())
+            # Reasoning (msg.create)
+            r = p.get("reasoning")
+            if isinstance(r, str): extra += len(r.split())
+            # Stream deltas (text or reason)
+            t = p.get("text") or p.get("reason")
+            if isinstance(t, str): extra += len(t.split())
+            # Tool args
+            tc = p.get("tool_call")
+            if isinstance(tc, dict):
+                a = tc.get("arguments_delta")
+                if isinstance(a, str): extra += len(a.split())
+        except: pass
+    return base + extra

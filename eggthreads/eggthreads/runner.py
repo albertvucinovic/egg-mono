@@ -1075,7 +1075,7 @@ class ThreadRunner:
         import asyncio as _asyncio
         import os as _os
         import signal as _signal
-        from .api import get_thread_working_directory
+        from .api import _ensure_thread_working_directory
 
         from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
 
@@ -1106,7 +1106,7 @@ class ThreadRunner:
         # enabled.  We intentionally avoid using ``shell=True`` so that
         # the sandbox wrapper controls the executed binary directly.
         base_argv = ['/bin/bash', '-lc', script]
-        cwd = get_thread_working_directory(self.db, self.thread_id)
+        cwd = _ensure_thread_working_directory(self.db, self.thread_id)
 
         # Honour per-thread sandbox settings. This makes tool execution
         # reproducible across processes because the config is stored as
