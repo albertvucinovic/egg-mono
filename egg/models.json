@@ -8,8 +8,8 @@
           "model_name": "gpt-5.2",
           "max_tokens": 400000,
           "parameters": {
-                  "reasoning_effort": "high",
-                  "prompt_cache_retention": "24h"
+            "reasoning_effort": "high",
+            "prompt_cache_retention": "24h"
           },
           "cost": {
             "input_tokens": 0.175,
@@ -21,65 +21,65 @@
           "model_name": "gpt-5.2",
           "max_tokens": 400000,
           "parameters": {
-                  "reasoning_effort": "xhigh",
-                  "prompt_cache_retention": "24h"
+            "reasoning_effort": "xhigh",
+            "prompt_cache_retention": "24h"
           },
           "cost": {
             "input_tokens": 0.175,
             "cached_input": 0.0175,
-            "output_tokens": 3.0
+            "output_tokens": 3
           }
-        }, 
+        },
         "GP#T 5.1 high": {
-	        "#model_name": "gpt-5.1",
-	        "max_tokens": 400000,
+          "#model_name": "gpt-5.1",
+          "max_tokens": 400000,
           "parameters": {
-                  "reasoning_effort": "high",
-                  "prompt_cache_retention": "24h"
-	        }
-	      },
-	      "GPT 5 high": {
-	        "model_name": "gpt-5",
-	        "max_tokens": 400000,
+            "reasoning_effort": "high",
+            "prompt_cache_retention": "24h"
+          }
+        },
+        "GPT 5 high": {
+          "model_name": "gpt-5",
+          "max_tokens": 400000,
           "parameters": {
-                  "reasoning_effort": "high",
-                  "prompt_cache_retention": "24h"
-	         }
-	       },
-         "GPT 5": {
-           "model_name": "gpt-5",
-           "max_tokens": 400000
-         },
-         "GPT 5 Chat": {
-           "model_name": "gpt-5-chat-latest",
-           "max_tokens": 400000
-         },
-         "GPT 5 Mini": {
-           "model_name": "gpt-5-mini",
-           "max_tokens": 400000,
-	          "parameters": {
-              "reasoning_effort": "high"
-	          }
-         },
-         "OpenAI o3-mini": {
-           "model_name": "o3-mini",
-           "max_tokens": 128000
-         },
-         "OpenAI GPT-4.1": {
-           "model_name": "gpt-4.1",
-           "max_tokens": 128000
-         },
-         "OpenAI GPT-4o": {
-           "model_name": "gpt-4o",
-           "max_tokens": 128000
-         },
-         "GPT 5 Nano": {
-           "model_name": "gpt-5-nano",
-           "max_tokens": 32000,
-	           "parameters": {
-               "reasoning_effort": "high"
-	            }
-         }
+            "reasoning_effort": "high",
+            "prompt_cache_retention": "24h"
+          }
+        },
+        "GPT 5": {
+          "model_name": "gpt-5",
+          "max_tokens": 400000
+        },
+        "GPT 5 Chat": {
+          "model_name": "gpt-5-chat-latest",
+          "max_tokens": 400000
+        },
+        "GPT 5 Mini": {
+          "model_name": "gpt-5-mini",
+          "max_tokens": 400000,
+          "parameters": {
+            "reasoning_effort": "high"
+          }
+        },
+        "OpenAI o3-mini": {
+          "model_name": "o3-mini",
+          "max_tokens": 128000
+        },
+        "OpenAI GPT-4.1": {
+          "model_name": "gpt-4.1",
+          "max_tokens": 128000
+        },
+        "OpenAI GPT-4o": {
+          "model_name": "gpt-4o",
+          "max_tokens": 128000
+        },
+        "GPT 5 Nano": {
+          "model_name": "gpt-5-nano",
+          "max_tokens": 32000,
+          "parameters": {
+            "reasoning_effort": "high"
+          }
+        }
       }
     },
     "anthropic": {
@@ -128,7 +128,6 @@
             "cached_input": 0.005
           }
         },
- 
         "Google Gemini 2.5 Flash": {
           "model_name": "gemini-2.5-flash",
           "max_tokens": 1000000
@@ -195,7 +194,7 @@
       "api_base": "http://localhost:8000/v1/chat/completions",
       "api_key_env": "LOCAL_API_KEY",
       "parameters": {
-	 "cache_prompt": true
+        "cache_prompt": true
       },
       "models": {
         "Qwen3 235B 2597 Thinking PI": {
@@ -281,7 +280,7 @@
     "deepseek-speciale": {
       "api_base": "https://api.deepseek.com/v3.2_speciale_expires_on_20251215/chat/completions",
       "api_key_env": "DEEPSEEK_API_KEY",
-      "parameters" : {
+      "parameters": {
         "cache_prompt": true
       },
       "models": {
@@ -353,14 +352,14 @@
       "api_base": "https://api.x.ai/v1/chat/completions",
       "api_key_env": "GROK_CODE_API_KEY",
       "models": {
-	 "grok-4-latest": {
-            "model_name": "grok-4-latest",
-	    "max_tokens": "1000000"
-	 },
-         "grok-code-fast-1": {
-            "model_name": "grok-code-fast-1",
-	    "max_tokens": "256000"
-	 }
+        "grok-4-latest": {
+          "model_name": "grok-4-latest",
+          "max_tokens": "1000000"
+        },
+        "grok-code-fast-1": {
+          "model_name": "grok-code-fast-1",
+          "max_tokens": "256000"
+        }
       }
     },
     "moonshotai": {
@@ -368,9 +367,9 @@
       "api_key_env": "MOONSHOTAI_API_KEY",
       "models": {
         "kimi-k2-0905-preview": {
-      		"model_name": "kimi-k2-0905-preview",
-      		"max_tokens": 256000
-      	},
+          "model_name": "kimi-k2-0905-preview",
+          "max_tokens": 256000
+        },
         "kimi-k2-thinking": {
           "model_name": "kimi-k2-thinking",
           "max_tokens": 256000,
