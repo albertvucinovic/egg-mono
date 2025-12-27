@@ -197,6 +197,12 @@ class DockerProvider:
         # Default settings
         image = settings.get("image", "python:3.12-slim")
         network = settings.get("network", "none")
+
+        # Ensure network is a string (srt-style settings use dict)
+
+        if not isinstance(network, str):
+
+            network = "none"
         workspace = settings.get("workspace", "/workspace")
         extra_mounts = settings.get("extra_mounts", [])
         extra_args = settings.get("extra_args", [])
@@ -327,8 +333,8 @@ def _default_config_dict() -> Dict[str, object]:
     # "allow writes only under ." (``filesystem.allowWrite``).
 
     return {
-        # The default sandbox provider is srt (Anthropic sandbox-runtime).
-        "provider": "srt",
+        # The default sandbox provider is docker (container-based).
+        "provider": "docker",
         # Secure-by-default network: empty allowlist means "deny all".
         "network": {
             "allowedDomains": [],
@@ -499,9 +505,9 @@ def sandbox_enabled() -> bool:
 
 
 def sandbox_available() -> bool:
-    """Return whether an ``srt`` binary is available."""
+    """Return whether the default sandbox provider (docker) is available."""
     try:
-        return shutil.which(_SRT_BIN) is not None
+        return _PROVIDERS["docker"].is_available()
     except Exception:
         return False
 
@@ -564,7 +570,7 @@ def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:
         argv,
         enabled=sandbox_enabled(),
         settings=_load_config(_default_config_path()),
-        provider="srt",
+        provider="docker",
     )
 def wrap_argv_for_sandbox_with_settings(
     argv: List[str],
@@ -577,7 +583,7 @@ def wrap_argv_for_sandbox_with_settings(
     """Wrap an argv for sandbox execution with explicit settings.
 
     The provider can be specified via the ``provider`` argument or via a
-    "provider" key inside ``settings`` (default "srt").  If sandboxing is
+    "provider" key inside ``settings`` (default "docker").  If sandboxing is
     disabled or the requested provider is unavailable, the original argv
     is returned unchanged.
     """
@@ -586,7 +592,7 @@ def wrap_argv_for_sandbox_with_settings(
 
     # Determine provider name
     if provider is None:
-        provider_name = str(settings.get("provider", "srt"))
+        provider_name = str(settings.get("provider", "docker"))
     else:
         provider_name = provider
 
@@ -627,7 +633,7 @@ def wrap_argv_for_sandbox_with_config(
         settings = _load_config(p)
     except Exception:
         settings = _load_config(_default_config_path())
-    return wrap_argv_for_sandbox_with_settings(argv, enabled=eff_enabled, settings=settings, provider="srt")
+    return wrap_argv_for_sandbox_with_settings(argv, enabled=eff_enabled, settings=settings, provider="docker")
 def _parent_id(db: "ThreadsDB", thread_id: str) -> Optional[str]:
     try:
         row = db.conn.execute(
@@ -681,7 +687,7 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
     """
 
     enabled = sandbox_enabled()
-    provider = "srt"
+    provider = "docker"
     settings: Dict[str, object] = _load_config(_default_config_path())
     source = "default.json"
 
@@ -772,17 +778,24 @@ def set_thread_sandbox_config(
     if src_name and "source" not in payload:
         payload["source"] = src_name
 
-    # Provider (default "srt")
+    # Provider (default "docker")
     if provider is not None:
         payload["provider"] = provider
     else:
-        # Infer from settings if present, otherwise default to "srt"
-        prov = (settings or {}).get("provider")
+        # Infer from settings if present, otherwise default to "docker"
+        # Check both the settings parameter and payload["settings"]
+        prov = None
+        if isinstance(settings, dict):
+            prov = settings.get("provider")
+        if not isinstance(prov, str) or not prov.strip():
+            # Check payload settings
+            payload_settings = payload.get("settings")
+            if isinstance(payload_settings, dict):
+                prov = payload_settings.get("provider")
         if isinstance(prov, str) and prov.strip():
             payload["provider"] = prov.strip()
         else:
-            payload["provider"] = "srt"
-
+            payload["provider"] = "docker"
     try:
         db.append_event(
             event_id=_os.urandom(10).hex(),
@@ -899,9 +912,8 @@ def get_sandbox_status() -> Dict[str, object]:
     warning: Optional[str] = None
     if sandbox_enabled() and not sandbox_available():
         warning = (
-            "Sandboxing is enabled by default but the 'srt' CLI was not found. "
-            "Tool commands will run *without* a sandbox. Install it "
-            "with: npm install -g @anthropic-ai/sandbox-runtime."
+            "Sandboxing is enabled by default but the 'docker' provider is not available. "
+            "Tool commands will run *without* a sandbox. Install Docker or choose another provider."
         )
 
     cfg = get_srt_sandbox_configuration()

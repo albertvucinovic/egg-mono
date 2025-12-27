@@ -233,17 +233,17 @@ def test_wrap_argv_for_sandbox_with_settings_provider_selection(eggthreads):
     """Test provider selection in wrap_argv_for_sandbox_with_settings."""
     sandbox = eggthreads.sandbox
     
-    # Test default provider (srt)
-    with patch.object(sandbox._PROVIDERS["srt"], "is_available", return_value=True):
-        with patch.object(sandbox._PROVIDERS["srt"], "wrap_argv") as mock_wrap:
-            mock_wrap.return_value = ["srt", "--settings", "x", "cmd"]
+    # Test default provider (docker)
+    with patch.object(sandbox._PROVIDERS["docker"], "is_available", return_value=True):
+        with patch.object(sandbox._PROVIDERS["docker"], "wrap_argv") as mock_wrap:
+            mock_wrap.return_value = ["docker", "run", "cmd"]
             argv = ["echo", "test"]
             settings = {}
             wrapped = sandbox.wrap_argv_for_sandbox_with_settings(
                 argv, enabled=True, settings=settings
             )
             mock_wrap.assert_called_once()
-            assert wrapped[0] == "srt"
+            assert wrapped[0] == "docker"
     
     # Test explicit provider via settings
     with patch.object(sandbox._PROVIDERS["docker"], "is_available", return_value=True):
@@ -284,8 +284,6 @@ def test_wrap_argv_for_sandbox_with_settings_provider_selection(eggthreads):
             argv, enabled=False, settings={}
         )
         assert wrapped == argv  # No sandbox when disabled
-
-
 def test_get_sandbox_status_includes_providers(eggthreads):
     """Test that get_sandbox_status includes provider availability."""
     sandbox = eggthreads.sandbox
@@ -357,7 +355,7 @@ def test_set_thread_sandbox_config_provider_inference(eggthreads, tmp_path):
     config = sandbox.get_thread_sandbox_config(db, thread_id)
     assert config.provider == "bwrap"
     
-    # Set config without provider in settings - should default to "srt"
+    # Set config without provider in settings - should default to "docker"
     settings_without_provider = {"network": {"allowedDomains": []}}
     sandbox.set_thread_sandbox_config(
         db, thread_id, enabled=True, settings=settings_without_provider, 
@@ -365,7 +363,7 @@ def test_set_thread_sandbox_config_provider_inference(eggthreads, tmp_path):
     )
     
     config2 = sandbox.get_thread_sandbox_config(db, thread_id)
-    assert config2.provider == "srt"
+    assert config2.provider == "docker"
 
 def test_working_dir_handling(eggthreads):
     """Test that working directory is properly handled by providers."""
@@ -476,7 +474,7 @@ def test_default_config_includes_provider(eggthreads):
     sandbox = eggthreads.sandbox
     default_dict = sandbox._default_config_dict()
     assert "provider" in default_dict
-    assert default_dict["provider"] == "srt"
+    assert default_dict["provider"] == "docker"
     # Ensure other expected keys are present
     assert "network" in default_dict
     assert "filesystem" in default_dict
@@ -531,3 +529,263 @@ def test_real_bwrap_provider_if_available(eggthreads, tmp_path):
     assert "--bind" in wrapped
     assert "--unshare-net" in wrapped
     assert wrapped[-2:] == ["echo", "test"]
+
+
+def test_docker_provider_with_subthreads_and_cwd(eggthreads, tmp_path):
+    """Test docker provider with subthreads and custom working directories."""
+    sandbox = eggthreads.sandbox
+    
+    # Create a DB
+    db = eggthreads.ThreadsDB()
+    db.init_schema()
+    
+    # Create root thread with docker provider
+    root = eggthreads.create_root_thread(db, name="root")
+    eggthreads.append_message(db, root, "system", "test")
+    
+    # Set sandbox config with docker provider
+    sandbox.set_thread_sandbox_config(
+        db, root, enabled=True, provider="docker", reason="test"
+    )
+    
+    # Create child thread with custom working directory
+    child = eggthreads.create_child_thread(db, root, name="child")
+    custom_dir = tmp_path / "custom_cwd"
+    custom_dir.mkdir()
+    eggthreads.set_thread_working_directory(db, child, str(custom_dir))
+    
+    # Get config for child (should inherit docker provider)
+    config = sandbox.get_thread_sandbox_config(db, child)
+    assert config.provider == "docker"
+    
+    # Mock docker provider to verify working directory
+    with patch.object(sandbox._PROVIDERS["docker"], "is_available", return_value=True):
+        with patch.object(sandbox._PROVIDERS["docker"], "wrap_argv") as mock_wrap:
+            mock_wrap.return_value = ["docker", "run", "cmd"]
+            
+            # Simulate what runner would do: get thread working directory
+            child_cwd = eggthreads.get_thread_working_directory(db, child)
+            # Should be the custom directory
+            assert str(child_cwd) == str(custom_dir)
+            
+            # Simulate wrapping argv
+            argv = ["echo", "hello"]
+            wrapped = sandbox.wrap_argv_for_sandbox_with_settings(
+                argv,
+                enabled=config.enabled,
+                settings=config.settings,
+                provider=config.provider,
+                working_dir=child_cwd
+            )
+            
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+            # Verify wrap_argv called with correct working_dir
+            mock_wrap.assert_called_once()
+            call_args = mock_wrap.call_args
+            # The call includes argv, settings, and optionally working_dir as positional args
+            assert len(call_args[0]) >= 2  # argv, settings
+            # working_dir may be third positional argument
+            if len(call_args[0]) >= 3:
+                working_dir_arg = call_args[0][2]
+            else:
+                # Or as keyword argument
+                assert "working_dir" in call_args[1]
+                working_dir_arg = call_args[1]["working_dir"]
+            # Should be a Path pointing to custom_dir
+            from pathlib import Path
+            assert isinstance(working_dir_arg, Path)
+            assert str(working_dir_arg) == str(custom_dir)
+
+def test_docker_provider_mounts_correct_directory(eggthreads, tmp_path):
+    """Test that docker provider correctly mounts working directory."""
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["docker"]
+    
+    with patch.object(provider, "is_available", return_value=True):
+        # Test with root directory
+        argv = ["ls"]
+        settings = {}
+        wrapped = provider.wrap_argv(argv, settings, working_dir=tmp_path)
+        
+        # Check mount
+        assert "-v" in wrapped
+        vol_idx = wrapped.index("-v")
+        assert wrapped[vol_idx + 1] == f"{tmp_path}:/workspace"
+        
+        # Test with subdirectory
+        subdir = tmp_path / "sub" / "deep"
+        subdir.mkdir(parents=True)
+        wrapped2 = provider.wrap_argv(argv, settings, working_dir=subdir)
+        vol_idx2 = wrapped2.index("-v")
+        assert wrapped2[vol_idx2 + 1] == f"{subdir}:/workspace"
+        
+        # Test with custom workspace in settings
+        settings_custom = {"workspace": "/app"}
+        wrapped3 = provider.wrap_argv(argv, settings_custom, working_dir=tmp_path)
+        vol_idx3 = wrapped3.index("-v")
+        assert wrapped3[vol_idx3 + 1] == f"{tmp_path}:/app"
+        # Check -w uses custom workspace
+        w_idx = wrapped3.index("-w")
+        assert wrapped3[w_idx + 1] == "/app"

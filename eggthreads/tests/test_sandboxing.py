@@ -27,7 +27,7 @@ def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, m
     eggthreads = _import_eggthreads(monkeypatch, tmp_path)
 
     # Require srt to be present for this integration-like test.
-    if not eggthreads.get_sandbox_status().get("available"):
+    if not eggthreads.sandbox.provider_available("srt"):
         pytest.skip("srt CLI not available")
 
     # Enable sandboxing by default for the process.
@@ -43,6 +43,7 @@ def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, m
     srt_dir = Path.cwd() / ".egg" / "srt"
     srt_dir.mkdir(parents=True, exist_ok=True)
     restrictive = {
+        "provider": "srt",
         "filesystem": {"denyRead": [], "allowWrite": ["."], "denyWrite": []},
         "network": {"allowedDomains": ["example.com"], "deniedDomains": []},
     }
@@ -70,6 +71,7 @@ def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, m
 
     # Now switch to a permissive config and ensure a newly spawned child uses it.
     permissive = {
+        "provider": "srt",
         "filesystem": {"denyRead": [], "allowWrite": [".", ".."], "denyWrite": []},
         "network": {"allowedDomains": ["example.com"], "deniedDomains": []},
     }

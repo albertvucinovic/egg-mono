@@ -81,12 +81,16 @@ def test_sandbox_config_generation(db):
     from eggthreads.sandbox import wrap_argv_for_sandbox_with_settings
     import eggthreads.sandbox
     argv = ["ls"]
-    settings = {"filesystem": {"allowWrite": ["."]}}
+    settings = {"filesystem": {"allowWrite": ["."]}, "provider": "srt"}
     working_dir = Path.cwd() / "a" / "b"
     
     # We want to test this specific function, so we mock its internal check
     orig_avail = eggthreads.sandbox.sandbox_available
     eggthreads.sandbox.sandbox_available = lambda: True
+    
+    # Mock srt provider availability
+    orig_srt_avail = eggthreads.sandbox._PROVIDERS["srt"].is_available
+    eggthreads.sandbox._PROVIDERS["srt"].is_available = lambda: True
     
     orig_eff = eggthreads.sandbox._effective_config_path_from_settings
     captured = []
@@ -99,7 +103,9 @@ def test_sandbox_config_generation(db):
         assert "a/b" in captured[0]["filesystem"]["allowWrite"]
     finally:
         eggthreads.sandbox.sandbox_available = orig_avail
+        eggthreads.sandbox._PROVIDERS["srt"].is_available = orig_srt_avail
         eggthreads.sandbox._effective_config_path_from_settings = orig_eff
+
 
 def test_delete_and_reattach_auto_recreate(db):
     """Verify that if the CWD is deleted, it is automatically recreated as empty upon next use."""
