@@ -925,6 +925,74 @@ def set_subtree_sandbox_config(
         except Exception:
             continue
 
+def enable_user_sandbox_control(db: "ThreadsDB", thread_id: str, reason: Optional[str] = None) -> None:
+    """Allow user commands /toggleSandboxing and /setSandboxConfiguration for this thread.
+
+    This is a thread-wide flag that can only be set programmatically via this API.
+    When disabled, the UI commands that modify sandbox configuration are blocked.
+    """
+    import os
+    payload = {'decision': 'allow_user_commands'}
+    if reason is not None:
+        payload['reason'] = reason
+    db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_='sandbox.control',
+        msg_id=None,
+        invoke_id=None,
+        payload=payload,
+    )
+
+
+def disable_user_sandbox_control(db: "ThreadsDB", thread_id: str, reason: Optional[str] = None) -> None:
+    """Disallow user commands /toggleSandboxing and /setSandboxConfiguration for this thread.
+
+    This is a thread-wide flag that can only be set programmatically via this API.
+    When disabled, the UI commands that modify sandbox configuration are blocked.
+    """
+    import os
+    payload = {'decision': 'disallow_user_commands'}
+    if reason is not None:
+        payload['reason'] = reason
+    db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_='sandbox.control',
+        msg_id=None,
+        invoke_id=None,
+        payload=payload,
+    )
+
+
+def is_user_sandbox_control_enabled(db: "ThreadsDB", thread_id: str) -> bool:
+    """Return True if user sandbox control commands are allowed for this thread.
+
+    Defaults to True (allowed) when no sandbox.control event exists.
+    """
+    try:
+        cur = db.conn.execute(
+            """SELECT payload_json FROM events
+               WHERE thread_id=? AND type_='sandbox.control'
+               ORDER BY event_seq DESC LIMIT 1""",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return True
+        import json
+        payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        decision = payload.get('decision')
+        if decision == 'allow_user_commands':
+            return True
+        elif decision == 'disallow_user_commands':
+            return False
+        else:
+            # Unknown decision, default to True
+            return True
+    except Exception:
+        # If anything goes wrong, assume allowed (safe fallback)
+        return True
 @dataclass
 class SrtSandboxConfiguration:
     """Metadata about the per-working-directory sandbox settings."""

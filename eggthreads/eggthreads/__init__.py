@@ -69,6 +69,9 @@ from .sandbox import (
     set_thread_sandbox_config,
     set_subtree_sandbox_config,
     get_thread_sandbox_status,
+    enable_user_sandbox_control,
+    disable_user_sandbox_control,
+    is_user_sandbox_control_enabled,
 )
 
 from .tools import ToolRegistry, create_default_tools
@@ -96,5 +99,8 @@ __all__ = [
     'ToolRegistry', 'create_default_tools',
     'create_llm_client',
     'snapshot_token_stats', 'streaming_token_stats', 'total_token_stats', 'EventWatcher',
+    'enable_user_sandbox_control',
+    'disable_user_sandbox_control',
+    'is_user_sandbox_control_enabled',
 ]
 from .event_watcher import EventWatcher
