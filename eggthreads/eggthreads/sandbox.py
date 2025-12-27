@@ -382,9 +382,9 @@ def _default_config_dict() -> Dict[str, object]:
             "denyRead": [],
             # Write restrictions are allow-only.
             "allowWrite": ["."],
-            # Denies will be extended at runtime to always protect our
-            # settings directory and default.json.
-            "denyWrite": [".egg/sandbox"],
+            # Denies will be extended at runtime to always protect the
+            # .egg directory (including settings).
+            "denyWrite": [".egg"],
         },
     }
 def _default_config_path() -> Path:
