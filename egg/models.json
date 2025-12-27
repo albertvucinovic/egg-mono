@@ -395,6 +395,10 @@
           }
         }
       }
+    },
+    "mistral": {
+      "api_base": "https://api.mistral.ai/v1/chat/completions",
+      "api_key_env": "MISTRAL_API_KEY"
     }
   },
   "default_model": "Qwen3 Coder Local"
