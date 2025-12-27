@@ -39,15 +39,15 @@ def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, m
     root = eggthreads.create_root_thread(db, name="root")
     eggthreads.append_message(db, root, "system", "test")
 
-    # Create a restrictive config (default) in .egg/srt.
-    srt_dir = Path.cwd() / ".egg" / "srt"
-    srt_dir.mkdir(parents=True, exist_ok=True)
+    # Create a restrictive config (default) in .egg/sandbox.
+    sandbox_dir = Path.cwd() / ".egg" / "sandbox"
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
     restrictive = {
         "provider": "srt",
         "filesystem": {"denyRead": [], "allowWrite": ["."], "denyWrite": []},
         "network": {"allowedDomains": ["example.com"], "deniedDomains": []},
     }
-    (srt_dir / "restrict.json").write_text(__import__("json").dumps(restrictive), encoding="utf-8")
+    (sandbox_dir / "restrict.json").write_text(__import__("json").dumps(restrictive), encoding="utf-8")
 
     # Apply restrictive config to the root thread. Children without an
     # explicit sandbox.config event should inherit it.
@@ -75,7 +75,7 @@ def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, m
         "filesystem": {"denyRead": [], "allowWrite": [".", ".."], "denyWrite": []},
         "network": {"allowedDomains": ["example.com"], "deniedDomains": []},
     }
-    (srt_dir / "allow_parent.json").write_text(__import__("json").dumps(permissive), encoding="utf-8")
+    (sandbox_dir / "allow_parent.json").write_text(__import__("json").dumps(permissive), encoding="utf-8")
 
     eggthreads.set_thread_sandbox_config(db, root, enabled=True, config_name="allow_parent.json", reason="switch")
 

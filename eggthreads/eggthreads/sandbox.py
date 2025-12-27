@@ -11,7 +11,7 @@ Goals
 * Provide a **single place** where eggthreads decides whether tool
   executions (bash, python, etc.) should be wrapped in the sandbox.
 * Keep a **default** configuration per working directory (the directory
-  from which the process is started), under ``.egg/srt/default.json``.
+  from which the process is started), under ``.egg/sandbox/default.json``.
 
 * Support **per-thread** sandbox configuration via DB events:
 
@@ -20,7 +20,7 @@ Goals
   - If a thread has no config event, it inherits the nearest ancestor's
     config event.
   - If neither the thread nor any ancestor has a config event, the
-    default settings file ``.egg/srt/default.json`` is used.
+    default settings file ``.egg/sandbox/default.json`` is used.
 
   There is intentionally **no process-wide** sandbox configuration.
 
@@ -38,20 +38,20 @@ Key concepts
   - Otherwise the original argv is returned unchanged and callers run
     tools directly (unsandboxed).
 
-* Configuration files live under ``.egg/srt/`` in the current working
+* Configuration files live under ``.egg/sandbox/`` in the current working
   directory.  We create a default configuration file
-  ``.egg/srt/default.json`` which is intentionally conservative:
+  ``.egg/sandbox/default.json`` which is intentionally conservative:
 
     - On the filesystem, only the current directory is allowed for
       reading and writing.
 
-* Optional *named* configuration files may exist under ``.egg/srt/``
-  (e.g. ``.egg/srt/readall.json``). UIs may load such a file and store
+* Optional *named* configuration files may exist under ``.egg/sandbox/``
+  (e.g. ``.egg/sandbox/readall.json``). UIs may load such a file and store
   the full JSON into a ``sandbox.config`` event.
 
 * Regardless of which configuration is used, **all files under
-  ``.egg/srt/`` are always off limits for writing inside the sandbox**.
-  In particular, ``.egg/srt/default.json`` must never be writable from
+  ``.egg/sandbox/`` are always off limits for writing inside the sandbox**.
+  In particular, ``.egg/sandbox/default.json`` must never be writable from
   within the sandbox. We enforce this by augmenting every effective
   config with mandatory ``filesystem.denyWrite`` entries.
 
@@ -113,18 +113,146 @@ class SandboxProvider(Protocol):
         ...
 
     def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
-        """Return wrapped argv for execution under this sandbox.
+        if not self.is_available():
+            return argv
+        # Basic bwrap sandbox: read-only root, bind working directory, unshare network
+        # This is a minimal example; real implementation should respect settings.
+        from pathlib import Path
+        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        # Build bwrap command
+        cmd = ["bwrap", "--ro-bind", "/", "/",
+               "--bind", str(wd), str(wd),
+               "--dev", "/dev",
+               "--proc", "/proc",
+               "--unshare-net",
+               "--chdir", str(wd)]
+        # Protect .egg directory if it's within the bound directory
+        egg_dir = Path.cwd() / ".egg"
+        try:
+            egg_rel = egg_dir.relative_to(wd)
+            # egg_dir is inside wd, need to add read-only bind
+            cmd.extend(["--ro-bind", str(egg_dir), str(egg_dir)])
+        except ValueError:
+            # egg_dir is not inside wd, already protected by root ro-bind
+            pass
+        # Add the original command
+        cmd.extend(argv)
+        return cmd
+        srt_bin = os.environ.get("EGG_SRT_BIN", "srt").strip() or "srt"
+        available = shutil.which(srt_bin) is not None
+        return {
+            "available": available,
+            "binary": srt_bin,
+        }
+class DockerProvider:
+    """Sandbox provider using Docker containers."""
+    name = "docker"
 
-        If sandboxing cannot be applied (e.g. provider unavailable), return
-        the original argv unchanged.
-        """
-        ...
+    def is_available(self) -> bool:
+        # Check if docker CLI is available and daemon reachable.
+        try:
+            import subprocess
+            subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=5)
+            return True
+        except Exception:
+            return False
 
+    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
+        if not self.is_available():
+            return argv
+        # Default settings
+        image = settings.get("image", "python:3.12-slim")
+        network = settings.get("network", "none")
+
+        # Ensure network is a string (srt-style settings use dict)
+        if not isinstance(network, str):
+            network = "none"
+        workspace = settings.get("workspace", "/workspace")
+        extra_mounts = settings.get("extra_mounts", [])
+        extra_args = settings.get("extra_args", [])
+        # Build docker run command
+        cmd = ["docker", "run", "--rm"]
+        # Network
+        if network:
+            cmd.extend(["--network", network])
+        # Mount working directory as workspace
+        from pathlib import Path
+        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        cmd.extend(["-v", f"{wd}:{workspace}"])
+        # Protect .egg directory if it's within the mounted workspace
+        egg_dir = Path.cwd() / ".egg"
+        try:
+            egg_rel = egg_dir.relative_to(wd)
+            # egg_dir is inside wd, need to add read-only mount
+            container_egg_path = str(Path(workspace) / egg_rel)
+            cmd.extend(["-v", f"{egg_dir}:{container_egg_path}:ro"])
+        except ValueError:
+            # egg_dir is not inside wd, not visible in container
+            pass
+        # Additional mounts
+        for mount in extra_mounts:
+            if isinstance(mount, dict) and mount.get("src") and mount.get("dst"):
+                cmd.extend(["-v", f"{mount['src']}:{mount['dst']}"])
+        # Extra arguments (user-provided)
+        for arg in extra_args:
+            if isinstance(arg, str):
+                cmd.append(arg)
+        # Set working directory inside container
+        cmd.extend(["-w", workspace])
+        # Image
+        cmd.append(image)
+        # The command to run inside container (argv)
+        cmd.extend(argv)
+        return cmd
     def get_status(self) -> Dict[str, Any]:
-        """Return provider-specific status dict (e.g., version, availability)."""
-        ...
+        available = self.is_available()
+        return {
+            "available": available,
+            "provider": "docker",
+        }
 
+class BwrapProvider:
+    """Sandbox provider using bubblewrap (bwrap)."""
+    name = "bwrap"
 
+    def is_available(self) -> bool:
+        # Check if bwrap binary exists
+        import shutil
+        return shutil.which("bwrap") is not None
+
+    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
+        if not self.is_available():
+            return argv
+        # Basic bwrap sandbox: read-only root, bind working directory, unshare network
+        # This is a minimal example; real implementation should respect settings.
+        from pathlib import Path
+        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        # Build bwrap command
+        cmd = ["bwrap", "--ro-bind", "/", "/",
+               "--bind", str(wd), str(wd),
+               "--dev", "/dev",
+               "--proc", "/proc",
+               "--unshare-net",
+               "--chdir", str(wd)]
+        # Protect .egg directory if it's within the bound directory
+        egg_dir = Path.cwd() / ".egg"
+        try:
+            egg_rel = egg_dir.relative_to(wd)
+            # egg_dir is inside wd, need to add read-only bind
+            cmd.extend(["--ro-bind", str(egg_dir), str(egg_dir)])
+        except ValueError:
+            # egg_dir is not inside wd, already protected by root ro-bind
+            pass
+        # Add the original command
+        cmd.extend(argv)
+        return cmd
+    def get_status(self) -> Dict[str, Any]:
+        available = self.is_available()
+        return {
+            "available": available,
+            "provider": "bwrap",
+        }
+# Registry of known providers
 class SrtProvider:
     """Sandbox provider using Anthropic's sandbox-runtime (srt)."""
     name = "srt"
@@ -178,100 +306,7 @@ class SrtProvider:
             "available": available,
             "binary": srt_bin,
         }
-class DockerProvider:
-    """Sandbox provider using Docker containers."""
-    name = "docker"
 
-    def is_available(self) -> bool:
-        # Check if docker CLI is available and daemon reachable.
-        try:
-            import subprocess
-            subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=5)
-            return True
-        except Exception:
-            return False
-
-    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
-        if not self.is_available():
-            return argv
-        # Default settings
-        image = settings.get("image", "python:3.12-slim")
-        network = settings.get("network", "none")
-
-        # Ensure network is a string (srt-style settings use dict)
-
-        if not isinstance(network, str):
-
-            network = "none"
-        workspace = settings.get("workspace", "/workspace")
-        extra_mounts = settings.get("extra_mounts", [])
-        extra_args = settings.get("extra_args", [])
-        # Build docker run command
-        cmd = ["docker", "run", "--rm"]
-        # Network
-        if network:
-            cmd.extend(["--network", network])
-        # Mount working directory as workspace
-        from pathlib import Path
-        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
-        cmd.extend(["-v", f"{wd}:{workspace}"])
-        # Additional mounts
-        for mount in extra_mounts:
-            if isinstance(mount, dict) and mount.get("src") and mount.get("dst"):
-                cmd.extend(["-v", f"{mount['src']}:{mount['dst']}"])
-        # Extra arguments (user-provided)
-        for arg in extra_args:
-            if isinstance(arg, str):
-                cmd.append(arg)
-        # Set working directory inside container
-        cmd.extend(["-w", workspace])
-        # Image
-        cmd.append(image)
-        # The command to run inside container (argv)
-        cmd.extend(argv)
-        return cmd
-
-    def get_status(self) -> Dict[str, Any]:
-        available = self.is_available()
-        return {
-            "available": available,
-            "provider": "docker",
-        }
-
-class BwrapProvider:
-    """Sandbox provider using bubblewrap (bwrap)."""
-    name = "bwrap"
-
-    def is_available(self) -> bool:
-        # Check if bwrap binary exists
-        import shutil
-        return shutil.which("bwrap") is not None
-
-    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
-        if not self.is_available():
-            return argv
-        # Basic bwrap sandbox: read-only root, bind working directory, unshare network
-        # This is a minimal example; real implementation should respect settings.
-        from pathlib import Path
-        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
-        # Build bwrap command
-        cmd = ["bwrap", "--ro-bind", "/", "/",
-               "--bind", str(wd), str(wd),
-               "--dev", "/dev",
-               "--proc", "/proc",
-               "--unshare-net",
-               "--chdir", str(wd)]
-        # Add the original command
-        cmd.extend(argv)
-        return cmd
-
-    def get_status(self) -> Dict[str, Any]:
-        available = self.is_available()
-        return {
-            "available": available,
-            "provider": "bwrap",
-        }
-# Registry of known providers
 _PROVIDERS: Dict[str, SandboxProvider] = {
     "srt": SrtProvider(),
     "docker": DockerProvider(),
@@ -292,8 +327,8 @@ def get_provider_names() -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-def _srt_dir() -> Path:
-    """Return the per-working-directory settings dir (``.egg/srt``).
+def _sandbox_dir() -> Path:
+    """Return the per-working-directory settings dir (``.egg/sandbox``).
 
     We intentionally compute this dynamically from :func:`Path.cwd`
     instead of capturing the CWD at import time. This keeps the module
@@ -301,19 +336,19 @@ def _srt_dir() -> Path:
     where callers may change directories.
     """
 
-    return (Path.cwd() / ".egg" / "srt").resolve()
+    return (Path.cwd() / ".egg" / "sandbox").resolve()
 
 
-def _ensure_srt_dir() -> Path:
-    """Ensure ``.egg/srt`` exists and return its path."""
+def _ensure_sandbox_dir() -> Path:
+    """Ensure ``.egg/sandbox`` exists and return its path."""
 
-    srt_dir = _srt_dir()
+    sandbox_dir = _sandbox_dir()
     try:
-        srt_dir.mkdir(parents=True, exist_ok=True)
+        sandbox_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         # Best-effort; callers may still try to write configs and fail.
         pass
-    return srt_dir
+    return sandbox_dir
 
 
 def _default_config_dict() -> Dict[str, object]:
@@ -324,7 +359,7 @@ def _default_config_dict() -> Dict[str, object]:
     unrestricted ("allow all domains") so that existing tool usage
     with outbound HTTP continues to work without additional
     configuration.  Users can provide stricter configs under
-    ``.egg/srt/`` and select them via :func:`set_srt_sandbox_configuration`.
+    ``.egg/sandbox/`` and select them via :func:`set_srt_sandbox_configuration`.
     """
 
     # NOTE: sandbox-runtime currently supports a deny-only model for
@@ -349,13 +384,13 @@ def _default_config_dict() -> Dict[str, object]:
             "allowWrite": ["."],
             # Denies will be extended at runtime to always protect our
             # settings directory and default.json.
-            "denyWrite": [".egg/srt"],
+            "denyWrite": [".egg/sandbox"],
         },
     }
 def _default_config_path() -> Path:
     """Return the path to the default config, creating it if needed."""
 
-    cfg_dir = _ensure_srt_dir()
+    cfg_dir = _ensure_sandbox_dir()
     path = cfg_dir / "default.json"
     if not path.exists():
         try:
@@ -382,7 +417,7 @@ def _normalize_name(name: str) -> str:
     name = (name or "").strip()
     if not name:
         return "default.json"
-    # Prevent directory traversal outside .egg/srt – treat name as a
+    # Prevent directory traversal outside .egg/sandbox – treat name as a
     # simple file name.
     name = os.path.basename(name)
     if not name.endswith(".json"):
@@ -397,7 +432,7 @@ def _config_source_path(name: Optional[str] = None) -> Path:
     returned instead.
     """
 
-    cfg_dir = _ensure_srt_dir()
+    cfg_dir = _ensure_sandbox_dir()
     if not name:
         return _default_config_path()
     norm = _normalize_name(name)
@@ -418,24 +453,31 @@ def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
         fs = {}
         out["filesystem"] = fs
 
+    # Add .egg to denyRead if present
+    deny_read = fs.get("denyRead")
+    if not isinstance(deny_read, list):
+        deny_read = []
+    egg_dir = _ensure_sandbox_dir().parent
+    if str(egg_dir) not in deny_read:
+        deny_read.append(str(egg_dir))
+    fs["denyRead"] = deny_read
+
     deny = fs.get("denyWrite")
     if not isinstance(deny, list):
         deny = []
 
     # Always protect our settings directory and the default.json file.
-    srt_dir = _ensure_srt_dir()
-    protected = [str(srt_dir), str((srt_dir / "default.json").resolve())]
+    sandbox_dir = _ensure_sandbox_dir()
+    protected = [str(sandbox_dir), str((sandbox_dir / "default.json").resolve()), str(egg_dir)]
     for p in protected:
         if p not in deny:
             deny.append(p)
     fs["denyWrite"] = deny
     return out
-
-
 def _effective_config_path_from_settings(settings: Dict[str, object]) -> Path:
     """Write an augmented settings file and return its path."""
 
-    cfg_dir = _ensure_srt_dir()
+    cfg_dir = _ensure_sandbox_dir()
     eff = _augment_with_protections(settings if isinstance(settings, dict) else {})
 
     # Content-addressed filename to avoid races between concurrent
@@ -534,7 +576,7 @@ def set_sandbox_config(*, enabled: bool, config_name: Optional[str] = None) -> N
     It only:
 
       * sets the default enabled policy for the process, and
-      * validates that the named config exists under .egg/srt.
+      * validates that the named config exists under .egg/sandbox.
 
     Callers that want a thread to actually use the config must store it
     into the thread via :func:`set_thread_sandbox_config`.
@@ -543,10 +585,10 @@ def set_sandbox_config(*, enabled: bool, config_name: Optional[str] = None) -> N
     set_sandbox_globally_enabled(bool(enabled))
     if isinstance(config_name, str) and config_name.strip():
         norm = _normalize_name(config_name)
-        cfg_dir = _ensure_srt_dir()
+        cfg_dir = _ensure_sandbox_dir()
         path = cfg_dir / norm
         if not path.exists():
-            raise ValueError(f"srt configuration file not found: {path}")
+            raise ValueError(f"sandbox configuration file not found: {path}")
 
 
 def set_srt_sandbox_configuration(name: str) -> None:
@@ -564,7 +606,7 @@ def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:
     """Backward-compatible convenience wrapper.
 
     If called without thread context, we use the default settings
-    (``.egg/srt/default.json``) and the default enabled policy.
+    (``.egg/sandbox/default.json``) and the default enabled policy.
     """
     return wrap_argv_for_sandbox_with_settings(
         argv,
@@ -679,10 +721,10 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
 
     1) Latest ``sandbox.config`` event on the thread.
     2) Latest ``sandbox.config`` event on the nearest ancestor.
-    3) ``.egg/srt/default.json`` (created if missing).
+    3) ``.egg/sandbox/default.json`` (created if missing).
 
     The returned config contains the full settings dict. Mandatory
-    protections (e.g. denying writes to ``.egg/srt``) are applied at
+    protections (e.g. denying writes to ``.egg/sandbox``) are applied at
     execution time when we write the *effective* settings file.
     """
 
@@ -762,10 +804,10 @@ def set_thread_sandbox_config(
         # full JSON in the event.
         if isinstance(config_name, str) and config_name.strip():
             norm = _normalize_name(config_name)
-            cfg_dir = _ensure_srt_dir()
+            cfg_dir = _ensure_sandbox_dir()
             path = cfg_dir / norm
             if not path.exists():
-                raise ValueError(f"srt configuration file not found: {path}")
+                raise ValueError(f"sandbox configuration file not found: {path}")
             payload["settings"] = _load_config(path)
             payload["source"] = f"file:{norm}"
             src_name = norm
@@ -844,7 +886,7 @@ def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, obje
         "provider": cfg.provider,
         "config_source": cfg.source,
         "config_path": str(src),
-        "settings_dir": str(_ensure_srt_dir()),
+        "settings_dir": str(_ensure_sandbox_dir()),
         "warning": warning,
     }
 def set_subtree_sandbox_config(
@@ -894,7 +936,7 @@ class SrtSandboxConfiguration:
 def get_srt_sandbox_configuration() -> SrtSandboxConfiguration:
     """Return metadata for the working-directory settings folder."""
 
-    cfg_dir = _ensure_srt_dir()
+    cfg_dir = _ensure_sandbox_dir()
     return SrtSandboxConfiguration(
         settings_dir=str(cfg_dir),
         default_path=str(_default_config_path()),

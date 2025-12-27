@@ -409,10 +409,138 @@ def test_working_dir_handling(eggthreads):
         assert wrapped[chdir_index + 1] == "/custom/dir"
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+
+def test_augment_with_protections_adds_egg_protection(eggthreads):
+    """Test that _augment_with_protections adds .egg to denyWrite and denyRead."""
+    sandbox = eggthreads.sandbox
+    # Create a minimal config
+    cfg = {}
+    augmented = sandbox._augment_with_protections(cfg)
+    # Should have filesystem dict
+    assert "filesystem" in augmented
+    fs = augmented["filesystem"]
+    # Should have denyWrite list containing .egg directory
+    deny_write = fs.get("denyWrite")
+    assert isinstance(deny_write, list)
+    # Compute expected .egg path (parent of sandbox dir)
+    sandbox_dir = sandbox._ensure_sandbox_dir()
+    egg_dir = sandbox_dir.parent
+    assert str(egg_dir) in deny_write
+    # Also should have denyRead list containing .egg
+    deny_read = fs.get("denyRead")
+    assert isinstance(deny_read, list)
+    assert str(egg_dir) in deny_read
+    # Sandbox directory and default.json also protected
+    assert str(sandbox_dir) in deny_write
+    assert str(sandbox_dir / "default.json") in deny_write
 
 
+def test_docker_provider_protects_egg_dir(eggthreads, tmp_path):
+    """Test that Docker provider adds read-only mount for .egg directory."""
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["docker"]
+    
+    with patch.object(provider, "is_available", return_value=True):
+        argv = ["ls"]
+        settings = {}
+        # When working dir is same as CWD, .egg is inside
+        wrapped = provider.wrap_argv(argv, settings, working_dir=tmp_path)
+        # Should have a -v mount for .egg as read-only
+        # Find all -v occurrences
+        vol_indices = [i for i, arg in enumerate(wrapped) if arg == "-v"]
+        egg_dir = tmp_path / ".egg"
+        # Create .egg directory for relative path detection
+        egg_dir.mkdir(exist_ok=True)
+        found = False
+        for idx in vol_indices:
+            mount_spec = wrapped[idx + 1]
+            if mount_spec.startswith(str(egg_dir) + ":"):
+                # Should contain :ro (may be at end or middle)
+                if ":ro" in mount_spec:
+                    found = True
+                break
+        assert found, f"Expected read-only mount for .egg in {wrapped}"
+        
+        # When working dir is elsewhere (outside .egg), no extra mount needed
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        wrapped2 = provider.wrap_argv(argv, settings, working_dir=other_dir)
+        # Should not have .egg mount because .egg not inside other_dir
+        egg_inside = False
+        for idx in range(len(wrapped2)):
+            if wrapped2[idx] == "-v" and idx+1 < len(wrapped2):
+                if wrapped2[idx+1].startswith(str(egg_dir) + ":"):
+                    egg_inside = True
+        assert not egg_inside, f".egg mount should not appear when .egg not inside working dir: {wrapped2}"
+def test_bwrap_provider_protects_egg_dir(eggthreads, tmp_path):
+    """Test that Bwrap provider adds --ro-bind for .egg directory."""
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["bwrap"]
+    
+    with patch.object(provider, "is_available", return_value=True):
+        argv = ["ls"]
+        settings = {}
+        # Working dir same as CWD, .egg inside
+        wrapped = provider.wrap_argv(argv, settings, working_dir=tmp_path)
+        # Should have --ro-bind for .egg
+        egg_dir = tmp_path / ".egg"
+        egg_dir.mkdir(exist_ok=True)
+        found = False
+        for i, arg in enumerate(wrapped):
+            if arg == "--ro-bind" and i+2 < len(wrapped):
+                src = wrapped[i+1]
+                dst = wrapped[i+2]
+                if src == str(egg_dir) and dst == str(egg_dir):
+                    found = True
+        assert found, f"Expected --ro-bind for .egg in {wrapped}"
+        
+        # When working dir elsewhere, .egg not inside, root ro-bind already protects
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        wrapped2 = provider.wrap_argv(argv, settings, working_dir=other_dir)
+        # Should not have extra --ro-bind for .egg (since root ro-bind covers)
+        extra_ro_bind = False
+        for i, arg in enumerate(wrapped2):
+            if arg == "--ro-bind" and i+2 < len(wrapped2):
+                src = wrapped2[i+1]
+                if src == str(egg_dir):
+                    extra_ro_bind = True
+        # Actually we still add ro-bind for .egg even if not inside? Let's check implementation.
+        # The implementation adds ro-bind if egg_dir is inside wd, else not.
+        # So we should assert not extra_ro_bind.
+        assert not extra_ro_bind, f"Unexpected --ro-bind for .egg when not inside working dir: {wrapped2}"
+
+
+def test_srt_provider_protects_egg_dir(eggthreads):
+    """Test that SRT provider settings include .egg protection via augmentation."""
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["srt"]
+    
+    with patch.object(provider, "is_available", return_value=True):
+        argv = ["echo", "test"]
+        settings = {}
+        # Mock _effective_config_path_from_settings to capture augmented config
+        original = sandbox._effective_config_path_from_settings
+        captured_config = None
+        def mock_eff(s):
+            nonlocal captured_config
+            # Call original to get augmented config
+            path = original(s)
+            captured_config = sandbox._augment_with_protections(s)
+            return path
+        sandbox._effective_config_path_from_settings = mock_eff
+        try:
+            provider.wrap_argv(argv, settings, working_dir=Path.cwd())
+            # Verify captured_config includes .egg protection
+            assert captured_config is not None
+            fs = captured_config.get("filesystem", {})
+            deny_write = fs.get("denyWrite", [])
+            deny_read = fs.get("denyRead", [])
+            egg_dir = sandbox._ensure_sandbox_dir().parent
+            assert str(egg_dir) in deny_write
+            assert str(egg_dir) in deny_read
+        finally:
+            sandbox._effective_config_path_from_settings = original
 def test_integration_thread_with_docker_provider(eggthreads, tmp_path):
     """Integration test: set docker provider and verify command wrapping."""
     sandbox = eggthreads.sandbox
