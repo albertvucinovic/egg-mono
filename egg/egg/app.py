@@ -2504,6 +2504,16 @@ class EggDisplayApp:
             self._log_system("\n".join(lines))
         elif cmd == 'toggleSandboxing':
             # Toggle sandboxing for the *current thread subtree*.
+            # Check if user sandbox control is enabled
+            try:
+                from eggthreads import is_user_sandbox_control_enabled  # type: ignore
+                if not is_user_sandbox_control_enabled(self.db, self.current_thread):
+                    self._log_system("User sandbox control is disabled for this thread.")
+                    return
+            except ImportError:
+                # Older eggthreads version, assume enabled
+                pass
+
             try:
                 from eggthreads import get_thread_sandbox_status  # type: ignore
 
@@ -2537,6 +2547,16 @@ class EggDisplayApp:
             except Exception as e:
                 self._log_system(f'/toggleSandboxing error: {e}')
         elif cmd == 'setSandboxConfiguration':
+            # Check if user sandbox control is enabled
+            try:
+                from eggthreads import is_user_sandbox_control_enabled  # type: ignore
+                if not is_user_sandbox_control_enabled(self.db, self.current_thread):
+                    self._log_system("User sandbox control is disabled for this thread.")
+                    return
+            except ImportError:
+                # Older eggthreads version, assume enabled
+                pass
+
             name = (arg or '').strip()
             if not name:
                 # Print help about sandbox configuration
@@ -2594,7 +2614,7 @@ SRT Provider:
    "provider": "srt",
    "filesystem": {
      "allowWrite": ["."],
-     "denyWrite": [".egg/sandbox"]
+     "denyWrite": [".egg"]
    },
    "network": {
      "allowedDomains": ["example.com"]
