@@ -80,7 +80,7 @@ Commands:
     /schedulers 
   Tool management: 
     /toggleAutoApproval, /toolsOn, /toolsOff, /disableTool <name>, /enableTool <name> 
-    /toggleSandboxing, /setSrtSandboxConfiguration <file.json>
+    /toggleSandboxing, /setSandboxConfiguration <file.json>
     /toolsSecrets <on|off>, /toolsStatus 
   Display:
     /togglePanel (chat|children|system)
@@ -2528,10 +2528,110 @@ class EggDisplayApp:
                         self._log_system('Sandboxing ENABLED but not effective.')
             except Exception as e:
                 self._log_system(f'/toggleSandboxing error: {e}')
-        elif cmd == 'setSrtSandboxConfiguration':
+        elif cmd == 'setSandboxConfiguration':
             name = (arg or '').strip()
             if not name:
-                self._log_system('Usage: /setSrtSandboxConfiguration <file.json>')
+                # Print help about sandbox configuration
+                help_text = '''                                                    Sandbox Configuration and Control in Eggthreads                
+
+                                                     1. Default Configuration Handling and Storage                 
+
+Default Configuration Creation:                                                                                     
+
+ • The default sandbox configuration is defined in _default_config_dict() in sandbox.py                             
+ • By default, it sets "provider": "docker" (previously "srt")                                                      
+ • Other default settings include network restrictions and filesystem permissions                                   
+
+Storage Location:                                                                                                   
+
+ • Default configuration is stored in .egg/sandbox/default.json (legacy directory name)                                 
+ • This file is created automatically if it doesn't exist when _default_config_path() is called                     
+ • The file location is relative to the current working directory                                                   
+
+Provider-Specific Defaults:                                                                                         
+
+ • Docker Provider: Defaults to image: "python:3.12-slim", network: "none", workspace: "/workspace"                 
+ • SRT Provider: Uses SRT-specific settings like filesystem.allowWrite and network.allowedDomains                   
+ • Bwrap Provider: Uses minimal settings, primarily working directory binding                                       
+
+Configuration Inheritance:                                                                                          
+
+ • Threads inherit sandbox configuration from their nearest ancestor with a sandbox.config event                    
+ • If no ancestor has a config, the default config from .egg/sandbox/default.json is used                               
+
+                                                     2. Specifying Configuration for Each Provider                 
+
+Provider Selection:                                                                                                 
+
+ • The provider field in settings determines which provider to use                                                  
+ • Can be specified via: settings["provider"], provider parameter, or default config                                
+ • Supported values: "docker", "srt", "bwrap"                                                                       
+
+Provider-Specific Settings:                                                                                         
+
+Docker Provider:                                                                                                    
+
+                                                                                                                    
+ {                                                                                                                  
+   "provider": "docker",                                                                                            
+   "image": "python:3.12-slim",                                                                                     
+   "network": "none",                                                                                               
+   "workspace": "/workspace",                                                                                       
+   "extra_mounts": [{"src": "/host/path", "dst": "/container/path"}],                                               
+   "extra_args": ["--cap-drop", "ALL"]                                                                              
+ }                                                                                                                  
+
+                                                                                                                    
+SRT Provider:                                                                                                       
+
+                                                                                                                    
+ {                                                                                                                  
+   "provider": "srt",                                                                                               
+   "filesystem": {                                                                                                  
+     "allowWrite": ["."],                                                                                           
+     "denyWrite": [".egg/sandbox"]                                                                                  
+   },                                                                                                               
+   "network": {                                                                                                     
+     "allowedDomains": ["example.com"]                                                                              
+   }                                                                                                                
+ }                                                                                                                  
+
+                                                                                                                    
+Bwrap Provider:                                                                                                     
+
+                                                                                                                    
+ {                                                                                                                  
+   "provider": "bwrap"                                                                                              
+   // Minimal settings - primarily uses working directory                                                           
+ }                                                                                                                  
+
+                                                                                                                    
+Configuration Methods:                                                                                              
+
+ 1 Thread-specific config: set_thread_sandbox_config(db, thread_id, enabled=True, provider="docker", settings={...})
+ 2 Config files: Store JSON files in .egg/sandbox/ and reference by name                                                
+ 3 Programmatic settings: Pass settings dict directly to API functions                                              
+
+                                                           3. Sandbox Control from egg.py TUI                       
+
+Commands Available:                                                                                                 
+
+ 1 /toggleSandboxing - Toggle sandboxing for current thread subtree                                                 
+    • Toggles enabled flag while preserving current settings                                                        
+    • Updates thread's sandbox.config event                                                                         
+    • Shows status in System panel                                                                                  
+ 2 /setSandboxConfiguration <file.json> - Apply config file to current thread                                       
+    • Loads JSON file from .egg/sandbox/ directory                                                                      
+    • Applies full settings to current thread and subtree                                                           
+    • File should contain provider field and provider-specific settings                                             
+
+UI Indicators:                                                                                                      
+
+ • System Panel Title: Shows Sandboxing[ON] (green) or Sandboxing[OFF] (red)                                        
+ • Status based on: get_thread_sandbox_status() effectiveness check                                                 
+ • Warning messages: Show if sandboxing enabled but provider unavailable
+'''
+                self._log_system(help_text)
                 return
             try:
                 from eggthreads import set_subtree_sandbox_config  # type: ignore
@@ -2545,11 +2645,11 @@ class EggDisplayApp:
                     self.current_thread,
                     enabled=True,
                     config_name=name,
-                    reason='/setSrtSandboxConfiguration',
+                    reason='/setSandboxConfiguration',
                 )
                 self._log_system(f"Sandbox configuration applied to this thread: {name}")
             except Exception as e:
-                self._log_system(f'/setSrtSandboxConfiguration error: {e}')
+                self._log_system(f'/setSandboxConfiguration error: {e}')
 
         elif cmd == 'togglePanel':
             which = (arg or '').strip().lower()
