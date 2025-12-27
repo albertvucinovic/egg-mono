@@ -1113,12 +1113,7 @@ class ThreadRunner:
         # events in the thread.
         try:
             sb = get_thread_sandbox_config(self.db, self.thread_id)
-            argv = wrap_argv_for_sandbox_with_settings(
-                base_argv,
-                enabled=sb.enabled,
-                settings=sb.settings,
-                working_dir=cwd
-            )
+            argv = wrap_argv_for_sandbox_with_settings(base_argv, enabled=sb.enabled, settings=sb.settings, working_dir=cwd, provider=sb.provider)
         except Exception:
             from .sandbox import wrap_argv_for_sandbox
             argv = wrap_argv_for_sandbox(base_argv)

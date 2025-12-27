@@ -84,6 +84,208 @@ if TYPE_CHECKING:  # pragma: no cover
     from .db import ThreadsDB
 
 
+@dataclass
+class ThreadSandboxConfig:
+    """Effective sandbox selection for a thread."""
+
+    enabled: bool
+    provider: str
+    settings: Dict[str, object]
+    source: str
+
+
+# ---------------------------------------------------------------------------
+# Sandbox providers registry
+# ---------------------------------------------------------------------------
+
+from typing import Protocol, runtime_checkable, Dict, List, Optional, Any
+import subprocess
+import shutil
+
+
+@runtime_checkable
+class SandboxProvider(Protocol):
+    """Protocol for sandbox providers."""
+    name: str
+
+    def is_available(self) -> bool:
+        """Return True if this provider can be used on the current system."""
+        ...
+
+    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
+        """Return wrapped argv for execution under this sandbox.
+
+        If sandboxing cannot be applied (e.g. provider unavailable), return
+        the original argv unchanged.
+        """
+        ...
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return provider-specific status dict (e.g., version, availability)."""
+        ...
+
+
+class SrtProvider:
+    """Sandbox provider using Anthropic's sandbox-runtime (srt)."""
+    name = "srt"
+
+    def is_available(self) -> bool:
+        srt_bin = os.environ.get("EGG_SRT_BIN", "srt").strip() or "srt"
+        return shutil.which(srt_bin) is not None
+
+    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
+        # If not available, return original argv (caller will fall back).
+        if not self.is_available():
+            return argv
+        # Apply mandatory protections and working_dir adjustment
+        import copy
+        from pathlib import Path
+        cfg = copy.deepcopy(settings) if isinstance(settings, dict) else {}
+        fs = cfg.setdefault("filesystem", {})
+        if not isinstance(fs, dict):
+            fs = {}
+            cfg["filesystem"] = fs
+        # Add working_dir to allowWrite if it's a subdirectory of CWD
+        if working_dir:
+            try:
+                wd = Path(working_dir).resolve()
+                cwd = Path.cwd().resolve()
+                rel_wd = wd.relative_to(cwd)
+                aw = fs.get("allowWrite")
+                if not isinstance(aw, list):
+                    aw = ["."]
+                if str(rel_wd) not in aw:
+                    aw.append(str(rel_wd))
+                fs["allowWrite"] = aw
+            except ValueError:
+                # Not a subdirectory, keep settings as is (srt may deny it)
+                pass
+        # Use the existing helper to augment with mandatory protections and write file
+        eff_path = _effective_config_path_from_settings(cfg)
+        # Build command string
+        try:
+            import shlex
+            cmd_str = shlex.join(list(argv))
+        except Exception:
+            cmd_str = " ".join(str(x) for x in argv)
+        srt_bin = os.environ.get("EGG_SRT_BIN", "srt").strip() or "srt"
+        return [srt_bin, "--settings", str(eff_path), cmd_str]
+
+    def get_status(self) -> Dict[str, Any]:
+        srt_bin = os.environ.get("EGG_SRT_BIN", "srt").strip() or "srt"
+        available = shutil.which(srt_bin) is not None
+        return {
+            "available": available,
+            "binary": srt_bin,
+        }
+class DockerProvider:
+    """Sandbox provider using Docker containers."""
+    name = "docker"
+
+    def is_available(self) -> bool:
+        # Check if docker CLI is available and daemon reachable.
+        try:
+            import subprocess
+            subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=5)
+            return True
+        except Exception:
+            return False
+
+    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
+        if not self.is_available():
+            return argv
+        # Default settings
+        image = settings.get("image", "python:3.12-slim")
+        network = settings.get("network", "none")
+        workspace = settings.get("workspace", "/workspace")
+        extra_mounts = settings.get("extra_mounts", [])
+        extra_args = settings.get("extra_args", [])
+        # Build docker run command
+        cmd = ["docker", "run", "--rm"]
+        # Network
+        if network:
+            cmd.extend(["--network", network])
+        # Mount working directory as workspace
+        from pathlib import Path
+        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        cmd.extend(["-v", f"{wd}:{workspace}"])
+        # Additional mounts
+        for mount in extra_mounts:
+            if isinstance(mount, dict) and mount.get("src") and mount.get("dst"):
+                cmd.extend(["-v", f"{mount['src']}:{mount['dst']}"])
+        # Extra arguments (user-provided)
+        for arg in extra_args:
+            if isinstance(arg, str):
+                cmd.append(arg)
+        # Set working directory inside container
+        cmd.extend(["-w", workspace])
+        # Image
+        cmd.append(image)
+        # The command to run inside container (argv)
+        cmd.extend(argv)
+        return cmd
+
+    def get_status(self) -> Dict[str, Any]:
+        available = self.is_available()
+        return {
+            "available": available,
+            "provider": "docker",
+        }
+
+class BwrapProvider:
+    """Sandbox provider using bubblewrap (bwrap)."""
+    name = "bwrap"
+
+    def is_available(self) -> bool:
+        # Check if bwrap binary exists
+        import shutil
+        return shutil.which("bwrap") is not None
+
+    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
+        if not self.is_available():
+            return argv
+        # Basic bwrap sandbox: read-only root, bind working directory, unshare network
+        # This is a minimal example; real implementation should respect settings.
+        from pathlib import Path
+        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        # Build bwrap command
+        cmd = ["bwrap", "--ro-bind", "/", "/",
+               "--bind", str(wd), str(wd),
+               "--dev", "/dev",
+               "--proc", "/proc",
+               "--unshare-net",
+               "--chdir", str(wd)]
+        # Add the original command
+        cmd.extend(argv)
+        return cmd
+
+    def get_status(self) -> Dict[str, Any]:
+        available = self.is_available()
+        return {
+            "available": available,
+            "provider": "bwrap",
+        }
+# Registry of known providers
+_PROVIDERS: Dict[str, SandboxProvider] = {
+    "srt": SrtProvider(),
+    "docker": DockerProvider(),
+    "bwrap": BwrapProvider(),}
+
+
+def _get_provider(name: str) -> Optional[SandboxProvider]:
+    return _PROVIDERS.get(name)
+
+
+def provider_available(name: str) -> bool:
+    provider = _get_provider(name)
+    return provider.is_available() if provider else False
+
+
+def get_provider_names() -> List[str]:
+    return list(_PROVIDERS.keys())
+
+
+# ---------------------------------------------------------------------------
 def _srt_dir() -> Path:
     """Return the per-working-directory settings dir (``.egg/srt``).
 
@@ -125,6 +327,8 @@ def _default_config_dict() -> Dict[str, object]:
     # "allow writes only under ." (``filesystem.allowWrite``).
 
     return {
+        # The default sandbox provider is srt (Anthropic sandbox-runtime).
+        "provider": "srt",
         # Secure-by-default network: empty allowlist means "deny all".
         "network": {
             "allowedDomains": [],
@@ -142,8 +346,6 @@ def _default_config_dict() -> Dict[str, object]:
             "denyWrite": [".egg/srt"],
         },
     }
-
-
 def _default_config_path() -> Path:
     """Return the path to the default config, creating it if needed."""
 
@@ -197,6 +399,53 @@ def _config_source_path(name: Optional[str] = None) -> Path:
     if path.exists():
         return path
     return _default_config_path()
+
+
+def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
+    """Return a copy of *cfg* with mandatory protections applied."""
+
+    import copy
+
+    out = copy.deepcopy(cfg) if isinstance(cfg, dict) else {}
+    fs = out.setdefault("filesystem", {})
+    if not isinstance(fs, dict):
+        fs = {}
+        out["filesystem"] = fs
+
+    deny = fs.get("denyWrite")
+    if not isinstance(deny, list):
+        deny = []
+
+    # Always protect our settings directory and the default.json file.
+    srt_dir = _ensure_srt_dir()
+    protected = [str(srt_dir), str((srt_dir / "default.json").resolve())]
+    for p in protected:
+        if p not in deny:
+            deny.append(p)
+    fs["denyWrite"] = deny
+    return out
+
+
+def _effective_config_path_from_settings(settings: Dict[str, object]) -> Path:
+    """Write an augmented settings file and return its path."""
+
+    cfg_dir = _ensure_srt_dir()
+    eff = _augment_with_protections(settings if isinstance(settings, dict) else {})
+
+    # Content-addressed filename to avoid races between concurrent
+    # invocations using different settings.
+    try:
+        canon = json.dumps(eff, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        h = hashlib.sha256(canon).hexdigest()[:16]
+    except Exception:
+        h = os.urandom(8).hex()
+
+    eff_path = cfg_dir / f"_effective__{h}.json"
+    try:
+        eff_path.write_text(json.dumps(eff, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return eff_path
 
 
 def _load_config(path: Path) -> Dict[str, object]:
@@ -311,66 +560,45 @@ def wrap_argv_for_sandbox(argv: List[str]) -> List[str]:
     If called without thread context, we use the default settings
     (``.egg/srt/default.json``) and the default enabled policy.
     """
-
-    return wrap_argv_for_sandbox_with_settings(argv, enabled=sandbox_enabled(), settings=_load_config(_default_config_path()))
-
-
+    return wrap_argv_for_sandbox_with_settings(
+        argv,
+        enabled=sandbox_enabled(),
+        settings=_load_config(_default_config_path()),
+        provider="srt",
+    )
 def wrap_argv_for_sandbox_with_settings(
     argv: List[str],
     *,
     enabled: bool,
     settings: Dict[str, object],
     working_dir: Optional[str | Path] = None,
+    provider: Optional[str] = None,
 ) -> List[str]:
     """Wrap an argv for sandbox execution with explicit settings.
 
-    ``srt`` expects a single command string (it executes via a
-    shell-like layer). When sandboxing is effective, we:
-
-      1) write the effective settings file (augmented with mandatory
-         protections), and
-      2) pass a shell-escaped command string built from ``argv``.
+    The provider can be specified via the ``provider`` argument or via a
+    "provider" key inside ``settings`` (default "srt").  If sandboxing is
+    disabled or the requested provider is unavailable, the original argv
+    is returned unchanged.
     """
-
-    if not (bool(enabled) and sandbox_available()):
+    if not enabled:
         return argv
 
-    # If a working_dir is provided, ensure it's relative to CWD for the sandbox
-    # and adjust the settings to allow writing to it.
-    if working_dir:
-        working_dir = Path(working_dir).resolve()
-        cwd = Path.cwd().resolve()
-        try:
-            rel_wd = working_dir.relative_to(cwd)
-            # Add to allowWrite if it's a subdirectory
-            import copy
-            settings = copy.deepcopy(settings)
-            fs = settings.setdefault("filesystem", {})
-            if not isinstance(fs, dict):
-                fs = {}
-                settings["filesystem"] = fs
-            aw = fs.get("allowWrite")
-            if not isinstance(aw, list):
-                aw = ["."]
-            if str(rel_wd) not in aw:
-                aw.append(str(rel_wd))
-            fs["allowWrite"] = aw
-        except ValueError:
-            # Not a subdirectory, keep settings as is (srt may deny it)
-            pass
+    # Determine provider name
+    if provider is None:
+        provider_name = str(settings.get("provider", "srt"))
+    else:
+        provider_name = provider
 
-    eff_path = _effective_config_path_from_settings(settings)
+    provider_obj = _PROVIDERS.get(provider_name)
+    if provider_obj is None:
+        # Unknown provider -> no sandbox
+        return argv
+    if not provider_obj.is_available():
+        return argv
 
-    try:
-        import shlex
-
-        cmd_str = shlex.join(list(argv))
-    except Exception:
-        cmd_str = " ".join(str(x) for x in argv)
-
-    return [_SRT_BIN, "--settings", str(eff_path), cmd_str]
-
-
+    # Delegate to provider
+    return provider_obj.wrap_argv(argv, settings, working_dir)
 def wrap_bash_argv_for_sandbox(argv: List[str], eff_path) -> List[str]:  # pragma: no cover
     """Backward-compatible wrapper.
 
@@ -399,18 +627,7 @@ def wrap_argv_for_sandbox_with_config(
         settings = _load_config(p)
     except Exception:
         settings = _load_config(_default_config_path())
-    return wrap_argv_for_sandbox_with_settings(argv, enabled=eff_enabled, settings=settings)
-
-
-@dataclass
-class ThreadSandboxConfig:
-    """Effective sandbox selection for a thread."""
-
-    enabled: bool
-    settings: Dict[str, object]
-    source: str
-
-
+    return wrap_argv_for_sandbox_with_settings(argv, enabled=eff_enabled, settings=settings, provider="srt")
 def _parent_id(db: "ThreadsDB", thread_id: str) -> Optional[str]:
     try:
         row = db.conn.execute(
@@ -464,6 +681,7 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
     """
 
     enabled = sandbox_enabled()
+    provider = "srt"
     settings: Dict[str, object] = _load_config(_default_config_path())
     source = "default.json"
 
@@ -475,6 +693,12 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
                 enabled = bool(payload.get("enabled"))
             except Exception:
                 pass
+
+        # Provider (default "srt" for backward compatibility)
+        if "provider" in payload:
+            prov = payload.get("provider")
+            if isinstance(prov, str) and prov.strip():
+                provider = prov.strip()
 
         # Preferred modern format: payload contains full settings JSON.
         cfg = payload.get("settings") or payload.get("config")
@@ -492,9 +716,12 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
                 except Exception:
                     pass
 
-    return ThreadSandboxConfig(enabled=bool(enabled), settings=dict(settings), source=str(source))
-
-
+    return ThreadSandboxConfig(
+        enabled=bool(enabled),
+        provider=provider,
+        settings=dict(settings),
+        source=str(source),
+    )
 def set_thread_sandbox_config(
     db: "ThreadsDB",
     thread_id: str,
@@ -502,6 +729,7 @@ def set_thread_sandbox_config(
     enabled: bool,
     config_name: Optional[str] = None,
     settings: Optional[Dict[str, object]] = None,
+    provider: Optional[str] = None,
     reason: str = "user",
 ) -> None:
     """Persist sandbox configuration for a thread.
@@ -544,6 +772,17 @@ def set_thread_sandbox_config(
     if src_name and "source" not in payload:
         payload["source"] = src_name
 
+    # Provider (default "srt")
+    if provider is not None:
+        payload["provider"] = provider
+    else:
+        # Infer from settings if present, otherwise default to "srt"
+        prov = (settings or {}).get("provider")
+        if isinstance(prov, str) and prov.strip():
+            payload["provider"] = prov.strip()
+        else:
+            payload["provider"] = "srt"
+
     try:
         db.append_event(
             event_id=_os.urandom(10).hex(),
@@ -555,8 +794,6 @@ def set_thread_sandbox_config(
         )
     except Exception:
         pass
-
-
 def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, object]:
     """Return sandbox status for a specific thread.
 
@@ -566,13 +803,13 @@ def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, obje
     """
 
     cfg = get_thread_sandbox_config(db, thread_id)
-    effective = bool(cfg.enabled) and sandbox_available()
+    provider_available = _PROVIDERS.get(cfg.provider, SrtProvider()).is_available()
+    effective = bool(cfg.enabled) and provider_available
     warning: Optional[str] = None
-    if bool(cfg.enabled) and not sandbox_available():
+    if bool(cfg.enabled) and not provider_available:
         warning = (
-            "Sandboxing is enabled but the 'srt' CLI was not found. "
-            "Tool commands will run *without* a sandbox. Install it "
-            "with: npm install -g @anthropic-ai/sandbox-runtime."
+            f"Sandboxing is enabled but provider '{cfg.provider}' is not available. "
+            "Tool commands will run *without* a sandbox."
         )
 
     # Best-effort: source_path is only meaningful for default.json or
@@ -588,17 +825,15 @@ def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, obje
 
     return {
         "enabled": bool(cfg.enabled),
-        "available": sandbox_available(),
+        "available": provider_available,
         "effective": effective,
         "mode": "on" if bool(cfg.enabled) else "off",
-        "srt_bin": _SRT_BIN,
+        "provider": cfg.provider,
         "config_source": cfg.source,
         "config_path": str(src),
         "settings_dir": str(_ensure_srt_dir()),
         "warning": warning,
     }
-
-
 def set_subtree_sandbox_config(
     db: "ThreadsDB",
     root_thread_id: str,
@@ -670,64 +905,15 @@ def get_sandbox_status() -> Dict[str, object]:
         )
 
     cfg = get_srt_sandbox_configuration()
+    # Provider availability
+    providers = {}
+    for name, prov in _PROVIDERS.items():
+        providers[name] = prov.is_available()
     return {
         "available": sandbox_available(),
         "srt_bin": _SRT_BIN,
         "settings_dir": cfg.settings_dir,
         "default_config_path": cfg.default_path,
         "warning": warning,
+        "providers": providers,
     }
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers (effective settings file)
-# ---------------------------------------------------------------------------
-
-
-def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
-    """Return a copy of *cfg* with mandatory protections applied."""
-
-    import copy
-
-    out = copy.deepcopy(cfg) if isinstance(cfg, dict) else {}
-    fs = out.setdefault("filesystem", {})
-    if not isinstance(fs, dict):
-        fs = {}
-        out["filesystem"] = fs
-
-    deny = fs.get("denyWrite")
-    if not isinstance(deny, list):
-        deny = []
-
-    # Always protect our settings directory and the default.json file.
-    srt_dir = _ensure_srt_dir()
-    protected = [str(srt_dir), str((srt_dir / "default.json").resolve())]
-    for p in protected:
-        if p not in deny:
-            deny.append(p)
-    fs["denyWrite"] = deny
-    return out
-
-
-def _effective_config_path_from_settings(settings: Dict[str, object]) -> Path:
-    """Write an augmented settings file and return its path."""
-
-    cfg_dir = _ensure_srt_dir()
-    eff = _augment_with_protections(settings if isinstance(settings, dict) else {})
-
-    # Content-addressed filename to avoid races between concurrent
-    # invocations using different settings.
-    try:
-        canon = json.dumps(eff, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        h = hashlib.sha256(canon).hexdigest()[:16]
-    except Exception:
-        h = os.urandom(8).hex()
-
-    eff_path = cfg_dir / f"_effective__{h}.json"
-    try:
-        eff_path.write_text(json.dumps(eff, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return eff_path
-
-
