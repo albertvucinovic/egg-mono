@@ -81,6 +81,7 @@ Commands:
   Tool management: 
     /toggleAutoApproval, /toolsOn, /toolsOff, /disableTool <name>, /enableTool <name> 
     /toggleSandboxing, /setSandboxConfiguration <file.json>
+    /getSandboxingConfig
     /toolsSecrets <on|off>, /toolsStatus 
   Display:
     /togglePanel (chat|children|system)
@@ -838,12 +839,19 @@ class EggDisplayApp:
         except Exception:
             effective = False
         if effective:
-            # Green when sandboxing is active
-            self.system_output.title = "System  [green]Sandboxing[ON][/green]"
+            provider = sb.get('provider', 'docker')
+            # Map provider to display name
+            if provider == 'docker':
+                display = 'Docker'
+            elif provider == 'srt':
+                display = 'srt'
+            elif provider == 'bwrap':
+                display = 'Bwrap'
+            else:
+                display = provider
+            self.system_output.title = f"System  [green]Sandboxing[{display}][/green]"
         else:
-            # Red when sandboxing is disabled, degraded, or unavailable
             self.system_output.title = "System  [red]Sandboxing[OFF][/red]"
-
         # Keep the System panel intentionally compact so it doesn't dominate
         # the single-column layout.
         status_lines = [
@@ -2532,106 +2540,100 @@ class EggDisplayApp:
             name = (arg or '').strip()
             if not name:
                 # Print help about sandbox configuration
-                help_text = '''                                                    Sandbox Configuration and Control in Eggthreads                
+                help_text = '''                                                    Sandbox Configuration and Control in Eggthreads
 
-                                                     1. Default Configuration Handling and Storage                 
+                                                     1. Default Configuration Handling and Storage
 
-Default Configuration Creation:                                                                                     
+Default Configuration Creation:
 
- • The default sandbox configuration is defined in _default_config_dict() in sandbox.py                             
- • By default, it sets "provider": "docker" (previously "srt")                                                      
- • Other default settings include network restrictions and filesystem permissions                                   
+ • The default sandbox configuration is defined in _default_config_dict() in sandbox.py
+ • By default, it sets "provider": "docker" (previously "srt")
+ • Other default settings include network restrictions and filesystem permissions
 
-Storage Location:                                                                                                   
+Storage Location:
 
- • Default configuration is stored in .egg/sandbox/default.json (legacy directory name)                                 
- • This file is created automatically if it doesn't exist when _default_config_path() is called                     
- • The file location is relative to the current working directory                                                   
+ • Default configuration is stored in .egg/sandbox/default.json (legacy directory name)
+ • This file is created automatically if it doesn't exist when _default_config_path() is called
+ • The file location is relative to the current working directory
 
-Provider-Specific Defaults:                                                                                         
+Provider-Specific Defaults:
 
- • Docker Provider: Defaults to image: "python:3.12-slim", network: "none", workspace: "/workspace"                 
- • SRT Provider: Uses SRT-specific settings like filesystem.allowWrite and network.allowedDomains                   
- • Bwrap Provider: Uses minimal settings, primarily working directory binding                                       
+ • Docker Provider: Defaults to image: "python:3.12-slim", network: "none", workspace: "/workspace"
+ • SRT Provider: Uses SRT-specific settings like filesystem.allowWrite and network.allowedDomains
+ • Bwrap Provider: Uses minimal settings, primarily working directory binding
 
-Configuration Inheritance:                                                                                          
+Configuration Inheritance:
 
- • Threads inherit sandbox configuration from their nearest ancestor with a sandbox.config event                    
- • If no ancestor has a config, the default config from .egg/sandbox/default.json is used                               
+ • Threads inherit sandbox configuration from their nearest ancestor with a sandbox.config event
+ • If no ancestor has a config, the default config from .egg/sandbox/default.json is used
 
-                                                     2. Specifying Configuration for Each Provider                 
+                                                     2. Specifying Configuration for Each Provider
 
-Provider Selection:                                                                                                 
+Provider Selection:
 
- • The provider field in settings determines which provider to use                                                  
- • Can be specified via: settings["provider"], provider parameter, or default config                                
- • Supported values: "docker", "srt", "bwrap"                                                                       
+ • The provider field in settings determines which provider to use
+ • Can be specified via: settings["provider"], provider parameter, or default config
+ • Supported values: "docker", "srt", "bwrap"
 
-Provider-Specific Settings:                                                                                         
+Provider-Specific Settings:
 
-Docker Provider:                                                                                                    
+Docker Provider:
 
-                                                                                                                    
- {                                                                                                                  
-   "provider": "docker",                                                                                            
-   "image": "python:3.12-slim",                                                                                     
-   "network": "none",                                                                                               
-   "workspace": "/workspace",                                                                                       
-   "extra_mounts": [{"src": "/host/path", "dst": "/container/path"}],                                               
-   "extra_args": ["--cap-drop", "ALL"]                                                                              
- }                                                                                                                  
+ {
+   "provider": "docker",
+   "image": "python:3.12-slim",
+   "network": "none",
+   "workspace": "/workspace",
+   "extra_mounts": [{"src": "/host/path", "dst": "/container/path"}],
+   "extra_args": ["--cap-drop", "ALL"]
+ }
 
-                                                                                                                    
-SRT Provider:                                                                                                       
+SRT Provider:
 
-                                                                                                                    
- {                                                                                                                  
-   "provider": "srt",                                                                                               
-   "filesystem": {                                                                                                  
-     "allowWrite": ["."],                                                                                           
-     "denyWrite": [".egg/sandbox"]                                                                                  
-   },                                                                                                               
-   "network": {                                                                                                     
-     "allowedDomains": ["example.com"]                                                                              
-   }                                                                                                                
- }                                                                                                                  
+ {
+   "provider": "srt",
+   "filesystem": {
+     "allowWrite": ["."],
+     "denyWrite": [".egg/sandbox"]
+   },
+   "network": {
+     "allowedDomains": ["example.com"]
+   }
+ }
 
-                                                                                                                    
-Bwrap Provider:                                                                                                     
+Bwrap Provider:
 
-                                                                                                                    
- {                                                                                                                  
-   "provider": "bwrap"                                                                                              
-   // Minimal settings - primarily uses working directory                                                           
- }                                                                                                                  
+ {
+   "provider": "bwrap"
+   // Minimal settings - primarily uses working directory
+ }
 
-                                                                                                                    
-Configuration Methods:                                                                                              
+Configuration Methods:
 
  1 Thread-specific config: set_thread_sandbox_config(db, thread_id, enabled=True, provider="docker", settings={...})
- 2 Config files: Store JSON files in .egg/sandbox/ and reference by name                                                
- 3 Programmatic settings: Pass settings dict directly to API functions                                              
+ 2 Config files: Store JSON files in .egg/sandbox/ and reference by name
+ 3 Programmatic settings: Pass settings dict directly to API functions
 
-                                                           3. Sandbox Control from egg.py TUI                       
+                                                           3. Sandbox Control from egg.py TUI
 
-Commands Available:                                                                                                 
+Commands Available:
 
- 1 /toggleSandboxing - Toggle sandboxing for current thread subtree                                                 
-    • Toggles enabled flag while preserving current settings                                                        
-    • Updates thread's sandbox.config event                                                                         
-    • Shows status in System panel                                                                                  
- 2 /setSandboxConfiguration <file.json> - Apply config file to current thread                                       
-    • Loads JSON file from .egg/sandbox/ directory                                                                      
-    • Applies full settings to current thread and subtree                                                           
-    • File should contain provider field and provider-specific settings                                             
+ 1 /toggleSandboxing - Toggle sandboxing for current thread subtree
+    • Toggles enabled flag while preserving current settings
+    • Updates thread's sandbox.config event
+    • Shows status in System panel
+ 2 /setSandboxConfiguration <file.json> - Apply config file to current thread
+    • Loads JSON file from .egg/sandbox/ directory
+    • Applies full settings to current thread and subtree
+    • File should contain provider field and provider-specific settings
 
-UI Indicators:                                                                                                      
+UI Indicators:
 
- • System Panel Title: Shows Sandboxing[ON] (green) or Sandboxing[OFF] (red)                                        
- • Status based on: get_thread_sandbox_status() effectiveness check                                                 
- • Warning messages: Show if sandboxing enabled but provider unavailable
-'''
-                self._log_system(help_text)
+ • System Panel Title: Shows Sandboxing[ON] (green) or Sandboxing[OFF] (red)
+ • Status based on: get_thread_sandbox_status() effectiveness check
+ • Warning messages: Show if sandboxing enabled but provider unavailable'''
+                self._log_system('Sandbox configuration help (see console for full).')
+                self._console_print_block('Sandbox Configuration', help_text.strip(), border_style='blue')
                 return
             try:
                 from eggthreads import set_subtree_sandbox_config  # type: ignore
@@ -2650,6 +2652,28 @@ UI Indicators:
                 self._log_system(f"Sandbox configuration applied to this thread: {name}")
             except Exception as e:
                 self._log_system(f'/setSandboxConfiguration error: {e}')
+
+        elif cmd == 'getSandboxingConfig':
+            try:
+                from eggthreads import get_thread_sandbox_status  # type: ignore
+                sb = get_thread_sandbox_status(self.db, self.current_thread)
+                # Format configuration info
+                config_lines = []
+                config_lines.append("Current thread sandbox configuration:")
+                config_lines.append(f"  Provider: {sb.get('provider', 'unknown')}")
+                config_lines.append(f"  Enabled: {sb.get('enabled', False)}")
+                config_lines.append(f"  Available: {sb.get('available', False)}")
+                config_lines.append(f"  Effective: {sb.get('effective', False)}")
+                config_lines.append(f"  Config source: {sb.get('config_source', 'unknown')}")
+                config_lines.append(f"  Config path: {sb.get('config_path', 'unknown')}")
+                warning = sb.get('warning')
+                if warning:
+                    config_lines.append(f"  Warning: {warning}")
+                config_text = '\n'.join(config_lines)
+                self._log_system('Sandbox configuration (see console for full).')
+                self._console_print_block('Sandbox Configuration', config_text, border_style='blue')
+            except Exception as e:
+                self._log_system(f'/getSandboxingConfig error: {e}')
 
         elif cmd == 'togglePanel':
             which = (arg or '').strip().lower()

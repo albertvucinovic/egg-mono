@@ -220,9 +220,9 @@ class EggCompleter(Completer):
                     yield Completion(p, start_position=-len(prefix))
             return
 
-        # /setSrtSandboxConfiguration: suggest config files from .egg/srt
-        if text.startswith('/setSrtSandboxConfiguration '):
-            prefix = text[len('/setSrtSandboxConfiguration '):]
+        # /setSandboxConfiguration: suggest config files from .egg/sandbox
+        if text.startswith('/setSandboxConfiguration '):
+            prefix = text[len('/setSandboxConfiguration '):]
             try:
                 from eggthreads import get_srt_sandbox_configuration  # type: ignore
                 from pathlib import Path as _Path
@@ -494,7 +494,8 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/schedulers', '/enterMode', '/toggleAutoApproval',
                 '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus',
                 '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
-                '/setSrtSandboxConfiguration',
+                '/setSandboxConfiguration',
+                '/getSandboxingConfig',
                 '/togglePanel',
                 '/redraw',
             ]
@@ -641,8 +642,8 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 names = []
             return _mk_items(names, arg_tok)
 
-        if cmd == '/setSrtSandboxConfiguration':
-            # Suggest available .json files from .egg/srt
+        if cmd == '/setSandboxConfiguration':
+            # Suggest available .json files from .egg/sandbox
             try:
                 from eggthreads import get_srt_sandbox_configuration  # type: ignore
                 from pathlib import Path as _Path
