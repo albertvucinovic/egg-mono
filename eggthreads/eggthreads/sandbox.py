@@ -84,6 +84,128 @@ if TYPE_CHECKING:  # pragma: no cover
     from .db import ThreadsDB
 
 
+
+# ---------------------------------------------------------------------------
+# Common abstractions for mandatory protections and default configurations
+# ---------------------------------------------------------------------------
+
+def get_mandatory_protected_paths() -> List[str]:
+    """Return list of paths that must be protected in all sandbox configurations.
+    
+    These paths should be made read-only or otherwise protected from writes
+    regardless of provider or configuration.
+    """
+    sandbox_dir = _ensure_sandbox_dir()
+    egg_dir = sandbox_dir.parent
+    return [
+        str(sandbox_dir),
+        str((sandbox_dir / "default.json").resolve()),
+        str(egg_dir),
+    ]
+
+
+def get_provider_default_config(provider_name: str) -> Dict[str, object]:
+    """Return default configuration suitable for a specific provider.
+    
+    Each provider has different configuration needs. This function returns
+    sensible defaults for each provider type.
+    """
+    # Base defaults are SRT-style config
+    base_defaults = _default_config_dict()
+    
+    if provider_name == "docker":
+        return {
+            "provider": "docker",
+            "image": "python:3.12-slim",
+            "network": "none",
+            "workspace": "/workspace",
+            "extra_mounts": [],
+            "extra_args": ["--cap-drop", "ALL"],
+        }
+    elif provider_name == "bwrap":
+        return {
+            "provider": "bwrap",
+            # Minimal settings - bwrap primarily uses working directory binding
+        }
+    elif provider_name == "srt":
+        return base_defaults
+    else:
+        # Unknown provider, return base defaults
+        return base_defaults
+
+
+def apply_mandatory_protections(provider_name: str, settings: Dict[str, Any], 
+                               working_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Apply mandatory protections to settings for any provider.
+    
+    This ensures consistent protection of critical paths (.egg directory, etc.)
+    across all providers, using each provider's native mechanism.
+    
+    Returns: Updated settings with protections applied
+    """
+    import copy
+    
+    # Make a copy to avoid modifying original
+    result = copy.deepcopy(settings) if isinstance(settings, dict) else {}
+    
+    # Get mandatory protected paths
+    protected_paths = get_mandatory_protected_paths()
+    
+    if provider_name == "srt":
+        # For SRT, we need to update the filesystem.denyWrite list
+        fs = result.setdefault("filesystem", {})
+        if not isinstance(fs, dict):
+            fs = {}
+            result["filesystem"] = fs
+            
+        deny_write = fs.get("denyWrite")
+        if not isinstance(deny_write, list):
+            deny_write = []
+            
+        for path in protected_paths:
+            if path not in deny_write:
+                deny_write.append(path)
+                
+        fs["denyWrite"] = deny_write
+        
+        # Also add to denyRead
+        deny_read = fs.get("denyRead")
+        if not isinstance(deny_read, list):
+            deny_read = []
+            
+        egg_dir = _ensure_sandbox_dir().parent
+        if str(egg_dir) not in deny_read:
+            deny_read.append(str(egg_dir))
+            
+        fs["denyRead"] = deny_read
+        
+    # For docker and bwrap, protections are applied in wrap_argv methods
+    # using the protected_paths list. They don't need settings modification.
+    
+    return result
+
+
+def normalize_provider_settings(provider_name: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize settings for a specific provider, filling in defaults.
+    
+    Takes user-provided settings and ensures all required fields are present
+    with sensible defaults.
+    """
+    if not isinstance(settings, dict):
+        settings = {}
+        
+    # Get provider defaults
+    defaults = get_provider_default_config(provider_name)
+    
+    # Merge user settings over defaults
+    result = defaults.copy()
+    result.update(settings)
+    
+    # Ensure provider field is correct
+    result["provider"] = provider_name
+    
+    return result
+
 @dataclass
 class ThreadSandboxConfig:
     """Effective sandbox selection for a thread."""
@@ -159,6 +281,9 @@ class DockerProvider:
 
     def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
         if not self.is_available():
+            # Normalize settings with provider-specific defaults
+            settings = normalize_provider_settings("docker", settings)
+        
             return argv
         # Default settings
         image = settings.get("image", "python:3.12-slim")
@@ -179,17 +304,18 @@ class DockerProvider:
         from pathlib import Path
         wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
         cmd.extend(["-v", f"{wd}:{workspace}"])
-        # Protect .egg directory if it's within the mounted workspace
-        egg_dir = Path.cwd() / ".egg"
-        try:
-            egg_rel = egg_dir.relative_to(wd)
-            # egg_dir is inside wd, need to add read-only mount
-            container_egg_path = str(Path(workspace) / egg_rel)
-            cmd.extend(["-v", f"{egg_dir}:{container_egg_path}:ro"])
-        except ValueError:
-            # egg_dir is not inside wd, not visible in container
-            pass
-        # Additional mounts
+        # Protect mandatory paths (e.g., .egg directory)
+        protected_paths = get_mandatory_protected_paths()
+        for protected in protected_paths:
+            try:
+                prot_path = Path(protected).resolve()
+                if prot_path.exists():
+                    rel_path = prot_path.relative_to(wd)
+                    container_path = str(Path(workspace) / rel_path)
+                    cmd.extend(["-v", f"{prot_path}:{container_path}:ro"])
+            except (ValueError, Exception):
+                # Path not inside working directory or other error
+                pass
         for mount in extra_mounts:
             if isinstance(mount, dict) and mount.get("src") and mount.get("dst"):
                 cmd.extend(["-v", f"{mount['src']}:{mount['dst']}"])
@@ -222,6 +348,9 @@ class BwrapProvider:
 
     def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
         if not self.is_available():
+            # Normalize settings with provider-specific defaults
+            settings = normalize_provider_settings("bwrap", settings)
+        
             return argv
         # Basic bwrap sandbox: read-only root, bind working directory, unshare network
         # This is a minimal example; real implementation should respect settings.
@@ -234,16 +363,16 @@ class BwrapProvider:
                "--proc", "/proc",
                "--unshare-net",
                "--chdir", str(wd)]
-        # Protect .egg directory if it's within the bound directory
-        egg_dir = Path.cwd() / ".egg"
-        try:
-            egg_rel = egg_dir.relative_to(wd)
-            # egg_dir is inside wd, need to add read-only bind
-            cmd.extend(["--ro-bind", str(egg_dir), str(egg_dir)])
-        except ValueError:
-            # egg_dir is not inside wd, already protected by root ro-bind
-            pass
-        # Add the original command
+        # Protect mandatory paths (e.g., .egg directory)
+        protected_paths = get_mandatory_protected_paths()
+        for protected in protected_paths:
+            try:
+                prot_path = Path(protected).resolve()
+                if prot_path.exists():
+                    cmd.extend(["--ro-bind", str(prot_path), str(prot_path)])
+            except (ValueError, Exception):
+                # Path not inside working directory or other error
+                pass
         cmd.extend(argv)
         return cmd
     def get_status(self) -> Dict[str, Any]:
@@ -265,20 +394,20 @@ class SrtProvider:
         # If not available, return original argv (caller will fall back).
         if not self.is_available():
             return argv
-        # Apply mandatory protections and working_dir adjustment
-        import copy
-        from pathlib import Path
-        cfg = copy.deepcopy(settings) if isinstance(settings, dict) else {}
-        fs = cfg.setdefault("filesystem", {})
-        if not isinstance(fs, dict):
-            fs = {}
-            cfg["filesystem"] = fs
+        
+        # Apply mandatory protections and normalize settings
+        cfg = apply_mandatory_protections("srt", settings, working_dir)
+        
         # Add working_dir to allowWrite if it's a subdirectory of CWD
         if working_dir:
             try:
                 wd = Path(working_dir).resolve()
                 cwd = Path.cwd().resolve()
                 rel_wd = wd.relative_to(cwd)
+                fs = cfg.setdefault("filesystem", {})
+                if not isinstance(fs, dict):
+                    fs = {}
+                    cfg["filesystem"] = fs
                 aw = fs.get("allowWrite")
                 if not isinstance(aw, list):
                     aw = ["."]
@@ -288,6 +417,7 @@ class SrtProvider:
             except ValueError:
                 # Not a subdirectory, keep settings as is (srt may deny it)
                 pass
+        
         # Use the existing helper to augment with mandatory protections and write file
         eff_path = _effective_config_path_from_settings(cfg)
         # Build command string
@@ -298,7 +428,6 @@ class SrtProvider:
             cmd_str = " ".join(str(x) for x in argv)
         srt_bin = os.environ.get("EGG_SRT_BIN", "srt").strip() or "srt"
         return [srt_bin, "--settings", str(eff_path), cmd_str]
-
     def get_status(self) -> Dict[str, Any]:
         srt_bin = os.environ.get("EGG_SRT_BIN", "srt").strip() or "srt"
         available = shutil.which(srt_bin) is not None
@@ -467,8 +596,7 @@ def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
         deny = []
 
     # Always protect our settings directory and the default.json file.
-    sandbox_dir = _ensure_sandbox_dir()
-    protected = [str(sandbox_dir), str((sandbox_dir / "default.json").resolve()), str(egg_dir)]
+    protected = get_mandatory_protected_paths()
     for p in protected:
         if p not in deny:
             deny.append(p)
@@ -639,6 +767,11 @@ def wrap_argv_for_sandbox_with_settings(
         provider_name = provider
 
     provider_obj = _PROVIDERS.get(provider_name)
+    # Normalize settings for this provider
+    settings = normalize_provider_settings(provider_name, settings)
+        # Apply mandatory protections
+    settings = apply_mandatory_protections(provider_name, settings, working_dir)
+    
     if provider_obj is None:
         # Unknown provider -> no sandbox
         return argv
