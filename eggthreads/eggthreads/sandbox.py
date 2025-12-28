@@ -15,10 +15,6 @@ Goals
 
 * Support **per-thread** sandbox configuration via DB events:
 
-  - A thread may have a ``sandbox.config`` event whose payload contains
-    the **full sandbox settings JSON**.
-  - If a thread has no config event, it inherits the nearest ancestor's
-    config event.
   - If neither the thread nor any ancestor has a config event, the
     default settings file ``.egg/sandbox/default.json`` is used.
 
@@ -62,6 +58,7 @@ Public API
   prepend ``srt --settings ...`` when sandboxing is effective.
 * :func:`get_thread_sandbox_config(db, thread_id)` – resolve the
   effective per-thread configuration (including ancestor inheritance).
+* User sandbox control: a ``user_control_enabled`` field in the configuration`` determines whether UI commands can modify sandbox settings for a thread.
 * :func:`set_thread_sandbox_config(db, thread_id, ...)` – persist a
   per-thread configuration as an event containing the full JSON.
 * :func:`get_thread_sandbox_status(db, thread_id)` – status dict for UIs.
@@ -939,10 +936,6 @@ def set_thread_sandbox_config(
                 user_control_enabled = bool(settings.get("user_control_enabled"))
             except Exception:
                 pass
-        if user_control_enabled is None:
-            # Get current effective flag
-            cfg = get_thread_sandbox_config(db, thread_id)
-            user_control_enabled = cfg.user_control_enabled
     payload: Dict[str, object] = {
         "enabled": bool(enabled),
         "reason": reason,
@@ -975,6 +968,18 @@ def set_thread_sandbox_config(
     if src_name and "source" not in payload:
         payload["source"] = src_name
 
+    # If user_control_enabled still not determined, check payload["settings"]
+    if user_control_enabled is None:
+        payload_settings = payload.get("settings")
+        if isinstance(payload_settings, dict) and "user_control_enabled" in payload_settings:
+            try:
+                user_control_enabled = bool(payload_settings.get("user_control_enabled"))
+            except Exception:
+                pass
+    # Final fallback to current config
+    if user_control_enabled is None:
+        cfg = get_thread_sandbox_config(db, thread_id)
+        user_control_enabled = cfg.user_control_enabled
     # Provider (default "docker")
     if provider is not None:
         payload["provider"] = provider
