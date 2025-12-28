@@ -1108,7 +1108,7 @@ def is_user_sandbox_control_enabled(db: "ThreadsDB", thread_id: str) -> bool:
     try:
         cur = db.conn.execute(
             """SELECT payload_json FROM events
-               WHERE thread_id=? AND type_='sandbox.control'
+               WHERE thread_id=? AND type='sandbox.control'
                ORDER BY event_seq DESC LIMIT 1""",
             (thread_id,),
         )
