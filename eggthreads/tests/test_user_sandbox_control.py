@@ -46,26 +46,26 @@ def test_user_sandbox_control_events(tmp_path, monkeypatch):
     root = eggthreads.create_root_thread(db, name="root")
     # Disable
     eggthreads.disable_user_sandbox_control(db, root, reason="test")
-    # Verify event stored
+    # Verify event stored as sandbox.config with user_control_enabled=False
     cur = db.conn.execute(
-        "SELECT payload_json FROM events WHERE thread_id=? AND type='sandbox.control' ORDER BY event_seq DESC LIMIT 1",
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='sandbox.config' ORDER BY event_seq DESC LIMIT 1",
         (root,),
     )
     row = cur.fetchone()
     assert row is not None
     import json
     payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-    assert payload.get('decision') == 'disallow_user_commands'
+    assert payload.get('user_control_enabled') == False
     assert payload.get('reason') == 'test'
     # Enable
     eggthreads.enable_user_sandbox_control(db, root, reason="test2")
     cur = db.conn.execute(
-        "SELECT payload_json FROM events WHERE thread_id=? AND type='sandbox.control' ORDER BY event_seq DESC LIMIT 1",
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='sandbox.config' ORDER BY event_seq DESC LIMIT 1",
         (root,),
     )
     row = cur.fetchone()
     payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-    assert payload.get('decision') == 'allow_user_commands'
+    assert payload.get('user_control_enabled') == True
     assert payload.get('reason') == 'test2'
 
 
@@ -77,8 +77,8 @@ def test_user_sandbox_control_inheritance(tmp_path, monkeypatch):
     child = eggthreads.create_child_thread(db, root, name="child")
     # Disable on parent
     eggthreads.disable_user_sandbox_control(db, root, reason="parent")
-    # Child should also be disabled (since it inherits? Actually sandbox.control is per-thread? 
-    # The function is_user_sandbox_control_enabled only looks at events for that thread, not ancestors.
-    # So child should still be enabled (no event). Let's verify.
-    # This test documents the current behavior.
+    # Child should inherit the sandbox.config event, thus also disabled
+    assert eggthreads.is_user_sandbox_control_enabled(db, child) is False
+    # Enable parent
+    eggthreads.enable_user_sandbox_control(db, root, reason="parent_enable")
     assert eggthreads.is_user_sandbox_control_enabled(db, child) is True

@@ -70,7 +70,7 @@ The implementation is deliberately self‑contained and avoids importing
 other eggthreads modules to prevent circular imports.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 import hashlib
@@ -214,6 +214,7 @@ class ThreadSandboxConfig:
     provider: str
     settings: Dict[str, object]
     source: str
+    user_control_enabled: bool = field(default=True)
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +866,7 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
 
     enabled = sandbox_enabled()
     provider = "docker"
+    user_control_enabled = True
     settings: Dict[str, object] = _load_config(_default_config_path())
     source = "default.json"
 
@@ -882,6 +884,12 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
             prov = payload.get("provider")
             if isinstance(prov, str) and prov.strip():
                 provider = prov.strip()
+                # User control flag
+                if "user_control_enabled" in payload:
+                    try:
+                        user_control_enabled = bool(payload.get("user_control_enabled"))
+                    except Exception:
+                        pass
 
         # Preferred modern format: payload contains full settings JSON.
         cfg = payload.get("settings") or payload.get("config")
@@ -904,6 +912,7 @@ def get_thread_sandbox_config(db: "ThreadsDB", thread_id: str) -> ThreadSandboxC
         provider=provider,
         settings=dict(settings),
         source=str(source),
+        user_control_enabled=user_control_enabled,
     )
 def set_thread_sandbox_config(
     db: "ThreadsDB",
@@ -912,7 +921,7 @@ def set_thread_sandbox_config(
     enabled: bool,
     config_name: Optional[str] = None,
     settings: Optional[Dict[str, object]] = None,
-    provider: Optional[str] = None,
+    provider: Optional[str] = None, user_control_enabled: Optional[bool] = None,
     reason: str = "user",
 ) -> None:
     """Persist sandbox configuration for a thread.
@@ -922,7 +931,18 @@ def set_thread_sandbox_config(
     """
 
     import os as _os
-
+    # Determine user_control_enabled if not provided
+    if user_control_enabled is None:
+        # First check if settings dict contains user_control_enabled
+        if isinstance(settings, dict) and "user_control_enabled" in settings:
+            try:
+                user_control_enabled = bool(settings.get("user_control_enabled"))
+            except Exception:
+                pass
+        if user_control_enabled is None:
+            # Get current effective flag
+            cfg = get_thread_sandbox_config(db, thread_id)
+            user_control_enabled = cfg.user_control_enabled
     payload: Dict[str, object] = {
         "enabled": bool(enabled),
         "reason": reason,
@@ -973,6 +993,8 @@ def set_thread_sandbox_config(
             payload["provider"] = prov.strip()
         else:
             payload["provider"] = "docker"
+    if user_control_enabled is not None:
+        payload["user_control_enabled"] = user_control_enabled
     try:
         db.append_event(
             event_id=_os.urandom(10).hex(),
@@ -1066,68 +1088,39 @@ def enable_user_sandbox_control(db: "ThreadsDB", thread_id: str, reason: Optiona
     This is a thread-wide flag that can only be set programmatically via this API.
     When disabled, the UI commands that modify sandbox configuration are blocked.
     """
-    import os
-    payload = {'decision': 'allow_user_commands'}
-    if reason is not None:
-        payload['reason'] = reason
-    db.append_event(
-        event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
-        type_='sandbox.control',
-        msg_id=None,
-        invoke_id=None,
-        payload=payload,
+    # Get current config to preserve settings
+    cfg = get_thread_sandbox_config(db, thread_id)
+    set_thread_sandbox_config(
+        db, thread_id,
+        enabled=cfg.enabled,
+        provider=cfg.provider,
+        settings=cfg.settings,
+        user_control_enabled=True,
+        reason=reason or "enable_user_sandbox_control"
     )
-
-
 def disable_user_sandbox_control(db: "ThreadsDB", thread_id: str, reason: Optional[str] = None) -> None:
     """Disallow user commands /toggleSandboxing and /setSandboxConfiguration for this thread.
 
     This is a thread-wide flag that can only be set programmatically via this API.
     When disabled, the UI commands that modify sandbox configuration are blocked.
     """
-    import os
-    payload = {'decision': 'disallow_user_commands'}
-    if reason is not None:
-        payload['reason'] = reason
-    db.append_event(
-        event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
-        type_='sandbox.control',
-        msg_id=None,
-        invoke_id=None,
-        payload=payload,
+    # Get current config to preserve settings
+    cfg = get_thread_sandbox_config(db, thread_id)
+    set_thread_sandbox_config(
+        db, thread_id,
+        enabled=cfg.enabled,
+        provider=cfg.provider,
+        settings=cfg.settings,
+        user_control_enabled=False,
+        reason=reason or "disable_user_sandbox_control"
     )
-
-
 def is_user_sandbox_control_enabled(db: "ThreadsDB", thread_id: str) -> bool:
     """Return True if user sandbox control commands are allowed for this thread.
 
-    Defaults to True (allowed) when no sandbox.control event exists.
+    Defaults to True (allowed) when no sandbox.config event exists.
     """
-    try:
-        cur = db.conn.execute(
-            """SELECT payload_json FROM events
-               WHERE thread_id=? AND type='sandbox.control'
-               ORDER BY event_seq DESC LIMIT 1""",
-            (thread_id,),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return True
-        import json
-        payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-        decision = payload.get('decision')
-        if decision == 'allow_user_commands':
-            return True
-        elif decision == 'disallow_user_commands':
-            return False
-        else:
-            # Unknown decision, default to True
-            return True
-    except Exception:
-        # If anything goes wrong, assume allowed (safe fallback)
-        return True
+    cfg = get_thread_sandbox_config(db, thread_id)
+    return cfg.user_control_enabled
 @dataclass
 class SrtSandboxConfiguration:
     """Metadata about the per-working-directory sandbox settings."""
