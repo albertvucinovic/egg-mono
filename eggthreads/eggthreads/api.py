@@ -151,7 +151,7 @@ def delete_message(db: ThreadsDB, thread_id: str, msg_id: str) -> None:
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.delete', payload={"reason": "user"}, msg_id=msg_id)
 
 
-def create_snapshot(db: ThreadsDB, thread_id: str) -> None:
+def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
     # Build from all events; you can optimize by reading from last snapshot seq later
     cur = db.conn.execute("SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC", (thread_id,))
     evs = cur.fetchall()
@@ -160,6 +160,7 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> None:
     last_seq = evs[-1]["event_seq"] if evs else -1
     db.conn.execute("UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?",
                     (json.dumps(snap), last_seq, thread_id))
+    return snap
 
 
 def delete_thread(db: ThreadsDB, thread_id: str) -> None:
