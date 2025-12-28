@@ -2651,7 +2651,33 @@ UI Indicators:
 
  • System Panel Title: Shows Sandboxing[ON] (green) or Sandboxing[OFF] (red)
  • Status based on: get_thread_sandbox_status() effectiveness check
- • Warning messages: Show if sandboxing enabled but provider unavailable'''
+ • Warning messages: Show if sandboxing enabled but provider unavailable
+
+                                                           4. User Sandbox Control
+
+User sandbox control determines whether the TUI commands /toggleSandboxing and
+/setSandboxConfiguration are allowed for a thread. By default, user control is
+enabled (True). It can be disabled programmatically via the eggthreads API.
+
+Control Methods:
+
+ 1 Via configuration: Include "user_control_enabled": false in any sandbox
+   configuration (JSON file or settings dict). When such a config is applied,
+   the UI commands will be blocked for that thread and its descendants.
+
+ 2 Via API functions:
+    • enable_user_sandbox_control(db, thread_id, reason) – allow UI commands
+    • disable_user_sandbox_control(db, thread_id, reason) – block UI commands
+    • is_user_sandbox_control_enabled(db, thread_id) – check current status
+
+ 3 Inheritance: The user_control_enabled flag is inherited through the same
+   sandbox.config event mechanism as other sandbox settings. Child threads
+   inherit the flag from their nearest ancestor.
+
+When user control is disabled, attempts to use /toggleSandboxing or
+/setSandboxConfiguration will show "User sandbox control is disabled for this
+thread" in the System panel. This allows parent threads to lock sandbox
+configuration for child threads (e.g., in puzzle solving or automated tasks).'''
                 self._log_system('Sandbox configuration help (see console for full).')
                 self._console_print_block('Sandbox Configuration', help_text.strip(), border_style='blue')
                 return
