@@ -369,6 +369,8 @@ class BwrapProvider:
             try:
                 prot_path = Path(protected).resolve()
                 if prot_path.exists():
+                    # Only protect if path is inside working directory
+                    _ = prot_path.relative_to(wd)
                     cmd.extend(["--ro-bind", str(prot_path), str(prot_path)])
             except (ValueError, Exception):
                 # Path not inside working directory or other error
