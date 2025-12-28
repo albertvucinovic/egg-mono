@@ -351,3 +351,118 @@ def test_user_control_default_true(eggthreads, tmp_path):
 
 if __name__ == '__main__':
     pytest.main([__file__])
+
+
+def test_user_control_api_config_interaction(eggthreads, tmp_path):
+    """Test interactions between config-based and API-based user control for all providers."""
+    db = eggthreads.ThreadsDB()
+    db.init_schema()
+    
+    providers = ["docker", "srt", "bwrap"]
+    
+    for provider in providers:
+        # Create fresh thread for each provider
+        root = eggthreads.create_root_thread(db, name=f"root_{provider}")
+        eggthreads.append_message(db, root, "system", "test")
+        
+        # Provider-specific base config
+        if provider == "docker":
+            config = {
+                "provider": "docker",
+                "image": "alpine:latest",
+                "network": "host",
+                "extra_args": ["--cap-drop", "ALL"]
+            }
+        elif provider == "srt":
+            config = {
+                "provider": "srt",
+                "filesystem": {"allowWrite": ["."]},
+                "network": {"allowedDomains": []}
+            }
+        else:  # bwrap
+            config = {
+                "provider": "bwrap"
+            }
+        
+        print(f"Testing provider: {provider}")
+        
+        # 1. Start with no config, user control should be True (default)
+        assert eggthreads.is_user_sandbox_control_enabled(db, root) is True
+        
+        # 2. Set config with user_control_enabled=False
+        config_with_false = config.copy()
+        config_with_false["user_control_enabled"] = False
+        eggthreads.set_thread_sandbox_config(
+            db, root, enabled=True, settings=config_with_false, reason="config_false"
+        )
+        assert eggthreads.is_user_sandbox_control_enabled(db, root) is False
+        
+        # Verify provider settings preserved
+        cfg = eggthreads.get_thread_sandbox_config(db, root)
+        assert cfg.provider == provider
+        # Check some provider-specific setting
+        if provider == "docker":
+            assert cfg.settings.get("image") == "alpine:latest"
+            assert cfg.settings.get("network") == "host"
+        elif provider == "srt":
+            assert "filesystem" in cfg.settings
+        
+        # 3. Enable via API
+        eggthreads.enable_user_sandbox_control(db, root, reason="api_enable")
+        assert eggthreads.is_user_sandbox_control_enabled(db, root) is True
+        
+        # Provider settings should still be intact
+        cfg = eggthreads.get_thread_sandbox_config(db, root)
+        assert cfg.provider == provider
+        if provider == "docker":
+            assert cfg.settings.get("image") == "alpine:latest"
+        
+        # 4. Disable via API
+        eggthreads.disable_user_sandbox_control(db, root, reason="api_disable")
+        assert eggthreads.is_user_sandbox_control_enabled(db, root) is False
+        
+        # 5. Set new config without user_control_enabled field
+        # Should keep current user_control_enabled (False) because not specified
+        config_without_flag = config.copy()
+        config_without_flag["extra"] = "new"
+        eggthreads.set_thread_sandbox_config(
+            db, root, enabled=True, settings=config_without_flag, reason="config_no_flag"
+        )
+        # Should still be False (inherited from previous config because flag not specified)
+        assert eggthreads.is_user_sandbox_control_enabled(db, root) is False
+        
+        # 6. Set config with user_control_enabled=True explicitly
+        config_with_true = config.copy()
+        config_with_true["user_control_enabled"] = True
+        eggthreads.set_thread_sandbox_config(
+            db, root, enabled=True, settings=config_with_true, reason="config_true"
+        )
+        assert eggthreads.is_user_sandbox_control_enabled(db, root) is True
+        
+        # 7. Set config via file with user_control_enabled=False
+        import json
+        from pathlib import Path
+        sandbox_dir = Path.cwd() / ".egg" / "sandbox"
+        sandbox_dir.mkdir(parents=True, exist_ok=True)
+        file_config = config.copy()
+        file_config["user_control_enabled"] = False
+        config_file = sandbox_dir / f"{provider}_file.json"
+        config_file.write_text(json.dumps(file_config), encoding="utf-8")
+        
+        # Create new thread for file test
+        thread2 = eggthreads.create_child_thread(db, root, name=f"child_{provider}")
+        eggthreads.set_thread_sandbox_config(
+            db, thread2, enabled=True, config_name=f"{provider}_file.json", reason="file"
+        )
+        assert eggthreads.is_user_sandbox_control_enabled(db, thread2) is False
+        cfg = eggthreads.get_thread_sandbox_config(db, thread2)
+        assert cfg.provider == provider
+        
+        # 8. Enable via API on file-configured thread
+        eggthreads.enable_user_sandbox_control(db, thread2, reason="api_enable_file")
+        assert eggthreads.is_user_sandbox_control_enabled(db, thread2) is True
+        
+        # Clean up file
+        config_file.unlink()
+    
+    print("All provider interaction tests passed")
