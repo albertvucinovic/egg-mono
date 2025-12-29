@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from unittest.mock import patch, AsyncMock
 
 import pytest
 
@@ -14,6 +15,8 @@ from eggthreads.api import (
     execute_bash_command_hidden,
     get_user_command_result,
     wait_for_user_command_result,
+    wait_for_user_command_result_async,
+    execute_bash_command_async,
 )
 
 
@@ -177,6 +180,110 @@ def test_wait_for_user_command_result_timeout(tmp_path):
 
     result = wait_for_user_command_result(db, thread_id, tool_call_id, timeout_sec=0.1)
     assert result is None
+
+
+def test_execute_bash_command_async_success(tmp_path):
+    """execute_bash_command_async returns result after publication."""
+    import asyncio
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+
+    # Mock execute_bash_command to return a known tool call ID
+    mock_tool_call_id = "mock-tc-123"
+    with patch('eggthreads.api.execute_bash_command', return_value=mock_tool_call_id) as mock_exec:
+        # Start the async call (it will call the mock and then wait for result)
+        # We also need to mock wait_for_user_command_result_async to return a result
+        # Actually we should let the real wait_for_user_command_result_async work,
+        # but we need to publish events for the mocked tool call ID.
+        # Let's do that by calling the real execute_bash_command_async, but with mocked execute_bash_command.
+        # We'll also need to ensure events are published for mock_tool_call_id before the async wait finishes.
+        # We'll publish immediately after the mock returns.
+        # However the async function calls wait_for_user_command_result_async which polls.
+        # We'll publish events before the polling starts.
+        # We'll use side_effect to publish events then return the mock ID.
+        def side_effect(db, thread_id, script, hidden=False):
+            # publish events for mock_tool_call_id
+            db.append_event(
+                event_id=f"finished-{mock_tool_call_id}",
+                thread_id=thread_id,
+                type_="tool_call.finished",
+                payload={"tool_call_id": mock_tool_call_id, "reason": "success", "output": "async result"},
+            )
+            db.append_event(
+                event_id=f"output-approval-{mock_tool_call_id}",
+                thread_id=thread_id,
+                type_="tool_call.output_approval",
+                payload={"tool_call_id": mock_tool_call_id, "decision": "whole", "preview": "async result"},
+            )
+            db.append_event(
+                event_id=f"tool-msg-{mock_tool_call_id}",
+                thread_id=thread_id,
+                type_="msg.create",
+                payload={
+                    "role": "tool",
+                    "tool_call_id": mock_tool_call_id,
+                    "content": "async result",
+                },
+            )
+            return mock_tool_call_id
+        mock_exec.side_effect = side_effect
+
+        result = asyncio.run(execute_bash_command_async(db, thread_id, "echo test", timeout_sec=1.0))
+        assert result == "async result"
+        # Verify that execute_bash_command was called with correct arguments
+        mock_exec.assert_called_once_with(db, thread_id, "echo test", hidden=False)
+
+
+def test_execute_bash_command_async_timeout(tmp_path):
+    """execute_bash_command_async returns None on timeout."""
+    import asyncio
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+
+    # Mock execute_bash_command to return a known ID, but do NOT publish events.
+    mock_tool_call_id = "mock-tc-456"
+    with patch('eggthreads.api.execute_bash_command', return_value=mock_tool_call_id):
+        result = asyncio.run(execute_bash_command_async(db, thread_id, "echo test", timeout_sec=0.01))
+        assert result is None
+
+
+def test_wait_for_user_command_result_async(tmp_path):
+    """Async wait function works."""
+    import asyncio
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+
+    tool_call_id = execute_bash_command(db, thread_id, "echo test")
+    # No publication yet
+    result = asyncio.run(wait_for_user_command_result_async(db, thread_id, tool_call_id, timeout_sec=0.01))
+    assert result is None
+
+    # Publish result
+    db.append_event(
+        event_id=f"finished-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.finished",
+        payload={"tool_call_id": tool_call_id, "reason": "success", "output": "async wait"},
+    )
+    db.append_event(
+        event_id=f"output-approval-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.output_approval",
+        payload={"tool_call_id": tool_call_id, "decision": "whole", "preview": "async wait"},
+    )
+    db.append_event(
+        event_id=f"tool-msg-{tool_call_id}",
+        thread_id=thread_id,
+        type_="msg.create",
+        payload={
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": "async wait",
+        },
+    )
+
+    result = asyncio.run(wait_for_user_command_result_async(db, thread_id, tool_call_id, timeout_sec=1.0))
+    assert result == "async wait"
 
 
 if __name__ == "__main__":

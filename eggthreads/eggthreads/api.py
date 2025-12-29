@@ -681,6 +681,34 @@ def wait_for_user_command_result(db: ThreadsDB, thread_id: str, tool_call_id: st
         time.sleep(poll_interval)
     return None
 
+async def wait_for_user_command_result_async(db: ThreadsDB, thread_id: str, tool_call_id: str,
+                                             timeout_sec: float = 30.0, poll_interval: float = 0.1) -> Optional[str]:
+    """Async version of wait_for_user_command_result."""
+    import asyncio
+    from .tool_state import build_tool_call_states
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    while loop.time() - start < timeout_sec:
+        states = build_tool_call_states(db, thread_id)
+        tc = states.get(tool_call_id)
+        if tc is not None and tc.published:
+            return get_user_command_result(db, thread_id, tool_call_id)
+        await asyncio.sleep(poll_interval)
+    return None
+
+
+async def execute_bash_command_async(db: ThreadsDB, thread_id: str, script: str, hidden: bool = False,
+                                     timeout_sec: float = 30.0, poll_interval: float = 0.1) -> Optional[str]:
+    """Execute a bash command as a user tool call and wait for its result asynchronously.
+
+    Returns the tool message content if the tool call finishes within timeout_sec,
+    otherwise None.
+    """
+    tool_call_id = execute_bash_command(db, thread_id, script, hidden=hidden)
+    return await wait_for_user_command_result_async(db, thread_id, tool_call_id,
+                                                    timeout_sec=timeout_sec,
+                                                    poll_interval=poll_interval)
+
 def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_dir: str, reason: str = "user") -> None:
     """Apply working directory configuration to all threads in a subtree."""
     for tid in collect_subtree(db, root_thread_id):
