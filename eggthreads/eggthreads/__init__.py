@@ -32,6 +32,10 @@ from .api import (
     word_count_from_events,
     set_subtree_working_directory,
     approve_tool_calls_for_thread,
+    execute_bash_command,
+    execute_bash_command_hidden,
+    get_user_command_result,
+    wait_for_user_command_result,
     duplicate_thread
 )  # type: ignore
 from .tool_state import (
@@ -87,6 +91,7 @@ __all__ = [
     'word_count_from_snapshot', 'word_count_from_events',
     'set_subtree_working_directory',
     'approve_tool_calls_for_thread',
+    'execute_bash_command', 'execute_bash_command_hidden', 'get_user_command_result', 'wait_for_user_command_result',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
     'discover_runner_actionable',
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',

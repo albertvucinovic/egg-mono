@@ -574,6 +574,112 @@ def approve_tool_calls_for_thread(db, thread_id, decision='all-in-turn', reason=
         payload=payload,
     )
 
+def execute_bash_command(db: ThreadsDB, thread_id: str, script: str, hidden: bool = False) -> str:
+    """Execute a bash command as a user tool call (RA3).
+
+    This mimics the UI's $ (visible) and $$ (hidden) commands. It appends a
+    user message with a tool_call for the 'bash' tool, automatically approves
+    it, and returns the tool_call_id.
+
+    Args:
+        db: ThreadsDB instance.
+        thread_id: The thread where the command should be executed.
+        script: Bash script to run.
+        hidden: If True, the command is marked no_api and its output will not
+                be shown to the LLM (corresponds to '$$').
+
+    Returns:
+        The tool_call_id of the created tool call, which can be used to later
+        retrieve the result via get_user_command_result.
+    """
+    import os
+    tool_call_id = _ulid_like()
+    tool_call = {
+        'id': tool_call_id,
+        'type': 'function',
+        'function': {
+            'name': 'bash',
+            'arguments': json.dumps({'script': script}, ensure_ascii=False),
+        },
+    }
+    extra = {
+        'tool_calls': [tool_call],
+        'keep_user_turn': True,
+        'user_command_type': '$$' if hidden else '$',
+    }
+    if hidden:
+        extra['no_api'] = True
+    prefix = '$$ ' if hidden else '$ '
+    append_message(db, thread_id, 'user', f"{prefix}{script}", extra=extra)
+    approve_tool_calls_for_thread(db, thread_id, decision='granted',
+                                  reason='Auto-approved as user-initiated bash command',
+                                  tool_call_id=tool_call_id)
+    return tool_call_id
+
+
+def execute_bash_command_hidden(db: ThreadsDB, thread_id: str, script: str) -> str:
+    """Convenience wrapper for execute_bash_command with hidden=True."""
+    return execute_bash_command(db, thread_id, script, hidden=True)
+
+
+def get_user_command_result(db: ThreadsDB, thread_id: str, tool_call_id: str) -> Optional[str]:
+    """Retrieve the tool message content for a user command tool call.
+
+    Returns the content of the tool message that corresponds to the given
+    tool_call_id, if such a message has been published (state TC6). If the
+    tool call is not yet published, returns None.
+
+    Args:
+        db: ThreadsDB instance.
+        thread_id: The thread containing the tool call.
+        tool_call_id: The tool call ID returned by execute_bash_command.
+
+    Returns:
+        The content string of the tool message, or None if not yet published.
+    """
+    import json as _json
+    cur = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC",
+        (thread_id,),
+    )
+    for (pj,) in cur.fetchall():
+        try:
+            payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except Exception:
+            continue
+        if payload.get('role') == 'tool' and payload.get('tool_call_id') == tool_call_id:
+            return payload.get('content')
+    return None
+
+
+def wait_for_user_command_result(db: ThreadsDB, thread_id: str, tool_call_id: str,
+                                 timeout_sec: float = 30.0, poll_interval: float = 0.1) -> Optional[str]:
+    """Wait for a user command tool call to finish and return its result.
+
+    Polls the thread's tool call state until the tool call is published (TC6)
+    or the timeout expires. Returns the tool message content if published,
+    otherwise None.
+
+    Args:
+        db: ThreadsDB instance.
+        thread_id: The thread containing the tool call.
+        tool_call_id: The tool call ID returned by execute_bash_command.
+        timeout_sec: Maximum seconds to wait.
+        poll_interval: Seconds between polls.
+
+    Returns:
+        The content string of the tool message, or None on timeout.
+    """
+    import time
+    from .tool_state import build_tool_call_states
+    start = time.time()
+    while time.time() - start < timeout_sec:
+        states = build_tool_call_states(db, thread_id)
+        tc = states.get(tool_call_id)
+        if tc is not None and tc.published:
+            return get_user_command_result(db, thread_id, tool_call_id)
+        time.sleep(poll_interval)
+    return None
 
 def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_dir: str, reason: str = "user") -> None:
     """Apply working directory configuration to all threads in a subtree."""
