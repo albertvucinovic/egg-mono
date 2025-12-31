@@ -101,6 +101,40 @@ def get_mandatory_protected_paths() -> List[str]:
     ]
 
 
+_default_docker_image_cache = None
+
+def _default_docker_image() -> str:
+    """Return the default Docker image for sandboxing.
+    
+    If the locally built egg-sandbox image exists, use that.
+    Otherwise fall back to python:3.12-slim.
+    """
+    global _default_docker_image_cache
+    if _default_docker_image_cache is not None:
+        return _default_docker_image_cache
+    
+    # Check if docker CLI is available
+    import subprocess
+    try:
+        # First, check if docker is reachable
+        subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=5)
+    except Exception:
+        # Docker not available, fall back to public image
+        _default_docker_image_cache = "python:3.12-slim"
+        return _default_docker_image_cache
+    
+    # Docker is available, check for local egg-sandbox image
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", "egg-sandbox"],
+            capture_output=True,
+            check=True,
+            timeout=5,
+        )
+        _default_docker_image_cache = "egg-sandbox"
+    except Exception:
+        _default_docker_image_cache = "python:3.12-slim"
+
 def get_provider_default_config(provider_name: str) -> Dict[str, object]:
     """Return default configuration suitable for a specific provider.
     
@@ -113,7 +147,7 @@ def get_provider_default_config(provider_name: str) -> Dict[str, object]:
     if provider_name == "docker":
         return {
             "provider": "docker",
-            "image": "python:3.12-slim",
+            "image": _default_docker_image(),
             "network": "none",
             "workspace": "/workspace",
             "extra_mounts": [],
@@ -180,7 +214,6 @@ def apply_mandatory_protections(provider_name: str, settings: Dict[str, Any],
     # using the protected_paths list. They don't need settings modification.
     
     return result
-
 
 def normalize_provider_settings(provider_name: str, settings: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize settings for a specific provider, filling in defaults.
@@ -264,6 +297,7 @@ class SandboxProvider(Protocol):
             "available": available,
             "binary": srt_bin,
         }
+
 class DockerProvider:
     """Sandbox provider using Docker containers."""
     name = "docker"
@@ -281,10 +315,10 @@ class DockerProvider:
         if not self.is_available():
             # Normalize settings with provider-specific defaults
             settings = normalize_provider_settings("docker", settings)
-        
+
             return argv
         # Default settings
-        image = settings.get("image", "python:3.12-slim")
+        image = settings.get("image", _default_docker_image())
         network = settings.get("network", "none")
 
         # Ensure network is a string (srt-style settings use dict)
@@ -328,6 +362,7 @@ class DockerProvider:
         # The command to run inside container (argv)
         cmd.extend(argv)
         return cmd
+
     def get_status(self) -> Dict[str, Any]:
         available = self.is_available()
         return {
