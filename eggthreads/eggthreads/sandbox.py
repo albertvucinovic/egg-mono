@@ -294,7 +294,7 @@ class DockerProvider:
         extra_mounts = settings.get("extra_mounts", [])
         extra_args = settings.get("extra_args", [])
         # Build docker run command
-        cmd = ["docker", "run", "--rm"]
+        cmd = ["docker", "run", "--rm", "--user", f"{os.getuid()}"]
         # Network
         if network:
             cmd.extend(["--network", network])

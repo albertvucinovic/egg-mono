@@ -156,7 +156,7 @@ def create_default_tools() -> ToolRegistry:
         thread_id = (args.get('_thread_id') or '').strip()
 
         # Build argv for python -c.
-        base_argv = [sys.executable or 'python3', '-c', script]
+        base_argv = ['python3', '-c', script]
 
         cwd = None
         # Apply sandbox wrapper, respecting per-thread sandbox config.
