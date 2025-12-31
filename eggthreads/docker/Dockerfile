@@ -5,6 +5,9 @@ RUN apt-get update && apt-get install -y \
     bash \
     && rm -rf /var/lib/apt/lists/*
 
+COPY bin/applypatch /usr/bin/applypatch
+COPY bin/apply_patch.py /usr/bin/apply_patch.py
+
 RUN pip install numpy scipy
 
 WORKDIR /workspace
