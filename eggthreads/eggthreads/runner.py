@@ -96,11 +96,14 @@ class ThreadRunner:
         # the provider call and the event annotations stay in sync. Fall
         # back to the LLM client's current_model_key if needed.
         current_model: Optional[str] = None
+        concrete_model_info: Optional[Dict[str, Any]] = None
         try:
-            from .api import current_thread_model
+            from .api import current_thread_model, current_thread_model_info
             current_model = current_thread_model(self.db, self.thread_id)
+            concrete_model_info = current_thread_model_info(self.db, self.thread_id)
         except Exception:
             current_model = None
+            concrete_model_info = None
         if not current_model:
             try:
                 current_model = getattr(self.llm, 'current_model_key', None)
@@ -110,6 +113,18 @@ class ThreadRunner:
         # For LLM turns, configure the underlying client before we start
         # streaming so that the model used for the provider call matches
         # the model we record in events.
+        if ra.kind == 'RA1_llm' and current_model:
+            try:
+                if concrete_model_info:
+                    # Try set_model_with_config if available (eggllm >= 0.1.0)
+                    if hasattr(self.llm, 'set_model_with_config'):
+                        self.llm.set_model_with_config(current_model, concrete_model_info)
+                    else:
+                        self.llm.set_model(current_model)
+                else:
+                    self.llm.set_model(current_model)
+            except Exception:
+                pass
         if ra.kind == 'RA1_llm' and current_model:
             try:
                 self.llm.set_model(current_model)
