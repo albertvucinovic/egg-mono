@@ -110,3 +110,78 @@ class ModelRegistry:
             out.update(m["parameters"])
         return out
 
+    def get_concrete_model_info(self, display_key: str) -> Dict[str, Any]:
+        """Return a dict with nested providers structure containing the provider config and the specific model config."""
+        model_cfg = self.get_model_config(display_key)
+        if not model_cfg:
+            raise KeyError(f"Model not found: {display_key}")
+        provider = model_cfg.get("provider")
+        if not provider:
+            raise KeyError(f"Model {display_key} has no provider")
+        provider_cfg = self.provider_config(provider)
+        # Build provider dict with api_base, api_key_env, parameters
+        prov_dict = {}
+        if "api_base" in provider_cfg:
+            prov_dict["api_base"] = provider_cfg["api_base"]
+        if "api_key_env" in provider_cfg:
+            prov_dict["api_key_env"] = provider_cfg["api_key_env"]
+        if "parameters" in provider_cfg and isinstance(provider_cfg["parameters"], dict):
+            prov_dict["parameters"] = provider_cfg["parameters"]
+        # Build model dict without 'provider' key
+        model_dict = {k: v for k, v in model_cfg.items() if k != "provider"}
+        # Ensure model_name is present (should be)
+        if "model_name" not in model_dict:
+            model_dict["model_name"] = display_key
+        result = {
+            "providers": {
+                provider: {
+                    **prov_dict,
+                    "models": {
+                        display_key: model_dict
+                    }
+                }
+            }
+        }
+        return result
+
+    def add_ephemeral_from_concrete_info(self, concrete_info: Dict[str, Any], display_key: Optional[str] = None) -> str:
+        """Add provider and model config from concrete_info to the registry.
+
+        concrete_info must have a "providers" dict with exactly one provider,
+        and that provider must have a "models" dict with exactly one model.
+        If display_key is provided, the model will be registered under that
+        display key; otherwise the original key from concrete_info is used.
+        """
+        providers = concrete_info.get("providers")
+        if not isinstance(providers, dict):
+            raise ValueError("concrete_info must have a 'providers' dict")
+        if len(providers) != 1:
+            raise ValueError("concrete_info must contain exactly one provider")
+        provider_name = next(iter(providers))
+        provider_info = providers[provider_name]
+        # Update providers_config (overwrite if exists)
+        prov_cfg = {}
+        if "api_base" in provider_info:
+            prov_cfg["api_base"] = provider_info["api_base"]
+        if "api_key_env" in provider_info:
+            prov_cfg["api_key_env"] = provider_info["api_key_env"]
+        if "parameters" in provider_info and isinstance(provider_info["parameters"], dict):
+            prov_cfg["parameters"] = provider_info["parameters"]
+        self.providers_config[provider_name] = prov_cfg
+        # Process models
+        models = provider_info.get("models")
+        if not isinstance(models, dict):
+            raise ValueError("Provider info must have a 'models' dict")
+        if len(models) != 1:
+            raise ValueError("Provider must have exactly one model in concrete_info")
+        original_model_key, model_cfg = next(iter(models.items()))
+        final_display_key = display_key if display_key is not None else original_model_key
+        # Ensure provider field is set
+        model_cfg_with_provider = dict(model_cfg)
+        model_cfg_with_provider["provider"] = provider_name
+        # Add to models_config
+        self.models_config[final_display_key] = model_cfg_with_provider
+        # Also add to _ephemeral for cleanup (optional)
+        self._ephemeral[final_display_key] = model_cfg_with_provider
+        return final_display_key
+

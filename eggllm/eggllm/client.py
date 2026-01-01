@@ -51,6 +51,25 @@ class LLMClient:
         os.environ["DEFAULT_MODEL"] = resolved
         return resolved
 
+
+    def set_model_with_config(self, key: str, concrete_model_info: Optional[Dict[str, Any]] = None) -> str:
+        """Set the current model, optionally adding ephemeral configuration.
+
+        If concrete_model_info is provided, it should be a dict with the nested
+        providers structure (as returned by registry.get_concrete_model_info).
+        The provider and model config will be added as ephemeral entries,
+        making the model available even if not present in models.json.
+        """
+        if concrete_model_info is not None:
+            # Add ephemeral entry; the display key will be 'key'
+            self.registry.add_ephemeral_from_concrete_info(concrete_model_info, display_key=key)
+        resolved = self.registry.resolve(key)
+        if not resolved:
+            raise KeyError(f"Unknown model: {key}")
+        self.current_model_key = resolved
+        os.environ["EG_CHILD_MODEL"] = resolved
+        os.environ["DEFAULT_MODEL"] = resolved
+        return resolved
     # -------- Cost helpers -------------------------------------------------
     def current_model_cost_config(self, model_key: Optional[str] = None) -> Dict[str, Any]:
         """Return the per-1K-token cost configuration for a model.
@@ -360,4 +379,3 @@ class LLMClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
         requests.post(base_url, headers=headers, json=payload, timeout=30).raise_for_status()
-
