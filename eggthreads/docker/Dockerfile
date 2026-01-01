@@ -9,7 +9,8 @@ COPY bin/applypatch /usr/bin/applypatch
 COPY bin/apply_patch.py /usr/bin/apply_patch.py
 COPY bin/apply_patch /usr/bin/apply_patch
 
-RUN pip install numpy scipy
+RUN pip install numpy scipy pytest
+RUN pip install rich requests readchar
 
 WORKDIR /workspace
 CMD ["bash"]
