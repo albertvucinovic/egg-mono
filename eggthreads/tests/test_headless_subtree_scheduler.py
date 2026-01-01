@@ -28,6 +28,31 @@ import pytest
 import eggthreads as ts
 import examples.headless_subtree_scheduler as hs  # type: ignore
 
+import json
+import os
+
+def _create_dummy_models_json(tmp_path):
+    """Create a minimal models.json for testing."""
+    models_json = tmp_path / "models.json"
+    models_data = {
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "Test Model": {
+                        "model_name": "gpt-3.5-turbo"
+                    }
+                }
+            }
+        }
+    }
+    import json
+    models_json.write_text(json.dumps(models_data))
+    # Also create all-models.json (optional)
+    all_models_json = tmp_path / "all-models.json"
+    all_models_json.write_text(json.dumps({}))
+
 
 def _make_db(tmp_path: Path) -> ts.ThreadsDB:
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
@@ -277,7 +302,7 @@ def test_all_in_turn_approval_events_created(tmp_path, monkeypatch) -> None:
     """main() creates tool_call.approval events with 'all-in-turn' for each thread."""
 
     monkeypatch.chdir(tmp_path)
-
+    _create_dummy_models_json(tmp_path)
     # Dummy scheduler and helpers that do nothing
     class DummyScheduler:
         def __init__(self, db, root_thread_id, config=None, models_path=None, all_models_path=None, llm=None):
@@ -322,12 +347,12 @@ def test_all_in_turn_approval_events_created(tmp_path, monkeypatch) -> None:
     # All threads get the event
     assert all_in_turn_events == 6  # root + 19 children
 
-
 def test_tools_enabled_for_subtree(tmp_path, monkeypatch) -> None:
+    """main() calls set_subtree_tools_enabled for the batch root."""
     """main() calls set_subtree_tools_enabled for the batch root."""
 
     monkeypatch.chdir(tmp_path)
-
+    _create_dummy_models_json(tmp_path)
     calls = []
     original_set_subtree_tools_enabled = ts.set_subtree_tools_enabled
 
@@ -590,13 +615,7 @@ def test_periodic_reporter_output_format(tmp_path, capsys) -> None:
 def test_main_with_custom_models_path(tmp_path, monkeypatch) -> None:
     """main respects EGG_MODELS_PATH and EGG_ALL_MODELS_PATH environment variables."""
     monkeypatch.chdir(tmp_path)
-    # Create dummy model files
-    models_json = tmp_path / "custom_models.json"
-    models_json.write_text('{"models": {}}')
-    all_models_json = tmp_path / "custom_all_models.json"
-    all_models_json.write_text('{"providers": {}}')
-    monkeypatch.setenv("EGG_MODELS_PATH", str(models_json))
-    monkeypatch.setenv("EGG_ALL_MODELS_PATH", str(all_models_json))
+    _create_dummy_models_json(tmp_path)
     # Dummy scheduler
     class DummyScheduler:
         def __init__(self, db, root_thread_id, config=None, models_path=None, all_models_path=None, llm=None):
