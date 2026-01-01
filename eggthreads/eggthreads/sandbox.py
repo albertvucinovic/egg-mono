@@ -134,6 +134,7 @@ def _default_docker_image() -> str:
         _default_docker_image_cache = "egg-sandbox"
     except Exception:
         _default_docker_image_cache = "python:3.12-slim"
+    return _default_docker_image_cache
 
 def get_provider_default_config(provider_name: str) -> Dict[str, object]:
     """Return default configuration suitable for a specific provider.
