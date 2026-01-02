@@ -9,91 +9,6 @@ from .runner import ThreadRunner, RunnerConfig
 
 try:
     from eggllm.config import load_models_config
-    _EGGLLM_AVAILABLE = True
-except ImportError:
-    try:
-        from eggllm.eggllm.config import load_models_config
-        _EGGLLM_AVAILABLE = True
-    except ImportError:
-        _EGGLLM_AVAILABLE = False
-
-def _get_concrete_model_info(model_key: str, models_path: str = "models.json") -> Dict[str, Any]:
-    """Return nested providers dict for the given model_key."""
-    if not _EGGLLM_AVAILABLE:
-        return {}
-    try:
-        try:
-            models_config, providers_config = load_models_config(models_path)
-        except Exception as e:
-            raise
-        # Find model config
-        model_cfg = models_config.get(model_key)
-        if not model_cfg:
-            raise KeyError(f"Model {model_key} not found in {models_path}")
-        provider = model_cfg.get("provider")
-        if not provider:
-            raise KeyError(f"Model {model_key} has no provider")
-        provider_cfg = providers_config.get(provider, {})
-        # Build provider dict
-        prov_dict = {}
-        if "api_base" in provider_cfg:
-            prov_dict["api_base"] = provider_cfg["api_base"]
-        if "api_key_env" in provider_cfg:
-            prov_dict["api_key_env"] = provider_cfg["api_key_env"]
-        if "parameters" in provider_cfg and isinstance(provider_cfg["parameters"], dict):
-            prov_dict["parameters"] = provider_cfg["parameters"]
-        # Build model dict without provider key
-        model_dict = {k: v for k, v in model_cfg.items() if k != "provider"}
-        if "model_name" not in model_dict:
-            model_dict["model_name"] = model_key
-        return {
-            "providers": {
-                provider: {
-                    **prov_dict,
-                    "models": {
-                        model_key: model_dict
-                    }
-                }
-            }
-        }
-    except Exception:
-        # If anything goes wrong, return empty dict (no concrete info)
-        return {}
-
-try:
-    from eggllm.config import load_models_config
-    from eggllm.registry import Registry
-    HAS_EGGLLM = True
-except ImportError:
-    try:
-        from eggllm.eggllm.config import load_models_config
-        from eggllm.eggllm.registry import Registry
-        HAS_EGGLLM = True
-    except ImportError:
-        HAS_EGGLLM = False
-        load_models_config = None
-        Registry = None
-
-
-def _get_concrete_model_info(model_key: str, models_path: str = "models.json") -> dict:
-    """Return nested providers dict containing provider and model config for the given model_key.
-    
-    If eggllm is not available, raises ImportError.
-    If model_key not found in models.json, raises ValueError.
-    """
-    if not HAS_EGGLLM:
-        raise ImportError("eggllm not available; cannot compute concrete model info")
-    models_config, providers_config = load_models_config(models_path)
-    if model_key not in models_config:
-        raise ValueError(f"Model key '{model_key}' not found in models config")
-    # Build a Registry instance to reuse its get_concrete_model_info method
-    reg = Registry(models_config, providers_config)
-    return reg.get_concrete_model_info(model_key)
-
-
-
-try:
-    from eggllm.config import load_models_config
     from eggllm.registry import ModelRegistry
     from eggllm.catalog import AllModelsCatalog
     EGGLLM_AVAILABLE = True
@@ -188,6 +103,7 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
         raise ValueError(f"Model key '{model_key}' not found in {models_path}")
     # Old flat format not supported
     raise ValueError(f"Model key '{model_key}' not found in {models_path}")
+
 def _ulid_like() -> str:
     # Real ULID using Crockford's Base32. Minimal local implementation to avoid extra deps.
     import os, time
