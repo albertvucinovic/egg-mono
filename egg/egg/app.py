@@ -1406,13 +1406,19 @@ class EggDisplayApp:
             # Fallback plain
             self.console.print(f"{title}\n{text}")
 
-    def _format_model_info(self, concrete_model_info):
+    def _format_model_info(self, concrete_model_info, model_key=None):
         """Format concrete model info dict as a human-readable string."""
-        if not concrete_model_info:
-            return "No concrete configuration available."
+        if not concrete_model_info or concrete_model_info == {}:
+            if model_key:
+                return f"Model: {model_key}\nNo concrete configuration available."
+            else:
+                return "No concrete configuration available."
         import json
         # Pretty print the nested dict as JSON with indentation
-        return json.dumps(concrete_model_info, indent=2)
+        result = json.dumps(concrete_model_info, indent=2)
+        if model_key:
+            return f"Model: {model_key}\n{result}"
+        return result
 
     # ---------------- Input and commands ----------------
     def _handle_key(self, key: str) -> bool:
@@ -2321,7 +2327,7 @@ class EggDisplayApp:
                 create_snapshot(self.db, self.current_thread)
                 # Get concrete configuration and display a static view box
                 concrete = current_thread_model_info(self.db, self.current_thread)
-                formatted = self._format_model_info(concrete)
+                formatted = self._format_model_info(concrete, arg2)
                 self._log_system('Model set (see console for full).')
                 self._console_print_block('Model', formatted, border_style='blue')
             else:
@@ -2329,12 +2335,9 @@ class EggDisplayApp:
                 cur_model = self._current_model_for_thread(self.current_thread)
                 if cur_model:
                     concrete = current_thread_model_info(self.db, self.current_thread)
-                    if concrete:
-                        formatted = self._format_model_info(concrete)
-                        self._log_system("Current model configuration (see console).")
-                        self._console_print_block("Model", formatted, border_style="blue")
-                    else:
-                        self._log_system(f"Current model: {cur_model} (no concrete config)")
+                    formatted = self._format_model_info(concrete, cur_model)
+                    self._log_system("Current model configuration (see console).")
+                    self._console_print_block("Model", formatted, border_style="blue")
                 else:
                     self._log_system("No model selected for this thread.")
 
