@@ -7,7 +7,105 @@ from .db import ThreadsDB, ThreadRow
 from .snapshot import SnapshotBuilder
 from .runner import ThreadRunner, RunnerConfig
 
+try:
+    from eggllm.config import load_models_config
+    _EGGLLM_AVAILABLE = True
+except ImportError:
+    _EGGLLM_AVAILABLE = False
 
+def _get_concrete_model_info(model_key: str, models_path: str = "models.json") -> Dict[str, Any]:
+    """Return nested providers dict for the given model_key."""
+    if not _EGGLLM_AVAILABLE:
+        return {}
+    try:
+        models_config, providers_config = load_models_config(models_path)
+        # Find model config
+        model_cfg = models_config.get(model_key)
+        if not model_cfg:
+            raise KeyError(f"Model {model_key} not found in {models_path}")
+        provider = model_cfg.get("provider")
+        if not provider:
+            raise KeyError(f"Model {model_key} has no provider")
+        provider_cfg = providers_config.get(provider, {})
+        # Build provider dict
+        prov_dict = {}
+        if "api_base" in provider_cfg:
+            prov_dict["api_base"] = provider_cfg["api_base"]
+        if "api_key_env" in provider_cfg:
+            prov_dict["api_key_env"] = provider_cfg["api_key_env"]
+        if "parameters" in provider_cfg and isinstance(provider_cfg["parameters"], dict):
+            prov_dict["parameters"] = provider_cfg["parameters"]
+        # Build model dict without provider key
+        model_dict = {k: v for k, v in model_cfg.items() if k != "provider"}
+        if "model_name" not in model_dict:
+            model_dict["model_name"] = model_key
+        return {
+            "providers": {
+                provider: {
+                    **prov_dict,
+                    "models": {
+                        model_key: model_dict
+                    }
+                }
+            }
+        }
+    except Exception:
+        # If anything goes wrong, return empty dict (no concrete info)
+        return {}
+
+try:
+    from eggllm.config import load_models_config
+    from eggllm.registry import Registry
+    HAS_EGGLLM = True
+except ImportError:
+    HAS_EGGLLM = False
+    load_models_config = None
+    Registry = None
+
+
+def _get_concrete_model_info(model_key: str, models_path: str = "models.json") -> dict:
+    """Return nested providers dict containing provider and model config for the given model_key.
+    
+    If eggllm is not available, raises ImportError.
+    If model_key not found in models.json, raises ValueError.
+    """
+    if not HAS_EGGLLM:
+        raise ImportError("eggllm not available; cannot compute concrete model info")
+    models_config, providers_config = load_models_config(models_path)
+    if model_key not in models_config:
+        raise ValueError(f"Model key '{model_key}' not found in models config")
+    # Build a Registry instance to reuse its get_concrete_model_info method
+    reg = Registry(models_config, providers_config)
+    return reg.get_concrete_model_info(model_key)
+
+
+
+try:
+    from eggllm.config import load_models_config
+    from eggllm.registry import ModelRegistry
+    from eggllm.catalog import AllModelsCatalog
+    EGGLLM_AVAILABLE = True
+except ImportError:
+    EGGLLM_AVAILABLE = False
+
+
+def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
+    """Return nested providers dict for a given model key.
+    
+    Raises ValueError if model_key not found or eggllm not available.
+    """
+    if not EGGLLM_AVAILABLE:
+        raise ValueError("eggllm not installed, cannot compute concrete model info")
+    models_config, providers_config = load_models_config(models_path)
+    catalog = AllModelsCatalog(None)  # dummy catalog
+    registry = ModelRegistry(models_config, providers_config, catalog)
+    if model_key not in models_config:
+        # try to resolve aliases
+        resolved = registry.resolve(model_key)
+        if resolved is None:
+            raise ValueError(f"Model key '{model_key}' not found in {models_path}")
+        model_key = resolved
+    return registry.get_concrete_model_info(model_key)
 def _ulid_like() -> str:
     # Real ULID using Crockford's Base32. Minimal local implementation to avoid extra deps.
     import os, time
@@ -324,25 +422,37 @@ def resume_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='control.resume', payload={"reason": reason})
 
 
-def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str = 'user') -> None:
+def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str = 'user',
+                         concrete_model_info: Optional[Dict[str, Any]] = None,
+                         models_path: str = "models.json") -> None:
     """Append a model.switch event to a thread.
 
     This is the authoritative record of model selection for a thread.
     The ThreadRunner and UIs should not infer the active model from
     message payloads; they should instead call current_thread_model(),
     which uses these events.
+
+    If concrete_model_info is not provided, it will be computed from
+    models.json (if eggllm is available). If eggllm is not available,
+    the field will be omitted.
     """
+    payload = {
+        'model_key': model_key,
+        'reason': reason,
+    }
+    if concrete_model_info is None:
+        try:
+            concrete_model_info = _get_concrete_model_info(model_key, models_path)
+        except Exception:
+            concrete_model_info = {}
+    if concrete_model_info:
+        payload['concrete_model_info'] = concrete_model_info
     db.append_event(
         event_id=_ulid_like(),
         thread_id=thread_id,
         type_='model.switch',
-        payload={
-            'model_key': model_key,
-            'reason': reason,
-        },
+        payload=payload,
     )
-
-
 def current_thread_model(db: ThreadsDB, thread_id: str) -> Optional[str]:
     """Return the effective model for a thread.
 
@@ -385,6 +495,29 @@ def current_thread_model(db: ThreadsDB, thread_id: str) -> Optional[str]:
     return model_key
 
 
+
+def current_thread_model_info(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the concrete_model_info dict from the most recent model.switch event.
+    
+    Returns None if no model.switch event exists or if the payload lacks
+    concrete_model_info.
+    """
+    import json
+    try:
+        cur = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='model.switch' ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            try:
+                payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except Exception:
+                payload = {}
+            return payload.get('concrete_model_info')
+    except Exception:
+        pass
+    return None
 def get_thread_working_directory(db: ThreadsDB, thread_id: str) -> Path:
     from pathlib import Path
     import json
