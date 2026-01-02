@@ -48,6 +48,7 @@ from eggthreads import (  # type: ignore
     approve_tool_calls_for_thread,
     pause_thread,
     resume_thread,
+    current_thread_model_info,
 )
 from eggthreads import (  # type: ignore
     get_sandbox_status,
@@ -1405,6 +1406,14 @@ class EggDisplayApp:
             # Fallback plain
             self.console.print(f"{title}\n{text}")
 
+    def _format_model_info(self, concrete_model_info):
+        """Format concrete model info dict as a human-readable string."""
+        if not concrete_model_info:
+            return "No concrete configuration available."
+        import json
+        # Pretty print the nested dict as JSON with indentation
+        return json.dumps(concrete_model_info, indent=2)
+
     # ---------------- Input and commands ----------------
     def _handle_key(self, key: str) -> bool:
         # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits
@@ -2310,8 +2319,25 @@ class EggDisplayApp:
                     },
                 )
                 create_snapshot(self.db, self.current_thread)
-                self._log_system(f"Model set to: {arg2}")
+                # Get concrete configuration and display a static view box
+                concrete = current_thread_model_info(self.db, self.current_thread)
+                formatted = self._format_model_info(concrete)
+                self._log_system('Model set (see console for full).')
+                self._console_print_block('Model', formatted, border_style='blue')
             else:
+                # Show current model configuration
+                cur_model = self._current_model_for_thread(self.current_thread)
+                if cur_model:
+                    concrete = current_thread_model_info(self.db, self.current_thread)
+                    if concrete:
+                        formatted = self._format_model_info(concrete)
+                        self._log_system("Current model configuration (see console).")
+                        self._console_print_block("Model", formatted, border_style="blue")
+                    else:
+                        self._log_system(f"Current model: {cur_model} (no concrete config)")
+                else:
+                    self._log_system("No model selected for this thread.")
+
                 try:
                     llm = self.llm_client
                     if not llm:
