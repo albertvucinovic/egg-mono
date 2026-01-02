@@ -401,5 +401,5 @@
       "api_key_env": "MISTRAL_API_KEY"
     }
   },
-  "default_model": "Qwen3 Coder Local"
+  "default_model": "openai 120b Local"
 }
