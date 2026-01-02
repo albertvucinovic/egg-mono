@@ -11,14 +11,21 @@ try:
     from eggllm.config import load_models_config
     _EGGLLM_AVAILABLE = True
 except ImportError:
-    _EGGLLM_AVAILABLE = False
+    try:
+        from eggllm.eggllm.config import load_models_config
+        _EGGLLM_AVAILABLE = True
+    except ImportError:
+        _EGGLLM_AVAILABLE = False
 
 def _get_concrete_model_info(model_key: str, models_path: str = "models.json") -> Dict[str, Any]:
     """Return nested providers dict for the given model_key."""
     if not _EGGLLM_AVAILABLE:
         return {}
     try:
-        models_config, providers_config = load_models_config(models_path)
+        try:
+            models_config, providers_config = load_models_config(models_path)
+        except Exception as e:
+            raise
         # Find model config
         model_cfg = models_config.get(model_key)
         if not model_cfg:
@@ -58,9 +65,14 @@ try:
     from eggllm.registry import Registry
     HAS_EGGLLM = True
 except ImportError:
-    HAS_EGGLLM = False
-    load_models_config = None
-    Registry = None
+    try:
+        from eggllm.eggllm.config import load_models_config
+        from eggllm.eggllm.registry import Registry
+        HAS_EGGLLM = True
+    except ImportError:
+        HAS_EGGLLM = False
+        load_models_config = None
+        Registry = None
 
 
 def _get_concrete_model_info(model_key: str, models_path: str = "models.json") -> dict:
@@ -86,7 +98,13 @@ try:
     from eggllm.catalog import AllModelsCatalog
     EGGLLM_AVAILABLE = True
 except ImportError:
-    EGGLLM_AVAILABLE = False
+    try:
+        from eggllm.eggllm.config import load_models_config
+        from eggllm.eggllm.registry import ModelRegistry
+        from eggllm.eggllm.catalog import AllModelsCatalog
+        EGGLLM_AVAILABLE = True
+    except ImportError:
+        EGGLLM_AVAILABLE = False
 
 
 def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
@@ -94,18 +112,82 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
     
     Raises ValueError if model_key not found or eggllm not available.
     """
-    if not EGGLLM_AVAILABLE:
-        raise ValueError("eggllm not installed, cannot compute concrete model info")
-    models_config, providers_config = load_models_config(models_path)
-    catalog = AllModelsCatalog(None)  # dummy catalog
-    registry = ModelRegistry(models_config, providers_config, catalog)
-    if model_key not in models_config:
-        # try to resolve aliases
-        resolved = registry.resolve(model_key)
-        if resolved is None:
-            raise ValueError(f"Model key '{model_key}' not found in {models_path}")
-        model_key = resolved
-    return registry.get_concrete_model_info(model_key)
+    # First try eggllm if available
+    try:
+        from eggllm.config import load_models_config
+        from eggllm.registry import ModelRegistry
+        from eggllm.catalog import AllModelsCatalog
+    except ImportError:
+        try:
+            from eggllm.eggllm.config import load_models_config
+            from eggllm.eggllm.registry import ModelRegistry
+            from eggllm.eggllm.catalog import AllModelsCatalog
+        except ImportError:
+            # eggllm not available, fall back to direct parsing
+            load_models_config = None
+    
+    if load_models_config is not None:
+        try:
+            models_config, providers_config = load_models_config(models_path)
+            catalog = AllModelsCatalog(None)  # dummy catalog
+            registry = ModelRegistry(models_config, providers_config, catalog)
+            if model_key not in models_config:
+                # try to resolve aliases
+                resolved = registry.resolve(model_key)
+                if resolved is None:
+                    raise ValueError(f"Model key '{model_key}' not found in {models_path}")
+                model_key = resolved
+            return registry.get_concrete_model_info(model_key)
+        except Exception:
+            # eggllm path failed, fall through to direct parsing
+            pass
+    
+    # Fallback: parse models.json directly
+    import json
+    import os.path
+    try:
+        with open(models_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        raise ValueError(f"Cannot read models file: {models_path}")
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid models file: {models_path}")
+    # New format with providers
+    if "providers" in data and isinstance(data["providers"], dict):
+        providers = data["providers"]
+        for provider_name, provider_cfg in providers.items():
+            if not isinstance(provider_cfg, dict):
+                continue
+            models_map = provider_cfg.get("models", {})
+            if not isinstance(models_map, dict):
+                continue
+            if model_key in models_map:
+                model_cfg = models_map[model_key]
+                if not isinstance(model_cfg, dict):
+                    model_cfg = {}
+                provider_dict = {}
+                if "api_base" in provider_cfg:
+                    provider_dict["api_base"] = provider_cfg["api_base"]
+                if "api_key_env" in provider_cfg:
+                    provider_dict["api_key_env"] = provider_cfg["api_key_env"]
+                if "parameters" in provider_cfg and isinstance(provider_cfg["parameters"], dict):
+                    provider_dict["parameters"] = provider_cfg["parameters"]
+                model_dict = {k: v for k, v in model_cfg.items() if k != "provider"}
+                if "model_name" not in model_dict:
+                    model_dict["model_name"] = model_key
+                return {
+                    "providers": {
+                        provider_name: {
+                            **provider_dict,
+                            "models": {
+                                model_key: model_dict
+                            }
+                        }
+                    }
+                }
+        raise ValueError(f"Model key '{model_key}' not found in {models_path}")
+    # Old flat format not supported
+    raise ValueError(f"Model key '{model_key}' not found in {models_path}")
 def _ulid_like() -> str:
     # Real ULID using Crockford's Base32. Minimal local implementation to avoid extra deps.
     import os, time
