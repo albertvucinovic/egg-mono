@@ -2312,7 +2312,7 @@ class EggDisplayApp:
                 # user-level notification that is excluded from LLM
                 # context (no_api=True) but visible in the transcript.
                 from eggthreads import set_thread_model  # type: ignore
-                set_thread_model(self.db, self.current_thread, arg2, reason='ui /model')
+                set_thread_model(self.db, self.current_thread, arg2, reason='ui /model', models_path=str(MODELS_PATH))
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.current_thread,
