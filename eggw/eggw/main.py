@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize database
     db = ThreadsDB()
+    db.init_schema()  # Create tables if they don't exist
 
     # Load models
     models_config = load_models_config()
