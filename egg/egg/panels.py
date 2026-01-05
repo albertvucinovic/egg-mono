@@ -408,6 +408,13 @@ class PanelsMixin:
         except Exception:
             self._last_printed_seq_by_thread[tid] = self._last_printed_seq_by_thread.get(tid, -1)
 
+        # Separator line between static view and dynamic panels
+        try:
+            from rich.rule import Rule
+            self.console.print(Rule(style="dim"))
+        except Exception:
+            self.console.print("─" * 40)
+
     def print_banner(self) -> None:
         """Print the static console banner (above the live panels)."""
         try:
