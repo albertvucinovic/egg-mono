@@ -7,3 +7,4 @@ doc/
 temp/
 venv/
 .beads
+__pycache__/
