@@ -16,6 +16,7 @@ import {
   createThread,
   deleteThread,
   duplicateThread,
+  openThread,
 } from "@/lib/api";
 import { useAppStore, Thread } from "@/lib/store";
 import clsx from "clsx";
@@ -67,7 +68,15 @@ function TreeNode({ thread, level }: TreeNodeProps) {
           isSelected && "bg-[#2a2a2a] border-l-2 border-blue-500"
         )}
         style={{ paddingLeft: `${level * 16 + 8}px` }}
-        onClick={() => setCurrentThreadId(thread.id)}
+        onClick={() => {
+          setCurrentThreadId(thread.id);
+          // Start scheduler for this thread
+          openThread(thread.id).then(() => {
+            addSystemLog(`Opened thread ${thread.id.slice(-8)}`, "info");
+          }).catch(() => {
+            addSystemLog(`Failed to open thread`, "error");
+          });
+        }}
       >
         {thread.has_children ? (
           <button

@@ -56,9 +56,11 @@ from models import (
 
 # Global state
 db: Optional[ThreadsDB] = None
-scheduler: Optional[SubtreeScheduler] = None
 llm_client = None
 models_config: Dict[str, Any] = {}
+active_schedulers: Dict[str, Dict[str, Any]] = {}  # root_thread_id -> {"scheduler": SubtreeScheduler, "task": Task}
+MODELS_PATH = PROJECT_ROOT / "egg" / "models.json"
+ALL_MODELS_PATH = PROJECT_ROOT / "egg" / "all-models.json"
 
 
 def load_models_config() -> Dict[str, Any]:
@@ -104,14 +106,65 @@ async def lifespan(app: FastAPI):
     pass
 
 
-async def run_scheduler():
-    """Run the scheduler loop."""
-    global scheduler
-    if scheduler:
-        try:
-            await scheduler.run_async()
-        except Exception as e:
-            print(f"Scheduler error: {e}")
+def get_thread_root_id(thread_id: str) -> str:
+    """Return the root thread id for any thread id."""
+    if not db:
+        return thread_id
+    current = thread_id
+    while True:
+        parent = get_parent(db, current)
+        if not parent:
+            return current
+        current = parent
+
+
+def start_scheduler(root_tid: str) -> None:
+    """Start a scheduler for a root thread if not already running."""
+    global active_schedulers
+
+    if root_tid in active_schedulers:
+        return  # Already running
+
+    if not db:
+        return
+
+    poll_sec = float(os.environ.get("EGG_POLL_SEC", "0.15"))
+
+    sched = SubtreeScheduler(
+        db,
+        root_thread_id=root_tid,
+        models_path=str(MODELS_PATH),
+        all_models_path=str(ALL_MODELS_PATH),
+    )
+    task = asyncio.create_task(sched.run_forever(poll_sec=poll_sec))
+    active_schedulers[root_tid] = {"scheduler": sched, "task": task}
+    print(f"Started scheduler for root {root_tid[-8:]}")
+
+
+def stop_scheduler(root_tid: str) -> None:
+    """Stop a scheduler for a root thread."""
+    global active_schedulers
+
+    if root_tid not in active_schedulers:
+        return
+
+    entry = active_schedulers.pop(root_tid)
+    sched = entry.get("scheduler")
+    task = entry.get("task")
+
+    if sched:
+        sched.stop()
+    if task:
+        task.cancel()
+
+    print(f"Stopped scheduler for root {root_tid[-8:]}")
+
+
+def ensure_scheduler_for(thread_id: str) -> None:
+    """Ensure a scheduler is running for the thread's root."""
+    root_id = get_thread_root_id(thread_id)
+    if root_id not in active_schedulers:
+        start_scheduler(root_id)
 
 
 app = FastAPI(
@@ -329,8 +382,32 @@ async def send_message(thread_id: str, request: SendMessageRequest):
     # Append user message
     msg_id = append_message(db, thread_id, role="user", content=request.content)
 
-    # The scheduler will pick up the thread and generate a response
+    # Ensure scheduler is running for this thread's root
+    ensure_scheduler_for(thread_id)
+
     return {"status": "sent", "message_id": msg_id}
+
+
+@app.post("/api/threads/{thread_id}/open")
+async def open_thread(thread_id: str):
+    """Open a thread - starts its scheduler if not already running."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    # Ensure scheduler is running for this thread's root
+    ensure_scheduler_for(thread_id)
+
+    root_id = get_thread_root_id(thread_id)
+    return {
+        "status": "ok",
+        "thread_id": thread_id,
+        "root_id": root_id,
+        "scheduler_running": root_id in active_schedulers,
+    }
 
 
 # --- Model endpoints ---
