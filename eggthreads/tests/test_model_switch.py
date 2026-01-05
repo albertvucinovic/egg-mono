@@ -411,6 +411,82 @@ def test_runner_uses_concrete_model_info(eggthreads, tmp_path):
     mock_llm.set_model_with_config.assert_called_once_with("MyCustomModel", concrete)
 
 
+def test_create_root_thread_defaults_to_models_json_default(eggthreads, tmp_path):
+    """Test that create_root_thread without initial_model_key defaults to the default_model from models.json."""
+    from eggthreads import ThreadsDB, create_root_thread, current_thread_model, current_thread_model_info
+
+    db_path = tmp_path / "threads.sqlite"
+    db = ThreadsDB(db_path)
+    db.init_schema()
+
+    # Create models.json with a default_model
+    models_json = tmp_path / "models.json"
+    models_json.write_text(json.dumps({
+        "default_model": "DefaultGPT",
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "DefaultGPT": {
+                        "model_name": "gpt-4",
+                        "max_tokens": 4096,
+                    },
+                    "AlternateModel": {
+                        "model_name": "gpt-3.5-turbo",
+                        "max_tokens": 2048,
+                    }
+                }
+            }
+        }
+    }))
+
+    # Create thread WITHOUT specifying initial_model_key - should default to DefaultGPT
+    tid = create_root_thread(db, name="test", models_path=str(models_json))
+
+    # Verify the model is set to the default
+    assert current_thread_model(db, tid) == "DefaultGPT"
+
+    # Verify model.switch event was created with reason='initial'
+    events = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='model.switch'",
+        (tid,)
+    ).fetchall()
+    assert len(events) == 1
+    payload = json.loads(events[0][0])
+    assert payload['model_key'] == 'DefaultGPT'
+    assert payload['reason'] == 'initial'
+
+    # Verify concrete_model_info is populated
+    assert 'concrete_model_info' in payload
+    concrete = payload['concrete_model_info']
+    assert 'providers' in concrete
+    assert 'DefaultGPT' in concrete['providers']['openai']['models']
+
+
+def test_create_root_thread_without_models_json_has_no_model(eggthreads, tmp_path):
+    """Test that create_root_thread without models.json and no initial_model_key has no model."""
+    from eggthreads import ThreadsDB, create_root_thread, current_thread_model
+
+    db_path = tmp_path / "threads.sqlite"
+    db = ThreadsDB(db_path)
+    db.init_schema()
+
+    # Create thread without models.json and without initial_model_key
+    # Use a non-existent path for models_path
+    tid = create_root_thread(db, name="test", models_path="/nonexistent/models.json")
+
+    # Verify no model is set
+    assert current_thread_model(db, tid) is None
+
+    # Verify no model.switch events
+    events = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='model.switch'",
+        (tid,)
+    ).fetchall()
+    assert len(events) == 0
+
+
 def test_model_switch_inheritance_with_concrete_info(eggthreads, tmp_path):
     """Test that child threads can have their own concrete_model_info independent of parent."""
     from eggthreads import ThreadsDB, set_thread_model, current_thread_model, current_thread_model_info

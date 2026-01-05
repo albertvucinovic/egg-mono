@@ -22,6 +22,23 @@ except ImportError:
         EGGLLM_AVAILABLE = False
 
 
+def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
+    """Return the default_model key from models.json, or None if unavailable."""
+    import os.path
+    if not os.path.exists(models_path):
+        return None
+    try:
+        with open(models_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            dm = data.get('default_model')
+            if isinstance(dm, str) and dm.strip():
+                return dm.strip()
+    except Exception:
+        pass
+    return None
+
+
 def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
     """Return nested providers dict for a given model key.
     
@@ -125,10 +142,17 @@ def _ulid_like() -> str:
 def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_key: Optional[str] = None,
                        models_path: str = "models.json") -> str:
     tid = _ulid_like()
-    db.create_thread(thread_id=tid, name=name, parent_id=None, initial_model_key=initial_model_key, depth=0)
-    # Emit model.switch event with concrete_model_info if initial_model_key is set
-    if initial_model_key:
-        set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path)
+
+    # If no initial_model_key is provided, default to the default_model from models.json
+    effective_model_key = initial_model_key
+    if effective_model_key is None:
+        effective_model_key = _get_default_model_key(models_path)
+
+    db.create_thread(thread_id=tid, name=name, parent_id=None, initial_model_key=effective_model_key, depth=0)
+
+    # Emit model.switch event with concrete_model_info if we have a model
+    if effective_model_key:
+        set_thread_model(db, tid, effective_model_key, reason='initial', models_path=models_path)
     return tid
 
 
