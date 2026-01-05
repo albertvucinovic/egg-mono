@@ -179,12 +179,14 @@ class PanelsMixin:
     def render_group(self) -> Group:
         """Render the panel group for the live display."""
         # Single-column layout, top-to-bottom:
+        #   (separator line)
         #   System
         #   Children
         #   Chat Messages
         #   (optional) Approval
         #   Input
-        children: List[Any] = []
+        from rich.rule import Rule
+        children: List[Any] = [Rule(style="dim")]  # Separator between static and live
         if self._panel_visible.get('system', True):
             children.append(self.system_output.render())
         if self._panel_visible.get('children', True):
@@ -407,13 +409,6 @@ class PanelsMixin:
             self._last_printed_seq_by_thread[tid] = last
         except Exception:
             self._last_printed_seq_by_thread[tid] = self._last_printed_seq_by_thread.get(tid, -1)
-
-        # Separator line between static view and dynamic panels
-        try:
-            from rich.rule import Rule
-            self.console.print(Rule(style="dim"))
-        except Exception:
-            self.console.print("─" * 40)
 
     def print_banner(self) -> None:
         """Print the static console banner (above the live panels)."""

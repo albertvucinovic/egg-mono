@@ -32,6 +32,7 @@ Commands:
     /toolsSecrets <on|off>, /toolsStatus
   Display:
     /togglePanel (chat|children|system)
+    /toggleBorders
     /redraw
   Other:
     /enterMode <send|newline>, /cost, /paste, /quit
