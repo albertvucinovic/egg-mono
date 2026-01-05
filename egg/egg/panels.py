@@ -327,21 +327,29 @@ class PanelsMixin:
                     else:
                         args_str = str(args or '')
                     lines.append(f"{name}({args_str})")
-                tc_title = 'Tool Calls'
+                # Build consistent title bar like other boxes
+                tc_title_parts = ['[bold yellow]Tool Calls[/bold yellow]']
+                if model_key:
+                    tc_title_parts.append(f"[dim](model: {model_key})[/dim]")
                 if pm_tokens["tool_calls"]:
-                    tc_title += f" [dim](tok={pm_tokens['tool_calls']})[/dim]"
-                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold'), title=tc_title, border_style='yellow', box=self._get_static_box()))
+                    tc_title_parts.append(f"[dim](tok={pm_tokens['tool_calls']})[/dim]")
+                if ts_str:
+                    tc_title_parts.append(f"[dim]{ts_str}[/dim]")
+                if msg_id:
+                    tc_title_parts.append(f"[dim]{msg_id[-8:]}[/dim]")
+                tc_title = " | ".join(tc_title_parts)
+                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'), title=tc_title, border_style='yellow', box=self._get_static_box()))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
             if isinstance(tstream, dict) and tstream:
                 for nm, txt in tstream.items():
                     if txt:
-                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Output: {nm}', border_style='yellow', box=self._get_static_box()))
+                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=f'[bold yellow]Tool Output: {nm}[/bold yellow]', border_style='yellow', box=self._get_static_box()))
             tc_stream = m.get('tool_calls_stream') or {}
             if isinstance(tc_stream, dict) and tc_stream:
                 for nm, txt in tc_stream.items():
                     if txt:
-                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Call Args (streamed): {nm}', border_style='yellow', box=self._get_static_box()))
+                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=f'[bold yellow]Tool Call Args (streamed): {nm}[/bold yellow]', border_style='yellow', box=self._get_static_box()))
             return
 
         if role == 'tool':
@@ -364,8 +372,9 @@ class PanelsMixin:
     def console_print_block(self, title: str, text: str, border_style: str = 'blue') -> None:
         """Print a titled block to the console."""
         try:
-            # Parse rich markup within the text for colored segments
-            self.console.print(Panel(Text.from_markup(text), title=title, border_style=border_style, box=self._get_static_box()))
+            # Apply border_style as the text color for consistency
+            styled_text = Text(text, style=border_style)
+            self.console.print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
         except Exception:
             # Fallback plain
             self.console.print(f"{title}\n{text}")
