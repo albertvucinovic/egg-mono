@@ -86,9 +86,10 @@ async def lifespan(app: FastAPI):
     models_config = load_models_config()
 
     # Initialize LLM client
+    models_path = PROJECT_ROOT / "egg" / "models.json"
     try:
         from eggllm import LLMClient
-        llm_client = LLMClient(models_config)
+        llm_client = LLMClient(models_path=models_path)
     except Exception as e:
         print(f"Warning: Could not initialize LLM client: {e}")
         llm_client = None
