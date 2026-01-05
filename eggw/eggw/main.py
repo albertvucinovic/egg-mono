@@ -159,13 +159,17 @@ async def get_root_threads():
         raise HTTPException(status_code=503, detail="Database not initialized")
 
     threads = []
-    for t in list_root_threads(db):
-        children = list_children_ids(db, t.thread_id)
+    # list_root_threads returns thread IDs (strings), not ThreadRow objects
+    for thread_id in list_root_threads(db):
+        t = db.get_thread(thread_id)
+        if not t:
+            continue
+        children = list_children_ids(db, thread_id)
         threads.append(ThreadInfo(
-            id=t.thread_id,
+            id=thread_id,
             name=t.name,
             parent_id=None,
-            model_key=current_thread_model(db, t.thread_id),
+            model_key=current_thread_model(db, thread_id),
             has_children=len(children) > 0,
         ))
     return threads
