@@ -139,9 +139,18 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     tid = _ulid_like()
     db.create_thread(thread_id=tid, name=name, parent_id=parent_id, initial_model_key=initial_model_key, depth=depth)
 
-    # Emit model.switch event with concrete_model_info if initial_model_key is set
+    # Model inheritance: if initial_model_key is explicitly provided, use it.
+    # Otherwise, inherit from parent's model.switch event (including concrete_model_info).
     if initial_model_key:
+        # Explicit model specified - look it up from models_path
         set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path)
+    else:
+        # Inherit from parent: copy parent's model.switch event with concrete_model_info
+        parent_model = current_thread_model(db, parent_id)
+        if parent_model:
+            parent_concrete = current_thread_model_info(db, parent_id)
+            # Create model.switch event with inherited concrete_model_info (no models_path lookup needed)
+            set_thread_model(db, tid, parent_model, reason='inherited', concrete_model_info=parent_concrete)
 
     # Do not eagerly persist sandbox configuration on the child.
     # The effective sandbox config is resolved by inheriting the nearest

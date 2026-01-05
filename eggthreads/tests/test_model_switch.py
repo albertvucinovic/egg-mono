@@ -125,8 +125,8 @@ def test_current_thread_model_precedence(eggthreads, tmp_path):
 
 
 def test_model_inheritance_subthreads(eggthreads, tmp_path):
-    """Test that child threads do NOT inherit model from parent - they need explicit model.switch."""
-    from eggthreads import ThreadsDB, set_thread_model, current_thread_model, current_thread_model_info
+    """Test that child threads automatically inherit model from parent via create_child_thread."""
+    from eggthreads import ThreadsDB, create_child_thread, set_thread_model, current_thread_model, current_thread_model_info
 
     db_path = tmp_path / "threads.sqlite"
     db = ThreadsDB(db_path)
@@ -152,14 +152,24 @@ def test_model_inheritance_subthreads(eggthreads, tmp_path):
     }
     set_thread_model(db, parent, "GPT-4", concrete_model_info=concrete, reason="parent")
 
-    # Create child without explicit initial_model_key (using db.create_thread directly to avoid auto model.switch)
-    child = "child-1"
-    db.create_thread(thread_id=child, name="child", parent_id=parent, initial_model_key=None, depth=1)
+    # Create child WITHOUT initial_model_key - should automatically inherit from parent
+    child = create_child_thread(db, parent, name="child")
 
-    # Child should NOT inherit model automatically (inheritance is not automatic;
-    # child must have its own model.switch event or initial_model_key).
-    assert current_thread_model(db, child) is None
-    assert current_thread_model_info(db, child) is None
+    # Child should INHERIT model from parent automatically
+    assert current_thread_model(db, child) == "GPT-4"
+    # Child should also inherit concrete_model_info
+    child_concrete = current_thread_model_info(db, child)
+    assert child_concrete == concrete
+
+    # Verify the model.switch event has reason='inherited'
+    events = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='model.switch'",
+        (child,)
+    ).fetchall()
+    assert len(events) == 1
+    import json
+    payload = json.loads(events[0][0])
+    assert payload['reason'] == 'inherited'
 
 
 def test_initial_model_creates_switch_event(eggthreads, tmp_path):
