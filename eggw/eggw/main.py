@@ -148,12 +148,12 @@ async def get_threads():
 
     threads = []
     for t in list_threads(db):
-        children = list_children_ids(db, t.id)
+        children = list_children_ids(db, t.thread_id)
         threads.append(ThreadInfo(
-            id=t.id,
+            id=t.thread_id,
             name=t.name,
-            parent_id=t.parent_id,
-            model_key=current_thread_model(db, t.id),
+            parent_id=get_parent(db, t.thread_id),
+            model_key=current_thread_model(db, t.thread_id),
             has_children=len(children) > 0,
         ))
     return threads
@@ -167,12 +167,12 @@ async def get_root_threads():
 
     threads = []
     for t in list_root_threads(db):
-        children = list_children_ids(db, t.id)
+        children = list_children_ids(db, t.thread_id)
         threads.append(ThreadInfo(
-            id=t.id,
+            id=t.thread_id,
             name=t.name,
             parent_id=None,
-            model_key=current_thread_model(db, t.id),
+            model_key=current_thread_model(db, t.thread_id),
             has_children=len(children) > 0,
         ))
     return threads
@@ -188,12 +188,12 @@ async def get_thread(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    children = list_children_ids(db, t.id)
+    children = list_children_ids(db, t.thread_id)
     return ThreadInfo(
-        id=t.id,
+        id=t.thread_id,
         name=t.name,
-        parent_id=t.parent_id,
-        model_key=current_thread_model(db, t.id),
+        parent_id=get_parent(db, t.thread_id),
+        model_key=current_thread_model(db, t.thread_id),
         has_children=len(children) > 0,
     )
 
@@ -228,10 +228,10 @@ async def create_thread(request: CreateThreadRequest):
 
     t = db.get_thread(thread_id)
     return ThreadInfo(
-        id=t.id,
+        id=t.thread_id,
         name=t.name,
-        parent_id=t.parent_id,
-        model_key=current_thread_model(db, t.id),
+        parent_id=get_parent(db, t.thread_id),
+        model_key=current_thread_model(db, t.thread_id),
         has_children=False,
     )
 
@@ -259,10 +259,10 @@ async def duplicate_thread_endpoint(thread_id: str, name: Optional[str] = None):
     new_id = duplicate_thread(db, thread_id, new_name=name)
     t = db.get_thread(new_id)
     return ThreadInfo(
-        id=t.id,
+        id=t.thread_id,
         name=t.name,
-        parent_id=t.parent_id,
-        model_key=current_thread_model(db, t.id),
+        parent_id=get_parent(db, t.thread_id),
+        model_key=current_thread_model(db, t.thread_id),
         has_children=False,
     )
 
@@ -274,13 +274,14 @@ async def get_thread_children(thread_id: str):
         raise HTTPException(status_code=503, detail="Database not initialized")
 
     children = []
-    for child in list_children_with_meta(db, thread_id):
-        grandchildren = list_children_ids(db, child.id)
+    # list_children_with_meta returns tuples: (child_id, name, short_recap, created_at)
+    for child_id, name, short_recap, created_at in list_children_with_meta(db, thread_id):
+        grandchildren = list_children_ids(db, child_id)
         children.append(ThreadInfo(
-            id=child.id,
-            name=child.name,
+            id=child_id,
+            name=name,
             parent_id=thread_id,
-            model_key=current_thread_model(db, child.id),
+            model_key=current_thread_model(db, child_id),
             has_children=len(grandchildren) > 0,
         ))
     return children
