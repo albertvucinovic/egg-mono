@@ -94,22 +94,14 @@ async def lifespan(app: FastAPI):
         print(f"Warning: Could not initialize LLM client: {e}")
         llm_client = None
 
-    # Initialize scheduler with a default model key if available
-    default_model = next(iter(models_config.keys()), None)
-    if default_model and llm_client:
-        scheduler = SubtreeScheduler(
-            db=db,
-            llm_client=llm_client,
-            default_model_key=default_model,
-        )
-        # Start scheduler in background
-        asyncio.create_task(run_scheduler())
+    # Note: SubtreeScheduler requires a root_thread_id to watch.
+    # For per-thread scheduling, we'll start schedulers on-demand when messages are sent.
+    # Global scheduler initialization is skipped for now.
 
     yield
 
     # Cleanup
-    if scheduler:
-        scheduler.stop()
+    pass
 
 
 async def run_scheduler():
