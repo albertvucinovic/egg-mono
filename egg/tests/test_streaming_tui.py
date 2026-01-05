@@ -35,7 +35,7 @@ def _make_app(tmp_path, monkeypatch):
 
     import egg
 
-    monkeypatch.setattr(egg.EggDisplayApp, "_start_scheduler", lambda self, root_tid: None)
+    monkeypatch.setattr(egg.EggDisplayApp, "start_scheduler", lambda self, root_tid: None)
     return egg.EggDisplayApp()
 
 
@@ -88,9 +88,9 @@ def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypat
         chunk_seq=1,
     )
 
-    # Patch EventWatcher so _watch_thread runs the "preload" logic once and
+    # Patch EventWatcher so watch_thread runs the "preload" logic once and
     # then terminates (otherwise it polls forever).
-    import egg
+    import streaming
 
     class _NoOpWatcher:
         def __init__(self, *args, **kwargs):
@@ -100,23 +100,23 @@ def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypat
             if False:  # pragma: no cover - keep it an async generator
                 yield []
 
-    monkeypatch.setattr(egg, "EventWatcher", _NoOpWatcher)
+    monkeypatch.setattr(streaming, "EventWatcher", _NoOpWatcher)
 
-    asyncio.run(app._watch_thread(tid))
+    asyncio.run(app.watch_thread(tid))
 
     # 1) The chat panel should show that we are currently streaming.
-    panel_text = app._compose_chat_panel_text()
+    panel_text = app.compose_chat_panel_text()
     assert "Assistant (streaming)]" in panel_text
     assert "Hello ... world" in panel_text
 
     # 2) The thread list line should be labeled as STREAMING.
-    thread_line = app._format_thread_line(tid)
+    thread_line = app.format_thread_line(tid)
     assert "STREAMING" in thread_line
 
     # Once the stream is closed and the lease released, the streaming markers
     # must disappear from the TUI.
     asyncio.run(
-        app._ingest_event_for_live(
+        app.ingest_event_for_live(
             {
                 "type": "stream.close",
                 "invoke_id": invoke_id,
@@ -127,7 +127,7 @@ def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypat
     )
     app.db.release(tid, invoke_id)
 
-    panel_text2 = app._compose_chat_panel_text()
+    panel_text2 = app.compose_chat_panel_text()
     assert "Assistant (streaming)]" not in panel_text2
-    thread_line2 = app._format_thread_line(tid)
+    thread_line2 = app.format_thread_line(tid)
     assert "STREAMING" not in thread_line2
