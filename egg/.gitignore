@@ -6,3 +6,4 @@
 doc/
 temp/
 venv/
+__pycache__/
