@@ -125,11 +125,6 @@ class ThreadRunner:
                     self.llm.set_model(current_model)
             except Exception:
                 pass
-        if ra.kind == 'RA1_llm' and current_model:
-            try:
-                self.llm.set_model(current_model)
-            except Exception:
-                pass
 
         # Open streaming event tagged with model_key and kind so that
         # downstream boundary detection can distinguish RA1 from

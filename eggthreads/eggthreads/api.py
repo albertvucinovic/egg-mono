@@ -122,17 +122,26 @@ def _ulid_like() -> str:
     return ts + rd
 
 
-def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_key: Optional[str] = None) -> str:
+def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_key: Optional[str] = None,
+                       models_path: str = "models.json") -> str:
     tid = _ulid_like()
     db.create_thread(thread_id=tid, name=name, parent_id=None, initial_model_key=initial_model_key, depth=0)
+    # Emit model.switch event with concrete_model_info if initial_model_key is set
+    if initial_model_key:
+        set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path)
     return tid
 
 
-def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None) -> str:
+def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None,
+                        models_path: str = "models.json") -> str:
     parent = db.get_thread(parent_id)
     depth = (parent.depth + 1) if parent else 1
     tid = _ulid_like()
     db.create_thread(thread_id=tid, name=name, parent_id=parent_id, initial_model_key=initial_model_key, depth=depth)
+
+    # Emit model.switch event with concrete_model_info if initial_model_key is set
+    if initial_model_key:
+        set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path)
 
     # Do not eagerly persist sandbox configuration on the child.
     # The effective sandbox config is resolved by inheriting the nearest
