@@ -48,6 +48,7 @@ from eggthreads import (  # type: ignore
     approve_tool_calls_for_thread,
     pause_thread,
     resume_thread,
+    current_thread_model_info,
 )
 from eggthreads import (  # type: ignore
     get_sandbox_status,
@@ -187,7 +188,7 @@ class EggDisplayApp:
         # a persistent warning when tools are running without a
         # sandbox.
         self._sandbox_status: Dict[str, Any] = {}
-        self.current_thread: str = create_root_thread(self.db, name='Root')
+        self.current_thread: str = create_root_thread(self.db, name='Root', models_path=str(MODELS_PATH))
         append_message(self.db, self.current_thread, 'system', self.system_prompt)
         create_snapshot(self.db, self.current_thread)
 
@@ -1405,6 +1406,20 @@ class EggDisplayApp:
             # Fallback plain
             self.console.print(f"{title}\n{text}")
 
+    def _format_model_info(self, concrete_model_info, model_key=None):
+        """Format concrete model info dict as a human-readable string."""
+        if not concrete_model_info or concrete_model_info == {}:
+            if model_key:
+                return f"Model: {model_key}\nNo concrete configuration available."
+            else:
+                return "No concrete configuration available."
+        import json
+        # Pretty print the nested dict as JSON with indentation
+        result = json.dumps(concrete_model_info, indent=2)
+        if model_key:
+            return f"Model: {model_key}\n{result}"
+        return result
+
     # ---------------- Input and commands ----------------
     def _handle_key(self, key: str) -> bool:
         # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits
@@ -1880,7 +1895,7 @@ class EggDisplayApp:
         elif cmd == 'newThread':
             new_name = (arg or '').strip() or 'Root'
             cur_model_key = self._current_model_for_thread(self.current_thread) or None
-            new_root = create_root_thread(self.db, name=new_name, initial_model_key=cur_model_key)
+            new_root = create_root_thread(self.db, name=new_name, initial_model_key=cur_model_key, models_path=str(MODELS_PATH))
             append_message(self.db, new_root, 'system', self.system_prompt)
             create_snapshot(self.db, new_root)
             self._ensure_scheduler_for(new_root)
@@ -2297,7 +2312,7 @@ class EggDisplayApp:
                 # user-level notification that is excluded from LLM
                 # context (no_api=True) but visible in the transcript.
                 from eggthreads import set_thread_model  # type: ignore
-                set_thread_model(self.db, self.current_thread, arg2, reason='ui /model')
+                set_thread_model(self.db, self.current_thread, arg2, reason='ui /model', models_path=str(MODELS_PATH))
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.current_thread,
@@ -2310,8 +2325,22 @@ class EggDisplayApp:
                     },
                 )
                 create_snapshot(self.db, self.current_thread)
-                self._log_system(f"Model set to: {arg2}")
+                # Get concrete configuration and display a static view box
+                concrete = current_thread_model_info(self.db, self.current_thread)
+                formatted = self._format_model_info(concrete, arg2)
+                self._log_system('Model set (see console for full).')
+                self._console_print_block('Model', formatted, border_style='blue')
             else:
+                # Show current model configuration
+                cur_model = self._current_model_for_thread(self.current_thread)
+                if cur_model:
+                    concrete = current_thread_model_info(self.db, self.current_thread)
+                    formatted = self._format_model_info(concrete, cur_model)
+                    self._log_system("Current model configuration (see console).")
+                    self._console_print_block("Model", formatted, border_style="blue")
+                else:
+                    self._log_system("No model selected for this thread.")
+
                 try:
                     llm = self.llm_client
                     if not llm:
