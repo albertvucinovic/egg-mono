@@ -39,7 +39,7 @@ from eggthreads import (
     set_thread_model,
     duplicate_thread,
     approve_tool_calls_for_thread,
-    snapshot_token_stats,
+    total_token_stats,
 )
 
 from models import (
@@ -434,7 +434,7 @@ async def get_token_stats(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    stats = snapshot_token_stats(db, thread_id)
+    stats = total_token_stats(db, thread_id)
     return ThreadTokenStats(
         input_tokens=stats.get("input_tokens", 0),
         output_tokens=stats.get("output_tokens", 0),
