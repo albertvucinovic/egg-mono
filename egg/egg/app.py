@@ -188,7 +188,7 @@ class EggDisplayApp:
         # a persistent warning when tools are running without a
         # sandbox.
         self._sandbox_status: Dict[str, Any] = {}
-        self.current_thread: str = create_root_thread(self.db, name='Root')
+        self.current_thread: str = create_root_thread(self.db, name='Root', models_path=str(MODELS_PATH))
         append_message(self.db, self.current_thread, 'system', self.system_prompt)
         create_snapshot(self.db, self.current_thread)
 
@@ -1895,7 +1895,7 @@ class EggDisplayApp:
         elif cmd == 'newThread':
             new_name = (arg or '').strip() or 'Root'
             cur_model_key = self._current_model_for_thread(self.current_thread) or None
-            new_root = create_root_thread(self.db, name=new_name, initial_model_key=cur_model_key)
+            new_root = create_root_thread(self.db, name=new_name, initial_model_key=cur_model_key, models_path=str(MODELS_PATH))
             append_message(self.db, new_root, 'system', self.system_prompt)
             create_snapshot(self.db, new_root)
             self._ensure_scheduler_for(new_root)
