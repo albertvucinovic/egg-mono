@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  --panel-bg: #1a1a1a;
+  --panel-border: #333;
+  --user-msg: #2563eb;
+  --assistant-msg: #1e3a5f;
+  --system-msg: #1f2937;
+  --tool-msg: #422006;
+  --reasoning-msg: #3f1f5f;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--panel-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--panel-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}
+
+/* Panel styles */
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+}
+
+/* Message role colors */
+.msg-user { background: var(--user-msg); }
+.msg-assistant { background: var(--assistant-msg); }
+.msg-system { background: var(--system-msg); }
+.msg-tool { background: var(--tool-msg); }
+.msg-reasoning { background: var(--reasoning-msg); }
+
+/* Markdown code blocks */
+pre {
+  background: #111;
+  padding: 0.5rem;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.875rem;
+}
+
+/* Tool call status badges */
+.tc-pending { color: #fbbf24; }
+.tc-approved { color: #22c55e; }
+.tc-denied { color: #ef4444; }
+.tc-executing { color: #3b82f6; }
+.tc-finished { color: #a855f7; }
