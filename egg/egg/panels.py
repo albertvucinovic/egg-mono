@@ -10,6 +10,7 @@ from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
+from rich import box as rich_box
 
 from eggthreads import create_snapshot
 
@@ -18,6 +19,15 @@ from utils import snapshot_messages, looks_markdown
 
 class PanelsMixin:
     """Mixin providing panel management methods for EggDisplayApp."""
+
+    def _get_static_box(self) -> Any:
+        """Get the box style to use for static console panels.
+
+        Returns MINIMAL when borders are hidden, SQUARE otherwise.
+        """
+        if getattr(self, '_borders_visible', True):
+            return rich_box.SQUARE
+        return rich_box.MINIMAL
 
     def update_panels(self) -> None:
         """Update all UI panels with current state."""
@@ -253,7 +263,7 @@ class PanelsMixin:
                 parts.append(f"[dim]{msg_id[-8:]}[/dim]")
             full_title = " | ".join(parts)
             try:
-                self.console.print(Panel(renderable, title=full_title, border_style=border))
+                self.console.print(Panel(renderable, title=full_title, border_style=border, box=self._get_static_box()))
             except Exception:
                 # Fallback to plain text if Panel fails for any reason
                 self.console.print(f"[{border}]{full_title}[/] {getattr(renderable, 'plain', str(renderable))}")
@@ -318,18 +328,18 @@ class PanelsMixin:
                 tc_title = 'Tool Calls'
                 if pm_tokens["tool_calls"]:
                     tc_title += f" [dim](tok={pm_tokens['tool_calls']})[/dim]"
-                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold'), title=tc_title, border_style='yellow'))
+                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold'), title=tc_title, border_style='yellow', box=self._get_static_box()))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
             if isinstance(tstream, dict) and tstream:
                 for nm, txt in tstream.items():
                     if txt:
-                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Output: {nm}', border_style='yellow'))
+                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Output: {nm}', border_style='yellow', box=self._get_static_box()))
             tc_stream = m.get('tool_calls_stream') or {}
             if isinstance(tc_stream, dict) and tc_stream:
                 for nm, txt in tc_stream.items():
                     if txt:
-                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Call Args (streamed): {nm}', border_style='yellow'))
+                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold'), title=f'Tool Call Args (streamed): {nm}', border_style='yellow', box=self._get_static_box()))
             return
 
         if role == 'tool':
@@ -353,7 +363,7 @@ class PanelsMixin:
         """Print a titled block to the console."""
         try:
             # Parse rich markup within the text for colored segments
-            self.console.print(Panel(Text.from_markup(text), title=title, border_style=border_style))
+            self.console.print(Panel(Text.from_markup(text), title=title, border_style=border_style, box=self._get_static_box()))
         except Exception:
             # Fallback plain
             self.console.print(f"{title}\n{text}")
@@ -377,12 +387,12 @@ class PanelsMixin:
                 pass
         if heading:
             try:
-                self.console.print(Panel(heading, border_style='blue'))
+                self.console.print(Panel(heading, border_style='blue', box=self._get_static_box()))
             except Exception:
                 self.console.print(heading)
         msgs = snapshot_messages(self.db, tid)
         if not msgs:
-            self.console.print(Panel('[dim]No messages yet[/dim]', border_style='blue'))
+            self.console.print(Panel('[dim]No messages yet[/dim]', border_style='blue', box=self._get_static_box()))
         else:
             for m in msgs:
                 if isinstance(m, dict):
