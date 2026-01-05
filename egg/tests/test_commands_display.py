@@ -104,37 +104,41 @@ class TestCmdToggleBorders:
         assert egg_app._borders_visible == initial
 
     def test_changes_output_panel_box_styles(self, egg_app, monkeypatch):
-        """Should change box styles on output panels when toggling off."""
+        """Should change box styles on output panels when toggling on."""
         from rich import box as rich_box
 
         monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
 
-        # Initially borders should be visible
-        assert egg_app._borders_visible is True
+        # Initially borders should be hidden (off by default)
+        assert egg_app._borders_visible is False
+        assert egg_app.chat_output.style.box == rich_box.MINIMAL
 
         egg_app.cmd_toggleBorders("")
 
-        # After toggle, borders should be hidden
-        assert egg_app._borders_visible is False
-        # Output panels should use MINIMAL box
-        assert egg_app.chat_output.style.box == rich_box.MINIMAL
-        assert egg_app.system_output.style.box == rich_box.MINIMAL
-        assert egg_app.children_output.style.box == rich_box.MINIMAL
-        assert egg_app.approval_panel.style.box == rich_box.MINIMAL
+        # After toggle, borders should be visible
+        assert egg_app._borders_visible is True
+        # Output panels should use original box style (SQUARE)
+        assert egg_app.chat_output.style.box == egg_app._original_box_styles['chat']
+        assert egg_app.system_output.style.box == egg_app._original_box_styles['system']
+        assert egg_app.children_output.style.box == egg_app._original_box_styles['children']
+        assert egg_app.approval_panel.style.box == egg_app._original_box_styles['approval']
 
     def test_restores_original_box_styles(self, egg_app, monkeypatch):
-        """Should restore original box styles when toggling back on."""
+        """Should restore original box styles when toggling to on."""
+        from rich import box as rich_box
+
         monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
 
-        # Store original styles
+        # Store original styles (SQUARE, stored before being changed to MINIMAL)
         original_chat = egg_app._original_box_styles['chat']
         original_system = egg_app._original_box_styles['system']
 
-        # Toggle off then on
-        egg_app.cmd_toggleBorders("")
+        # Initially off (MINIMAL)
+        assert egg_app.chat_output.style.box == rich_box.MINIMAL
+
+        # Toggle to on - should restore original SQUARE styles
         egg_app.cmd_toggleBorders("")
 
-        # Should be restored
         assert egg_app.chat_output.style.box == original_chat
         assert egg_app.system_output.style.box == original_system
 
@@ -155,7 +159,8 @@ class TestCmdToggleBorders:
 
         egg_app.cmd_toggleBorders("")
 
-        assert any("borders" in msg.lower() and "off" in msg.lower()
+        # Since borders are off by default, first toggle turns them on
+        assert any("borders" in msg.lower() and "on" in msg.lower()
                    for msg in egg_app._system_log)
 
     def test_triggers_redraw(self, egg_app, monkeypatch):

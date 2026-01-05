@@ -305,7 +305,7 @@ class PanelsMixin:
                     reason_title += f" [dim](model: {model_key})[/dim]"
                 if pm_tokens["reasoning"]:
                     reason_title += f" [dim](tok={pm_tokens['reasoning']})[/dim]"
-                panel(Text(reas, no_wrap=False, overflow='fold'), reason_title, 'magenta')
+                panel(Text(reas, no_wrap=False, overflow='fold', style='magenta'), reason_title, 'magenta')
             if content:
                 if looks_markdown(content):
                     panel(Markdown(content), title, 'cyan')

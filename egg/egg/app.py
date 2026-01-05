@@ -238,7 +238,7 @@ class EggDisplayApp(
 
         # Border visibility for all output panels (not input panel).
         # Users can toggle this at runtime via /toggleBorders.
-        self._borders_visible: bool = True
+        self._borders_visible: bool = False  # Off by default
         # Store original box styles so we can restore them when toggling borders back on.
         self._original_box_styles: Dict[str, Any] = {
             'chat': self.chat_output.style.box,
@@ -246,6 +246,12 @@ class EggDisplayApp(
             'children': self.children_output.style.box,
             'approval': self.approval_panel.style.box,
         }
+        # Apply minimal box style since borders are off by default
+        from rich import box as rich_box
+        self.chat_output.style.box = rich_box.MINIMAL
+        self.system_output.style.box = rich_box.MINIMAL
+        self.children_output.style.box = rich_box.MINIMAL
+        self.approval_panel.style.box = rich_box.MINIMAL
 
         # Auto redraw static console view when terminal is resized.
         # This is debounced so that we redraw once after resizing settles.
