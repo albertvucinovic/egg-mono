@@ -62,12 +62,15 @@ models_config: Dict[str, Any] = {}
 
 
 def load_models_config() -> Dict[str, Any]:
-    """Load models configuration."""
+    """Load models configuration using eggllm's config loader."""
+    from eggllm.config import load_models_config as eggllm_load_models
+
     models_path = PROJECT_ROOT / "egg" / "models.json"
-    if models_path.exists():
-        with open(models_path) as f:
-            return json.load(f)
-    return {}
+    if not models_path.exists():
+        return {}
+
+    models_config, _ = eggllm_load_models(models_path)
+    return models_config
 
 
 @asynccontextmanager
@@ -338,8 +341,8 @@ async def get_models():
         models.append(ModelInfo(
             key=key,
             provider=config.get("provider", "unknown"),
-            model_id=config.get("model", ""),
-            display_name=config.get("display_name", key),
+            model_id=config.get("model_name", key),
+            display_name=key,  # The key is the display name in eggllm format
         ))
     return models
 
