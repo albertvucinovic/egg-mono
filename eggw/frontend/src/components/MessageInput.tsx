@@ -10,12 +10,23 @@ export function MessageInput() {
   const [input, setInput] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const queryClient = useQueryClient();
-  const { currentThreadId, isStreaming, addSystemLog } = useAppStore();
+  const { currentThreadId, isStreaming, addSystemLog, addMessage } = useAppStore();
 
   const mutation = useMutation({
-    mutationFn: () => sendMessage(currentThreadId!, input),
-    onSuccess: () => {
+    mutationFn: (content: string) => sendMessage(currentThreadId!, content),
+    onMutate: (content: string) => {
+      // Immediately add message to store for instant display
+      addMessage({
+        id: `temp-${Date.now()}`,
+        role: "user",
+        content: content,
+      });
+
+      // Clear input immediately
       setInput("");
+    },
+    onSuccess: () => {
+      // Refetch to sync with real data
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
       addSystemLog("Message sent", "success");
     },
@@ -34,7 +45,7 @@ export function MessageInput() {
 
   const handleSubmit = () => {
     if (!input.trim() || !currentThreadId || isStreaming) return;
-    mutation.mutate();
+    mutation.mutate(input.trim());
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {

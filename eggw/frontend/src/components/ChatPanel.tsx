@@ -120,8 +120,7 @@ function MessageBlock({ message }: MessageBlockProps) {
 
 export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const { currentThreadId, messages, setMessages, streamingContent } =
-    useAppStore();
+  const { currentThreadId, messages, setMessages, streamingContent } = useAppStore();
 
   const { data, isLoading } = useQuery({
     queryKey: ["messages", currentThreadId],
@@ -129,6 +128,7 @@ export function ChatPanel() {
     enabled: !!currentThreadId,
   });
 
+  // Sync fetched messages to store (but don't overwrite optimistic updates)
   useEffect(() => {
     if (data) {
       setMessages(data);
