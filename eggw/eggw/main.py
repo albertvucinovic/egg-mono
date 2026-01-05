@@ -205,21 +205,24 @@ async def create_thread(request: CreateThreadRequest):
 
     model_key = request.model_key or next(iter(models_config.keys()), None)
 
+    models_path = str(PROJECT_ROOT / "egg" / "models.json")
+
     if request.parent_id:
         # Create child thread
         thread_id = create_child_thread(
             db,
             parent_id=request.parent_id,
             name=request.name,
-            model_key=model_key,
-            context=request.context,
+            initial_model_key=model_key,
+            models_path=models_path,
         )
     else:
         # Create root thread
         thread_id = create_root_thread(
             db,
             name=request.name,
-            model_key=model_key,
+            initial_model_key=model_key,
+            models_path=models_path,
         )
 
     t = db.get_thread(thread_id)
