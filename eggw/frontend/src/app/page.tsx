@@ -7,10 +7,14 @@ import { MessageInput } from "@/components/MessageInput";
 import { SystemPanel } from "@/components/SystemPanel";
 import { ApprovalPanel } from "@/components/ApprovalPanel";
 import { useAppStore } from "@/lib/store";
+import { useSSE } from "@/hooks/useSSE";
 
 export default function Home() {
   const { currentThreadId } = useAppStore();
   const [leftPanelWidth, setLeftPanelWidth] = useState(280);
+
+  // Connect to SSE for real-time streaming
+  useSSE(currentThreadId);
 
   return (
     <main className="h-screen flex flex-col">

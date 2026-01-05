@@ -3,15 +3,16 @@
 import { useEffect, useRef, useCallback } from "react";
 import { createEventSource } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+import { useQueryClient } from "@tanstack/react-query";
 
 export function useSSE(threadId: string | null) {
   const eventSourceRef = useRef<EventSource | null>(null);
+  const queryClient = useQueryClient();
   const {
     setStreamingContent,
     appendStreamingContent,
     setIsStreaming,
     addSystemLog,
-    addMessage,
   } = useAppStore();
 
   const connect = useCallback(() => {
@@ -26,7 +27,7 @@ export function useSSE(threadId: string | null) {
     eventSourceRef.current = es;
 
     es.onopen = () => {
-      addSystemLog("SSE connection opened", "info");
+      addSystemLog("SSE connected", "info");
     };
 
     es.onerror = () => {
@@ -34,65 +35,81 @@ export function useSSE(threadId: string | null) {
       setIsStreaming(false);
     };
 
-    // Handle different event types
-    es.addEventListener("message.content", (e) => {
+    // Handle stream.open - streaming started
+    es.addEventListener("stream.open", (e) => {
       try {
-        const data = JSON.parse(e.data);
-        if (data.delta) {
-          appendStreamingContent(data.delta);
-          setIsStreaming(true);
-        }
+        setStreamingContent("");
+        setIsStreaming(true);
+        addSystemLog("Streaming started", "info");
       } catch (err) {
-        console.error("Failed to parse SSE data:", err);
+        console.error("Failed to handle stream.open:", err);
       }
     });
 
-    es.addEventListener("message.complete", (e) => {
+    // Handle stream.delta - streaming content chunks
+    es.addEventListener("stream.delta", (e) => {
       try {
         const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+
+        // Content can be in different fields depending on what's streaming
+        // Backend sends "text" for content deltas
+        const delta = payload.text || payload.content || payload.reasoning || payload.delta || "";
+        if (delta) {
+          appendStreamingContent(delta);
+        }
+      } catch (err) {
+        console.error("Failed to parse stream.delta:", err);
+      }
+    });
+
+    // Handle stream.close - streaming finished
+    es.addEventListener("stream.close", (e) => {
+      try {
         setStreamingContent("");
         setIsStreaming(false);
-        if (data.message) {
-          addMessage(data.message);
-        }
+        addSystemLog("Streaming complete", "info");
+        // Refresh messages to get the final content
+        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
       } catch (err) {
-        console.error("Failed to parse SSE data:", err);
+        console.error("Failed to handle stream.close:", err);
       }
     });
 
-    es.addEventListener("tool_call", (e) => {
+    // Handle msg.create - new message created
+    es.addEventListener("msg.create", (e) => {
       try {
         const data = JSON.parse(e.data);
-        addSystemLog(`Tool call: ${data.name || "unknown"}`, "info");
+        const payload = data.payload || {};
+        const role = payload.role || "unknown";
+        addSystemLog(`Message created: ${role}`, "info");
+        // Refresh messages
+        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
       } catch (err) {
-        console.error("Failed to parse SSE data:", err);
+        console.error("Failed to parse msg.create:", err);
       }
     });
 
-    es.addEventListener("tool_result", (e) => {
+    // Handle tool_call events
+    es.addEventListener("tool_call.create", (e) => {
       try {
         const data = JSON.parse(e.data);
-        addSystemLog(`Tool result: ${data.tool_call_id?.slice(-8) || "unknown"}`, "info");
+        const payload = data.payload || {};
+        addSystemLog(`Tool call: ${payload.name || "unknown"}`, "info");
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
       } catch (err) {
-        console.error("Failed to parse SSE data:", err);
+        console.error("Failed to parse tool_call.create:", err);
       }
     });
 
-    es.addEventListener("approval_needed", (e) => {
+    // Handle tool_call approval events
+    es.addEventListener("tool_call.approval", (e) => {
       try {
         const data = JSON.parse(e.data);
-        addSystemLog(`Approval needed: ${data.tool_name || "unknown"}`, "info");
+        addSystemLog("Tool approval needed", "info");
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
       } catch (err) {
-        console.error("Failed to parse SSE data:", err);
-      }
-    });
-
-    es.addEventListener("error", (e) => {
-      try {
-        const data = JSON.parse((e as MessageEvent).data);
-        addSystemLog(`Error: ${data.message || "unknown"}`, "error");
-      } catch (err) {
-        // Ignore parse errors for error events
+        console.error("Failed to parse tool_call.approval:", err);
       }
     });
 
@@ -103,7 +120,7 @@ export function useSSE(threadId: string | null) {
     appendStreamingContent,
     setIsStreaming,
     addSystemLog,
-    addMessage,
+    queryClient,
   ]);
 
   const disconnect = useCallback(() => {

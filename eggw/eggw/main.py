@@ -531,15 +531,30 @@ async def stream_events(thread_id: str):
     async def event_generator():
         watcher = EventWatcher(db, thread_id)
         try:
-            async for event in watcher.watch_async():
-                yield {
-                    "event": event.get("event_type", "unknown"),
-                    "data": json.dumps(event),
-                }
+            async for batch in watcher.aiter():
+                for row in batch:
+                    event_type = row["type"] if "type" in row.keys() else "unknown"
+                    payload = {}
+                    if "payload_json" in row.keys() and row["payload_json"]:
+                        try:
+                            payload = json.loads(row["payload_json"])
+                        except:
+                            pass
+
+                    event_data = {
+                        "event_seq": row["event_seq"],
+                        "event_type": event_type,
+                        "msg_id": row["msg_id"] if "msg_id" in row.keys() else None,
+                        "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
+                        "payload": payload,
+                    }
+
+                    yield {
+                        "event": event_type,
+                        "data": json.dumps(event_data),
+                    }
         except asyncio.CancelledError:
             pass
-        finally:
-            watcher.stop()
 
     return EventSourceResponse(event_generator())
 
