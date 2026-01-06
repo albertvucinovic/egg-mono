@@ -11,6 +11,8 @@ export function useSSE(threadId: string | null) {
   const {
     setStreamingContent,
     appendStreamingContent,
+    setStreamingReasoning,
+    appendStreamingReasoning,
     setIsStreaming,
     addSystemLog,
   } = useAppStore();
@@ -39,6 +41,7 @@ export function useSSE(threadId: string | null) {
     es.addEventListener("stream.open", (e) => {
       try {
         setStreamingContent("");
+        setStreamingReasoning("");
         setIsStreaming(true);
         addSystemLog("Streaming started", "info");
       } catch (err) {
@@ -52,11 +55,16 @@ export function useSSE(threadId: string | null) {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
 
+        // Handle reasoning separately from content
+        if (payload.reasoning) {
+          appendStreamingReasoning(payload.reasoning);
+        }
+
         // Content can be in different fields depending on what's streaming
         // Backend sends "text" for content deltas
-        const delta = payload.text || payload.content || payload.reasoning || payload.delta || "";
-        if (delta) {
-          appendStreamingContent(delta);
+        const contentDelta = payload.text || payload.content || payload.delta || "";
+        if (contentDelta) {
+          appendStreamingContent(contentDelta);
         }
       } catch (err) {
         console.error("Failed to parse stream.delta:", err);
@@ -67,6 +75,7 @@ export function useSSE(threadId: string | null) {
     es.addEventListener("stream.close", (e) => {
       try {
         setStreamingContent("");
+        setStreamingReasoning("");
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
         // Refresh messages to get the final content
@@ -118,6 +127,8 @@ export function useSSE(threadId: string | null) {
     threadId,
     setStreamingContent,
     appendStreamingContent,
+    setStreamingReasoning,
+    appendStreamingReasoning,
     setIsStreaming,
     addSystemLog,
     queryClient,

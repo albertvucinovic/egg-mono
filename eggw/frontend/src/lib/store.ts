@@ -53,6 +53,11 @@ interface AppState {
   setStreamingContent: (content: string) => void;
   appendStreamingContent: (chunk: string) => void;
 
+  // Streaming reasoning
+  streamingReasoning: string;
+  setStreamingReasoning: (content: string) => void;
+  appendStreamingReasoning: (chunk: string) => void;
+
   // Tool calls
   pendingTools: ToolCall[];
   setPendingTools: (tools: ToolCall[]) => void;
@@ -91,6 +96,12 @@ export const useAppStore = create<AppState>((set) => ({
   setStreamingContent: (content) => set({ streamingContent: content }),
   appendStreamingContent: (chunk) =>
     set((state) => ({ streamingContent: state.streamingContent + chunk })),
+
+  // Streaming reasoning
+  streamingReasoning: "",
+  setStreamingReasoning: (content) => set({ streamingReasoning: content }),
+  appendStreamingReasoning: (chunk) =>
+    set((state) => ({ streamingReasoning: state.streamingReasoning + chunk })),
 
   // Tool calls
   pendingTools: [],

@@ -29,8 +29,9 @@ function MessageBlock({ message }: MessageBlockProps) {
   };
 
   // Check if this is a shell command (starts with $ or $$)
+  // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
   const isShellCommand = message.role === "user" &&
-    (message.content?.startsWith("$ ") || message.content?.startsWith("$$ "));
+    message.content?.match(/^\$\$?\s*\S/);
 
   // For tool messages, check if content is long
   const isLongToolOutput = message.role === "tool" &&
@@ -128,24 +129,48 @@ function MessageBlock({ message }: MessageBlockProps) {
       {/* Tool calls */}
       {message.tool_calls && message.tool_calls.length > 0 && (
         <div className="mt-2 space-y-2">
-          {message.tool_calls.map((tc: any, idx: number) => (
-            <div
-              key={tc.id || idx}
-              className="bg-amber-900/20 rounded p-2 border border-amber-800"
-            >
-              <div className="flex items-center gap-2 text-sm">
-                <span className="text-amber-400 font-medium">{tc.name}</span>
-                <span className="text-xs text-gray-500 font-mono">
-                  {tc.id?.slice(-8)}
-                </span>
+          {message.tool_calls.map((tc: any, idx: number) => {
+            // Extract the tool name - handle both formats
+            const toolName = tc.name || tc.function?.name || "unknown";
+            // Extract arguments - handle both formats
+            let args = tc.arguments || tc.function?.arguments;
+            if (typeof args === "string") {
+              try {
+                args = JSON.parse(args);
+              } catch {
+                // Keep as string
+              }
+            }
+            // For bash commands, extract the script
+            const isBash = toolName === "bash";
+            const script = isBash && args?.script;
+
+            return (
+              <div
+                key={tc.id || idx}
+                className="bg-amber-900/30 rounded p-2 border border-amber-700"
+              >
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-amber-400 font-medium">{toolName}</span>
+                  <span className="text-xs text-gray-500 font-mono">
+                    {tc.id?.slice(-8)}
+                  </span>
+                </div>
+                {/* Special display for bash scripts */}
+                {isBash && script ? (
+                  <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto">
+                    $ {script}
+                  </pre>
+                ) : (
+                  <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40">
+                    {typeof args === "string"
+                      ? args
+                      : JSON.stringify(args, null, 2)}
+                  </pre>
+                )}
               </div>
-              <pre className="mt-1 text-xs text-gray-300 overflow-auto">
-                {typeof tc.arguments === "string"
-                  ? tc.arguments
-                  : JSON.stringify(tc.arguments, null, 2)}
-              </pre>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -154,7 +179,7 @@ function MessageBlock({ message }: MessageBlockProps) {
 
 export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const { currentThreadId, messages, setMessages, streamingContent } = useAppStore();
+  const { currentThreadId, messages, setMessages, streamingContent, streamingReasoning } = useAppStore();
 
   const { data, isLoading } = useQuery({
     queryKey: ["messages", currentThreadId],
@@ -174,7 +199,7 @@ export function ChatPanel() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, streamingContent]);
+  }, [messages, streamingContent, streamingReasoning]);
 
   if (!currentThreadId) {
     return (
@@ -199,15 +224,31 @@ export function ChatPanel() {
           ))}
 
           {/* Streaming content */}
-          {streamingContent && (
-            <div className="rounded border p-3 mb-3 bg-slate-800 border-slate-600 animate-pulse">
+          {(streamingContent || streamingReasoning) && (
+            <div className="rounded border p-3 mb-3 bg-slate-800 border-slate-600">
               <div className="text-xs text-gray-400 mb-2">
                 <span className="font-medium text-gray-300">Assistant</span>
-                <span className="ml-2 text-blue-400">streaming...</span>
+                <span className="ml-2 text-blue-400 animate-pulse">streaming...</span>
               </div>
-              <div className="prose prose-invert prose-sm max-w-none">
-                <ReactMarkdown>{streamingContent}</ReactMarkdown>
-              </div>
+
+              {/* Streaming reasoning */}
+              {streamingReasoning && (
+                <details open className="mb-2 bg-purple-900/30 rounded p-2 border border-purple-700">
+                  <summary className="cursor-pointer text-sm text-purple-300">
+                    Reasoning <span className="text-xs text-purple-400 animate-pulse">(streaming...)</span>
+                  </summary>
+                  <div className="mt-2 text-sm text-purple-200 whitespace-pre-wrap">
+                    {streamingReasoning}
+                  </div>
+                </details>
+              )}
+
+              {/* Streaming content */}
+              {streamingContent && (
+                <div className="prose prose-invert prose-sm max-w-none">
+                  <ReactMarkdown>{streamingContent}</ReactMarkdown>
+                </div>
+              )}
             </div>
           )}
         </>
