@@ -13,6 +13,10 @@ export function MessageInput() {
   const {
     currentThreadId,
     isStreaming,
+    setIsStreaming,
+    setStreamingContent,
+    setStreamingReasoning,
+    setStreamingToolCalls,
     addSystemLog,
     addMessage,
     setCurrentThreadId,
@@ -29,6 +33,8 @@ export function MessageInput() {
         content: content,
       });
       setInput("");
+      // Focus input after sending
+      textareaRef.current?.focus();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
@@ -43,7 +49,13 @@ export function MessageInput() {
   const cancelMutation = useMutation({
     mutationFn: () => interruptThread(currentThreadId!),
     onSuccess: () => {
+      setStreamingContent("");
+      setStreamingReasoning("");
+      setStreamingToolCalls({});
+      setIsStreaming(false);
       addSystemLog("Streaming cancelled", "info");
+      // Focus input after cancel
+      textareaRef.current?.focus();
     },
     onError: () => {
       addSystemLog("Failed to cancel streaming", "error");
@@ -55,6 +67,8 @@ export function MessageInput() {
     mutationFn: (command: string) => executeCommand(currentThreadId!, command),
     onMutate: (command: string) => {
       setInput("");
+      // Focus input after sending
+      textareaRef.current?.focus();
       // For shell commands, show them in the chat
       if (command.startsWith('$')) {
         addMessage({
