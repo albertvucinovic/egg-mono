@@ -121,12 +121,12 @@ function MessageBlock({ message }: MessageBlockProps) {
         <>
           {/* Shell command display */}
           {isShellCommand ? (
-            <pre className="text-sm text-green-400 font-mono bg-black/30 p-2 rounded overflow-auto">
+            <pre className="text-sm font-mono p-2 rounded overflow-auto" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
               {message.content}
             </pre>
           ) : isCommandOutput ? (
             /* Command output (system messages) - monospace for tree/list formatting */
-            <pre className="text-sm text-cyan-300 font-mono bg-black/20 p-2 rounded overflow-auto whitespace-pre-wrap">
+            <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
               {message.content}
             </pre>
           ) : message.role === "tool" ? (
@@ -147,7 +147,7 @@ function MessageBlock({ message }: MessageBlockProps) {
             )
           ) : (
             /* Regular markdown content with GFM tables and LaTeX support */
-            <div className="prose prose-invert prose-sm max-w-none">
+            <div className="prose prose-sm max-w-none">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
                 rehypePlugins={[rehypeRaw, rehypeKatex]}
@@ -172,25 +172,25 @@ function MessageBlock({ message }: MessageBlockProps) {
                   table({ children }) {
                     return (
                       <div className="overflow-x-auto my-4">
-                        <table className="min-w-full border-collapse border border-gray-600">
+                        <table className="min-w-full border-collapse border" style={{ borderColor: "var(--panel-border)" }}>
                           {children}
                         </table>
                       </div>
                     );
                   },
                   thead({ children }) {
-                    return <thead className="bg-gray-800">{children}</thead>;
+                    return <thead style={{ background: "var(--panel-bg)" }}>{children}</thead>;
                   },
                   th({ children }) {
                     return (
-                      <th className="px-4 py-2 text-left border border-gray-600 font-semibold">
+                      <th className="px-4 py-2 text-left border font-semibold" style={{ borderColor: "var(--panel-border)", color: "var(--heading-color)" }}>
                         {children}
                       </th>
                     );
                   },
                   td({ children }) {
                     return (
-                      <td className="px-4 py-2 border border-gray-600">
+                      <td className="px-4 py-2 border" style={{ borderColor: "var(--panel-border)" }}>
                         {children}
                       </td>
                     );
@@ -338,7 +338,7 @@ export function ChatPanel() {
 
               {/* Streaming content with GFM tables and LaTeX support */}
               {streamingContent && (
-                <div className="prose prose-invert prose-sm max-w-none">
+                <div className="prose prose-sm max-w-none">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkMath]}
                     rehypePlugins={[rehypeRaw, rehypeKatex]}
@@ -346,25 +346,25 @@ export function ChatPanel() {
                       table({ children }) {
                         return (
                           <div className="overflow-x-auto my-4">
-                            <table className="min-w-full border-collapse border border-gray-600">
+                            <table className="min-w-full border-collapse border" style={{ borderColor: "var(--panel-border)" }}>
                               {children}
                             </table>
                           </div>
                         );
                       },
                       thead({ children }) {
-                        return <thead className="bg-gray-800">{children}</thead>;
+                        return <thead style={{ background: "var(--panel-bg)" }}>{children}</thead>;
                       },
                       th({ children }) {
                         return (
-                          <th className="px-4 py-2 text-left border border-gray-600 font-semibold">
+                          <th className="px-4 py-2 text-left border font-semibold" style={{ borderColor: "var(--panel-border)", color: "var(--heading-color)" }}>
                             {children}
                           </th>
                         );
                       },
                       td({ children }) {
                         return (
-                          <td className="px-4 py-2 border border-gray-600">
+                          <td className="px-4 py-2 border" style={{ borderColor: "var(--panel-border)" }}>
                             {children}
                           </td>
                         );
