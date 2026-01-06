@@ -372,26 +372,26 @@
 [data-theme="light-mono"] {
   --background: #ffffff;
   --foreground: #000000;
-  --panel-bg: #fafafa;
-  --panel-border: #dddddd;
+  --panel-bg: #f8f8f8;
+  --panel-border: #000000;
   --user-msg-bg: #ffffff;
   --user-msg-border: #000000;
   --assistant-msg-bg: #f5f5f5;
-  --assistant-msg-border: #cccccc;
+  --assistant-msg-border: #000000;
   --system-msg-bg: #ffffff;
-  --system-msg-border: #888888;
+  --system-msg-border: #000000;
   --tool-msg-bg: #fafafa;
-  --tool-msg-border: #aaaaaa;
+  --tool-msg-border: #000000;
   --reasoning-bg: #f8f8f8;
-  --reasoning-border: #999999;
+  --reasoning-border: #000000;
   --tool-call-bg: #f5f5f5;
-  --tool-call-border: #888888;
+  --tool-call-border: #000000;
   --accent: #000000;
-  --accent-hover: #333333;
+  --accent-hover: #000000;
   --heading-color: #000000;
-  --muted: #555555;
+  --muted: #000000;
   --code-bg: #f5f5f5;
-  --scrollbar-thumb: #cccccc;
+  --scrollbar-thumb: #888888;
 }
 
 body {
