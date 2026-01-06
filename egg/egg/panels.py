@@ -310,7 +310,7 @@ class PanelsMixin:
                 if looks_markdown(content):
                     panel(Markdown(content), title, 'cyan')
                 else:
-                    panel(Text(content, no_wrap=False, overflow='fold', style='cyan'), title, 'cyan')
+                    panel(Text(content, no_wrap=False, overflow='fold', style='white'), title, 'cyan')
             # Tool-calls summary if present
             tcs = m.get('tool_calls')
             if isinstance(tcs, list) and tcs:
