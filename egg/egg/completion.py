@@ -387,7 +387,10 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         prefix = line
 
     def _last_token(s: str) -> str:
-        m = re.search(r"([\w\-.:/~]+)$", s)
+        # Strip trailing whitespace to find the last token even if cursor is after a space
+        # This handles cases like "/model gemini " where user typed space after token
+        s_stripped = s.rstrip()
+        m = re.search(r"([\w\-.:/~]+)$", s_stripped)
         return m.group(1) if m else ""
 
     def _mk_items(cands: List[str], base: str) -> List[Dict[str, str]]:
@@ -397,16 +400,14 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         for c in cands:
             if not isinstance(c, str) or not c:
                 continue
-            if base_l and c.lower().startswith(base_l.lower()):
-                ins = c[len(base):]
-                rep = 0
-            elif not base_l:
-                ins = c
-                rep = 0
-            else:
-                # containment match -> replace the current token with full candidate
-                ins = c
-                rep = len(base)
+            # Check if candidate matches (prefix or containment)
+            if base_l:
+                if not (c.lower().startswith(base_l.lower()) or base_l.lower() in c.lower()):
+                    continue
+            # Always return full value and replace the typed token
+            # This handles the case where user types more after suggestions are fetched
+            ins = c
+            rep = len(base) if base_l else 0
             key = (c, ins, rep)
             if key in seen:
                 continue
@@ -576,21 +577,16 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 items = suggestions
             except Exception:
                 items = []
-            # Contains filtering based on the current token only (not whole sub-line)
-            atok = (arg_tok or '').lower()
-            if atok:
-                items = [s for s in items if atok in s.lower()]
-            # If the user typed additional non-whitespace after the last token, treat it as part of the token
-            # e.g., '/model hi'+tab+'g' should filter to ones containing 'hig'.
-            if sub and not sub.endswith(' '):
-                # recompute token from end of sub
-                import re as _re
-                m = _re.search(r"([\w\-.:/~]+)$", sub)
-                tok2 = m.group(1) if m else arg_tok
-                if tok2 != arg_tok:
-                    items = [s for s in items if tok2.lower() in s.lower()]
-                    return _mk_items(items, tok2)
-            return _mk_items(items, arg_tok)
+            # Filter by the entire argument (supports multi-word search like "gemini flash")
+            # Strip trailing whitespace from sub for matching
+            sub_stripped = sub.rstrip()
+            if sub_stripped:
+                # Split into words and check if all words are found in the model name
+                words = sub_stripped.lower().split()
+                items = [s for s in items if all(w in s.lower() for w in words)]
+            # Replace the ENTIRE argument after /model, not just the last token
+            # This ensures "gemini flash" is fully replaced, not just "flash"
+            return _mk_items(items, sub_stripped)
 
         # /updateAllModels providers
         if cmd == '/updateAllModels':

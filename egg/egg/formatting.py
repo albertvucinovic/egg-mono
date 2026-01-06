@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
-from eggthreads import list_children_with_meta, list_root_threads
+from eggthreads import list_children_with_meta, list_root_threads, list_threads
 
 from utils import snapshot_messages
 
@@ -14,15 +14,18 @@ class FormattingMixin:
 
     def format_thread_line(self, tid: str) -> str:
         """Format a single thread line for display."""
+        from rich.markup import escape as rich_escape
+
         th = self.db.get_thread(tid)
         status = th.status if th else 'unknown'
-        recap = (th.short_recap if th and th.short_recap else 'No recap').strip()
-        mk = self.current_model_for_thread(tid) or 'default'
+        # Escape user content to prevent Rich markup interference
+        recap = rich_escape((th.short_recap if th and th.short_recap else 'No recap').strip())
+        mk = rich_escape(self.current_model_for_thread(tid) or 'default')
         try:
             streaming = self.db.current_open(tid) is not None
         except Exception:
             streaming = False
-        label = th.name if th and th.name else ''
+        label = rich_escape(th.name if th and th.name else '')
         id_short = tid[-8:]
         sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
         cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == self.current_thread else ''
@@ -40,24 +43,113 @@ class FormattingMixin:
         )
 
     def format_tree(self, root_tid: Optional[str] = None) -> str:
-        """Format a thread tree for display."""
+        """Format a thread tree for display (optimized with bulk queries)."""
+        # Fetch all data upfront to avoid N+1 queries
+        all_threads = list_threads(self.db)
+        if not all_threads:
+            return 'No threads.'
+
+        # Build lookup maps
+        threads_by_id = {t.thread_id: t for t in all_threads}
+
+        # Fetch all parent-child relationships in one query
+        children_map: Dict[str, List[str]] = {}  # parent_id -> [child_ids]
+        parent_set: Set[str] = set()  # threads that have a parent
+        try:
+            cur = self.db.conn.execute("SELECT parent_id, child_id FROM children ORDER BY rowid")
+            for row in cur.fetchall():
+                parent_id, child_id = row[0], row[1]
+                if parent_id not in children_map:
+                    children_map[parent_id] = []
+                children_map[parent_id].append(child_id)
+                parent_set.add(child_id)
+        except Exception:
+            pass
+
+        # Fetch all model settings in one query
+        model_map: Dict[str, str] = {}
+        try:
+            cur = self.db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
+            for row in cur.fetchall():
+                model_map[row[0]] = row[1]
+        except Exception:
+            pass
+
+        # For threads without explicit model, use initial_model_key
+        for t in all_threads:
+            if t.thread_id not in model_map and t.initial_model_key:
+                model_map[t.thread_id] = t.initial_model_key
+
+        # Get streaming threads (threads with open streams)
+        streaming_set: Set[str] = set()
+        try:
+            cur = self.db.conn.execute("SELECT thread_id FROM event_streams WHERE done = 0")
+            for row in cur.fetchall():
+                streaming_set.add(row[0])
+        except Exception:
+            pass
+
+        # Get scheduled threads from self
+        scheduled_set: Set[str] = set()
+        try:
+            scheduled_set = set(getattr(self, 'schedulers', {}).keys())
+        except Exception:
+            pass
+
+        current_thread = getattr(self, 'current_thread', None)
+
+        def format_line_fast(tid: str) -> str:
+            """Format thread line using pre-fetched data."""
+            from rich.markup import escape as rich_escape
+
+            th = threads_by_id.get(tid)
+            if not th:
+                return f"[dim]{tid[-8:]}[/dim] (not found)"
+
+            status = th.status or 'unknown'
+            # Escape user content to prevent Rich markup interference
+            recap = rich_escape((th.short_recap or 'No recap').strip())
+            mk = rich_escape(model_map.get(tid, 'default'))
+            streaming = tid in streaming_set
+            label = rich_escape(th.name or '')
+            id_short = tid[-8:]
+
+            sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
+            cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == current_thread else ''
+            sched_tag = '[bold cyan][SCHED][/bold cyan] ' if tid in scheduled_set else ''
+
+            if status == 'active':
+                status_tag = f"[bold green]{status}[/]"
+            elif status == 'paused':
+                status_tag = f"[bold red]{status}[/]"
+            else:
+                status_tag = f"[bold]{status}[/]"
+
+            return (
+                f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap} "
+                f"[dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
+            )
+
         def render_tree(tid: str, prefix: str = '', is_last: bool = True, out: Optional[List[str]] = None):
             if out is None:
                 out = []
             connector = '└─ ' if is_last else '├─ '
             indent_next = '   ' if is_last else '│  '
-            base_line = self.format_thread_line(tid)
+            base_line = format_line_fast(tid)
             out.append(prefix + connector + base_line)
-            try:
-                kids = [cid for cid, _n, _r, _c in list_children_with_meta(self.db, tid)]
-            except Exception:
-                kids = []
+
+            kids = children_map.get(tid, [])
             for i, cid in enumerate(kids):
                 last = (i == len(kids) - 1)
                 render_tree(cid, prefix + indent_next, last, out)
             return out
 
-        roots = [root_tid] if root_tid else list_root_threads(self.db)
+        # Find roots
+        if root_tid:
+            roots = [root_tid]
+        else:
+            roots = [t.thread_id for t in all_threads if t.thread_id not in parent_set]
+
         lines: List[str] = []
         if not roots:
             return 'No threads.'
