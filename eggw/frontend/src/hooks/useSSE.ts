@@ -64,6 +64,9 @@ export function useSSE(threadId: string | null) {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
 
+        // If we receive deltas, we're streaming (handles joining mid-stream)
+        setIsStreaming(true);
+
         // Handle reasoning deltas (backend sends 'reason' field)
         if (payload.reason) {
           appendStreamingReasoning(payload.reason);
