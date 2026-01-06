@@ -119,12 +119,14 @@ export function SystemPanel() {
     enabled: !!currentThreadId && currentThreadData?.has_children,
   });
 
-  // Fetch token stats for current thread
+  const { isStreaming } = useAppStore();
+
+  // Fetch token stats for current thread - faster during streaming
   const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ["stats", currentThreadId],
     queryFn: () => fetchTokenStats(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 5000,
+    refetchInterval: isStreaming ? 1000 : 5000, // 1s during streaming, 5s otherwise
   });
 
   // Navigate to thread helper

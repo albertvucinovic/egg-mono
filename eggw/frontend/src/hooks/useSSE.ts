@@ -97,8 +97,9 @@ export function useSSE(threadId: string | null) {
         setStreamingToolCalls({});
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
-        // Refresh messages to get the final content
+        // Refresh messages and stats to get the final content
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["stats", threadId] });
       } catch (err) {
         console.error("Failed to handle stream.close:", err);
       }
