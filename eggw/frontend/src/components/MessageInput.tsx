@@ -126,6 +126,37 @@ export function MessageInput() {
     }
   }, [shouldFocusAfterCancel, isStreaming]);
 
+  // Auto-focus input when thread changes or on mount
+  useEffect(() => {
+    if (currentThreadId && !isStreaming) {
+      textareaRef.current?.focus();
+    }
+  }, [currentThreadId, isStreaming]);
+
+  // Global key capture - focus input when user starts typing
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Skip if already focused on an input/textarea
+      if (document.activeElement?.tagName === "INPUT" ||
+          document.activeElement?.tagName === "TEXTAREA") {
+        return;
+      }
+      // Skip modifier keys, function keys, etc.
+      if (e.ctrlKey || e.metaKey || e.altKey || e.key.length > 1) {
+        return;
+      }
+      // Skip if no thread or streaming
+      if (!currentThreadId || isStreaming) {
+        return;
+      }
+      // Focus and let the key be captured
+      textareaRef.current?.focus();
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [currentThreadId, isStreaming]);
+
   const handleSubmit = () => {
     const trimmed = input.trim();
     if (!trimmed || !currentThreadId || isStreaming) return;
