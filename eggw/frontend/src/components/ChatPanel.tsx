@@ -158,11 +158,11 @@ function MessageBlock({ message }: MessageBlockProps) {
                 </div>
                 {/* Special display for bash scripts */}
                 {isBash && script ? (
-                  <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto">
+                  <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
                     $ {script}
                   </pre>
                 ) : (
-                  <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40">
+                  <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words">
                     {typeof args === "string"
                       ? args
                       : JSON.stringify(args, null, 2)}
@@ -276,11 +276,11 @@ export function ChatPanel() {
                           <span className="text-xs text-amber-300 animate-pulse">streaming...</span>
                         </div>
                         {isBash && script ? (
-                          <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto">
+                          <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
                             $ {script}
                           </pre>
                         ) : (
-                          <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40">
+                          <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-all">
                             {tc.arguments || "..."}
                           </pre>
                         )}
