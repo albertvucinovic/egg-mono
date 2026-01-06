@@ -640,6 +640,8 @@ async def execute_command(thread_id: str, request: CommandRequest):
             return _cmd_enter_mode(command_arg)
         elif command_name == "toggleBorders":
             return _cmd_toggle_borders()
+        elif command_name == "theme":
+            return _cmd_theme(command_arg)
         elif command_name == "quit":
             return _cmd_quit()
         else:
@@ -1480,6 +1482,34 @@ def _cmd_quit() -> CommandResponse:
     )
 
 
+# Available themes
+THEMES = ["dark", "midnight", "forest", "ocean", "warm", "mono"]
+
+
+def _cmd_theme(theme_name: str) -> CommandResponse:
+    """Handle /theme command - change color scheme."""
+    if not theme_name:
+        # List available themes
+        return CommandResponse(
+            success=True,
+            message=f"Available themes: {', '.join(THEMES)}\nUse /theme <name> to switch",
+            data={"themes": THEMES, "action": "list_themes"},
+        )
+
+    theme = theme_name.lower().strip()
+    if theme not in THEMES:
+        return CommandResponse(
+            success=False,
+            message=f"Unknown theme: {theme}. Available: {', '.join(THEMES)}",
+        )
+
+    return CommandResponse(
+        success=True,
+        message=f"Theme changed to: {theme}",
+        data={"theme": theme, "action": "set_theme"},
+    )
+
+
 def _cmd_help() -> CommandResponse:
     """Handle /help command."""
     help_text = """Available commands:
@@ -1492,7 +1522,7 @@ Tools: /toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus
        /disableTool <name>, /enableTool <name>, /toolsSecrets <on|off>
 Sandbox: /toggleSandboxing, /setSandboxConfiguration <file.json>,
          /getSandboxingConfig
-Display: /togglePanel <chat/children/system>, /toggleBorders
+Display: /togglePanel <chat/children/system>, /toggleBorders, /theme <name>
 Other: /cost, /schedulers, /enterMode <send/newline>, /paste, /quit, /help
 
 Shell: $ <cmd> (visible), $$ <cmd> (hidden)"""
@@ -1937,7 +1967,7 @@ async def get_autocomplete(
                 '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus',
                 '/disableTool', '/enableTool', '/toolsSecrets',
                 '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
-                '/togglePanel', '/toggleBorders',
+                '/togglePanel', '/toggleBorders', '/theme',
                 '/cost', '/schedulers', '/enterMode', '/paste', '/quit',
             ]
             pref_lower = prefix.lower()
@@ -2108,6 +2138,17 @@ async def get_autocomplete(
                         suggestions.append({
                             "display": opt,
                             "insert": opt,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd == '/theme':
+                # Theme name suggestions
+                arg_lower = arg_tok.lower()
+                for theme in THEMES:
+                    if not arg_lower or arg_lower in theme.lower():
+                        suggestions.append({
+                            "display": theme,
+                            "insert": theme,
                             "replace": len(arg_tok),
                         })
 

@@ -2,16 +2,172 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
+/* ============================================
+   Theme: Dark (default)
+   ============================================ */
+:root, [data-theme="dark"] {
   --background: #0a0a0a;
   --foreground: #ededed;
   --panel-bg: #1a1a1a;
   --panel-border: #333;
-  --user-msg: #2563eb;
-  --assistant-msg: #1e3a5f;
-  --system-msg: #1f2937;
-  --tool-msg: #422006;
-  --reasoning-msg: #3f1f5f;
+  --user-msg-bg: rgba(37, 99, 235, 0.5);
+  --user-msg-border: #1d4ed8;
+  --assistant-msg-bg: #1e293b;
+  --assistant-msg-border: #475569;
+  --system-msg-bg: rgba(6, 182, 212, 0.15);
+  --system-msg-border: #0891b2;
+  --tool-msg-bg: rgba(16, 185, 129, 0.15);
+  --tool-msg-border: #059669;
+  --reasoning-bg: rgba(147, 51, 234, 0.2);
+  --reasoning-border: #7c3aed;
+  --tool-call-bg: rgba(245, 158, 11, 0.2);
+  --tool-call-border: #d97706;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --heading-color: #f1f5f9;
+  --muted: #6b7280;
+  --code-bg: #111827;
+  --scrollbar-thumb: #374151;
+}
+
+/* ============================================
+   Theme: Midnight
+   ============================================ */
+[data-theme="midnight"] {
+  --background: #0f0f1a;
+  --foreground: #e2e8f0;
+  --panel-bg: #1a1a2e;
+  --panel-border: #2d2d44;
+  --user-msg-bg: rgba(99, 102, 241, 0.4);
+  --user-msg-border: #6366f1;
+  --assistant-msg-bg: #1e1e32;
+  --assistant-msg-border: #4c4c6d;
+  --system-msg-bg: rgba(34, 211, 238, 0.15);
+  --system-msg-border: #22d3ee;
+  --tool-msg-bg: rgba(52, 211, 153, 0.15);
+  --tool-msg-border: #34d399;
+  --reasoning-bg: rgba(168, 85, 247, 0.2);
+  --reasoning-border: #a855f7;
+  --tool-call-bg: rgba(251, 191, 36, 0.2);
+  --tool-call-border: #fbbf24;
+  --accent: #818cf8;
+  --accent-hover: #6366f1;
+  --heading-color: #c7d2fe;
+  --muted: #64748b;
+  --code-bg: #0f0f1a;
+  --scrollbar-thumb: #3730a3;
+}
+
+/* ============================================
+   Theme: Forest
+   ============================================ */
+[data-theme="forest"] {
+  --background: #0a1410;
+  --foreground: #d1fae5;
+  --panel-bg: #132a1f;
+  --panel-border: #1f4d35;
+  --user-msg-bg: rgba(34, 197, 94, 0.3);
+  --user-msg-border: #22c55e;
+  --assistant-msg-bg: #14332a;
+  --assistant-msg-border: #2d5a47;
+  --system-msg-bg: rgba(20, 184, 166, 0.2);
+  --system-msg-border: #14b8a6;
+  --tool-msg-bg: rgba(132, 204, 22, 0.15);
+  --tool-msg-border: #84cc16;
+  --reasoning-bg: rgba(168, 162, 158, 0.15);
+  --reasoning-border: #78716c;
+  --tool-call-bg: rgba(234, 179, 8, 0.2);
+  --tool-call-border: #eab308;
+  --accent: #4ade80;
+  --accent-hover: #22c55e;
+  --heading-color: #86efac;
+  --muted: #6b7280;
+  --code-bg: #0a1410;
+  --scrollbar-thumb: #166534;
+}
+
+/* ============================================
+   Theme: Ocean
+   ============================================ */
+[data-theme="ocean"] {
+  --background: #0a1628;
+  --foreground: #e0f2fe;
+  --panel-bg: #0f2942;
+  --panel-border: #1e4976;
+  --user-msg-bg: rgba(56, 189, 248, 0.3);
+  --user-msg-border: #38bdf8;
+  --assistant-msg-bg: #0c3654;
+  --assistant-msg-border: #2563eb;
+  --system-msg-bg: rgba(34, 211, 238, 0.2);
+  --system-msg-border: #22d3ee;
+  --tool-msg-bg: rgba(45, 212, 191, 0.15);
+  --tool-msg-border: #2dd4bf;
+  --reasoning-bg: rgba(129, 140, 248, 0.2);
+  --reasoning-border: #818cf8;
+  --tool-call-bg: rgba(251, 191, 36, 0.2);
+  --tool-call-border: #fbbf24;
+  --accent: #38bdf8;
+  --accent-hover: #0ea5e9;
+  --heading-color: #7dd3fc;
+  --muted: #64748b;
+  --code-bg: #071422;
+  --scrollbar-thumb: #0369a1;
+}
+
+/* ============================================
+   Theme: Warm
+   ============================================ */
+[data-theme="warm"] {
+  --background: #1c1412;
+  --foreground: #fef3c7;
+  --panel-bg: #292018;
+  --panel-border: #44362a;
+  --user-msg-bg: rgba(251, 146, 60, 0.3);
+  --user-msg-border: #fb923c;
+  --assistant-msg-bg: #2d2319;
+  --assistant-msg-border: #5c4c3d;
+  --system-msg-bg: rgba(253, 186, 116, 0.15);
+  --system-msg-border: #fdba74;
+  --tool-msg-bg: rgba(163, 230, 53, 0.15);
+  --tool-msg-border: #a3e635;
+  --reasoning-bg: rgba(248, 113, 113, 0.15);
+  --reasoning-border: #f87171;
+  --tool-call-bg: rgba(250, 204, 21, 0.2);
+  --tool-call-border: #facc15;
+  --accent: #f97316;
+  --accent-hover: #ea580c;
+  --heading-color: #fed7aa;
+  --muted: #78716c;
+  --code-bg: #1a1210;
+  --scrollbar-thumb: #92400e;
+}
+
+/* ============================================
+   Theme: Mono
+   ============================================ */
+[data-theme="mono"] {
+  --background: #0a0a0a;
+  --foreground: #d4d4d4;
+  --panel-bg: #171717;
+  --panel-border: #2a2a2a;
+  --user-msg-bg: rgba(163, 163, 163, 0.2);
+  --user-msg-border: #737373;
+  --assistant-msg-bg: #1f1f1f;
+  --assistant-msg-border: #404040;
+  --system-msg-bg: rgba(115, 115, 115, 0.15);
+  --system-msg-border: #525252;
+  --tool-msg-bg: rgba(163, 163, 163, 0.1);
+  --tool-msg-border: #525252;
+  --reasoning-bg: rgba(82, 82, 82, 0.3);
+  --reasoning-border: #525252;
+  --tool-call-bg: rgba(163, 163, 163, 0.15);
+  --tool-call-border: #737373;
+  --accent: #a3a3a3;
+  --accent-hover: #d4d4d4;
+  --heading-color: #e5e5e5;
+  --muted: #525252;
+  --code-bg: #0a0a0a;
+  --scrollbar-thumb: #404040;
 }
 
 body {
@@ -31,12 +187,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--panel-border);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #444;
+  background: var(--panel-border);
 }
 
 /* Panel styles */
@@ -46,16 +202,9 @@ body {
   border-radius: 4px;
 }
 
-/* Message role colors */
-.msg-user { background: var(--user-msg); }
-.msg-assistant { background: var(--assistant-msg); }
-.msg-system { background: var(--system-msg); }
-.msg-tool { background: var(--tool-msg); }
-.msg-reasoning { background: var(--reasoning-msg); }
-
 /* Markdown code blocks */
 pre {
-  background: #111;
+  background: var(--code-bg);
   padding: 0.5rem;
   border-radius: 4px;
   overflow-x: auto;
@@ -72,3 +221,110 @@ code {
 .tc-denied { color: #ef4444; }
 .tc-executing { color: #3b82f6; }
 .tc-finished { color: #a855f7; }
+
+/* ============================================
+   Markdown Prose Styles
+   ============================================ */
+.prose h1 {
+  color: var(--heading-color);
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.prose h2 {
+  color: var(--heading-color);
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.prose h3 {
+  color: var(--heading-color);
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose h4 {
+  color: var(--heading-color);
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 0.75rem;
+  margin-bottom: 0.375rem;
+}
+
+.prose h5, .prose h6 {
+  color: var(--heading-color);
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.prose p {
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.625;
+}
+
+.prose ul, .prose ol {
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  padding-left: 1.5rem;
+}
+
+.prose li {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.prose blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 1rem;
+  margin: 0.75rem 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid var(--panel-border);
+  margin: 1rem 0;
+}
+
+.prose a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.prose a:hover {
+  color: var(--accent-hover);
+}
+
+.prose strong {
+  color: var(--heading-color);
+  font-weight: 600;
+}
+
+.prose code:not(pre code) {
+  background: var(--code-bg);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+}
+
+/* First heading shouldn't have top margin */
+.prose > h1:first-child,
+.prose > h2:first-child,
+.prose > h3:first-child,
+.prose > h4:first-child {
+  margin-top: 0;
+}

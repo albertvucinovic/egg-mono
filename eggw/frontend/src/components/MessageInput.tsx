@@ -27,6 +27,7 @@ export function MessageInput() {
     addSystemLog,
     addMessage,
     setCurrentThreadId,
+    setTheme,
   } = useAppStore();
 
   // Regular message mutation
@@ -74,7 +75,7 @@ export function MessageInput() {
   // Commands that should show output in chat (info/status commands)
   const commandsWithChatOutput = [
     '/help', '/threads', '/listChildren', '/cost', '/toolsStatus',
-    '/schedulers', '/model', '/parentThread'
+    '/schedulers', '/model', '/parentThread', '/theme'
   ];
 
   // Command mutation
@@ -139,6 +140,9 @@ export function MessageInput() {
           // Thread renamed - refresh thread data
           queryClient.invalidateQueries({ queryKey: ["thread", currentThreadId] });
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+        } else if (response.data?.action === "set_theme" && response.data?.theme) {
+          // Theme changed - apply it
+          setTheme(response.data.theme);
         }
       } else {
         // Show errors in chat for better visibility

@@ -89,6 +89,10 @@ interface AppState {
   toggleBorders: () => void;
   enterMode: "send" | "newline";
   setEnterMode: (mode: "send" | "newline") => void;
+
+  // Theme
+  theme: string;
+  setTheme: (theme: string) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -181,4 +185,25 @@ export const useAppStore = create<AppState>((set) => ({
   toggleBorders: () => set((state) => ({ showBorders: !state.showBorders })),
   enterMode: "send",
   setEnterMode: (mode) => set({ enterMode: mode }),
+
+  // Theme
+  theme: "dark",
+  setTheme: (theme) => {
+    // Apply theme to document
+    if (typeof document !== "undefined") {
+      document.documentElement.setAttribute("data-theme", theme);
+      // Persist to localStorage
+      localStorage.setItem("eggw-theme", theme);
+    }
+    set({ theme });
+  },
 }));
+
+// Initialize theme from localStorage on client side
+if (typeof window !== "undefined") {
+  const savedTheme = localStorage.getItem("eggw-theme");
+  if (savedTheme) {
+    document.documentElement.setAttribute("data-theme", savedTheme);
+    useAppStore.setState({ theme: savedTheme });
+  }
+}

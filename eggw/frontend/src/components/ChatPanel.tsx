@@ -8,6 +8,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { fetchMessages } from "@/lib/api";
 import { useAppStore, Message } from "@/lib/store";
@@ -54,14 +55,14 @@ function MessageBlock({ message }: MessageBlockProps) {
   const roleColors: Record<string, string> = {
     user: "bg-blue-900/50 border-blue-700",
     assistant: "bg-slate-800 border-slate-600",
-    system: "bg-gray-800 border-gray-600",
+    system: "bg-cyan-900/40 border-cyan-700",
     tool: "bg-emerald-900/30 border-emerald-700",
   };
 
   const roleLabels: Record<string, string> = {
     user: "User",
     assistant: "Assistant",
-    system: "System",
+    system: "Command",
     tool: "Tool Result",
   };
 
@@ -69,6 +70,9 @@ function MessageBlock({ message }: MessageBlockProps) {
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
   const isShellCommand = message.role === "user" &&
     message.content?.match(/^\$\$?\s*\S/);
+
+  // Check if this is a system/command message (should render as monospace)
+  const isCommandOutput = message.role === "system";
 
   // For tool messages, check if content is long
   const isLongToolOutput = message.role === "tool" &&
@@ -116,6 +120,11 @@ function MessageBlock({ message }: MessageBlockProps) {
             <pre className="text-sm text-green-400 font-mono bg-black/30 p-2 rounded overflow-auto">
               {message.content}
             </pre>
+          ) : isCommandOutput ? (
+            /* Command output (system messages) - monospace for tree/list formatting */
+            <pre className="text-sm text-cyan-300 font-mono bg-black/20 p-2 rounded overflow-auto whitespace-pre-wrap">
+              {message.content}
+            </pre>
           ) : message.role === "tool" ? (
             /* Tool output - collapsible if long */
             isLongToolOutput ? (
@@ -137,7 +146,7 @@ function MessageBlock({ message }: MessageBlockProps) {
             <div className="prose prose-invert prose-sm max-w-none">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex]}
+                rehypePlugins={[rehypeRaw, rehypeKatex]}
                 components={{
                   code({ node, className, children, ...props }) {
                     const match = /language-(\w+)/.exec(className || "");
@@ -154,6 +163,32 @@ function MessageBlock({ message }: MessageBlockProps) {
                       <code className={className} {...props}>
                         {children}
                       </code>
+                    );
+                  },
+                  table({ children }) {
+                    return (
+                      <div className="overflow-x-auto my-4">
+                        <table className="min-w-full border-collapse border border-gray-600">
+                          {children}
+                        </table>
+                      </div>
+                    );
+                  },
+                  thead({ children }) {
+                    return <thead className="bg-gray-800">{children}</thead>;
+                  },
+                  th({ children }) {
+                    return (
+                      <th className="px-4 py-2 text-left border border-gray-600 font-semibold">
+                        {children}
+                      </th>
+                    );
+                  },
+                  td({ children }) {
+                    return (
+                      <td className="px-4 py-2 border border-gray-600">
+                        {children}
+                      </td>
                     );
                   },
                 }}
@@ -294,7 +329,35 @@ export function ChatPanel() {
                 <div className="prose prose-invert prose-sm max-w-none">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
+                    rehypePlugins={[rehypeRaw, rehypeKatex]}
+                    components={{
+                      table({ children }) {
+                        return (
+                          <div className="overflow-x-auto my-4">
+                            <table className="min-w-full border-collapse border border-gray-600">
+                              {children}
+                            </table>
+                          </div>
+                        );
+                      },
+                      thead({ children }) {
+                        return <thead className="bg-gray-800">{children}</thead>;
+                      },
+                      th({ children }) {
+                        return (
+                          <th className="px-4 py-2 text-left border border-gray-600 font-semibold">
+                            {children}
+                          </th>
+                        );
+                      },
+                      td({ children }) {
+                        return (
+                          <td className="px-4 py-2 border border-gray-600">
+                            {children}
+                          </td>
+                        );
+                      },
+                    }}
                   >
                     {preprocessLatex(streamingContent)}
                   </ReactMarkdown>
