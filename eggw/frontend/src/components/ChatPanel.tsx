@@ -105,7 +105,7 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
       {/* Reasoning (collapsible) */}
       {message.reasoning && (
         <details
-          className="mb-2 rounded p-2 border"
+          className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
         >
           <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-border)" }}>
@@ -133,7 +133,7 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
           ) : message.role === "tool" ? (
             /* Tool output - collapsible if long */
             isLongToolOutput ? (
-              <details className="rounded border" style={{ background: "var(--code-bg)", borderColor: "var(--tool-msg-border)" }}>
+              <details className={`rounded ${showBorders ? 'border' : ''}`} style={{ background: "var(--code-bg)", borderColor: "var(--tool-msg-border)" }}>
                 <summary className="cursor-pointer p-2 text-sm" style={{ color: "var(--tool-msg-border)" }}>
                   Output ({message.content.length.toLocaleString()} chars) - click to expand
                 </summary>
@@ -227,7 +227,7 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
             return (
               <div
                 key={tc.id || idx}
-                className="rounded p-2 border"
+                className={`rounded p-2 ${showBorders ? 'border' : ''}`}
                 style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
               >
                 <div className="flex items-center gap-2 text-sm">
@@ -398,7 +398,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
                       <details
                         key={tcId}
                         open
-                        className="rounded border"
+                        className={`rounded ${showBorders ? 'border' : ''}`}
                         style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
                       >
                         <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
