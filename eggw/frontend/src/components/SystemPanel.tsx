@@ -148,10 +148,10 @@ export function SystemPanel() {
   const currentThread = threads.find((t) => t.id === currentThreadId);
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Thread info */}
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Thread info - scrollable if needed */}
       {currentThreadId && (
-        <div className="p-3 border-b border-[var(--panel-border)]">
+        <div className="p-3 border-b border-[var(--panel-border)] overflow-auto max-h-[50%] flex-shrink-0">
           <h3 className="text-sm font-medium mb-2">Thread Info</h3>
 
           <div className="text-xs space-y-1">
@@ -312,7 +312,7 @@ export function SystemPanel() {
       )}
 
       {/* System log header */}
-      <div className="p-2 border-b border-[var(--panel-border)] flex items-center justify-between">
+      <div className="p-2 border-b border-[var(--panel-border)] flex items-center justify-between flex-shrink-0">
         <span className="text-sm font-medium">System Log</span>
         <button
           onClick={clearSystemLogs}
@@ -324,7 +324,7 @@ export function SystemPanel() {
       </div>
 
       {/* Log entries */}
-      <div ref={scrollRef} className="flex-1 overflow-auto p-2">
+      <div ref={scrollRef} className="flex-1 overflow-auto p-2 min-h-0">
         {systemLogs.length === 0 ? (
           <div className="text-center text-gray-500 text-sm py-4">
             No log entries

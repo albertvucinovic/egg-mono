@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ThreadTree } from "@/components/ThreadTree";
 import { ChatPanel } from "@/components/ChatPanel";
 import { ChildrenPanel } from "@/components/ChildrenPanel";
 import { MessageInput } from "@/components/MessageInput";
@@ -24,7 +23,6 @@ export default function Home() {
     setStreamingReasoning,
     setStreamingToolCalls,
   } = useAppStore();
-  const [leftPanelWidth, setLeftPanelWidth] = useState(280);
   const [showHelp, setShowHelp] = useState(false);
 
   // Connect to SSE for real-time streaming
@@ -169,36 +167,6 @@ export default function Home() {
 
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left sidebar - Thread tree */}
-        <div
-          className="border-r border-[var(--panel-border)] overflow-auto"
-          style={{ width: leftPanelWidth }}
-        >
-          <ThreadTree />
-        </div>
-
-        {/* Resize handle */}
-        <div
-          className="w-1 cursor-col-resize hover:bg-blue-500 transition-colors"
-          onMouseDown={(e) => {
-            const startX = e.clientX;
-            const startWidth = leftPanelWidth;
-
-            const onMouseMove = (e: MouseEvent) => {
-              const newWidth = startWidth + (e.clientX - startX);
-              setLeftPanelWidth(Math.max(200, Math.min(500, newWidth)));
-            };
-
-            const onMouseUp = () => {
-              document.removeEventListener("mousemove", onMouseMove);
-              document.removeEventListener("mouseup", onMouseUp);
-            };
-
-            document.addEventListener("mousemove", onMouseMove);
-            document.addEventListener("mouseup", onMouseUp);
-          }}
-        />
-
         {/* Center - Chat */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <ChildrenPanel />
@@ -208,7 +176,7 @@ export default function Home() {
         </div>
 
         {/* Right sidebar - System log */}
-        <div className="w-80 border-l border-[var(--panel-border)] overflow-auto">
+        <div className="w-80 border-l border-[var(--panel-border)] flex flex-col overflow-hidden">
           <SystemPanel />
         </div>
       </div>
