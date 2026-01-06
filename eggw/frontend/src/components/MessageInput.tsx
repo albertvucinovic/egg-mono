@@ -145,8 +145,8 @@ export function MessageInput() {
       if (e.ctrlKey || e.metaKey || e.altKey || e.key.length > 1) {
         return;
       }
-      // Skip if no thread or streaming
-      if (!currentThreadId || isStreaming) {
+      // Skip if no thread selected
+      if (!currentThreadId) {
         return;
       }
       // Focus and let the key be captured
@@ -155,7 +155,7 @@ export function MessageInput() {
 
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [currentThreadId, isStreaming]);
+  }, [currentThreadId]);
 
   const handleSubmit = () => {
     const trimmed = input.trim();
@@ -191,7 +191,7 @@ export function MessageInput() {
               ? "Message, /command, or $ shell..."
               : "Select a thread first"
           }
-          disabled={!currentThreadId || isStreaming}
+          disabled={!currentThreadId}
           className="flex-1 bg-[#111] border border-[var(--panel-border)] rounded px-3 py-2 resize-none focus:outline-none focus:border-blue-500 disabled:opacity-50 min-h-[40px]"
           rows={1}
         />
