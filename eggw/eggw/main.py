@@ -572,12 +572,51 @@ async def _cmd_new_thread(name: str) -> CommandResponse:
     )
 
 
+def get_auto_approval_status(thread_id: str) -> bool:
+    """Check if auto-approval is currently active for a thread.
+
+    This scans the tool_call.approval events to find the current state.
+    """
+    if not db:
+        return False
+
+    # Scan events for global_approval/revoke_global_approval
+    cur = db.conn.execute(
+        """SELECT payload_json FROM events
+           WHERE thread_id=? AND type='tool_call.approval'
+           ORDER BY event_seq DESC""",
+        (thread_id,)
+    )
+
+    for row in cur.fetchall():
+        try:
+            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+            decision = payload.get("decision")
+            if decision == "global_approval":
+                return True
+            if decision == "revoke_global_approval":
+                return False
+        except:
+            continue
+
+    return False
+
+
 async def _cmd_toggle_auto_approval(thread_id: str) -> CommandResponse:
     """Handle /toggleAutoApproval command."""
-    # TODO: Implement auto-approval toggle in thread settings
+    current_state = get_auto_approval_status(thread_id)
+    new_state = not current_state
+
+    # Use the appropriate decision
+    decision = "global_approval" if new_state else "revoke_global_approval"
+    reason = f"Auto-approval {'enabled' if new_state else 'disabled'} via web UI"
+
+    approve_tool_calls_for_thread(db, thread_id, decision=decision, reason=reason)
+
     return CommandResponse(
-        success=False,
-        message="Auto-approval toggle not yet implemented in web UI",
+        success=True,
+        message=f"Auto-approval {'enabled' if new_state else 'disabled'}",
+        data={"auto_approval": new_state},
     )
 
 
@@ -588,7 +627,7 @@ def _cmd_help() -> CommandResponse:
 /spawn <context> - Spawn a child thread with context
 /spawnChildThread <context> - Same as /spawn
 /newThread [name] - Create a new root thread
-/toggleAutoApproval - Toggle auto-approval (not yet implemented)
+/toggleAutoApproval - Toggle auto-approval for all tools
 /help - Show this help
 
 Shell commands:
@@ -599,6 +638,45 @@ $$ <command> - Execute shell command (output hidden from model)"""
         success=True,
         message=help_text,
     )
+
+
+# --- Thread settings endpoints ---
+
+@app.get("/api/threads/{thread_id}/settings")
+async def get_thread_settings(thread_id: str):
+    """Get thread settings including auto-approval status."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    return {
+        "auto_approval": get_auto_approval_status(thread_id),
+        "model_key": current_thread_model(db, thread_id),
+    }
+
+
+@app.post("/api/threads/{thread_id}/settings/auto-approval")
+async def set_auto_approval(thread_id: str, enabled: bool = True):
+    """Enable or disable auto-approval for a thread."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    current_state = get_auto_approval_status(thread_id)
+
+    # Only emit event if state is changing
+    if current_state != enabled:
+        decision = "global_approval" if enabled else "revoke_global_approval"
+        reason = f"Auto-approval {'enabled' if enabled else 'disabled'} via API"
+        approve_tool_calls_for_thread(db, thread_id, decision=decision, reason=reason)
+
+    return {"auto_approval": enabled}
 
 
 # --- Model endpoints ---

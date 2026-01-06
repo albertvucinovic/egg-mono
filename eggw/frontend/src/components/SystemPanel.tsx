@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, ArrowUp, ArrowDown, GitBranch } from "lucide-react";
-import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadChildren, openThread } from "@/lib/api";
+import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadChildren, openThread, fetchThreadSettings, setAutoApproval } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -61,6 +61,29 @@ export function SystemPanel() {
     queryKey: ["thread", currentThreadId],
     queryFn: () => fetchThread(currentThreadId!),
     enabled: !!currentThreadId,
+  });
+
+  // Fetch thread settings (including auto-approval status)
+  const { data: threadSettings, refetch: refetchSettings } = useQuery({
+    queryKey: ["threadSettings", currentThreadId],
+    queryFn: () => fetchThreadSettings(currentThreadId!),
+    enabled: !!currentThreadId,
+    refetchInterval: 5000,
+  });
+
+  // Auto-approval toggle mutation
+  const autoApprovalMutation = useMutation({
+    mutationFn: (enabled: boolean) => setAutoApproval(currentThreadId!, enabled),
+    onSuccess: (data) => {
+      addSystemLog(
+        `Auto-approval ${data.auto_approval ? "enabled" : "disabled"}`,
+        "success"
+      );
+      refetchSettings();
+    },
+    onError: () => {
+      addSystemLog("Failed to toggle auto-approval", "error");
+    },
   });
 
   // Fetch children of current thread
@@ -128,6 +151,26 @@ export function SystemPanel() {
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Auto-approval toggle */}
+            <div className="flex justify-between items-center">
+              <span className="text-gray-400">Auto-approve:</span>
+              <button
+                onClick={() => autoApprovalMutation.mutate(!threadSettings?.auto_approval)}
+                disabled={autoApprovalMutation.isPending}
+                className={clsx(
+                  "relative w-10 h-5 rounded-full transition-colors disabled:opacity-50",
+                  threadSettings?.auto_approval ? "bg-green-600" : "bg-gray-600"
+                )}
+              >
+                <span
+                  className={clsx(
+                    "absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform",
+                    threadSettings?.auto_approval ? "left-5" : "left-0.5"
+                  )}
+                />
+              </button>
             </div>
           </div>
 

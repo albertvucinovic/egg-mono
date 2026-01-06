@@ -149,6 +149,20 @@ export async function fetchTokenStats(threadId: string) {
   return res.json();
 }
 
+export async function fetchThreadSettings(threadId: string) {
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/settings`);
+  if (!res.ok) throw new Error("Failed to fetch settings");
+  return res.json();
+}
+
+export async function setAutoApproval(threadId: string, enabled: boolean) {
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/settings/auto-approval?enabled=${enabled}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to set auto-approval");
+  return res.json();
+}
+
 export function createEventSource(threadId: string) {
   return new EventSource(`${API_BASE}/api/threads/${threadId}/events`);
 }
