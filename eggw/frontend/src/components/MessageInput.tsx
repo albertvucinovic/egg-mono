@@ -8,6 +8,7 @@ import { useAppStore } from "@/lib/store";
 
 export function MessageInput() {
   const [input, setInput] = useState("");
+  const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const queryClient = useQueryClient();
   const {
@@ -54,8 +55,8 @@ export function MessageInput() {
       setStreamingToolCalls({});
       setIsStreaming(false);
       addSystemLog("Streaming cancelled", "info");
-      // Focus input after cancel
-      textareaRef.current?.focus();
+      // Set flag to focus after state update
+      setShouldFocusAfterCancel(true);
     },
     onError: () => {
       addSystemLog("Failed to cancel streaming", "error");
@@ -116,6 +117,14 @@ export function MessageInput() {
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, [input]);
+
+  // Focus input after cancel completes (when streaming stops)
+  useEffect(() => {
+    if (shouldFocusAfterCancel && !isStreaming) {
+      textareaRef.current?.focus();
+      setShouldFocusAfterCancel(false);
+    }
+  }, [shouldFocusAfterCancel, isStreaming]);
 
   const handleSubmit = () => {
     const trimmed = input.trim();
