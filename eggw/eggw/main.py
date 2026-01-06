@@ -1482,8 +1482,17 @@ def _cmd_quit() -> CommandResponse:
     )
 
 
-# Available themes
-THEMES = ["dark", "light", "light-mono", "colorful", "midnight", "cyberpunk", "forest", "ocean", "sunset", "mono", "disney", "fruit", "vegetables", "coffee", "matrix"]
+# Available themes (text-colored variants first, then background variants)
+THEMES = [
+    # Text-colored themes (uniform background, colored text)
+    "dark", "cyberpunk", "forest", "ocean", "sunset", "mono", "midnight",
+    "disney", "fruit", "vegetables", "coffee", "matrix", "light", "light-mono", "colorful",
+    # Background variants (colored backgrounds)
+    "dark-background", "cyberpunk-background", "forest-background", "ocean-background",
+    "sunset-background", "mono-background", "midnight-background", "disney-background",
+    "fruit-background", "vegetables-background", "coffee-background", "matrix-background",
+    "light-background", "light-mono-background",
+]
 
 
 def _cmd_theme(theme_name: str) -> CommandResponse:
