@@ -2,8 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2, RefreshCw } from "lucide-react";
-import { fetchTokenStats, fetchModels, setThreadModel } from "@/lib/api";
+import { Trash2, RefreshCw, ArrowUp, ArrowDown, GitBranch } from "lucide-react";
+import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadChildren, openThread } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -12,6 +12,7 @@ export function SystemPanel() {
   const queryClient = useQueryClient();
   const {
     currentThreadId,
+    setCurrentThreadId,
     systemLogs,
     clearSystemLogs,
     addSystemLog,
@@ -55,6 +56,20 @@ export function SystemPanel() {
     },
   });
 
+  // Fetch current thread details
+  const { data: currentThreadData } = useQuery({
+    queryKey: ["thread", currentThreadId],
+    queryFn: () => fetchThread(currentThreadId!),
+    enabled: !!currentThreadId,
+  });
+
+  // Fetch children of current thread
+  const { data: children } = useQuery({
+    queryKey: ["threadChildren", currentThreadId],
+    queryFn: () => fetchThreadChildren(currentThreadId!),
+    enabled: !!currentThreadId && currentThreadData?.has_children,
+  });
+
   // Fetch token stats for current thread
   const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ["stats", currentThreadId],
@@ -62,6 +77,15 @@ export function SystemPanel() {
     enabled: !!currentThreadId,
     refetchInterval: 5000,
   });
+
+  // Navigate to thread helper
+  const navigateToThread = (threadId: string) => {
+    setCurrentThreadId(threadId);
+    openThread(threadId).then(() => {
+      addSystemLog(`Switched to thread ${threadId.slice(-8)}`, "info");
+    });
+    queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+  };
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -107,6 +131,48 @@ export function SystemPanel() {
             </div>
           </div>
 
+          {/* Thread Navigation */}
+          <div className="mt-3 text-xs">
+            <div className="flex items-center gap-1 mb-1">
+              <GitBranch className="w-3 h-3 text-gray-400" />
+              <span className="text-gray-400">Navigation</span>
+            </div>
+
+            {/* Parent */}
+            {currentThreadData?.parent_id && (
+              <button
+                onClick={() => navigateToThread(currentThreadData.parent_id!)}
+                className="flex items-center gap-1 w-full px-2 py-1 text-left hover:bg-[#333] rounded text-blue-400"
+              >
+                <ArrowUp className="w-3 h-3" />
+                Parent: {currentThreadData.parent_id.slice(-8)}
+              </button>
+            )}
+
+            {/* Children */}
+            {children && children.length > 0 && (
+              <div className="mt-1">
+                <div className="text-gray-500 mb-1">Children ({children.length}):</div>
+                <div className="max-h-24 overflow-auto space-y-0.5">
+                  {children.map((child: any) => (
+                    <button
+                      key={child.id}
+                      onClick={() => navigateToThread(child.id)}
+                      className="flex items-center gap-1 w-full px-2 py-0.5 text-left hover:bg-[#333] rounded text-green-400"
+                    >
+                      <ArrowDown className="w-3 h-3" />
+                      {child.name || child.id.slice(-8)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {!currentThreadData?.parent_id && (!children || children.length === 0) && (
+              <div className="text-gray-500 px-2">Root thread, no children</div>
+            )}
+          </div>
+
           {/* Token stats */}
           {stats && (
             <div className="mt-3 text-xs">
@@ -121,13 +187,13 @@ export function SystemPanel() {
               </div>
               <div className="grid grid-cols-2 gap-1 text-gray-300">
                 <span>Input:</span>
-                <span className="text-right">{stats.input_tokens}</span>
+                <span className="text-right">{stats.input_tokens?.toLocaleString()}</span>
                 <span>Output:</span>
-                <span className="text-right">{stats.output_tokens}</span>
+                <span className="text-right">{stats.output_tokens?.toLocaleString()}</span>
                 <span>Reasoning:</span>
-                <span className="text-right">{stats.reasoning_tokens}</span>
+                <span className="text-right">{stats.reasoning_tokens?.toLocaleString()}</span>
                 <span className="font-medium">Total:</span>
-                <span className="text-right font-medium">{stats.total_tokens}</span>
+                <span className="text-right font-medium">{stats.total_tokens?.toLocaleString()}</span>
               </div>
             </div>
           )}
