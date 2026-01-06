@@ -105,10 +105,11 @@ fi
 echo "Starting frontend on port $FRONTEND_PORT..."
 cd "$SCRIPT_DIR/frontend"
 
-# Ensure node_modules exists
-if [ ! -d "node_modules" ]; then
+# Ensure node_modules exists and is up to date
+if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
     echo "Installing frontend dependencies..."
     npm install
+    touch node_modules  # Update timestamp
 fi
 
 # Run from the actual frontend directory to avoid Turbopack workspace issues
