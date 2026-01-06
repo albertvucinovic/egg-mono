@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks to get the real script directory
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CALLER_CWD="$(pwd)"
 
 # Configuration - can be overridden via environment variables
@@ -103,6 +104,14 @@ fi
 # Start frontend
 echo "Starting frontend on port $FRONTEND_PORT..."
 cd "$SCRIPT_DIR/frontend"
+
+# Ensure node_modules exists
+if [ ! -d "node_modules" ]; then
+    echo "Installing frontend dependencies..."
+    npm install
+fi
+
+# Run from the actual frontend directory to avoid Turbopack workspace issues
 NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev -- -p $FRONTEND_PORT 2>&1 | sed 's/^/[frontend] /' &
 FRONTEND_PID=$!
 
