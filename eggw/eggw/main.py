@@ -842,33 +842,52 @@ async def _cmd_cost(thread_id: str) -> CommandResponse:
 
 async def _cmd_tools_on(thread_id: str) -> CommandResponse:
     """Handle /toolsOn command - enable all tools."""
-    from eggthreads import set_tools_enabled
-    set_tools_enabled(db, thread_id, enabled=True)
-    return CommandResponse(success=True, message="Tools enabled")
+    try:
+        from eggthreads import set_thread_tools_enabled
+        set_thread_tools_enabled(db, thread_id, True)
+        return CommandResponse(success=True, message="Tools enabled for this thread")
+    except Exception as e:
+        return CommandResponse(success=False, message=f"Error: {e}")
 
 
 async def _cmd_tools_off(thread_id: str) -> CommandResponse:
     """Handle /toolsOff command - disable all tools."""
-    from eggthreads import set_tools_enabled
-    set_tools_enabled(db, thread_id, enabled=False)
-    return CommandResponse(success=True, message="Tools disabled")
+    try:
+        from eggthreads import set_thread_tools_enabled
+        set_thread_tools_enabled(db, thread_id, False)
+        return CommandResponse(success=True, message="Tools disabled for this thread")
+    except Exception as e:
+        return CommandResponse(success=False, message=f"Error: {e}")
 
 
 async def _cmd_tools_status(thread_id: str) -> CommandResponse:
     """Handle /toolsStatus command."""
-    states = build_tool_call_states(db, thread_id)
-    if not states:
-        return CommandResponse(success=True, message="No tool calls in this thread")
+    try:
+        from eggthreads import get_thread_tools_config
+        cfg = get_thread_tools_config(db, thread_id)
+        status = "enabled" if cfg.llm_tools_enabled else "disabled"
+        disabled = sorted(cfg.disabled_tools) if cfg.disabled_tools else []
+        disabled_str = ", ".join(disabled) if disabled else "(none)"
+        return CommandResponse(
+            success=True,
+            message=f"Tools: {status}\nDisabled: {disabled_str}",
+            data={"enabled": cfg.llm_tools_enabled, "disabled": disabled},
+        )
+    except Exception as e:
+        # Fallback to just listing tool calls
+        states = build_tool_call_states(db, thread_id)
+        if not states:
+            return CommandResponse(success=True, message="No tool calls in this thread")
 
-    lines = []
-    for tc_id, tc in states.items():
-        lines.append(f"  {tc.name} [{tc.state}] - {tc_id[-8:]}")
+        lines = []
+        for tc_id, tc in states.items():
+            lines.append(f"  {tc.name} [{tc.state}] - {tc_id[-8:]}")
 
-    return CommandResponse(
-        success=True,
-        message=f"Tool calls ({len(states)}):\n" + "\n".join(lines),
-        data={"count": len(states)},
-    )
+        return CommandResponse(
+            success=True,
+            message=f"Tool calls ({len(states)}):\n" + "\n".join(lines),
+            data={"count": len(states)},
+        )
 
 
 def _cmd_schedulers() -> CommandResponse:
