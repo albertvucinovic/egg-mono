@@ -164,11 +164,13 @@ export function MessageInput() {
 
   const handleSubmit = () => {
     const trimmed = input.trim();
-    if (!trimmed || !currentThreadId || isStreaming) return;
+    if (!trimmed || !currentThreadId) return;
 
+    // Commands can run during streaming (navigation, status, etc.)
+    // Only block regular messages during streaming
     if (isCommand(trimmed)) {
       commandMutation.mutate(trimmed);
-    } else {
+    } else if (!isStreaming) {
       messageMutation.mutate(trimmed);
     }
   };
@@ -200,12 +202,28 @@ export function MessageInput() {
           className="flex-1 bg-[#111] border border-[var(--panel-border)] rounded px-3 py-2 resize-none focus:outline-none focus:border-blue-500 disabled:opacity-50 min-h-[40px]"
           rows={1}
         />
+        {/* During streaming: show Run button for commands, Cancel button always */}
+        {isStreaming && inputIsCommand && (
+          <button
+            onClick={handleSubmit}
+            disabled={!input.trim() || !currentThreadId || isPending}
+            className="px-4 py-2 bg-amber-600 rounded hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            title="Run command while streaming"
+          >
+            {isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Terminal className="w-4 h-4" />
+            )}
+            Run
+          </button>
+        )}
         {isStreaming ? (
           <button
             onClick={() => cancelMutation.mutate()}
             disabled={cancelMutation.isPending}
             className="px-4 py-2 bg-red-600 rounded hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            title="Cancel streaming (Ctrl+C)"
+            title="Cancel streaming (Escape)"
           >
             {cancelMutation.isPending ? (
               <Loader2 className="w-4 h-4 animate-spin" />
