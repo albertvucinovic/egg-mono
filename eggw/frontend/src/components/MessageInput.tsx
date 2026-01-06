@@ -28,6 +28,10 @@ export function MessageInput() {
     addMessage,
     setCurrentThreadId,
     setTheme,
+    togglePanel,
+    toggleBorders,
+    setEnterMode,
+    enterMode,
   } = useAppStore();
 
   // Regular message mutation
@@ -143,6 +147,35 @@ export function MessageInput() {
         } else if (response.data?.action === "set_theme" && response.data?.theme) {
           // Theme changed - apply it
           setTheme(response.data.theme);
+        } else if (response.data?.action === "toggle" && response.data?.panel) {
+          // Toggle panel visibility
+          const panel = response.data.panel as "chat" | "children" | "system";
+          togglePanel(panel);
+        } else if (response.data?.action === "toggle_borders") {
+          // Toggle panel borders
+          toggleBorders();
+        } else if (response.data?.enter_mode) {
+          // Set Enter key mode
+          setEnterMode(response.data.enter_mode as "send" | "newline");
+        } else if (response.data?.action === "paste") {
+          // Paste from clipboard
+          navigator.clipboard.readText().then((text) => {
+            if (text && textareaRef.current) {
+              const textarea = textareaRef.current;
+              const start = textarea.selectionStart || 0;
+              const end = textarea.selectionEnd || 0;
+              const before = textarea.value.substring(0, start);
+              const after = textarea.value.substring(end);
+              setInput(before + text + after);
+              setTimeout(() => {
+                textarea.setSelectionRange(start + text.length, start + text.length);
+                textarea.focus();
+              }, 0);
+              addSystemLog("Pasted from clipboard", "info");
+            }
+          }).catch(() => {
+            addSystemLog("Failed to read clipboard", "error");
+          });
         }
       } else {
         // Show errors in chat for better visibility
@@ -371,10 +404,21 @@ export function MessageInput() {
       }
     }
 
-    // Normal submit on Enter
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit();
+    // Submit behavior depends on enterMode
+    if (e.key === "Enter") {
+      if (enterMode === "send") {
+        // send mode: Enter sends, Shift+Enter for newline
+        if (!e.shiftKey) {
+          e.preventDefault();
+          handleSubmit();
+        }
+      } else {
+        // newline mode: Ctrl/Cmd+Enter sends, Enter for newline
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          handleSubmit();
+        }
+      }
     }
   };
 
@@ -495,6 +539,9 @@ export function MessageInput() {
             Streaming...
           </span>
         )}
+        <span className="text-gray-600" title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>
+          [{enterMode === "send" ? "⏎ send" : "^⏎ send"}]
+        </span>
       </div>
     </div>
   );
