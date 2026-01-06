@@ -49,9 +49,10 @@ function preprocessLatex(content: string): string {
 
 interface MessageBlockProps {
   message: Message;
+  showBorders?: boolean;
 }
 
-function MessageBlock({ message }: MessageBlockProps) {
+function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
   // Use CSS variables for theme-aware colors
   const roleStyles: Record<string, React.CSSProperties> = {
     user: { background: "var(--user-msg-bg)", borderColor: "var(--user-msg-border)" },
@@ -83,7 +84,7 @@ function MessageBlock({ message }: MessageBlockProps) {
 
   return (
     <div
-      className="rounded border p-3 mb-3"
+      className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
       style={isShellCommand ? shellStyle : (roleStyles[message.role] || shellStyle)}
     >
       {/* Header */}
@@ -256,7 +257,11 @@ function MessageBlock({ message }: MessageBlockProps) {
   );
 }
 
-export function ChatPanel() {
+interface ChatPanelProps {
+  showBorders?: boolean;
+}
+
+export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const {
     currentThreadId,
@@ -306,13 +311,13 @@ export function ChatPanel() {
       ) : (
         <>
           {messages.map((msg, idx) => (
-            <MessageBlock key={msg.id || idx} message={msg} />
+            <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} />
           ))}
 
           {/* Streaming content */}
           {(streamingContent || streamingReasoning || Object.keys(streamingToolCalls).length > 0) && (
             <div
-              className="rounded border p-3 mb-3"
+              className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
               style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)" }}
             >
               <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
@@ -324,7 +329,7 @@ export function ChatPanel() {
               {streamingReasoning && (
                 <details
                   open
-                  className="mb-2 rounded p-2 border"
+                  className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
                   style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
                 >
                   <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-border)" }}>

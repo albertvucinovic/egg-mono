@@ -325,16 +325,16 @@ export default function Home() {
       <div className="flex-1 flex overflow-hidden">
         {/* Center - Chat */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {panelVisibility.children && <ChildrenPanel />}
-          {panelVisibility.chat && <ChatPanel />}
-          <ApprovalPanel />
-          <MessageInput />
+          {panelVisibility.children && <ChildrenPanel showBorders={showBorders} />}
+          {panelVisibility.chat && <ChatPanel showBorders={showBorders} />}
+          <ApprovalPanel showBorders={showBorders} />
+          <MessageInput showBorders={showBorders} />
         </div>
 
         {/* Right sidebar - System log */}
         {panelVisibility.system && (
           <div className={`w-80 flex flex-col overflow-hidden ${showBorders ? 'border-l border-[var(--panel-border)]' : ''}`}>
-            <SystemPanel />
+            <SystemPanel showBorders={showBorders} />
           </div>
         )}
       </div>

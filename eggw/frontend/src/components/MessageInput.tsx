@@ -7,7 +7,11 @@ import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocompl
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
-export function MessageInput() {
+interface MessageInputProps {
+  showBorders?: boolean;
+}
+
+export function MessageInput({ showBorders = true }: MessageInputProps) {
   const [input, setInput] = useState("");
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
@@ -426,12 +430,12 @@ export function MessageInput() {
   const inputIsCommand = isCommand(input);
 
   return (
-    <div className="border-t border-[var(--panel-border)] p-4 bg-[var(--panel-bg)] relative">
+    <div className={`p-4 bg-[var(--panel-bg)] relative ${showBorders ? 'border-t border-[var(--panel-border)]' : ''}`}>
       {/* Autocomplete dropdown */}
       {showSuggestions && suggestions.length > 0 && (
         <div
           ref={suggestionsRef}
-          className="absolute bottom-full left-4 right-4 mb-1 border rounded-lg shadow-lg max-h-64 overflow-auto z-50"
+          className={`absolute bottom-full left-4 right-4 mb-1 rounded-lg shadow-lg max-h-64 overflow-auto z-50 ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)" }}
         >
           {suggestions.map((suggestion, index) => (
@@ -471,7 +475,7 @@ export function MessageInput() {
               : "Select a thread first"
           }
           disabled={!currentThreadId}
-          className="flex-1 border rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[40px]"
+          className={`flex-1 rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[40px] ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
           rows={1}
         />

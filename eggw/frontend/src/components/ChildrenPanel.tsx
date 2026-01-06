@@ -12,7 +12,11 @@ interface ChildThread {
   has_children: boolean;
 }
 
-export function ChildrenPanel() {
+interface ChildrenPanelProps {
+  showBorders?: boolean;
+}
+
+export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
   const { currentThreadId, setCurrentThreadId, addSystemLog } = useAppStore();
 
   const { data: children = [], isLoading } = useQuery({
@@ -33,8 +37,8 @@ export function ChildrenPanel() {
   }
 
   return (
-    <div className="border-b border-[var(--panel-border)] bg-[var(--panel-bg)]">
-      <div className="px-3 py-2 text-xs border-b border-[var(--panel-border)] flex items-center justify-between" style={{ color: "var(--muted)" }}>
+    <div className={`bg-[var(--panel-bg)] ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
+      <div className={`px-3 py-2 text-xs flex items-center justify-between ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
         <span>Children ({children.length})</span>
       </div>
 

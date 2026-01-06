@@ -6,7 +6,11 @@ import { fetchToolCalls, approveTool } from "@/lib/api";
 import { useAppStore, ToolCall } from "@/lib/store";
 import clsx from "clsx";
 
-export function ApprovalPanel() {
+interface ApprovalPanelProps {
+  showBorders?: boolean;
+}
+
+export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
   const queryClient = useQueryClient();
   const { currentThreadId, addSystemLog } = useAppStore();
 
@@ -49,7 +53,7 @@ export function ApprovalPanel() {
 
   return (
     <div
-      className="border-t p-4"
+      className={`p-4 ${showBorders ? 'border-t' : ''}`}
       style={{ borderColor: "var(--tool-call-border)", background: "var(--tool-call-bg)" }}
     >
       <div className="flex items-center gap-2 mb-3" style={{ color: "var(--tool-call-border)" }}>
@@ -61,7 +65,7 @@ export function ApprovalPanel() {
         {pendingTools.map((tc) => (
           <div
             key={tc.id}
-            className="border rounded p-3"
+            className={`rounded p-3 ${showBorders ? 'border' : ''}`}
             style={{ background: "var(--panel-bg)", borderColor: "var(--tool-call-border)" }}
           >
             <div className="flex items-center justify-between mb-2">

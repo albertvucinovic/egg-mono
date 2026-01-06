@@ -7,7 +7,11 @@ import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadC
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
-export function SystemPanel() {
+interface SystemPanelProps {
+  showBorders?: boolean;
+}
+
+export function SystemPanel({ showBorders = true }: SystemPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
   const {
@@ -167,7 +171,7 @@ export function SystemPanel() {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Thread info - scrollable if needed */}
       {currentThreadId && (
-        <div className="p-3 border-b border-[var(--panel-border)] overflow-auto max-h-[50%] flex-shrink-0">
+        <div className={`p-3 overflow-auto max-h-[50%] flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
           <h3 className="text-sm font-medium mb-2">Thread Info</h3>
 
           <div className="text-xs space-y-1">
@@ -363,7 +367,7 @@ export function SystemPanel() {
       )}
 
       {/* System log header */}
-      <div className="p-2 border-b border-[var(--panel-border)] flex items-center justify-between flex-shrink-0">
+      <div className={`p-2 flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
         <span className="text-sm font-medium">System Log</span>
         <button
           onClick={clearSystemLogs}
