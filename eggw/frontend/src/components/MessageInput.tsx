@@ -89,10 +89,15 @@ export function MessageInput() {
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
           setCurrentThreadId(response.data.child_id);
-        } else if (response.data?.thread_id && command.startsWith('/newThread')) {
-          // Created a new thread - refresh and switch
+        } else if (response.data?.thread_id) {
+          // Thread created/switched/duplicated - refresh and switch
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+          queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
           setCurrentThreadId(response.data.thread_id);
+        } else if (response.data?.deleted_id) {
+          // Thread deleted - refresh lists
+          queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+          queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
         } else if (response.data?.model_key) {
           // Model changed - refresh threads
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });

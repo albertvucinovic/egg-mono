@@ -4,16 +4,26 @@ import { useState, useEffect, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ThreadTree } from "@/components/ThreadTree";
 import { ChatPanel } from "@/components/ChatPanel";
+import { ChildrenPanel } from "@/components/ChildrenPanel";
 import { MessageInput } from "@/components/MessageInput";
 import { SystemPanel } from "@/components/SystemPanel";
 import { ApprovalPanel } from "@/components/ApprovalPanel";
 import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
-import { createThread, openThread } from "@/lib/api";
+import { createThread, openThread, interruptThread } from "@/lib/api";
 
 export default function Home() {
   const queryClient = useQueryClient();
-  const { currentThreadId, setCurrentThreadId, addSystemLog } = useAppStore();
+  const {
+    currentThreadId,
+    setCurrentThreadId,
+    addSystemLog,
+    isStreaming,
+    setIsStreaming,
+    setStreamingContent,
+    setStreamingReasoning,
+    setStreamingToolCalls,
+  } = useAppStore();
   const [leftPanelWidth, setLeftPanelWidth] = useState(280);
   const [showHelp, setShowHelp] = useState(false);
 
@@ -22,13 +32,29 @@ export default function Home() {
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // Don't trigger shortcuts when typing in input fields
-    const target = e.target as HTMLElement;
-    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") {
-      // Allow Escape to blur
-      if (e.key === "Escape") {
+    // Escape - Cancel streaming or blur input
+    if (e.key === "Escape") {
+      const target = e.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") {
         target.blur();
       }
+      // Cancel streaming if active
+      if (isStreaming && currentThreadId) {
+        e.preventDefault();
+        interruptThread(currentThreadId).then(() => {
+          setStreamingContent("");
+          setStreamingReasoning("");
+          setStreamingToolCalls({});
+          setIsStreaming(false);
+          addSystemLog("Streaming cancelled (Escape)", "info");
+        });
+      }
+      return;
+    }
+
+    // Don't trigger other shortcuts when typing in input fields
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") {
       return;
     }
 
@@ -66,7 +92,7 @@ export default function Home() {
       const input = document.querySelector("textarea") as HTMLTextAreaElement;
       if (input) input.focus();
     }
-  }, [queryClient, setCurrentThreadId, addSystemLog, showHelp]);
+  }, [queryClient, setCurrentThreadId, addSystemLog, showHelp, isStreaming, currentThreadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
@@ -88,6 +114,10 @@ export default function Home() {
             <h2 className="text-lg font-semibold mb-4">Keyboard Shortcuts</h2>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
+                <span className="text-gray-400">Cancel streaming</span>
+                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Esc</kbd>
+              </div>
+              <div className="flex justify-between">
                 <span className="text-gray-400">New thread</span>
                 <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+N</kbd>
               </div>
@@ -103,19 +133,13 @@ export default function Home() {
                 <span className="text-gray-400">Show this help</span>
                 <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">?</kbd>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Unfocus input</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Esc</kbd>
-              </div>
             </div>
             <div className="mt-4 pt-4 border-t border-[var(--panel-border)] text-sm text-gray-400">
               <p className="font-medium text-gray-300 mb-2">Commands:</p>
-              <p>/model [name] - Change model</p>
-              <p>/spawn &lt;context&gt; - Spawn child thread</p>
-              <p>/newThread - Create new thread</p>
-              <p>/help - Show command help</p>
-              <p>$ cmd - Run shell command</p>
-              <p>$$ cmd - Run hidden shell command</p>
+              <p>/model, /spawn, /newThread, /threads</p>
+              <p>/parentThread, /listChildren, /cost</p>
+              <p>/toggleAutoApproval, /toolsOn, /toolsOff</p>
+              <p>$ cmd - Shell, $$ cmd - Hidden shell</p>
             </div>
             <button
               onClick={() => setShowHelp(false)}
@@ -177,6 +201,7 @@ export default function Home() {
 
         {/* Center - Chat */}
         <div className="flex-1 flex flex-col overflow-hidden">
+          <ChildrenPanel />
           <ChatPanel />
           <ApprovalPanel />
           <MessageInput />

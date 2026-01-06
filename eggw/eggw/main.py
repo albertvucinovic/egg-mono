@@ -512,6 +512,28 @@ async def execute_command(thread_id: str, request: CommandRequest):
             return _cmd_help()
         elif command_name == "toggleAutoApproval":
             return await _cmd_toggle_auto_approval(thread_id)
+        elif command_name == "parentThread":
+            return await _cmd_parent_thread(thread_id)
+        elif command_name == "thread":
+            return await _cmd_switch_thread(command_arg)
+        elif command_name == "threads":
+            return await _cmd_list_threads()
+        elif command_name == "listChildren":
+            return await _cmd_list_children(thread_id)
+        elif command_name == "deleteThread":
+            return await _cmd_delete_thread(thread_id, command_arg)
+        elif command_name == "duplicateThread":
+            return await _cmd_duplicate_thread(thread_id, command_arg)
+        elif command_name == "cost":
+            return await _cmd_cost(thread_id)
+        elif command_name == "toolsOn":
+            return await _cmd_tools_on(thread_id)
+        elif command_name == "toolsOff":
+            return await _cmd_tools_off(thread_id)
+        elif command_name == "toolsStatus":
+            return await _cmd_tools_status(thread_id)
+        elif command_name == "schedulers":
+            return _cmd_schedulers()
         else:
             return CommandResponse(
                 success=False,
@@ -669,19 +691,212 @@ async def _cmd_toggle_auto_approval(thread_id: str) -> CommandResponse:
     )
 
 
+async def _cmd_parent_thread(thread_id: str) -> CommandResponse:
+    """Handle /parentThread command."""
+    parent_id = get_parent(db, thread_id)
+    if not parent_id:
+        return CommandResponse(
+            success=False,
+            message="This thread has no parent (it's a root thread)",
+        )
+    return CommandResponse(
+        success=True,
+        message=f"Parent thread: {parent_id[-8:]}",
+        data={"thread_id": parent_id},
+    )
+
+
+async def _cmd_switch_thread(selector: str) -> CommandResponse:
+    """Handle /thread command to switch to a thread by ID or partial ID."""
+    if not selector:
+        return CommandResponse(success=False, message="Usage: /thread <id or partial-id>")
+
+    # Try exact match first
+    t = db.get_thread(selector)
+    if t:
+        return CommandResponse(
+            success=True,
+            message=f"Switched to thread: {selector[-8:]}",
+            data={"thread_id": selector},
+        )
+
+    # Try partial match
+    all_threads = list_threads(db)
+    matches = [t for t in all_threads if selector.lower() in t.thread_id.lower()]
+
+    if len(matches) == 1:
+        tid = matches[0].thread_id
+        return CommandResponse(
+            success=True,
+            message=f"Switched to thread: {tid[-8:]}",
+            data={"thread_id": tid},
+        )
+    elif len(matches) > 1:
+        match_list = ", ".join(t.thread_id[-8:] for t in matches[:5])
+        return CommandResponse(
+            success=False,
+            message=f"Ambiguous thread selector. Matches: {match_list}",
+        )
+    else:
+        return CommandResponse(success=False, message=f"No thread found matching: {selector}")
+
+
+async def _cmd_list_threads() -> CommandResponse:
+    """Handle /threads command."""
+    all_threads = list_threads(db)
+    if not all_threads:
+        return CommandResponse(success=True, message="No threads found")
+
+    lines = []
+    for t in all_threads:
+        name_part = f" ({t.name})" if t.name else ""
+        model = current_thread_model(db, t.thread_id)
+        model_part = f" [{model}]" if model else ""
+        lines.append(f"  {t.thread_id[-8:]}{name_part}{model_part}")
+
+    return CommandResponse(
+        success=True,
+        message=f"Threads ({len(all_threads)}):\n" + "\n".join(lines),
+        data={"threads": [t.thread_id for t in all_threads]},
+    )
+
+
+async def _cmd_list_children(thread_id: str) -> CommandResponse:
+    """Handle /listChildren command."""
+    children = list_children_with_meta(db, thread_id)
+    if not children:
+        return CommandResponse(success=True, message="No children")
+
+    lines = []
+    for child_id, name, recap, created in children:
+        name_part = f" ({name})" if name else ""
+        lines.append(f"  {child_id[-8:]}{name_part}")
+
+    return CommandResponse(
+        success=True,
+        message=f"Children ({len(children)}):\n" + "\n".join(lines),
+        data={"children": [c[0] for c in children]},
+    )
+
+
+async def _cmd_delete_thread(current_thread_id: str, selector: str) -> CommandResponse:
+    """Handle /deleteThread command."""
+    target_id = selector.strip() if selector else current_thread_id
+
+    # Try to find the thread
+    t = db.get_thread(target_id)
+    if not t:
+        # Try partial match
+        all_threads = list_threads(db)
+        matches = [th for th in all_threads if target_id.lower() in th.thread_id.lower()]
+        if len(matches) == 1:
+            target_id = matches[0].thread_id
+        elif len(matches) > 1:
+            return CommandResponse(success=False, message="Ambiguous thread selector")
+        else:
+            return CommandResponse(success=False, message="Thread not found")
+
+    delete_thread(db, target_id, delete_subtree=True)
+    return CommandResponse(
+        success=True,
+        message=f"Deleted thread: {target_id[-8:]}",
+        data={"deleted_id": target_id},
+    )
+
+
+async def _cmd_duplicate_thread(thread_id: str, name: str) -> CommandResponse:
+    """Handle /duplicateThread command."""
+    new_id = duplicate_thread(db, thread_id, new_name=name if name else None)
+    return CommandResponse(
+        success=True,
+        message=f"Duplicated to: {new_id[-8:]}",
+        data={"thread_id": new_id, "source_id": thread_id},
+    )
+
+
+async def _cmd_cost(thread_id: str) -> CommandResponse:
+    """Handle /cost command."""
+    stats = total_token_stats(db, thread_id, llm=llm_client)
+    api_usage = stats.get("api_usage", {})
+    totals = api_usage.get("totals", {})
+    cost_info = api_usage.get("cost_usd", {})
+
+    input_tokens = totals.get("input_tokens", 0)
+    output_tokens = totals.get("output_tokens", 0)
+    reasoning_tokens = totals.get("reasoning_tokens", 0)
+    cached_tokens = totals.get("cached_tokens", 0)
+    cost_usd = cost_info.get("total", 0)
+
+    return CommandResponse(
+        success=True,
+        message=f"Tokens: {input_tokens:,} in, {output_tokens:,} out, {reasoning_tokens:,} reasoning, {cached_tokens:,} cached\nCost: ${cost_usd:.4f}",
+        data={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "cached_tokens": cached_tokens,
+            "cost_usd": cost_usd,
+        },
+    )
+
+
+async def _cmd_tools_on(thread_id: str) -> CommandResponse:
+    """Handle /toolsOn command - enable all tools."""
+    from eggthreads import set_tools_enabled
+    set_tools_enabled(db, thread_id, enabled=True)
+    return CommandResponse(success=True, message="Tools enabled")
+
+
+async def _cmd_tools_off(thread_id: str) -> CommandResponse:
+    """Handle /toolsOff command - disable all tools."""
+    from eggthreads import set_tools_enabled
+    set_tools_enabled(db, thread_id, enabled=False)
+    return CommandResponse(success=True, message="Tools disabled")
+
+
+async def _cmd_tools_status(thread_id: str) -> CommandResponse:
+    """Handle /toolsStatus command."""
+    states = build_tool_call_states(db, thread_id)
+    if not states:
+        return CommandResponse(success=True, message="No tool calls in this thread")
+
+    lines = []
+    for tc_id, tc in states.items():
+        lines.append(f"  {tc.name} [{tc.state}] - {tc_id[-8:]}")
+
+    return CommandResponse(
+        success=True,
+        message=f"Tool calls ({len(states)}):\n" + "\n".join(lines),
+        data={"count": len(states)},
+    )
+
+
+def _cmd_schedulers() -> CommandResponse:
+    """Handle /schedulers command."""
+    if not active_schedulers:
+        return CommandResponse(success=True, message="No active schedulers")
+
+    lines = []
+    for root_id in active_schedulers:
+        lines.append(f"  {root_id[-8:]}")
+
+    return CommandResponse(
+        success=True,
+        message=f"Active schedulers ({len(active_schedulers)}):\n" + "\n".join(lines),
+        data={"count": len(active_schedulers), "roots": list(active_schedulers.keys())},
+    )
+
+
 def _cmd_help() -> CommandResponse:
     """Handle /help command."""
     help_text = """Available commands:
-/model [name] - Show or set the model
-/spawn <context> - Spawn a child thread with context
-/spawnChildThread <context> - Same as /spawn
-/newThread [name] - Create a new root thread
-/toggleAutoApproval - Toggle auto-approval for all tools
-/help - Show this help
+Model: /model [name]
+Thread: /newThread [name], /spawn <ctx>, /thread <id>, /threads
+        /parentThread, /listChildren, /deleteThread, /duplicateThread
+Tools: /toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus
+Other: /cost, /schedulers, /help
 
-Shell commands:
-$ <command> - Execute shell command (output visible to model)
-$$ <command> - Execute shell command (output hidden from model)"""
+Shell: $ <cmd> (visible), $$ <cmd> (hidden)"""
 
     return CommandResponse(
         success=True,
