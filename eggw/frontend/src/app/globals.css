@@ -394,29 +394,29 @@
   --scrollbar-thumb: #888888;
 }
 
-/* Colorful theme - matching egg.py TUI colors */
+/* Colorful theme - matching egg.py TUI colors (text only) */
 [data-theme="colorful"] {
   --background: #0a0a0a;
   --foreground: #e5e5e5;
-  --panel-bg: #141414;
+  --panel-bg: #0a0a0a;
   --panel-border: #333333;
-  --user-msg-bg: #052e16;
+  --user-msg-bg: #0a0a0a;
   --user-msg-border: #22c55e;
-  --assistant-msg-bg: #083344;
+  --assistant-msg-bg: #0a0a0a;
   --assistant-msg-border: #06b6d4;
-  --system-msg-bg: #172554;
+  --system-msg-bg: #0a0a0a;
   --system-msg-border: #3b82f6;
-  --tool-msg-bg: #422006;
+  --tool-msg-bg: #0a0a0a;
   --tool-msg-border: #eab308;
-  --reasoning-bg: #4a044e;
+  --reasoning-bg: #0a0a0a;
   --reasoning-border: #d946ef;
-  --tool-call-bg: #422006;
+  --tool-call-bg: #0a0a0a;
   --tool-call-border: #f59e0b;
   --accent: #06b6d4;
   --accent-hover: #22d3ee;
   --heading-color: #f5f5f5;
   --muted: #a3a3a3;
-  --code-bg: #1a1a1a;
+  --code-bg: #111111;
   --scrollbar-thumb: #404040;
 }
 
