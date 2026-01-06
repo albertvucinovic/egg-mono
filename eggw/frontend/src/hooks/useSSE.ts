@@ -115,8 +115,10 @@ export function useSSE(threadId: string | null) {
         const payload = data.payload || {};
         const role = payload.role || "unknown";
         addSystemLog(`Message created: ${role}`, "info");
-        // Refresh messages
-        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        // Only refresh messages if not streaming (streaming handles its own refresh on close)
+        if (!useAppStore.getState().isStreaming) {
+          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        }
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
       }
@@ -151,9 +153,11 @@ export function useSSE(threadId: string | null) {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         addSystemLog(`Tool finished: ${payload.name || "unknown"}`, "info");
-        // Refresh both tool calls and messages to show tool result
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
-        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        // Only refresh messages if not streaming (streaming handles its own refresh on close)
+        if (!useAppStore.getState().isStreaming) {
+          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        }
       } catch (err) {
         console.error("Failed to parse tool_call.finish:", err);
       }
@@ -164,7 +168,10 @@ export function useSSE(threadId: string | null) {
       try {
         addSystemLog("Tool output received", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
-        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        // Only refresh messages if not streaming (streaming handles its own refresh on close)
+        if (!useAppStore.getState().isStreaming) {
+          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        }
       } catch (err) {
         console.error("Failed to parse tool_call.output:", err);
       }
