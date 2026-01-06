@@ -120,10 +120,14 @@ function TreeNode({ thread, level }: TreeNodeProps) {
     <div>
       <div
         className={clsx(
-          "flex items-center gap-1 px-2 py-1 cursor-pointer hover:bg-[#2a2a2a] rounded group",
-          isSelected && "bg-[#2a2a2a] border-l-2 border-blue-500"
+          "flex items-center gap-1 px-2 py-1 cursor-pointer rounded group",
+          isSelected && "border-l-2"
         )}
-        style={{ paddingLeft: `${level * 16 + 8}px` }}
+        style={{
+          paddingLeft: `${level * 16 + 8}px`,
+          background: isSelected ? "var(--code-bg)" : undefined,
+          borderColor: isSelected ? "var(--accent)" : undefined,
+        }}
         onClick={() => {
           setCurrentThreadId(thread.id);
           // Start scheduler for this thread
@@ -140,7 +144,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
               e.stopPropagation();
               setExpanded(!expanded);
             }}
-            className="p-0.5 hover:bg-[#333] rounded"
+            className="p-0.5 rounded"
           >
             {expanded ? (
               <ChevronDown className="w-4 h-4" />
@@ -152,7 +156,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
           <span className="w-5" />
         )}
 
-        <MessageSquare className="w-4 h-4 text-gray-400" />
+        <MessageSquare className="w-4 h-4" style={{ color: "var(--muted)" }} />
 
         {isEditing ? (
           <>
@@ -163,22 +167,25 @@ function TreeNode({ thread, level }: TreeNodeProps) {
               onChange={(e) => setEditName(e.target.value)}
               onKeyDown={handleKeyDown}
               onClick={(e) => e.stopPropagation()}
-              className="flex-1 bg-[#111] border border-blue-500 rounded px-1 text-sm outline-none"
+              className="flex-1 border rounded px-1 text-sm outline-none"
+              style={{ background: "var(--code-bg)", borderColor: "var(--accent)", color: "var(--foreground)" }}
               placeholder="Thread name"
             />
             <button
               onClick={handleSaveEdit}
-              className="p-1 hover:bg-green-900 rounded"
+              className="p-1 rounded"
+              style={{ color: "var(--tool-msg-border)" }}
               title="Save"
             >
-              <Check className="w-3 h-3 text-green-400" />
+              <Check className="w-3 h-3" />
             </button>
             <button
               onClick={handleCancelEdit}
-              className="p-1 hover:bg-red-900 rounded"
+              className="p-1 rounded"
+              style={{ color: "var(--user-msg-border)" }}
               title="Cancel"
             >
-              <X className="w-3 h-3 text-red-400" />
+              <X className="w-3 h-3" />
             </button>
           </>
         ) : (
@@ -187,7 +194,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
               {thread.name || thread.id.slice(-8)}
             </span>
 
-            <span className="text-xs text-gray-500">
+            <span className="text-xs" style={{ color: "var(--muted)" }}>
               {thread.model_key?.split(":")[0]}
             </span>
 
@@ -195,7 +202,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
             <div className="hidden group-hover:flex gap-1">
               <button
                 onClick={handleStartEdit}
-                className="p-1 hover:bg-[#333] rounded"
+                className="p-1 rounded"
                 title="Rename"
               >
                 <Pencil className="w-3 h-3" />
@@ -205,7 +212,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
                   e.stopPropagation();
                   duplicateMutation.mutate();
                 }}
-                className="p-1 hover:bg-[#333] rounded"
+                className="p-1 rounded"
                 title="Duplicate"
               >
                 <Copy className="w-3 h-3" />
@@ -217,7 +224,8 @@ function TreeNode({ thread, level }: TreeNodeProps) {
                     deleteMutation.mutate();
                   }
                 }}
-                className="p-1 hover:bg-red-900 rounded"
+                className="p-1 rounded"
+                style={{ color: "var(--user-msg-border)" }}
                 title="Delete"
               >
                 <Trash2 className="w-3 h-3" />
@@ -272,7 +280,7 @@ export function ThreadTree() {
         <span className="text-sm font-medium">Threads</span>
         <button
           onClick={() => createMutation.mutate()}
-          className="p-1 hover:bg-[#333] rounded"
+          className="p-1 rounded"
           title="New thread"
         >
           <Plus className="w-4 h-4" />
@@ -282,13 +290,14 @@ export function ThreadTree() {
       {/* Thread list */}
       <div className="flex-1 overflow-auto py-1">
         {isLoading ? (
-          <div className="p-4 text-center text-gray-500">Loading...</div>
+          <div className="p-4 text-center" style={{ color: "var(--muted)" }}>Loading...</div>
         ) : threads?.length === 0 ? (
-          <div className="p-4 text-center text-gray-500">
+          <div className="p-4 text-center" style={{ color: "var(--muted)" }}>
             <p>No threads yet</p>
             <button
               onClick={() => createMutation.mutate()}
-              className="mt-2 px-3 py-1 bg-blue-600 rounded text-sm hover:bg-blue-500"
+              className="mt-2 px-3 py-1 rounded text-sm"
+              style={{ background: "var(--accent)", color: "var(--background)" }}
             >
               Create first thread
             </button>

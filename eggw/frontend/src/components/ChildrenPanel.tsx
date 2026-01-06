@@ -34,14 +34,14 @@ export function ChildrenPanel() {
 
   return (
     <div className="border-b border-[var(--panel-border)] bg-[var(--panel-bg)]">
-      <div className="px-3 py-2 text-xs text-gray-400 border-b border-[var(--panel-border)] flex items-center justify-between">
+      <div className="px-3 py-2 text-xs border-b border-[var(--panel-border)] flex items-center justify-between" style={{ color: "var(--muted)" }}>
         <span>Children ({children.length})</span>
       </div>
 
       {isLoading ? (
-        <div className="px-3 py-2 text-xs text-gray-500">Loading...</div>
+        <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>Loading...</div>
       ) : children.length === 0 ? (
-        <div className="px-3 py-2 text-xs text-gray-500">
+        <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>
           No children. Use /spawn to create one.
         </div>
       ) : (
@@ -50,19 +50,20 @@ export function ChildrenPanel() {
             <button
               key={child.id}
               onClick={() => navigateToChild(child.id)}
-              className="w-full px-3 py-1.5 text-left text-sm hover:bg-[var(--item-hover)] flex items-center gap-2 group"
+              className="w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 group"
+              style={{ color: "var(--foreground)" }}
             >
-              <ChevronRight className="w-3 h-3 text-gray-500" />
+              <ChevronRight className="w-3 h-3" style={{ color: "var(--muted)" }} />
               <span className="flex-1 truncate">
                 {child.name || child.id.slice(-8)}
               </span>
               {child.model_key && (
-                <span className="text-xs text-gray-500 group-hover:text-gray-400">
+                <span className="text-xs" style={{ color: "var(--muted)" }}>
                   {child.model_key}
                 </span>
               )}
               {child.has_children && (
-                <Plus className="w-3 h-3 text-gray-500" />
+                <Plus className="w-3 h-3" style={{ color: "var(--muted)" }} />
               )}
             </button>
           ))}

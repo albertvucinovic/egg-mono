@@ -447,14 +447,14 @@ export function MessageInput() {
             >
               <span className="font-mono text-sm flex-1 whitespace-nowrap overflow-hidden text-ellipsis">{suggestion.display}</span>
               {suggestion.meta && (
-                <span className="text-xs text-gray-500 flex-shrink-0 max-w-[200px] truncate">{suggestion.meta}</span>
+                <span className="text-xs flex-shrink-0 max-w-[200px] truncate" style={{ color: "var(--muted)" }}>{suggestion.meta}</span>
               )}
             </div>
           ))}
-          <div className="px-3 py-1 text-xs text-gray-500 border-t border-[var(--panel-border)]">
-            <kbd className="px-1 bg-[#333] rounded">Tab</kbd> to select,{" "}
-            <kbd className="px-1 bg-[#333] rounded">↑↓</kbd> to navigate,{" "}
-            <kbd className="px-1 bg-[#333] rounded">Esc</kbd> to close
+          <div className="px-3 py-1 text-xs border-t border-[var(--panel-border)]" style={{ color: "var(--muted)" }}>
+            <kbd className="px-1 rounded" style={{ background: "var(--code-bg)" }}>Tab</kbd> to select,{" "}
+            <kbd className="px-1 rounded" style={{ background: "var(--code-bg)" }}>↑↓</kbd> to navigate,{" "}
+            <kbd className="px-1 rounded" style={{ background: "var(--code-bg)" }}>Esc</kbd> to close
           </div>
         </div>
       )}
@@ -524,22 +524,22 @@ export function MessageInput() {
       </div>
 
       {/* Status line */}
-      <div className="mt-2 text-xs text-gray-500 flex items-center gap-4">
+      <div className="mt-2 text-xs flex items-center gap-4" style={{ color: "var(--muted)" }}>
         <span>
           {currentThreadId ? `Thread: ${currentThreadId.slice(-8)}` : "No thread"}
         </span>
         {inputIsCommand && (
-          <span className="text-amber-400">
+          <span style={{ color: "var(--tool-call-border)" }}>
             {input.startsWith('$') ? "Shell command" : "Slash command"}
           </span>
         )}
         {isStreaming && (
-          <span className="text-blue-400 flex items-center gap-1">
+          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
             <Loader2 className="w-3 h-3 animate-spin" />
             Streaming...
           </span>
         )}
-        <span className="text-gray-600" title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>
+        <span title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>
           [{enterMode === "send" ? "⏎ send" : "^⏎ send"}]
         </span>
       </div>

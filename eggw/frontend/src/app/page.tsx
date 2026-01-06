@@ -209,46 +209,47 @@ export default function Home() {
           onClick={() => setShowHelp(false)}
         >
           <div
-            className="bg-[#1a1a1a] border border-[var(--panel-border)] rounded-lg p-6 max-w-md"
+            className="border rounded-lg p-6 max-w-md"
+            style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-lg font-semibold mb-4">Keyboard Shortcuts</h2>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
-                <span className="text-gray-400">Cancel streaming</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Esc</kbd>
+                <span style={{ color: "var(--muted)" }}>Cancel streaming</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Esc</kbd>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">New thread</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+N</kbd>
+                <span style={{ color: "var(--muted)" }}>New thread</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+N</kbd>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Spawn child thread</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+S</kbd>
+                <span style={{ color: "var(--muted)" }}>Spawn child thread</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+S</kbd>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Clear input</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+E</kbd>
+                <span style={{ color: "var(--muted)" }}>Clear input</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+E</kbd>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Paste clipboard</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+P</kbd>
+                <span style={{ color: "var(--muted)" }}>Paste clipboard</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+P</kbd>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Focus input</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">i</kbd>
+                <span style={{ color: "var(--muted)" }}>Focus input</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>i</kbd>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Start command</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">/</kbd>
+                <span style={{ color: "var(--muted)" }}>Start command</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>/</kbd>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Show this help</span>
-                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">?</kbd>
+                <span style={{ color: "var(--muted)" }}>Show this help</span>
+                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>?</kbd>
               </div>
             </div>
-            <div className="mt-4 pt-4 border-t border-[var(--panel-border)] text-sm text-gray-400">
-              <p className="font-medium text-gray-300 mb-2">Commands:</p>
+            <div className="mt-4 pt-4 border-t border-[var(--panel-border)] text-sm" style={{ color: "var(--muted)" }}>
+              <p className="font-medium mb-2" style={{ color: "var(--foreground)" }}>Commands:</p>
               <p>/model, /updateAllModels, /spawn, /spawnAutoApprovedChildThread</p>
               <p>/newThread, /threads, /thread, /rename, /waitForThreads</p>
               <p>/parentThread, /listChildren, /deleteThread, /duplicateThread</p>
@@ -260,7 +261,8 @@ export default function Home() {
             </div>
             <button
               onClick={() => setShowHelp(false)}
-              className="mt-4 w-full py-2 bg-blue-600 hover:bg-blue-500 rounded"
+              className="mt-4 w-full py-2 rounded"
+              style={{ background: "var(--accent)", color: "var(--background)" }}
             >
               Close
             </button>
@@ -273,19 +275,19 @@ export default function Home() {
         <h1 className="text-lg font-semibold">eggw</h1>
         {currentThreadId && (
           <span className="ml-4 text-sm">
-            <span className="text-gray-400">Thread:</span>{" "}
+            <span style={{ color: "var(--muted)" }}>Thread:</span>{" "}
             {currentThreadData?.name ? (
               <>
-                <span className="text-gray-200">{currentThreadData.name}</span>
-                <span className="text-gray-500 ml-1">({currentThreadId.slice(-8)})</span>
+                <span style={{ color: "var(--foreground)" }}>{currentThreadData.name}</span>
+                <span style={{ color: "var(--muted)" }} className="ml-1">({currentThreadId.slice(-8)})</span>
               </>
             ) : (
-              <span className="text-gray-400">{currentThreadId.slice(-8)}</span>
+              <span style={{ color: "var(--muted)" }}>{currentThreadId.slice(-8)}</span>
             )}
           </span>
         )}
         {!currentThreadId && (
-          <span className="ml-4 text-sm text-gray-400">No thread selected</span>
+          <span className="ml-4 text-sm" style={{ color: "var(--muted)" }}>No thread selected</span>
         )}
         {/* Sandbox status */}
         {currentThreadId && sandboxStatus && (
@@ -311,7 +313,8 @@ export default function Home() {
         <div className="ml-auto">
           <button
             onClick={() => setShowHelp(true)}
-            className="text-xs text-gray-500 hover:text-gray-300 px-2 py-1"
+            className="text-xs px-2 py-1"
+            style={{ color: "var(--muted)" }}
           >
             Press ? for help
           </button>

@@ -172,14 +172,14 @@ export function SystemPanel() {
 
           <div className="text-xs space-y-1">
             <div className="flex justify-between">
-              <span className="text-gray-400">ID:</span>
+              <span style={{ color: "var(--muted)" }}>ID:</span>
               <span className="font-mono">{currentThreadId.slice(-12)}</span>
             </div>
 
             {/* Thread State */}
             {threadState && (
               <div className="flex justify-between items-center">
-                <span className="text-gray-400">Status:</span>
+                <span style={{ color: "var(--muted)" }}>Status:</span>
                 <div className="flex items-center gap-1.5">
                   <span
                     className={clsx(
@@ -202,7 +202,7 @@ export function SystemPanel() {
 
             {/* Model selector */}
             <div className="flex justify-between items-center">
-              <span className="text-gray-400">Model:</span>
+              <span style={{ color: "var(--muted)" }}>Model:</span>
               <select
                 value={threadSettings?.model_key || ""}
                 onChange={(e) => {
@@ -211,7 +211,8 @@ export function SystemPanel() {
                   }
                 }}
                 disabled={modelMutation.isPending}
-                className="bg-[#111] border border-[var(--panel-border)] rounded px-1 py-0.5 text-xs disabled:opacity-50"
+                className="border rounded px-1 py-0.5 text-xs disabled:opacity-50"
+                style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               >
                 {models.map((m) => (
                   <option key={m.key} value={m.key}>
@@ -223,7 +224,7 @@ export function SystemPanel() {
 
             {/* Auto-approval toggle */}
             <div className="flex justify-between items-center">
-              <span className="text-gray-400">Auto-approve:</span>
+              <span style={{ color: "var(--muted)" }}>Auto-approve:</span>
               <button
                 onClick={() => autoApprovalMutation.mutate(!threadSettings?.auto_approval)}
                 disabled={autoApprovalMutation.isPending}
@@ -283,16 +284,17 @@ export function SystemPanel() {
 
           {/* Thread Navigation */}
           <div className="mt-3 text-xs">
-            <div className="flex items-center gap-1 mb-1">
-              <GitBranch className="w-3 h-3 text-gray-400" />
-              <span className="text-gray-400">Navigation</span>
+            <div className="flex items-center gap-1 mb-1" style={{ color: "var(--muted)" }}>
+              <GitBranch className="w-3 h-3" />
+              <span>Navigation</span>
             </div>
 
             {/* Parent */}
             {currentThreadData?.parent_id && (
               <button
                 onClick={() => navigateToThread(currentThreadData.parent_id!)}
-                className="flex items-center gap-1 w-full px-2 py-1 text-left hover:bg-[#333] rounded text-blue-400"
+                className="flex items-center gap-1 w-full px-2 py-1 text-left rounded"
+                style={{ color: "var(--accent)" }}
               >
                 <ArrowUp className="w-3 h-3" />
                 Parent: {currentThreadData.parent_id.slice(-8)}
@@ -302,13 +304,14 @@ export function SystemPanel() {
             {/* Children */}
             {children && children.length > 0 && (
               <div className="mt-1">
-                <div className="text-gray-500 mb-1">Children ({children.length}):</div>
+                <div style={{ color: "var(--muted)" }} className="mb-1">Children ({children.length}):</div>
                 <div className="max-h-24 overflow-auto space-y-0.5">
                   {children.map((child: any) => (
                     <button
                       key={child.id}
                       onClick={() => navigateToThread(child.id)}
-                      className="flex items-center gap-1 w-full px-2 py-0.5 text-left hover:bg-[#333] rounded text-green-400"
+                      className="flex items-center gap-1 w-full px-2 py-0.5 text-left rounded"
+                      style={{ color: "var(--accent)" }}
                     >
                       <ArrowDown className="w-3 h-3" />
                       {child.name || child.id.slice(-8)}
@@ -319,7 +322,7 @@ export function SystemPanel() {
             )}
 
             {!currentThreadData?.parent_id && (!children || children.length === 0) && (
-              <div className="text-gray-500 px-2">Root thread, no children</div>
+              <div style={{ color: "var(--muted)" }} className="px-2">Root thread, no children</div>
             )}
           </div>
 
@@ -327,29 +330,30 @@ export function SystemPanel() {
           {stats && (
             <div className="mt-3 text-xs">
               <div className="flex justify-between items-center mb-1">
-                <span className="text-gray-400">Token Stats</span>
+                <span style={{ color: "var(--muted)" }}>Token Stats</span>
                 <button
                   onClick={() => refetchStats()}
-                  className="p-0.5 hover:bg-[#333] rounded"
+                  className="p-0.5 rounded"
+                  style={{ color: "var(--muted)" }}
                 >
                   <RefreshCw className="w-3 h-3" />
                 </button>
               </div>
-              <div className="grid grid-cols-2 gap-1 text-gray-300">
+              <div className="grid grid-cols-2 gap-1" style={{ color: "var(--foreground)" }}>
                 <span>Input:</span>
                 <span className="text-right">{(stats.input_tokens || 0).toLocaleString()}</span>
                 <span>Output:</span>
                 <span className="text-right">{(stats.output_tokens || 0).toLocaleString()}</span>
                 <span>Reasoning:</span>
                 <span className="text-right">{(stats.reasoning_tokens || 0).toLocaleString()}</span>
-                <span className="text-green-400">Cached:</span>
-                <span className="text-right text-green-400">{(stats.cached_tokens || 0).toLocaleString()}</span>
+                <span style={{ color: "var(--tool-msg-border)" }}>Cached:</span>
+                <span className="text-right" style={{ color: "var(--tool-msg-border)" }}>{(stats.cached_tokens || 0).toLocaleString()}</span>
                 <span>Context:</span>
                 <span className="text-right">{(stats.context_tokens || 0).toLocaleString()}</span>
                 <span className="font-medium">Total:</span>
                 <span className="text-right font-medium">{(stats.total_tokens || 0).toLocaleString()}</span>
-                <span className="text-yellow-400 font-medium">Cost:</span>
-                <span className="text-right text-yellow-400 font-medium">
+                <span className="font-medium" style={{ color: "var(--reasoning-border)" }}>Cost:</span>
+                <span className="text-right font-medium" style={{ color: "var(--reasoning-border)" }}>
                   ${(stats.cost_usd || 0).toFixed(4)}
                 </span>
               </div>
@@ -363,7 +367,8 @@ export function SystemPanel() {
         <span className="text-sm font-medium">System Log</span>
         <button
           onClick={clearSystemLogs}
-          className="p-1 hover:bg-[#333] rounded"
+          className="p-1 rounded"
+          style={{ color: "var(--muted)" }}
           title="Clear logs"
         >
           <Trash2 className="w-4 h-4" />
@@ -373,7 +378,7 @@ export function SystemPanel() {
       {/* Log entries */}
       <div ref={scrollRef} className="flex-1 overflow-auto p-2 min-h-0">
         {systemLogs.length === 0 ? (
-          <div className="text-center text-gray-500 text-sm py-4">
+          <div className="text-center text-sm py-4" style={{ color: "var(--muted)" }}>
             No log entries
           </div>
         ) : (
@@ -381,14 +386,13 @@ export function SystemPanel() {
             {systemLogs.map((log, idx) => (
               <div
                 key={idx}
-                className={clsx(
-                  "text-xs p-1 rounded",
-                  log.type === "error" && "bg-red-900/30 text-red-300",
-                  log.type === "success" && "bg-green-900/30 text-green-300",
-                  log.type === "info" && "text-gray-400"
-                )}
+                className="text-xs p-1 rounded"
+                style={{
+                  background: log.type === "error" ? "var(--user-msg-bg)" : log.type === "success" ? "var(--tool-msg-bg)" : undefined,
+                  color: log.type === "error" ? "var(--user-msg-border)" : log.type === "success" ? "var(--tool-msg-border)" : "var(--muted)",
+                }}
               >
-                <span className="text-gray-500">
+                <span style={{ color: "var(--muted)" }}>
                   {log.timestamp.toLocaleTimeString()}
                 </span>{" "}
                 {log.message}
