@@ -54,11 +54,12 @@ interface MessageBlockProps {
 
 function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
   // Use CSS variables for theme-aware colors
+  // Text colors use fallback to --foreground for themes that don't define *-text vars
   const roleStyles: Record<string, React.CSSProperties> = {
-    user: { background: "var(--user-msg-bg)", borderColor: "var(--user-msg-border)" },
-    assistant: { background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)" },
-    system: { background: "var(--system-msg-bg)", borderColor: "var(--system-msg-border)" },
-    tool: { background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" },
+    user: { background: "var(--user-msg-bg)", borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--foreground))" },
+    assistant: { background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" },
+    system: { background: "var(--system-msg-bg)", borderColor: "var(--system-msg-border)", color: "var(--system-msg-text, var(--foreground))" },
+    tool: { background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" },
   };
 
   const roleLabels: Record<string, string> = {
@@ -89,14 +90,14 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
     >
       {/* Header */}
       <div className="flex items-center gap-2 mb-2 text-xs" style={{ color: "var(--muted)" }}>
-        <span className="font-medium" style={{ color: "var(--foreground)" }}>
+        <span className="font-medium" style={roleStyles[message.role] ? { color: roleStyles[message.role].color } : { color: "var(--foreground)" }}>
           {isShellCommand ? "Shell" : roleLabels[message.role] || message.role}
         </span>
         {message.model_key && (
           <span style={{ color: "var(--muted)" }}>({message.model_key})</span>
         )}
         {message.tool_call_id && (
-          <span className="font-mono" style={{ color: "var(--tool-msg-border)" }}>
+          <span className="font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
             ← {message.tool_call_id.slice(-8)}
           </span>
         )}
@@ -108,10 +109,10 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
           className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
         >
-          <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-border)" }}>
+          <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
             Reasoning
           </summary>
-          <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--foreground)", opacity: 0.9 }}>
+          <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
             {message.reasoning}
           </div>
         </details>
@@ -127,28 +128,28 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
             </pre>
           ) : isCommandOutput ? (
             /* Command output (system messages) - monospace for tree/list formatting */
-            <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+            <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
               {message.content}
             </pre>
           ) : message.role === "tool" ? (
             /* Tool output - collapsible if long */
             isLongToolOutput ? (
               <details className={`rounded ${showBorders ? 'border' : ''}`} style={{ background: "var(--code-bg)", borderColor: "var(--tool-msg-border)" }}>
-                <summary className="cursor-pointer p-2 text-sm" style={{ color: "var(--tool-msg-border)" }}>
+                <summary className="cursor-pointer p-2 text-sm" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
                   Output ({message.content.length.toLocaleString()} chars) - click to expand
                 </summary>
-                <pre className="p-2 text-xs overflow-auto max-h-96 whitespace-pre-wrap" style={{ color: "var(--foreground)" }}>
+                <pre className="p-2 text-xs overflow-auto max-h-96 whitespace-pre-wrap" style={{ color: "var(--tool-msg-text, var(--foreground))" }}>
                   {message.content}
                 </pre>
               </details>
             ) : (
-              <pre className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+              <pre className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
                 {message.content}
               </pre>
             )
           ) : (
             /* Regular markdown content with GFM tables and LaTeX support */
-            <div className="prose prose-sm max-w-none">
+            <div className="prose prose-sm max-w-none" style={{ color: "inherit" }}>
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
                 rehypePlugins={[rehypeRaw, rehypeKatex]}
@@ -231,7 +232,7 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
                 style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
               >
                 <div className="flex items-center gap-2 text-sm">
-                  <span className="font-medium" style={{ color: "var(--tool-call-border)" }}>{toolName}</span>
+                  <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{toolName}</span>
                   <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
                     {tc.id?.slice(-8)}
                   </span>
@@ -294,7 +295,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
 
   if (!currentThreadId) {
     return (
-      <div className="flex-1 flex items-center justify-center text-gray-500">
+      <div className="flex-1 flex items-center justify-center" style={{ color: "var(--muted)" }}>
         Select a thread to view messages
       </div>
     );
@@ -303,9 +304,9 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   return (
     <div ref={scrollRef} className="flex-1 overflow-auto p-4">
       {isLoading ? (
-        <div className="text-center text-gray-500">Loading messages...</div>
+        <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
       ) : messages.length === 0 ? (
-        <div className="text-center text-gray-500">
+        <div className="text-center" style={{ color: "var(--muted)" }}>
           No messages yet. Start a conversation!
         </div>
       ) : (
@@ -318,10 +319,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
           {(streamingContent || streamingReasoning || Object.keys(streamingToolCalls).length > 0) && (
             <div
               className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
-              style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)" }}
+              style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
             >
               <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                <span className="font-medium" style={{ color: "var(--foreground)" }}>Assistant</span>
+                <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>Assistant</span>
                 <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
               </div>
 
@@ -332,10 +333,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
                   className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
                   style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
                 >
-                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-border)" }}>
+                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
                     Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
                   </summary>
-                  <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--foreground)", opacity: 0.9 }}>
+                  <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
                     {streamingReasoning}
                   </div>
                 </details>
@@ -343,7 +344,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
 
               {/* Streaming content with GFM tables and LaTeX support */}
               {streamingContent && (
-                <div className="prose prose-sm max-w-none">
+                <div className="prose prose-sm max-w-none" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm, remarkMath]}
                     rehypePlugins={[rehypeRaw, rehypeKatex]}
@@ -402,11 +403,11 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
                         style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
                       >
                         <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                          <span className="font-medium" style={{ color: "var(--tool-call-border)" }}>{tc.name || "tool"}</span>
+                          <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
                           <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
                             {tcId.slice(-8)}
                           </span>
-                          <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-border)" }}>streaming...</span>
+                          <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
                         </summary>
                         <div className="px-2 pb-2">
                           {isBash && script ? (

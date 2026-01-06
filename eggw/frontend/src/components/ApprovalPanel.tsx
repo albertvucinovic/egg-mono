@@ -56,7 +56,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
       className={`p-4 ${showBorders ? 'border-t' : ''}`}
       style={{ borderColor: "var(--tool-call-border)", background: "var(--tool-call-bg)" }}
     >
-      <div className="flex items-center gap-2 mb-3" style={{ color: "var(--tool-call-border)" }}>
+      <div className="flex items-center gap-2 mb-3" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>
         <AlertTriangle className="w-5 h-5" />
         <span className="font-medium">Pending Approvals</span>
       </div>
@@ -70,7 +70,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
           >
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <span className="font-medium" style={{ color: "var(--tool-call-border)" }}>{tc.name}</span>
+                <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name}</span>
                 <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
                   {tc.id.slice(-8)}
                 </span>
@@ -78,7 +78,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                   className="text-xs px-2 py-0.5 rounded border"
                   style={{
                     borderColor: tc.state === "TC1" ? "var(--tool-call-border)" : "var(--reasoning-border)",
-                    color: tc.state === "TC1" ? "var(--tool-call-border)" : "var(--reasoning-border)",
+                    color: tc.state === "TC1" ? "var(--tool-call-text, var(--tool-call-border))" : "var(--reasoning-text, var(--reasoning-border))",
                   }}
                 >
                   {tc.state === "TC1" ? "Exec Approval" : "Output Approval"}
@@ -101,7 +101,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
               <details className="mb-3">
                 <summary
                   className="cursor-pointer text-sm"
-                  style={{ color: "var(--reasoning-border)" }}
+                  style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}
                 >
                   View Output ({tc.output.length} chars)
                 </summary>
@@ -124,7 +124,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                       approveMutation.mutate({ toolCallId: tc.id, approved: true })
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-border)" }}
+                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--tool-msg-border))" }}
                   >
                     <Check className="w-4 h-4" /> Approve
                   </button>
@@ -133,7 +133,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                       approveMutation.mutate({ toolCallId: tc.id, approved: false })
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-border)" }}
+                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--user-msg-border))" }}
                   >
                     <X className="w-4 h-4" /> Deny
                   </button>
@@ -149,7 +149,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                       })
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-border)" }}
+                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--tool-msg-border))" }}
                   >
                     <Check className="w-4 h-4" /> Include Output
                   </button>
@@ -162,7 +162,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                       })
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-border)" }}
+                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--user-msg-border))" }}
                   >
                     <X className="w-4 h-4" /> Omit Output
                   </button>

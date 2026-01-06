@@ -394,29 +394,35 @@
   --scrollbar-thumb: #888888;
 }
 
-/* Colorful theme - matching egg.py TUI colors (text only) */
+/* Colorful theme - matching egg.py TUI colors (colored text, gray borders) */
 [data-theme="colorful"] {
   --background: #0a0a0a;
   --foreground: #e5e5e5;
   --panel-bg: #0a0a0a;
-  --panel-border: #333333;
+  --panel-border: #444444;
   --user-msg-bg: #0a0a0a;
-  --user-msg-border: #22c55e;
+  --user-msg-border: #444444;
+  --user-msg-text: #22c55e;
   --assistant-msg-bg: #0a0a0a;
-  --assistant-msg-border: #06b6d4;
+  --assistant-msg-border: #444444;
+  --assistant-msg-text: #06b6d4;
   --system-msg-bg: #0a0a0a;
-  --system-msg-border: #3b82f6;
+  --system-msg-border: #444444;
+  --system-msg-text: #3b82f6;
   --tool-msg-bg: #0a0a0a;
-  --tool-msg-border: #eab308;
+  --tool-msg-border: #444444;
+  --tool-msg-text: #eab308;
   --reasoning-bg: #0a0a0a;
-  --reasoning-border: #d946ef;
+  --reasoning-border: #444444;
+  --reasoning-text: #d946ef;
   --tool-call-bg: #0a0a0a;
-  --tool-call-border: #f59e0b;
+  --tool-call-border: #444444;
+  --tool-call-text: #f59e0b;
   --accent: #06b6d4;
   --accent-hover: #22d3ee;
   --heading-color: #f5f5f5;
   --muted: #a3a3a3;
-  --code-bg: #111111;
+  --code-bg: #0a0a0a;
   --scrollbar-thumb: #404040;
 }
 
@@ -424,6 +430,20 @@ body {
   color: var(--foreground);
   background: var(--background);
   font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Make prose inherit text color from parent (for themed message colors) */
+.prose,
+.prose p,
+.prose li,
+.prose strong,
+.prose em,
+.prose blockquote,
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  color: inherit !important;
 }
 
 /* Custom scrollbar */
