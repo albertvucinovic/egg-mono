@@ -29,6 +29,8 @@ export function ApprovalPanel() {
     }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+      // Also invalidate messages since tool will execute and produce output
+      queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
       addSystemLog("Tool approval updated", "success");
     },
     onError: () => {

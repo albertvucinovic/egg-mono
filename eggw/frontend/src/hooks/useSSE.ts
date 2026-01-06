@@ -145,6 +145,31 @@ export function useSSE(threadId: string | null) {
       }
     });
 
+    // Handle tool_call finish events - tool execution completed
+    es.addEventListener("tool_call.finish", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        addSystemLog(`Tool finished: ${payload.name || "unknown"}`, "info");
+        // Refresh both tool calls and messages to show tool result
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+      } catch (err) {
+        console.error("Failed to parse tool_call.finish:", err);
+      }
+    });
+
+    // Handle tool_call output events - tool output available
+    es.addEventListener("tool_call.output", (e) => {
+      try {
+        addSystemLog("Tool output received", "info");
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+      } catch (err) {
+        console.error("Failed to parse tool_call.output:", err);
+      }
+    });
+
     return es;
   }, [
     threadId,
