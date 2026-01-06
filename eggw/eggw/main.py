@@ -435,7 +435,7 @@ async def send_message(thread_id: str, request: SendMessageRequest):
 
 @app.post("/api/threads/{thread_id}/open")
 async def open_thread(thread_id: str):
-    """Open a thread - starts its scheduler if not already running."""
+    """Open a thread for viewing. Does NOT start scheduler - that only happens on user actions."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
@@ -443,9 +443,8 @@ async def open_thread(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    # Ensure scheduler is running for this thread's root
-    ensure_scheduler_for(thread_id)
-
+    # Don't start scheduler here - only start it when user sends a message,
+    # approves a tool, or runs a shell command. Opening is just for viewing.
     root_id = get_thread_root_id(thread_id)
     return {
         "status": "ok",
