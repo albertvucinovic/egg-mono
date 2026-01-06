@@ -45,6 +45,18 @@ class SendMessageRequest(BaseModel):
     content: str
 
 
+class CommandRequest(BaseModel):
+    """Request to execute a command."""
+    command: str  # The full command string (e.g., "/model GPT 5" or "$ ls -la")
+
+
+class CommandResponse(BaseModel):
+    """Response from command execution."""
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+
+
 class CreateThreadRequest(BaseModel):
     """Request to create a new thread."""
     name: Optional[str] = None

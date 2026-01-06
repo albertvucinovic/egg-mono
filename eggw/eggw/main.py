@@ -53,6 +53,8 @@ from models import (
     ThreadTokenStats,
     ModelInfo,
     ModelsResponse,
+    CommandRequest,
+    CommandResponse,
 )
 
 # Global state
@@ -421,6 +423,212 @@ async def open_thread(thread_id: str):
         "root_id": root_id,
         "scheduler_running": root_id in active_schedulers,
     }
+
+
+# --- Command endpoints ---
+
+@app.post("/api/threads/{thread_id}/command", response_model=CommandResponse)
+async def execute_command(thread_id: str, request: CommandRequest):
+    """Execute a slash command or shell command."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    cmd = request.command.strip()
+
+    # Handle shell commands: $$ (hidden) or $ (visible)
+    if cmd.startswith('$$') and len(cmd) > 2:
+        return await _execute_bash_command(thread_id, cmd[2:].strip(), hidden=True)
+    elif cmd.startswith('$') and len(cmd) > 1:
+        return await _execute_bash_command(thread_id, cmd[1:].strip(), hidden=False)
+
+    # Handle slash commands
+    if cmd.startswith('/'):
+        parts = cmd[1:].split(None, 1)
+        command_name = parts[0] if parts else ""
+        command_arg = parts[1] if len(parts) > 1 else ""
+
+        # Dispatch to command handlers
+        if command_name == "model":
+            return await _cmd_model(thread_id, command_arg)
+        elif command_name == "spawn" or command_name == "spawnChildThread":
+            return await _cmd_spawn(thread_id, command_arg)
+        elif command_name == "newThread":
+            return await _cmd_new_thread(command_arg)
+        elif command_name == "help":
+            return _cmd_help()
+        elif command_name == "toggleAutoApproval":
+            return await _cmd_toggle_auto_approval(thread_id)
+        else:
+            return CommandResponse(
+                success=False,
+                message=f"Unknown command: /{command_name}",
+            )
+
+    return CommandResponse(success=False, message="Invalid command format")
+
+
+async def _execute_bash_command(thread_id: str, script: str, hidden: bool) -> CommandResponse:
+    """Execute a bash command as a tool call."""
+    if not script:
+        return CommandResponse(success=False, message="Empty bash command")
+
+    import os as _os
+
+    # Create tool call entry
+    tc_id = _os.urandom(8).hex()
+    tool_call = {
+        'id': tc_id,
+        'type': 'function',
+        'function': {
+            'name': 'bash',
+            'arguments': json.dumps({'script': script}, ensure_ascii=False),
+        },
+    }
+
+    extra = {
+        'tool_calls': [tool_call],
+        'keep_user_turn': True,
+        'user_command_type': '$$' if hidden else '$',
+    }
+    if hidden:
+        extra['no_api'] = True
+
+    # Store the user message with tool call
+    prefix = '$$ ' if hidden else '$ '
+    msg_id = append_message(db, thread_id, 'user', f"{prefix}{script}", extra=extra)
+
+    # Auto-approve the tool call so it executes immediately
+    approve_tool_calls_for_thread(
+        db,
+        thread_id,
+        exec_approval='auto',
+        output_approval='omit' if hidden else 'whole',
+        filter_tc_ids=[tc_id],
+    )
+
+    # Ensure scheduler is running
+    ensure_scheduler_for(thread_id)
+
+    return CommandResponse(
+        success=True,
+        message=f"Executing: {script}",
+        data={"tool_call_id": tc_id, "hidden": hidden},
+    )
+
+
+async def _cmd_model(thread_id: str, model_name: str) -> CommandResponse:
+    """Handle /model command."""
+    if not model_name:
+        # Return current model
+        current = current_thread_model(db, thread_id)
+        return CommandResponse(
+            success=True,
+            message=f"Current model: {current}",
+            data={"model_key": current},
+        )
+
+    # Check if model exists
+    if model_name not in models_config:
+        # Try partial match
+        matches = [k for k in models_config.keys() if model_name.lower() in k.lower()]
+        if len(matches) == 1:
+            model_name = matches[0]
+        elif len(matches) > 1:
+            return CommandResponse(
+                success=False,
+                message=f"Ambiguous model name. Matches: {', '.join(matches[:5])}",
+            )
+        else:
+            return CommandResponse(
+                success=False,
+                message=f"Unknown model: {model_name}",
+            )
+
+    set_thread_model(db, thread_id, model_name)
+    return CommandResponse(
+        success=True,
+        message=f"Model changed to: {model_name}",
+        data={"model_key": model_name},
+    )
+
+
+async def _cmd_spawn(thread_id: str, context: str) -> CommandResponse:
+    """Handle /spawn or /spawnChildThread command."""
+    models_path = str(PROJECT_ROOT / "egg" / "models.json")
+
+    # Get parent's model
+    parent_model = current_thread_model(db, thread_id)
+
+    # Create child thread
+    child_id = create_child_thread(
+        db,
+        parent_id=thread_id,
+        initial_model_key=parent_model,
+        models_path=models_path,
+    )
+
+    # If context provided, add it as a user message
+    if context.strip():
+        append_message(db, child_id, 'user', context.strip())
+        ensure_scheduler_for(child_id)
+
+    return CommandResponse(
+        success=True,
+        message=f"Spawned child thread: {child_id[-8:]}",
+        data={"child_id": child_id, "parent_id": thread_id},
+    )
+
+
+async def _cmd_new_thread(name: str) -> CommandResponse:
+    """Handle /newThread command."""
+    models_path = str(PROJECT_ROOT / "egg" / "models.json")
+    model_key = default_model_key or next(iter(models_config.keys()), None)
+
+    thread_id = create_root_thread(
+        db,
+        name=name if name else None,
+        initial_model_key=model_key,
+        models_path=models_path,
+    )
+
+    return CommandResponse(
+        success=True,
+        message=f"Created new thread: {thread_id[-8:]}",
+        data={"thread_id": thread_id},
+    )
+
+
+async def _cmd_toggle_auto_approval(thread_id: str) -> CommandResponse:
+    """Handle /toggleAutoApproval command."""
+    # TODO: Implement auto-approval toggle in thread settings
+    return CommandResponse(
+        success=False,
+        message="Auto-approval toggle not yet implemented in web UI",
+    )
+
+
+def _cmd_help() -> CommandResponse:
+    """Handle /help command."""
+    help_text = """Available commands:
+/model [name] - Show or set the model
+/spawn <context> - Spawn a child thread with context
+/spawnChildThread <context> - Same as /spawn
+/newThread [name] - Create a new root thread
+/toggleAutoApproval - Toggle auto-approval (not yet implemented)
+/help - Show this help
+
+Shell commands:
+$ <command> - Execute shell command (output visible to model)
+$$ <command> - Execute shell command (output hidden from model)"""
+
+    return CommandResponse(
+        success=True,
+        message=help_text,
+    )
 
 
 # --- Model endpoints ---

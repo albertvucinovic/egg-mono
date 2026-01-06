@@ -2,17 +2,24 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Send, Loader2 } from "lucide-react";
-import { sendMessage } from "@/lib/api";
+import { Send, Loader2, Terminal } from "lucide-react";
+import { sendMessage, executeCommand, isCommand } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
 export function MessageInput() {
   const [input, setInput] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const queryClient = useQueryClient();
-  const { currentThreadId, isStreaming, addSystemLog, addMessage } = useAppStore();
+  const {
+    currentThreadId,
+    isStreaming,
+    addSystemLog,
+    addMessage,
+    setCurrentThreadId,
+  } = useAppStore();
 
-  const mutation = useMutation({
+  // Regular message mutation
+  const messageMutation = useMutation({
     mutationFn: (content: string) => sendMessage(currentThreadId!, content),
     onMutate: (content: string) => {
       // Immediately add message to store for instant display
@@ -21,17 +28,59 @@ export function MessageInput() {
         role: "user",
         content: content,
       });
-
-      // Clear input immediately
       setInput("");
     },
     onSuccess: () => {
-      // Refetch to sync with real data
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
       addSystemLog("Message sent", "success");
     },
     onError: () => {
       addSystemLog("Failed to send message", "error");
+    },
+  });
+
+  // Command mutation
+  const commandMutation = useMutation({
+    mutationFn: (command: string) => executeCommand(currentThreadId!, command),
+    onMutate: (command: string) => {
+      setInput("");
+      // For shell commands, show them in the chat
+      if (command.startsWith('$')) {
+        addMessage({
+          id: `temp-${Date.now()}`,
+          role: "user",
+          content: command,
+        });
+      }
+    },
+    onSuccess: (response, command) => {
+      if (response.success) {
+        addSystemLog(response.message, "success");
+
+        // Handle specific command responses
+        if (response.data?.child_id) {
+          // Spawned a child thread - refresh thread list and switch to it
+          queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+          queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
+          setCurrentThreadId(response.data.child_id);
+        } else if (response.data?.thread_id && command.startsWith('/newThread')) {
+          // Created a new thread - refresh and switch
+          queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+          setCurrentThreadId(response.data.thread_id);
+        } else if (response.data?.model_key) {
+          // Model changed - refresh threads
+          queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+        } else if (response.data?.tool_call_id) {
+          // Shell command - refresh messages and tools
+          queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+        }
+      } else {
+        addSystemLog(response.message, "error");
+      }
+    },
+    onError: () => {
+      addSystemLog("Failed to execute command", "error");
     },
   });
 
@@ -44,8 +93,14 @@ export function MessageInput() {
   }, [input]);
 
   const handleSubmit = () => {
-    if (!input.trim() || !currentThreadId || isStreaming) return;
-    mutation.mutate(input.trim());
+    const trimmed = input.trim();
+    if (!trimmed || !currentThreadId || isStreaming) return;
+
+    if (isCommand(trimmed)) {
+      commandMutation.mutate(trimmed);
+    } else {
+      messageMutation.mutate(trimmed);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -54,6 +109,9 @@ export function MessageInput() {
       handleSubmit();
     }
   };
+
+  const isPending = messageMutation.isPending || commandMutation.isPending;
+  const inputIsCommand = isCommand(input);
 
   return (
     <div className="border-t border-[var(--panel-border)] p-4 bg-[var(--panel-bg)]">
@@ -65,7 +123,7 @@ export function MessageInput() {
           onKeyDown={handleKeyDown}
           placeholder={
             currentThreadId
-              ? "Type a message... (Enter to send, Shift+Enter for newline)"
+              ? "Message, /command, or $ shell..."
               : "Select a thread first"
           }
           disabled={!currentThreadId || isStreaming}
@@ -74,15 +132,17 @@ export function MessageInput() {
         />
         <button
           onClick={handleSubmit}
-          disabled={!input.trim() || !currentThreadId || isStreaming || mutation.isPending}
+          disabled={!input.trim() || !currentThreadId || isStreaming || isPending}
           className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
         >
-          {mutation.isPending || isStreaming ? (
+          {isPending || isStreaming ? (
             <Loader2 className="w-4 h-4 animate-spin" />
+          ) : inputIsCommand ? (
+            <Terminal className="w-4 h-4" />
           ) : (
             <Send className="w-4 h-4" />
           )}
-          Send
+          {inputIsCommand ? "Run" : "Send"}
         </button>
       </div>
 
@@ -91,6 +151,11 @@ export function MessageInput() {
         <span>
           {currentThreadId ? `Thread: ${currentThreadId.slice(-8)}` : "No thread"}
         </span>
+        {inputIsCommand && (
+          <span className="text-amber-400">
+            {input.startsWith('$') ? "Shell command" : "Slash command"}
+          </span>
+        )}
         {isStreaming && (
           <span className="text-blue-400 flex items-center gap-1">
             <Loader2 className="w-3 h-3 animate-spin" />

@@ -81,6 +81,27 @@ export async function sendMessage(threadId: string, content: string) {
   return res.json();
 }
 
+export interface CommandResponse {
+  success: boolean;
+  message: string;
+  data?: Record<string, any>;
+}
+
+export async function executeCommand(threadId: string, command: string): Promise<CommandResponse> {
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/command`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command }),
+  });
+  if (!res.ok) throw new Error("Failed to execute command");
+  return res.json();
+}
+
+export function isCommand(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith('/') || trimmed.startsWith('$');
+}
+
 export async function fetchModels() {
   const res = await fetch(`${API_BASE}/api/models`);
   if (!res.ok) throw new Error("Failed to fetch models");
