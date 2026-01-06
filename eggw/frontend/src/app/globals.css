@@ -3,9 +3,43 @@
 @tailwind utilities;
 
 /* ============================================
-   Theme: Dark (default) - Classic dark mode with blue accents
+   Theme: Dark (default) - Colored text on uniform dark background
    ============================================ */
 :root, [data-theme="dark"] {
+  --background: #0d1117;
+  --foreground: #e6edf3;
+  --panel-bg: #0d1117;
+  --panel-border: #30363d;
+  --user-msg-bg: #0d1117;
+  --user-msg-border: #30363d;
+  --user-msg-text: #388bfd;
+  --assistant-msg-bg: #0d1117;
+  --assistant-msg-border: #30363d;
+  --assistant-msg-text: #8b949e;
+  --system-msg-bg: #0d1117;
+  --system-msg-border: #30363d;
+  --system-msg-text: #88c0d0;
+  --tool-msg-bg: #0d1117;
+  --tool-msg-border: #30363d;
+  --tool-msg-text: #a3be8c;
+  --reasoning-bg: #0d1117;
+  --reasoning-border: #30363d;
+  --reasoning-text: #b48ead;
+  --tool-call-bg: #0d1117;
+  --tool-call-border: #30363d;
+  --tool-call-text: #ebcb8b;
+  --accent: #58a6ff;
+  --accent-hover: #79c0ff;
+  --heading-color: #f0f6fc;
+  --muted: #8b949e;
+  --code-bg: #0d1117;
+  --scrollbar-thumb: #484f58;
+}
+
+/* ============================================
+   Theme: Dark-Background - Classic dark mode with colored backgrounds
+   ============================================ */
+[data-theme="dark-background"] {
   --background: #0d1117;
   --foreground: #e6edf3;
   --panel-bg: #161b22;
@@ -31,9 +65,43 @@
 }
 
 /* ============================================
-   Theme: Cyberpunk - Neon pink/cyan on deep purple
+   Theme: Cyberpunk - Colored text on deep purple
    ============================================ */
 [data-theme="cyberpunk"] {
+  --background: #0d0221;
+  --foreground: #f0e6ff;
+  --panel-bg: #0d0221;
+  --panel-border: #3d1647;
+  --user-msg-bg: #0d0221;
+  --user-msg-border: #3d1647;
+  --user-msg-text: #ff0080;
+  --assistant-msg-bg: #0d0221;
+  --assistant-msg-border: #3d1647;
+  --assistant-msg-text: #00ffff;
+  --system-msg-bg: #0d0221;
+  --system-msg-border: #3d1647;
+  --system-msg-text: #ffff00;
+  --tool-msg-bg: #0d0221;
+  --tool-msg-border: #3d1647;
+  --tool-msg-text: #00ff80;
+  --reasoning-bg: #0d0221;
+  --reasoning-border: #3d1647;
+  --reasoning-text: #ff00ff;
+  --tool-call-bg: #0d0221;
+  --tool-call-border: #3d1647;
+  --tool-call-text: #ff8000;
+  --accent: #ff0080;
+  --accent-hover: #ff40a0;
+  --heading-color: #00ffff;
+  --muted: #8866aa;
+  --code-bg: #0d0221;
+  --scrollbar-thumb: #7b2d8e;
+}
+
+/* ============================================
+   Theme: Cyberpunk-Background - Neon with colored backgrounds
+   ============================================ */
+[data-theme="cyberpunk-background"] {
   --background: #0d0221;
   --foreground: #f0e6ff;
   --panel-bg: #1a0a3e;
@@ -59,9 +127,43 @@
 }
 
 /* ============================================
-   Theme: Forest - Deep greens and earth tones
+   Theme: Forest - Colored text on deep green
    ============================================ */
 [data-theme="forest"] {
+  --background: #0b1a0b;
+  --foreground: #c8e6c8;
+  --panel-bg: #0b1a0b;
+  --panel-border: #2e5a2e;
+  --user-msg-bg: #0b1a0b;
+  --user-msg-border: #2e5a2e;
+  --user-msg-text: #8fbc3f;
+  --assistant-msg-bg: #0b1a0b;
+  --assistant-msg-border: #2e5a2e;
+  --assistant-msg-text: #3d7a4a;
+  --system-msg-bg: #0b1a0b;
+  --system-msg-border: #2e5a2e;
+  --system-msg-text: #8bc34a;
+  --tool-msg-bg: #0b1a0b;
+  --tool-msg-border: #2e5a2e;
+  --tool-msg-text: #cddc39;
+  --reasoning-bg: #0b1a0b;
+  --reasoning-border: #2e5a2e;
+  --reasoning-text: #a67c52;
+  --tool-call-bg: #0b1a0b;
+  --tool-call-border: #2e5a2e;
+  --tool-call-text: #ffc107;
+  --accent: #7cb342;
+  --accent-hover: #9ccc65;
+  --heading-color: #a5d6a7;
+  --muted: #6b8e6b;
+  --code-bg: #0b1a0b;
+  --scrollbar-thumb: #2e5a2e;
+}
+
+/* ============================================
+   Theme: Forest-Background - Deep greens with colored backgrounds
+   ============================================ */
+[data-theme="forest-background"] {
   --background: #0b1a0b;
   --foreground: #c8e6c8;
   --panel-bg: #122212;
@@ -87,9 +189,43 @@
 }
 
 /* ============================================
-   Theme: Ocean - Deep blues and teals
+   Theme: Ocean - Colored text on deep blue
    ============================================ */
 [data-theme="ocean"] {
+  --background: #041c2c;
+  --foreground: #b8e0f0;
+  --panel-bg: #041c2c;
+  --panel-border: #1a5276;
+  --user-msg-bg: #041c2c;
+  --user-msg-border: #1a5276;
+  --user-msg-text: #29b6f6;
+  --assistant-msg-bg: #041c2c;
+  --assistant-msg-border: #1a5276;
+  --assistant-msg-text: #0288d1;
+  --system-msg-bg: #041c2c;
+  --system-msg-border: #1a5276;
+  --system-msg-text: #00bcd4;
+  --tool-msg-bg: #041c2c;
+  --tool-msg-border: #1a5276;
+  --tool-msg-text: #26c6da;
+  --reasoning-bg: #041c2c;
+  --reasoning-border: #1a5276;
+  --reasoning-text: #7c4dff;
+  --tool-call-bg: #041c2c;
+  --tool-call-border: #1a5276;
+  --tool-call-text: #ffab40;
+  --accent: #00acc1;
+  --accent-hover: #26c6da;
+  --heading-color: #4dd0e1;
+  --muted: #607d8b;
+  --code-bg: #041c2c;
+  --scrollbar-thumb: #1a5276;
+}
+
+/* ============================================
+   Theme: Ocean-Background - Deep blues with colored backgrounds
+   ============================================ */
+[data-theme="ocean-background"] {
   --background: #041c2c;
   --foreground: #b8e0f0;
   --panel-bg: #0a2942;
@@ -115,9 +251,43 @@
 }
 
 /* ============================================
-   Theme: Sunset - Warm oranges, reds, and purples
+   Theme: Sunset - Colored text on warm dark
    ============================================ */
 [data-theme="sunset"] {
+  --background: #1a0f0a;
+  --foreground: #ffe4d4;
+  --panel-bg: #1a0f0a;
+  --panel-border: #4a2515;
+  --user-msg-bg: #1a0f0a;
+  --user-msg-border: #4a2515;
+  --user-msg-text: #ff8a65;
+  --assistant-msg-bg: #1a0f0a;
+  --assistant-msg-border: #4a2515;
+  --assistant-msg-text: #8d6e63;
+  --system-msg-bg: #1a0f0a;
+  --system-msg-border: #4a2515;
+  --system-msg-text: #ffb74d;
+  --tool-msg-bg: #1a0f0a;
+  --tool-msg-border: #4a2515;
+  --tool-msg-text: #ffd54f;
+  --reasoning-bg: #1a0f0a;
+  --reasoning-border: #4a2515;
+  --reasoning-text: #ce93d8;
+  --tool-call-bg: #1a0f0a;
+  --tool-call-border: #4a2515;
+  --tool-call-text: #fff176;
+  --accent: #ff7043;
+  --accent-hover: #ff8a65;
+  --heading-color: #ffab91;
+  --muted: #a1887f;
+  --code-bg: #1a0f0a;
+  --scrollbar-thumb: #6b3020;
+}
+
+/* ============================================
+   Theme: Sunset-Background - Warm colors with colored backgrounds
+   ============================================ */
+[data-theme="sunset-background"] {
   --background: #1a0f0a;
   --foreground: #ffe4d4;
   --panel-bg: #2d1810;
@@ -143,9 +313,43 @@
 }
 
 /* ============================================
-   Theme: Mono - Minimalist grayscale
+   Theme: Mono - Minimalist grayscale (no color variant needed)
    ============================================ */
 [data-theme="mono"] {
+  --background: #000000;
+  --foreground: #c0c0c0;
+  --panel-bg: #000000;
+  --panel-border: #303030;
+  --user-msg-bg: #000000;
+  --user-msg-border: #303030;
+  --user-msg-text: #e0e0e0;
+  --assistant-msg-bg: #000000;
+  --assistant-msg-border: #303030;
+  --assistant-msg-text: #a0a0a0;
+  --system-msg-bg: #000000;
+  --system-msg-border: #303030;
+  --system-msg-text: #c0c0c0;
+  --tool-msg-bg: #000000;
+  --tool-msg-border: #303030;
+  --tool-msg-text: #909090;
+  --reasoning-bg: #000000;
+  --reasoning-border: #303030;
+  --reasoning-text: #808080;
+  --tool-call-bg: #000000;
+  --tool-call-border: #303030;
+  --tool-call-text: #b0b0b0;
+  --accent: #ffffff;
+  --accent-hover: #e0e0e0;
+  --heading-color: #e0e0e0;
+  --muted: #606060;
+  --code-bg: #000000;
+  --scrollbar-thumb: #404040;
+}
+
+/* ============================================
+   Theme: Mono-Background - Grayscale with subtle backgrounds
+   ============================================ */
+[data-theme="mono-background"] {
   --background: #000000;
   --foreground: #c0c0c0;
   --panel-bg: #101010;
@@ -171,9 +375,43 @@
 }
 
 /* ============================================
-   Theme: Midnight - Deep indigo night sky
+   Theme: Midnight - Colored text on deep indigo
    ============================================ */
 [data-theme="midnight"] {
+  --background: #0a0a1a;
+  --foreground: #c8d4e8;
+  --panel-bg: #0a0a1a;
+  --panel-border: #2a2a5a;
+  --user-msg-bg: #0a0a1a;
+  --user-msg-border: #2a2a5a;
+  --user-msg-text: #6366f1;
+  --assistant-msg-bg: #0a0a1a;
+  --assistant-msg-border: #2a2a5a;
+  --assistant-msg-text: #4c4c8a;
+  --system-msg-bg: #0a0a1a;
+  --system-msg-border: #2a2a5a;
+  --system-msg-text: #60a5fa;
+  --tool-msg-bg: #0a0a1a;
+  --tool-msg-border: #2a2a5a;
+  --tool-msg-text: #818cf8;
+  --reasoning-bg: #0a0a1a;
+  --reasoning-border: #2a2a5a;
+  --reasoning-text: #a78bfa;
+  --tool-call-bg: #0a0a1a;
+  --tool-call-border: #2a2a5a;
+  --tool-call-text: #fbbf24;
+  --accent: #818cf8;
+  --accent-hover: #a5b4fc;
+  --heading-color: #c7d2fe;
+  --muted: #6b7280;
+  --code-bg: #0a0a1a;
+  --scrollbar-thumb: #3730a3;
+}
+
+/* ============================================
+   Theme: Midnight-Background - Deep indigo with colored backgrounds
+   ============================================ */
+[data-theme="midnight-background"] {
   --background: #0a0a1a;
   --foreground: #c8d4e8;
   --panel-bg: #12122a;
@@ -199,9 +437,43 @@
 }
 
 /* ============================================
-   Theme: Disney - Magical kingdom blues and golds
+   Theme: Disney - Colored text on magical blue
    ============================================ */
 [data-theme="disney"] {
+  --background: #0a1628;
+  --foreground: #f0f4ff;
+  --panel-bg: #0a1628;
+  --panel-border: #2a4a7a;
+  --user-msg-bg: #0a1628;
+  --user-msg-border: #2a4a7a;
+  --user-msg-text: #ffd700;
+  --assistant-msg-bg: #0a1628;
+  --assistant-msg-border: #2a4a7a;
+  --assistant-msg-text: #3b82f6;
+  --system-msg-bg: #0a1628;
+  --system-msg-border: #2a4a7a;
+  --system-msg-text: #ff69b4;
+  --tool-msg-bg: #0a1628;
+  --tool-msg-border: #2a4a7a;
+  --tool-msg-text: #90ee90;
+  --reasoning-bg: #0a1628;
+  --reasoning-border: #2a4a7a;
+  --reasoning-text: #da70d6;
+  --tool-call-bg: #0a1628;
+  --tool-call-border: #2a4a7a;
+  --tool-call-text: #ffd700;
+  --accent: #4169e1;
+  --accent-hover: #6495ed;
+  --heading-color: #ffd700;
+  --muted: #7a8caa;
+  --code-bg: #0a1628;
+  --scrollbar-thumb: #2a4a7a;
+}
+
+/* ============================================
+   Theme: Disney-Background - Magical kingdom with colored backgrounds
+   ============================================ */
+[data-theme="disney-background"] {
   --background: #0a1628;
   --foreground: #f0f4ff;
   --panel-bg: #152238;
@@ -227,9 +499,43 @@
 }
 
 /* ============================================
-   Theme: Fruit - Vibrant citrus and berry colors
+   Theme: Fruit - Colored text on berry dark
    ============================================ */
 [data-theme="fruit"] {
+  --background: #1a0a14;
+  --foreground: #ffe4e8;
+  --panel-bg: #1a0a14;
+  --panel-border: #4a1530;
+  --user-msg-bg: #1a0a14;
+  --user-msg-border: #4a1530;
+  --user-msg-text: #ffa500;
+  --assistant-msg-bg: #1a0a14;
+  --assistant-msg-border: #4a1530;
+  --assistant-msg-text: #dc143c;
+  --system-msg-bg: #1a0a14;
+  --system-msg-border: #4a1530;
+  --system-msg-text: #ffd700;
+  --tool-msg-bg: #1a0a14;
+  --tool-msg-border: #4a1530;
+  --tool-msg-text: #32cd32;
+  --reasoning-bg: #1a0a14;
+  --reasoning-border: #4a1530;
+  --reasoning-text: #9932cc;
+  --tool-call-bg: #1a0a14;
+  --tool-call-border: #4a1530;
+  --tool-call-text: #ff7f50;
+  --accent: #ff6347;
+  --accent-hover: #ff7f50;
+  --heading-color: #ffa07a;
+  --muted: #aa6080;
+  --code-bg: #1a0a14;
+  --scrollbar-thumb: #6b2040;
+}
+
+/* ============================================
+   Theme: Fruit-Background - Vibrant citrus with colored backgrounds
+   ============================================ */
+[data-theme="fruit-background"] {
   --background: #1a0a14;
   --foreground: #ffe4e8;
   --panel-bg: #2a1420;
@@ -255,9 +561,43 @@
 }
 
 /* ============================================
-   Theme: Vegetables - Earthy garden colors
+   Theme: Vegetables - Colored text on earthy dark
    ============================================ */
 [data-theme="vegetables"] {
+  --background: #0f1408;
+  --foreground: #e8f0d8;
+  --panel-bg: #0f1408;
+  --panel-border: #3a5420;
+  --user-msg-bg: #0f1408;
+  --user-msg-border: #3a5420;
+  --user-msg-text: #ff8c00;
+  --assistant-msg-bg: #0f1408;
+  --assistant-msg-border: #3a5420;
+  --assistant-msg-text: #228b22;
+  --system-msg-bg: #0f1408;
+  --system-msg-border: #3a5420;
+  --system-msg-text: #ff6347;
+  --tool-msg-bg: #0f1408;
+  --tool-msg-border: #3a5420;
+  --tool-msg-text: #9acd32;
+  --reasoning-bg: #0f1408;
+  --reasoning-border: #3a5420;
+  --reasoning-text: #9370db;
+  --tool-call-bg: #0f1408;
+  --tool-call-border: #3a5420;
+  --tool-call-text: #daa520;
+  --accent: #6b8e23;
+  --accent-hover: #9acd32;
+  --heading-color: #98fb98;
+  --muted: #6b8b6b;
+  --code-bg: #0f1408;
+  --scrollbar-thumb: #3a5420;
+}
+
+/* ============================================
+   Theme: Vegetables-Background - Earthy with colored backgrounds
+   ============================================ */
+[data-theme="vegetables-background"] {
   --background: #0f1408;
   --foreground: #e8f0d8;
   --panel-bg: #1a2410;
@@ -283,9 +623,43 @@
 }
 
 /* ============================================
-   Theme: Coffee - Warm browns and creams
+   Theme: Coffee - Colored text on warm brown
    ============================================ */
 [data-theme="coffee"] {
+  --background: #1a1210;
+  --foreground: #f5e6d3;
+  --panel-bg: #1a1210;
+  --panel-border: #4a3020;
+  --user-msg-bg: #1a1210;
+  --user-msg-border: #4a3020;
+  --user-msg-text: #d2b48c;
+  --assistant-msg-bg: #1a1210;
+  --assistant-msg-border: #4a3020;
+  --assistant-msg-text: #8b7355;
+  --system-msg-bg: #1a1210;
+  --system-msg-border: #4a3020;
+  --system-msg-text: #f5deb3;
+  --tool-msg-bg: #1a1210;
+  --tool-msg-border: #4a3020;
+  --tool-msg-text: #bc8f8f;
+  --reasoning-bg: #1a1210;
+  --reasoning-border: #4a3020;
+  --reasoning-text: #a0522d;
+  --tool-call-bg: #1a1210;
+  --tool-call-border: #4a3020;
+  --tool-call-text: #deb887;
+  --accent: #cd853f;
+  --accent-hover: #daa520;
+  --heading-color: #f5deb3;
+  --muted: #8b7355;
+  --code-bg: #1a1210;
+  --scrollbar-thumb: #5c4033;
+}
+
+/* ============================================
+   Theme: Coffee-Background - Warm browns with colored backgrounds
+   ============================================ */
+[data-theme="coffee-background"] {
   --background: #1a1210;
   --foreground: #f5e6d3;
   --panel-bg: #2a1e18;
@@ -311,9 +685,43 @@
 }
 
 /* ============================================
-   Theme: Matrix - Green digital rain
+   Theme: Matrix - Green text on black (already text-based)
    ============================================ */
 [data-theme="matrix"] {
+  --background: #000000;
+  --foreground: #00ff00;
+  --panel-bg: #000000;
+  --panel-border: #003300;
+  --user-msg-bg: #000000;
+  --user-msg-border: #003300;
+  --user-msg-text: #00ff00;
+  --assistant-msg-bg: #000000;
+  --assistant-msg-border: #003300;
+  --assistant-msg-text: #008800;
+  --system-msg-bg: #000000;
+  --system-msg-border: #003300;
+  --system-msg-text: #00cc00;
+  --tool-msg-bg: #000000;
+  --tool-msg-border: #003300;
+  --tool-msg-text: #009900;
+  --reasoning-bg: #000000;
+  --reasoning-border: #003300;
+  --reasoning-text: #006600;
+  --tool-call-bg: #000000;
+  --tool-call-border: #003300;
+  --tool-call-text: #33ff33;
+  --accent: #00ff00;
+  --accent-hover: #33ff33;
+  --heading-color: #00ff00;
+  --muted: #006600;
+  --code-bg: #000000;
+  --scrollbar-thumb: #003300;
+}
+
+/* ============================================
+   Theme: Matrix-Background - Green with subtle backgrounds
+   ============================================ */
+[data-theme="matrix-background"] {
   --background: #000000;
   --foreground: #00ff00;
   --panel-bg: #0a0a0a;
@@ -339,9 +747,43 @@
 }
 
 /* ============================================
-   Theme: Light - Clean light mode
+   Theme: Light - Colored text on white
    ============================================ */
 [data-theme="light"] {
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --panel-bg: #ffffff;
+  --panel-border: #d0d0d0;
+  --user-msg-bg: #ffffff;
+  --user-msg-border: #d0d0d0;
+  --user-msg-text: #2563eb;
+  --assistant-msg-bg: #ffffff;
+  --assistant-msg-border: #d0d0d0;
+  --assistant-msg-text: #4b5563;
+  --system-msg-bg: #ffffff;
+  --system-msg-border: #d0d0d0;
+  --system-msg-text: #0891b2;
+  --tool-msg-bg: #ffffff;
+  --tool-msg-border: #d0d0d0;
+  --tool-msg-text: #059669;
+  --reasoning-bg: #ffffff;
+  --reasoning-border: #d0d0d0;
+  --reasoning-text: #9333ea;
+  --tool-call-bg: #ffffff;
+  --tool-call-border: #d0d0d0;
+  --tool-call-text: #d97706;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --heading-color: #111111;
+  --muted: #6b7280;
+  --code-bg: #f5f5f5;
+  --scrollbar-thumb: #c0c0c0;
+}
+
+/* ============================================
+   Theme: Light-Background - Light mode with colored backgrounds
+   ============================================ */
+[data-theme="light-background"] {
   --background: #ffffff;
   --foreground: #1a1a1a;
   --panel-bg: #f5f5f5;
@@ -367,9 +809,43 @@
 }
 
 /* ============================================
-   Theme: Light-Mono - Pure black & white, typography-based
+   Theme: Light-Mono - Pure black & white (no color variant needed)
    ============================================ */
 [data-theme="light-mono"] {
+  --background: #ffffff;
+  --foreground: #000000;
+  --panel-bg: #ffffff;
+  --panel-border: #000000;
+  --user-msg-bg: #ffffff;
+  --user-msg-border: #000000;
+  --user-msg-text: #000000;
+  --assistant-msg-bg: #ffffff;
+  --assistant-msg-border: #000000;
+  --assistant-msg-text: #000000;
+  --system-msg-bg: #ffffff;
+  --system-msg-border: #000000;
+  --system-msg-text: #000000;
+  --tool-msg-bg: #ffffff;
+  --tool-msg-border: #000000;
+  --tool-msg-text: #000000;
+  --reasoning-bg: #ffffff;
+  --reasoning-border: #000000;
+  --reasoning-text: #000000;
+  --tool-call-bg: #ffffff;
+  --tool-call-border: #000000;
+  --tool-call-text: #000000;
+  --accent: #000000;
+  --accent-hover: #000000;
+  --heading-color: #000000;
+  --muted: #000000;
+  --code-bg: #f5f5f5;
+  --scrollbar-thumb: #888888;
+}
+
+/* ============================================
+   Theme: Light-Mono-Background - B&W with subtle backgrounds
+   ============================================ */
+[data-theme="light-mono-background"] {
   --background: #ffffff;
   --foreground: #000000;
   --panel-bg: #f8f8f8;
@@ -394,7 +870,9 @@
   --scrollbar-thumb: #888888;
 }
 
-/* Colorful theme - matching egg.py TUI colors (colored text, gray borders) */
+/* ============================================
+   Theme: Colorful - Matching egg.py TUI colors
+   ============================================ */
 [data-theme="colorful"] {
   --background: #0a0a0a;
   --foreground: #e5e5e5;
