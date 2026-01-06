@@ -323,6 +323,16 @@ export function MessageInput() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // Scroll selected suggestion into view
+  useEffect(() => {
+    if (showSuggestions && suggestionsRef.current) {
+      const selectedEl = suggestionsRef.current.querySelector(`[data-index="${selectedIndex}"]`);
+      if (selectedEl) {
+        selectedEl.scrollIntoView({ block: "nearest" });
+      }
+    }
+  }, [selectedIndex, showSuggestions]);
+
   const handleSubmit = () => {
     const trimmed = input.trim();
     if (!trimmed || !currentThreadId) return;
@@ -377,15 +387,17 @@ export function MessageInput() {
       {showSuggestions && suggestions.length > 0 && (
         <div
           ref={suggestionsRef}
-          className="absolute bottom-full left-4 right-4 mb-1 bg-[#1a1a1a] border border-[var(--panel-border)] rounded-lg shadow-lg max-h-64 overflow-auto z-50"
+          className="absolute bottom-full left-4 right-4 mb-1 border rounded-lg shadow-lg max-h-64 overflow-auto z-50"
+          style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)" }}
         >
           {suggestions.map((suggestion, index) => (
             <div
               key={`${suggestion.display}-${index}`}
-              className={clsx(
-                "px-3 py-2 cursor-pointer flex items-center gap-3",
-                index === selectedIndex ? "bg-blue-600/30" : "hover:bg-[#333]"
-              )}
+              data-index={index}
+              className="px-3 py-2 cursor-pointer flex items-center gap-3"
+              style={{
+                background: index === selectedIndex ? "var(--user-msg-bg)" : undefined,
+              }}
               onClick={() => applySuggestion(suggestion)}
               onMouseEnter={() => setSelectedIndex(index)}
             >
