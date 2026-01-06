@@ -58,6 +58,11 @@ interface AppState {
   setStreamingReasoning: (content: string) => void;
   appendStreamingReasoning: (chunk: string) => void;
 
+  // Streaming tool calls (tool_call_id -> {name, arguments})
+  streamingToolCalls: Record<string, { name: string; arguments: string }>;
+  setStreamingToolCalls: (tcs: Record<string, { name: string; arguments: string }>) => void;
+  appendToolCallArguments: (tcId: string, name: string, argsDelta: string) => void;
+
   // Tool calls
   pendingTools: ToolCall[];
   setPendingTools: (tools: ToolCall[]) => void;
@@ -102,6 +107,23 @@ export const useAppStore = create<AppState>((set) => ({
   setStreamingReasoning: (content) => set({ streamingReasoning: content }),
   appendStreamingReasoning: (chunk) =>
     set((state) => ({ streamingReasoning: state.streamingReasoning + chunk })),
+
+  // Streaming tool calls
+  streamingToolCalls: {},
+  setStreamingToolCalls: (tcs) => set({ streamingToolCalls: tcs }),
+  appendToolCallArguments: (tcId, name, argsDelta) =>
+    set((state) => {
+      const existing = state.streamingToolCalls[tcId] || { name: "", arguments: "" };
+      return {
+        streamingToolCalls: {
+          ...state.streamingToolCalls,
+          [tcId]: {
+            name: name || existing.name,
+            arguments: existing.arguments + argsDelta,
+          },
+        },
+      };
+    }),
 
   // Tool calls
   pendingTools: [],

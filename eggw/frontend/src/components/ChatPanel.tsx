@@ -179,7 +179,7 @@ function MessageBlock({ message }: MessageBlockProps) {
 
 export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const { currentThreadId, messages, setMessages, streamingContent, streamingReasoning } = useAppStore();
+  const { currentThreadId, messages, setMessages, streamingContent, streamingReasoning, streamingToolCalls } = useAppStore();
 
   const { data, isLoading } = useQuery({
     queryKey: ["messages", currentThreadId],
@@ -199,7 +199,7 @@ export function ChatPanel() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, streamingContent, streamingReasoning]);
+  }, [messages, streamingContent, streamingReasoning, streamingToolCalls]);
 
   if (!currentThreadId) {
     return (
@@ -224,7 +224,7 @@ export function ChatPanel() {
           ))}
 
           {/* Streaming content */}
-          {(streamingContent || streamingReasoning) && (
+          {(streamingContent || streamingReasoning || Object.keys(streamingToolCalls).length > 0) && (
             <div className="rounded border p-3 mb-3 bg-slate-800 border-slate-600">
               <div className="text-xs text-gray-400 mb-2">
                 <span className="font-medium text-gray-300">Assistant</span>
@@ -247,6 +247,46 @@ export function ChatPanel() {
               {streamingContent && (
                 <div className="prose prose-invert prose-sm max-w-none">
                   <ReactMarkdown>{streamingContent}</ReactMarkdown>
+                </div>
+              )}
+
+              {/* Streaming tool calls */}
+              {Object.keys(streamingToolCalls).length > 0 && (
+                <div className="mt-2 space-y-2">
+                  {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
+                    const isBash = tc.name === "bash";
+                    let parsedArgs: any = tc.arguments;
+                    try {
+                      parsedArgs = JSON.parse(tc.arguments);
+                    } catch {
+                      // Keep as string
+                    }
+                    const script = isBash && parsedArgs?.script;
+
+                    return (
+                      <div
+                        key={tcId}
+                        className="bg-amber-900/30 rounded p-2 border border-amber-700"
+                      >
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="text-amber-400 font-medium">{tc.name || "tool"}</span>
+                          <span className="text-xs text-gray-500 font-mono">
+                            {tcId.slice(-8)}
+                          </span>
+                          <span className="text-xs text-amber-300 animate-pulse">streaming...</span>
+                        </div>
+                        {isBash && script ? (
+                          <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto">
+                            $ {script}
+                          </pre>
+                        ) : (
+                          <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40">
+                            {tc.arguments || "..."}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

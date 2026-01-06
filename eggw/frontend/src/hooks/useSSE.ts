@@ -13,6 +13,8 @@ export function useSSE(threadId: string | null) {
     appendStreamingContent,
     setStreamingReasoning,
     appendStreamingReasoning,
+    setStreamingToolCalls,
+    appendToolCallArguments,
     setIsStreaming,
     addSystemLog,
   } = useAppStore();
@@ -42,6 +44,7 @@ export function useSSE(threadId: string | null) {
       try {
         setStreamingContent("");
         setStreamingReasoning("");
+        setStreamingToolCalls({});
         setIsStreaming(true);
         addSystemLog("Streaming started", "info");
       } catch (err) {
@@ -49,22 +52,31 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle stream.delta - streaming content chunks
+    // Handle stream.delta - streaming content/reasoning/tool_call chunks
     es.addEventListener("stream.delta", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
 
-        // Handle reasoning separately from content
-        if (payload.reasoning) {
-          appendStreamingReasoning(payload.reasoning);
+        // Handle reasoning deltas (backend sends 'reason' field)
+        if (payload.reason) {
+          appendStreamingReasoning(payload.reason);
         }
 
-        // Content can be in different fields depending on what's streaming
-        // Backend sends "text" for content deltas
-        const contentDelta = payload.text || payload.content || payload.delta || "";
-        if (contentDelta) {
-          appendStreamingContent(contentDelta);
+        // Handle content deltas (backend sends 'text' field)
+        if (payload.text) {
+          appendStreamingContent(payload.text);
+        }
+
+        // Handle tool call argument streaming
+        if (payload.tool_call) {
+          const tc = payload.tool_call;
+          const tcId = tc.id || "";
+          const tcName = tc.name || "";
+          const argsDelta = tc.arguments_delta || "";
+          if (tcId && argsDelta) {
+            appendToolCallArguments(tcId, tcName, argsDelta);
+          }
         }
       } catch (err) {
         console.error("Failed to parse stream.delta:", err);
@@ -76,6 +88,7 @@ export function useSSE(threadId: string | null) {
       try {
         setStreamingContent("");
         setStreamingReasoning("");
+        setStreamingToolCalls({});
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
         // Refresh messages to get the final content
@@ -129,6 +142,8 @@ export function useSSE(threadId: string | null) {
     appendStreamingContent,
     setStreamingReasoning,
     appendStreamingReasoning,
+    setStreamingToolCalls,
+    appendToolCallArguments,
     setIsStreaming,
     addSystemLog,
     queryClient,
