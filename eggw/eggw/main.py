@@ -40,6 +40,7 @@ from eggthreads import (
     duplicate_thread,
     approve_tool_calls_for_thread,
     total_token_stats,
+    execute_bash_command,
 )
 
 from models import (
@@ -476,39 +477,8 @@ async def _execute_bash_command(thread_id: str, script: str, hidden: bool) -> Co
     if not script:
         return CommandResponse(success=False, message="Empty bash command")
 
-    import os as _os
-
-    # Create tool call entry
-    tc_id = _os.urandom(8).hex()
-    tool_call = {
-        'id': tc_id,
-        'type': 'function',
-        'function': {
-            'name': 'bash',
-            'arguments': json.dumps({'script': script}, ensure_ascii=False),
-        },
-    }
-
-    extra = {
-        'tool_calls': [tool_call],
-        'keep_user_turn': True,
-        'user_command_type': '$$' if hidden else '$',
-    }
-    if hidden:
-        extra['no_api'] = True
-
-    # Store the user message with tool call
-    prefix = '$$ ' if hidden else '$ '
-    msg_id = append_message(db, thread_id, 'user', f"{prefix}{script}", extra=extra)
-
-    # Auto-approve the tool call so it executes immediately
-    approve_tool_calls_for_thread(
-        db,
-        thread_id,
-        exec_approval='auto',
-        output_approval='omit' if hidden else 'whole',
-        filter_tc_ids=[tc_id],
-    )
+    # Use eggthreads' execute_bash_command which handles everything correctly
+    tc_id = execute_bash_command(db, thread_id, script, hidden=hidden)
 
     # Ensure scheduler is running
     ensure_scheduler_for(thread_id)
@@ -697,22 +667,23 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
         raise HTTPException(status_code=404, detail="Tool call not found")
 
     if tc.state == "TC1":
-        # Execution approval
+        # Execution approval - use 'granted' or 'denied'
+        decision = "granted" if request.approved else "denied"
         approve_tool_calls_for_thread(
             db,
             thread_id,
-            tool_call_ids=[request.tool_call_id],
-            decision="granted" if request.approved else "denied",
+            decision=decision,
+            tool_call_id=request.tool_call_id,
         )
     elif tc.state == "TC4":
-        # Output approval
-        decision = request.output_decision or ("whole" if request.approved else "omit")
+        # Output approval - decision is the output handling: 'whole', 'partial', 'omit'
+        # For output approval, we use 'granted' with the output decision
+        output_decision = request.output_decision or ("whole" if request.approved else "omit")
         approve_tool_calls_for_thread(
             db,
             thread_id,
-            tool_call_ids=[request.tool_call_id],
-            decision=decision,
-            is_output_approval=True,
+            decision=output_decision,
+            tool_call_id=request.tool_call_id,
         )
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")
@@ -841,9 +812,8 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
                         approve_tool_calls_for_thread(
                             db,
                             thread_id,
-                            tool_call_ids=[tc_id],
                             decision=decision,
-                            is_output_approval=(tc.state == "TC4"),
+                            tool_call_id=tc_id,
                         )
 
             elif msg_type == "ping":
