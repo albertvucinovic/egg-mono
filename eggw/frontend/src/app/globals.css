@@ -170,6 +170,118 @@
   --scrollbar-thumb: #404040;
 }
 
+/* ============================================
+   Theme: Midnight - Deep indigo night sky
+   ============================================ */
+[data-theme="midnight"] {
+  --background: #0a0a1a;
+  --foreground: #c8d4e8;
+  --panel-bg: #12122a;
+  --panel-border: #2a2a5a;
+  --user-msg-bg: rgba(99, 102, 241, 0.25);
+  --user-msg-border: #6366f1;
+  --assistant-msg-bg: rgba(30, 30, 70, 0.6);
+  --assistant-msg-border: #4c4c8a;
+  --system-msg-bg: rgba(96, 165, 250, 0.12);
+  --system-msg-border: #60a5fa;
+  --tool-msg-bg: rgba(129, 140, 248, 0.1);
+  --tool-msg-border: #818cf8;
+  --reasoning-bg: rgba(167, 139, 250, 0.15);
+  --reasoning-border: #a78bfa;
+  --tool-call-bg: rgba(251, 191, 36, 0.15);
+  --tool-call-border: #fbbf24;
+  --accent: #818cf8;
+  --accent-hover: #a5b4fc;
+  --heading-color: #c7d2fe;
+  --muted: #6b7280;
+  --code-bg: #08081a;
+  --scrollbar-thumb: #3730a3;
+}
+
+/* ============================================
+   Theme: Disney - Magical kingdom blues and golds
+   ============================================ */
+[data-theme="disney"] {
+  --background: #0a1628;
+  --foreground: #f0f4ff;
+  --panel-bg: #152238;
+  --panel-border: #2a4a7a;
+  --user-msg-bg: rgba(255, 215, 0, 0.2);
+  --user-msg-border: #ffd700;
+  --assistant-msg-bg: rgba(30, 64, 115, 0.5);
+  --assistant-msg-border: #3b82f6;
+  --system-msg-bg: rgba(255, 182, 193, 0.15);
+  --system-msg-border: #ff69b4;
+  --tool-msg-bg: rgba(152, 251, 152, 0.12);
+  --tool-msg-border: #90ee90;
+  --reasoning-bg: rgba(186, 85, 211, 0.2);
+  --reasoning-border: #da70d6;
+  --tool-call-bg: rgba(255, 215, 0, 0.15);
+  --tool-call-border: #ffd700;
+  --accent: #4169e1;
+  --accent-hover: #6495ed;
+  --heading-color: #ffd700;
+  --muted: #7a8caa;
+  --code-bg: #0a1220;
+  --scrollbar-thumb: #2a4a7a;
+}
+
+/* ============================================
+   Theme: Fruit - Vibrant citrus and berry colors
+   ============================================ */
+[data-theme="fruit"] {
+  --background: #1a0a14;
+  --foreground: #ffe4e8;
+  --panel-bg: #2a1420;
+  --panel-border: #6b2040;
+  --user-msg-bg: rgba(255, 165, 0, 0.3);
+  --user-msg-border: #ffa500;
+  --assistant-msg-bg: rgba(220, 20, 60, 0.2);
+  --assistant-msg-border: #dc143c;
+  --system-msg-bg: rgba(255, 255, 0, 0.12);
+  --system-msg-border: #ffd700;
+  --tool-msg-bg: rgba(50, 205, 50, 0.15);
+  --tool-msg-border: #32cd32;
+  --reasoning-bg: rgba(138, 43, 226, 0.2);
+  --reasoning-border: #9932cc;
+  --tool-call-bg: rgba(255, 127, 80, 0.2);
+  --tool-call-border: #ff7f50;
+  --accent: #ff6347;
+  --accent-hover: #ff7f50;
+  --heading-color: #ffa07a;
+  --muted: #aa6080;
+  --code-bg: #140810;
+  --scrollbar-thumb: #6b2040;
+}
+
+/* ============================================
+   Theme: Vegetables - Earthy garden colors
+   ============================================ */
+[data-theme="vegetables"] {
+  --background: #0f1408;
+  --foreground: #e8f0d8;
+  --panel-bg: #1a2410;
+  --panel-border: #3a5420;
+  --user-msg-bg: rgba(255, 140, 0, 0.25);
+  --user-msg-border: #ff8c00;
+  --assistant-msg-bg: rgba(34, 80, 34, 0.4);
+  --assistant-msg-border: #228b22;
+  --system-msg-bg: rgba(255, 99, 71, 0.15);
+  --system-msg-border: #ff6347;
+  --tool-msg-bg: rgba(154, 205, 50, 0.15);
+  --tool-msg-border: #9acd32;
+  --reasoning-bg: rgba(128, 0, 128, 0.2);
+  --reasoning-border: #9370db;
+  --tool-call-bg: rgba(218, 165, 32, 0.2);
+  --tool-call-border: #daa520;
+  --accent: #6b8e23;
+  --accent-hover: #9acd32;
+  --heading-color: #98fb98;
+  --muted: #6b8b6b;
+  --code-bg: #0a1006;
+  --scrollbar-thumb: #3a5420;
+}
+
 body {
   color: var(--foreground);
   background: var(--background);
