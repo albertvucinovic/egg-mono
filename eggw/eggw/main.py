@@ -703,12 +703,22 @@ async def get_token_stats(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    stats = total_token_stats(db, thread_id)
+    # Get stats with cost estimates if llm_client is available
+    stats = total_token_stats(db, thread_id, llm=llm_client)
+
+    # Extract api_usage totals
+    api_usage = stats.get("api_usage", {})
+    totals = api_usage.get("totals", {})
+    cost_info = api_usage.get("cost_usd", {})
+
     return ThreadTokenStats(
-        input_tokens=stats.get("input_tokens", 0),
-        output_tokens=stats.get("output_tokens", 0),
-        reasoning_tokens=stats.get("reasoning_tokens", 0),
-        total_tokens=stats.get("total_tokens", 0),
+        input_tokens=totals.get("input_tokens", 0),
+        output_tokens=totals.get("output_tokens", 0),
+        reasoning_tokens=totals.get("reasoning_tokens", 0),
+        cached_tokens=totals.get("cached_tokens", 0),
+        total_tokens=totals.get("input_tokens", 0) + totals.get("output_tokens", 0) + totals.get("reasoning_tokens", 0),
+        cost_usd=cost_info.get("total", None),
+        context_tokens=stats.get("context_tokens", 0),
     )
 
 
