@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -132,10 +133,10 @@ function MessageBlock({ message }: MessageBlockProps) {
               </pre>
             )
           ) : (
-            /* Regular markdown content with LaTeX support */
+            /* Regular markdown content with GFM tables and LaTeX support */
             <div className="prose prose-invert prose-sm max-w-none">
               <ReactMarkdown
-                remarkPlugins={[remarkMath]}
+                remarkPlugins={[remarkGfm, remarkMath]}
                 rehypePlugins={[rehypeKatex]}
                 components={{
                   code({ node, className, children, ...props }) {
@@ -288,11 +289,11 @@ export function ChatPanel() {
                 </details>
               )}
 
-              {/* Streaming content with LaTeX support */}
+              {/* Streaming content with GFM tables and LaTeX support */}
               {streamingContent && (
                 <div className="prose prose-invert prose-sm max-w-none">
                   <ReactMarkdown
-                    remarkPlugins={[remarkMath]}
+                    remarkPlugins={[remarkGfm, remarkMath]}
                     rehypePlugins={[rehypeKatex]}
                   >
                     {preprocessLatex(streamingContent)}
