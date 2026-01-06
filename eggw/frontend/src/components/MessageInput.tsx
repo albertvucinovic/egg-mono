@@ -63,6 +63,12 @@ export function MessageInput() {
     },
   });
 
+  // Commands that should show output in chat (info/status commands)
+  const commandsWithChatOutput = [
+    '/help', '/threads', '/listChildren', '/cost', '/toolsStatus',
+    '/schedulers', '/model', '/parentThread'
+  ];
+
   // Command mutation
   const commandMutation = useMutation({
     mutationFn: (command: string) => executeCommand(currentThreadId!, command),
@@ -80,8 +86,22 @@ export function MessageInput() {
       }
     },
     onSuccess: (response, command) => {
+      // Check if this command should show output in chat
+      const cmdBase = command.split(/\s+/)[0].toLowerCase();
+      const showInChat = commandsWithChatOutput.some(c => cmdBase === c.toLowerCase());
+
       if (response.success) {
-        addSystemLog(response.message, "success");
+        // For info commands, show output as a system message in chat
+        if (showInChat && response.message) {
+          addMessage({
+            id: `cmd-${Date.now()}`,
+            role: "system",
+            content: response.message,
+          });
+        } else {
+          // For action commands, just log to system panel
+          addSystemLog(response.message, "success");
+        }
 
         // Handle specific command responses
         if (response.data?.child_id) {
@@ -98,8 +118,8 @@ export function MessageInput() {
           // Thread deleted - refresh lists
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
-        } else if (response.data?.model_key) {
-          // Model changed - refresh threads
+        } else if (response.data?.model_key && !showInChat) {
+          // Model changed - refresh threads (if not showing in chat)
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
         } else if (response.data?.tool_call_id) {
           // Shell command - refresh messages and tools
@@ -107,6 +127,12 @@ export function MessageInput() {
           queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
         }
       } else {
+        // Show errors in chat for better visibility
+        addMessage({
+          id: `cmd-err-${Date.now()}`,
+          role: "system",
+          content: `Error: ${response.message}`,
+        });
         addSystemLog(response.message, "error");
       }
     },

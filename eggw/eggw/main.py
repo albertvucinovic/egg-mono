@@ -166,12 +166,9 @@ def stop_scheduler(root_tid: str) -> None:
         return
 
     entry = active_schedulers.pop(root_tid)
-    sched = entry.get("scheduler")
     task = entry.get("task")
 
-    if sched:
-        sched.stop()
-    if task:
+    if task and not task.done():
         task.cancel()
 
     print(f"Stopped scheduler for root {root_tid[-8:]}")
@@ -435,7 +432,7 @@ async def send_message(thread_id: str, request: SendMessageRequest):
 
 @app.post("/api/threads/{thread_id}/open")
 async def open_thread(thread_id: str):
-    """Open a thread for viewing. Does NOT start scheduler - that only happens on user actions."""
+    """Open a thread for viewing. Stops any running scheduler to prevent auto-streaming."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
@@ -443,14 +440,19 @@ async def open_thread(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    # Don't start scheduler here - only start it when user sends a message,
-    # approves a tool, or runs a shell command. Opening is just for viewing.
+    # Stop all active schedulers when switching threads.
+    # This prevents auto-streaming when navigating to a thread with pending work.
+    # Scheduler will only restart when user explicitly sends a message,
+    # approves a tool, or runs a shell command.
+    for root_id in list(active_schedulers.keys()):
+        stop_scheduler(root_id)
+
     root_id = get_thread_root_id(thread_id)
     return {
         "status": "ok",
         "thread_id": thread_id,
         "root_id": root_id,
-        "scheduler_running": root_id in active_schedulers,
+        "scheduler_running": False,  # Always false now since we stopped them
     }
 
 
@@ -741,22 +743,44 @@ async def _cmd_switch_thread(selector: str) -> CommandResponse:
 
 
 async def _cmd_list_threads() -> CommandResponse:
-    """Handle /threads command."""
-    all_threads = list_threads(db)
-    if not all_threads:
+    """Handle /threads command - shows thread tree structure."""
+    roots = list_root_threads(db)
+    if not roots:
         return CommandResponse(success=True, message="No threads found")
 
-    lines = []
-    for t in all_threads:
-        name_part = f" ({t.name})" if t.name else ""
-        model = current_thread_model(db, t.thread_id)
-        model_part = f" [{model}]" if model else ""
-        lines.append(f"  {t.thread_id[-8:]}{name_part}{model_part}")
+    def format_thread(tid: str, indent: int = 0) -> list[str]:
+        """Format a thread and its children recursively."""
+        lines = []
+        t = db.get_thread(tid)
+        if not t:
+            return lines
 
+        # Build thread line
+        prefix = "  " * indent + ("├─ " if indent > 0 else "")
+        name_part = f" ({t.name})" if t.name else ""
+        model = current_thread_model(db, tid)
+        model_part = f" [{model}]" if model else ""
+        state = thread_state(db, tid)
+        state_part = f" <{state}>" if state != "waiting_user" else ""
+
+        lines.append(f"{prefix}{tid[-8:]}{name_part}{model_part}{state_part}")
+
+        # Get children and recurse
+        children = list_children_ids(db, tid)
+        for child_id in children:
+            lines.extend(format_thread(child_id, indent + 1))
+
+        return lines
+
+    lines = []
+    for root_id in roots:
+        lines.extend(format_thread(root_id))
+
+    total = len(list_threads(db))
     return CommandResponse(
         success=True,
-        message=f"Threads ({len(all_threads)}):\n" + "\n".join(lines),
-        data={"threads": [t.thread_id for t in all_threads]},
+        message=f"Threads ({total} total, {len(roots)} roots):\n" + "\n".join(lines),
+        data={"threads": roots, "total": total},
     )
 
 

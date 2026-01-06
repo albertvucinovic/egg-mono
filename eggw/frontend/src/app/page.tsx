@@ -9,7 +9,7 @@ import { SystemPanel } from "@/components/SystemPanel";
 import { ApprovalPanel } from "@/components/ApprovalPanel";
 import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
-import { createThread, openThread, interruptThread } from "@/lib/api";
+import { createThread, openThread, interruptThread, fetchRootThreads } from "@/lib/api";
 
 export default function Home() {
   const queryClient = useQueryClient();
@@ -24,6 +24,38 @@ export default function Home() {
     setStreamingToolCalls,
   } = useAppStore();
   const [showHelp, setShowHelp] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+
+  // Auto-create or select a thread on app load
+  useEffect(() => {
+    if (initialized || currentThreadId) return;
+
+    const initThread = async () => {
+      try {
+        const roots = await fetchRootThreads();
+        if (roots && roots.length > 0) {
+          // Select the most recent thread
+          const latest = roots[roots.length - 1];
+          setCurrentThreadId(latest.id);
+          await openThread(latest.id);
+          addSystemLog(`Opened thread ${latest.id.slice(-8)}`, "info");
+        } else {
+          // No existing threads - create a new one
+          const thread = await createThread({});
+          setCurrentThreadId(thread.id);
+          await openThread(thread.id);
+          addSystemLog(`Created thread ${thread.id.slice(-8)}`, "success");
+          queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+        }
+      } catch (err) {
+        console.error("Failed to initialize thread:", err);
+        addSystemLog("Failed to initialize thread", "error");
+      }
+      setInitialized(true);
+    };
+
+    initThread();
+  }, [initialized, currentThreadId, setCurrentThreadId, addSystemLog, queryClient]);
 
   // Connect to SSE for real-time streaming
   useSSE(currentThreadId);

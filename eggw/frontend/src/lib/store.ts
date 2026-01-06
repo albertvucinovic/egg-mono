@@ -84,7 +84,15 @@ interface AppState {
 export const useAppStore = create<AppState>((set) => ({
   // Current thread
   currentThreadId: null,
-  setCurrentThreadId: (id) => set({ currentThreadId: id }),
+  setCurrentThreadId: (id) => set({
+    currentThreadId: id,
+    // Clear messages immediately for instant UI feedback when switching threads
+    messages: [],
+    streamingContent: "",
+    streamingReasoning: "",
+    streamingToolCalls: {},
+    isStreaming: false,
+  }),
 
   // Threads
   threads: [],
