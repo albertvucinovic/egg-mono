@@ -18,34 +18,42 @@ function MessageBlock({ message }: MessageBlockProps) {
     user: "bg-blue-900/50 border-blue-700",
     assistant: "bg-slate-800 border-slate-600",
     system: "bg-gray-800 border-gray-600",
-    tool: "bg-amber-900/30 border-amber-700",
+    tool: "bg-emerald-900/30 border-emerald-700",
   };
 
   const roleLabels: Record<string, string> = {
     user: "User",
     assistant: "Assistant",
     system: "System",
-    tool: "Tool",
+    tool: "Tool Result",
   };
+
+  // Check if this is a shell command (starts with $ or $$)
+  const isShellCommand = message.role === "user" &&
+    (message.content?.startsWith("$ ") || message.content?.startsWith("$$ "));
+
+  // For tool messages, check if content is long
+  const isLongToolOutput = message.role === "tool" &&
+    message.content && message.content.length > 500;
 
   return (
     <div
       className={clsx(
         "rounded border p-3 mb-3",
-        roleColors[message.role] || "bg-gray-800 border-gray-600"
+        isShellCommand ? "bg-gray-900 border-gray-600" : roleColors[message.role] || "bg-gray-800 border-gray-600"
       )}
     >
       {/* Header */}
       <div className="flex items-center gap-2 mb-2 text-xs text-gray-400">
         <span className="font-medium text-gray-300">
-          {roleLabels[message.role] || message.role}
+          {isShellCommand ? "Shell" : roleLabels[message.role] || message.role}
         </span>
         {message.model_key && (
           <span className="text-gray-500">({message.model_key})</span>
         )}
         {message.tool_call_id && (
-          <span className="text-amber-500 font-mono">
-            {message.tool_call_id.slice(-8)}
+          <span className="text-emerald-500 font-mono">
+            ← {message.tool_call_id.slice(-8)}
           </span>
         )}
       </div>
@@ -64,31 +72,57 @@ function MessageBlock({ message }: MessageBlockProps) {
 
       {/* Content */}
       {message.content && (
-        <div className="prose prose-invert prose-sm max-w-none">
-          <ReactMarkdown
-            components={{
-              code({ node, className, children, ...props }) {
-                const match = /language-(\w+)/.exec(className || "");
-                const inline = !match;
-                return !inline ? (
-                  <SyntaxHighlighter
-                    style={oneDark}
-                    language={match[1]}
-                    PreTag="div"
-                  >
-                    {String(children).replace(/\n$/, "")}
-                  </SyntaxHighlighter>
-                ) : (
-                  <code className={className} {...props}>
-                    {children}
-                  </code>
-                );
-              },
-            }}
-          >
-            {message.content}
-          </ReactMarkdown>
-        </div>
+        <>
+          {/* Shell command display */}
+          {isShellCommand ? (
+            <pre className="text-sm text-green-400 font-mono bg-black/30 p-2 rounded overflow-auto">
+              {message.content}
+            </pre>
+          ) : message.role === "tool" ? (
+            /* Tool output - collapsible if long */
+            isLongToolOutput ? (
+              <details className="bg-black/30 rounded border border-emerald-800">
+                <summary className="cursor-pointer p-2 text-sm text-emerald-300">
+                  Output ({message.content.length.toLocaleString()} chars) - click to expand
+                </summary>
+                <pre className="p-2 text-xs text-gray-300 overflow-auto max-h-96 whitespace-pre-wrap">
+                  {message.content}
+                </pre>
+              </details>
+            ) : (
+              <pre className="text-xs text-gray-300 bg-black/30 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap">
+                {message.content}
+              </pre>
+            )
+          ) : (
+            /* Regular markdown content */
+            <div className="prose prose-invert prose-sm max-w-none">
+              <ReactMarkdown
+                components={{
+                  code({ node, className, children, ...props }) {
+                    const match = /language-(\w+)/.exec(className || "");
+                    const inline = !match;
+                    return !inline ? (
+                      <SyntaxHighlighter
+                        style={oneDark}
+                        language={match[1]}
+                        PreTag="div"
+                      >
+                        {String(children).replace(/\n$/, "")}
+                      </SyntaxHighlighter>
+                    ) : (
+                      <code className={className} {...props}>
+                        {children}
+                      </code>
+                    );
+                  },
+                }}
+              >
+                {message.content}
+              </ReactMarkdown>
+            </div>
+          )}
+        </>
       )}
 
       {/* Tool calls */}
