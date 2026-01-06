@@ -108,15 +108,16 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle msg.create - new message created
+    // Handle msg.create - new message created (but not during streaming)
     es.addEventListener("msg.create", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const role = payload.role || "unknown";
-        addSystemLog(`Message created: ${role}`, "info");
-        // Only refresh messages if not streaming (streaming handles its own refresh on close)
-        if (!useAppStore.getState().isStreaming) {
+        // Only log and refresh for non-assistant messages during streaming
+        // Assistant messages are handled by stream.close
+        if (role !== "assistant") {
+          addSystemLog(`Message created: ${role}`, "info");
           queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
         }
       } catch (err) {
@@ -139,41 +140,10 @@ export function useSSE(threadId: string | null) {
     // Handle tool_call approval events
     es.addEventListener("tool_call.approval", (e) => {
       try {
-        const data = JSON.parse(e.data);
         addSystemLog("Tool approval needed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.approval:", err);
-      }
-    });
-
-    // Handle tool_call finish events - tool execution completed
-    es.addEventListener("tool_call.finish", (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        const payload = data.payload || {};
-        addSystemLog(`Tool finished: ${payload.name || "unknown"}`, "info");
-        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
-        // Only refresh messages if not streaming (streaming handles its own refresh on close)
-        if (!useAppStore.getState().isStreaming) {
-          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
-        }
-      } catch (err) {
-        console.error("Failed to parse tool_call.finish:", err);
-      }
-    });
-
-    // Handle tool_call output events - tool output available
-    es.addEventListener("tool_call.output", (e) => {
-      try {
-        addSystemLog("Tool output received", "info");
-        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
-        // Only refresh messages if not streaming (streaming handles its own refresh on close)
-        if (!useAppStore.getState().isStreaming) {
-          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
-        }
-      } catch (err) {
-        console.error("Failed to parse tool_call.output:", err);
       }
     });
 
