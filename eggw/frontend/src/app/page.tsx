@@ -97,6 +97,8 @@ export default function Home() {
           setStreamingReasoning("");
           setStreamingToolCalls({});
           setIsStreaming(false);
+          // Refetch messages to get the saved partial content from backend
+          queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
           addSystemLog("Streaming cancelled (Escape)", "info");
         });
       }

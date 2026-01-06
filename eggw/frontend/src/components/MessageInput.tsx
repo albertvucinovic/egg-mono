@@ -71,6 +71,8 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
       setStreamingReasoning("");
       setStreamingToolCalls({});
       setIsStreaming(false);
+      // Refetch messages to get the saved partial content from backend
+      queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
       addSystemLog("Streaming cancelled", "info");
       // Set flag to focus after state update
       setShouldFocusAfterCancel(true);
