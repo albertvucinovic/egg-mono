@@ -2195,11 +2195,44 @@ async def get_autocomplete(
         # Could add shell command suggestions here
         pass
 
-    # Regular text - conversation word completion
-    elif thread_id and prefix:
+    # Regular text - filesystem paths and conversation words
+    elif prefix:
+        import os
         tok = last_token(prefix)
-        if tok and len(tok) >= 2:
-            # Get words from recent messages
+        fs_suggestions = []
+
+        # Try filesystem completion first (like egg.py)
+        if tok:
+            expanded = os.path.expanduser(tok)
+            base_dir = expanded
+            needle = ''
+            if not os.path.isdir(expanded):
+                base_dir = os.path.dirname(expanded) or '.'
+                needle = os.path.basename(expanded)
+            try:
+                if os.path.isdir(base_dir):
+                    entries = os.listdir(base_dir)
+                    for name in sorted(entries):
+                        if needle and not name.lower().startswith(needle.lower()):
+                            continue
+                        path = os.path.join(base_dir, name)
+                        suffix = '/' if os.path.isdir(path) else ''
+                        full_path = path + suffix
+                        fs_suggestions.append({
+                            "display": name + suffix,
+                            "insert": full_path,
+                            "replace": len(tok),
+                        })
+                        if len(fs_suggestions) >= 20:
+                            break
+            except:
+                pass
+
+        # If filesystem found matches, use those
+        if fs_suggestions:
+            suggestions.extend(fs_suggestions)
+        # Otherwise, fall back to conversation word completion
+        elif thread_id and tok and len(tok) >= 2:
             t = db.get_thread(thread_id)
             if t and t.snapshot_json:
                 try:
@@ -2217,8 +2250,8 @@ async def get_autocomplete(
                     for word in sorted(words)[:15]:
                         suggestions.append({
                             "display": word,
-                            "insert": word[len(tok):],
-                            "replace": 0,
+                            "insert": word,
+                            "replace": len(tok),
                         })
                 except:
                     pass

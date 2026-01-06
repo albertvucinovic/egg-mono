@@ -46,8 +46,11 @@ export function ApprovalPanel() {
   }
 
   return (
-    <div className="border-t border-yellow-700 bg-yellow-900/20 p-4">
-      <div className="flex items-center gap-2 mb-3 text-yellow-400">
+    <div
+      className="border-t p-4"
+      style={{ borderColor: "var(--tool-call-border)", background: "var(--tool-call-bg)" }}
+    >
+      <div className="flex items-center gap-2 mb-3" style={{ color: "var(--tool-call-border)" }}>
         <AlertTriangle className="w-5 h-5" />
         <span className="font-medium">Pending Approvals</span>
       </div>
@@ -56,20 +59,21 @@ export function ApprovalPanel() {
         {pendingTools.map((tc) => (
           <div
             key={tc.id}
-            className="bg-[#1a1a1a] border border-yellow-800 rounded p-3"
+            className="border rounded p-3"
+            style={{ background: "var(--panel-bg)", borderColor: "var(--tool-call-border)" }}
           >
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <span className="font-medium text-yellow-300">{tc.name}</span>
-                <span className="text-xs text-gray-500 font-mono">
+                <span className="font-medium" style={{ color: "var(--tool-call-border)" }}>{tc.name}</span>
+                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
                   {tc.id.slice(-8)}
                 </span>
                 <span
-                  className={clsx(
-                    "text-xs px-2 py-0.5 rounded",
-                    tc.state === "TC1" && "bg-yellow-800 text-yellow-200",
-                    tc.state === "TC4" && "bg-purple-800 text-purple-200"
-                  )}
+                  className="text-xs px-2 py-0.5 rounded border"
+                  style={{
+                    borderColor: tc.state === "TC1" ? "var(--tool-call-border)" : "var(--reasoning-border)",
+                    color: tc.state === "TC1" ? "var(--tool-call-border)" : "var(--reasoning-border)",
+                  }}
                 >
                   {tc.state === "TC1" ? "Exec Approval" : "Output Approval"}
                 </span>
@@ -77,7 +81,10 @@ export function ApprovalPanel() {
             </div>
 
             {/* Arguments preview */}
-            <pre className="text-xs text-gray-400 mb-3 max-h-32 overflow-auto bg-black/30 p-2 rounded">
+            <pre
+              className="text-xs mb-3 max-h-32 overflow-auto p-2 rounded"
+              style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
+            >
               {typeof tc.arguments === "string"
                 ? tc.arguments.slice(0, 500)
                 : JSON.stringify(tc.arguments, null, 2).slice(0, 500)}
@@ -86,10 +93,16 @@ export function ApprovalPanel() {
             {/* Output preview for TC4 */}
             {tc.state === "TC4" && tc.output && (
               <details className="mb-3">
-                <summary className="cursor-pointer text-sm text-purple-300">
+                <summary
+                  className="cursor-pointer text-sm"
+                  style={{ color: "var(--reasoning-border)" }}
+                >
                   View Output ({tc.output.length} chars)
                 </summary>
-                <pre className="mt-2 text-xs text-gray-300 max-h-40 overflow-auto bg-black/30 p-2 rounded">
+                <pre
+                  className="mt-2 text-xs max-h-40 overflow-auto p-2 rounded"
+                  style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
+                >
                   {tc.output.slice(0, 2000)}
                   {tc.output.length > 2000 && "\n... (truncated)"}
                 </pre>
@@ -104,7 +117,8 @@ export function ApprovalPanel() {
                     onClick={() =>
                       approveMutation.mutate({ toolCallId: tc.id, approved: true })
                     }
-                    className="flex items-center gap-1 px-3 py-1 bg-green-700 hover:bg-green-600 rounded text-sm"
+                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
+                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-border)" }}
                   >
                     <Check className="w-4 h-4" /> Approve
                   </button>
@@ -112,7 +126,8 @@ export function ApprovalPanel() {
                     onClick={() =>
                       approveMutation.mutate({ toolCallId: tc.id, approved: false })
                     }
-                    className="flex items-center gap-1 px-3 py-1 bg-red-700 hover:bg-red-600 rounded text-sm"
+                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
+                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-border)" }}
                   >
                     <X className="w-4 h-4" /> Deny
                   </button>
@@ -127,7 +142,8 @@ export function ApprovalPanel() {
                         outputDecision: "whole",
                       })
                     }
-                    className="flex items-center gap-1 px-3 py-1 bg-green-700 hover:bg-green-600 rounded text-sm"
+                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
+                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-border)" }}
                   >
                     <Check className="w-4 h-4" /> Include Output
                   </button>
@@ -139,7 +155,8 @@ export function ApprovalPanel() {
                         outputDecision: "omit",
                       })
                     }
-                    className="flex items-center gap-1 px-3 py-1 bg-red-700 hover:bg-red-600 rounded text-sm"
+                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
+                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-border)" }}
                   >
                     <X className="w-4 h-4" /> Omit Output
                   </button>
