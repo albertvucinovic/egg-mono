@@ -1086,19 +1086,23 @@ async def get_token_stats(thread_id: str):
     # Get stats with cost estimates if llm_client is available
     stats = total_token_stats(db, thread_id, llm=llm_client)
 
-    # Extract api_usage totals
+    # Extract api_usage - fields are at top level of api_usage dict
     api_usage = stats.get("api_usage", {})
-    totals = api_usage.get("totals", {})
-    cost_info = api_usage.get("cost_usd", {})
+    cost_info = api_usage.get("cost_usd", {}) if isinstance(api_usage.get("cost_usd"), dict) else {}
+
+    input_tokens = api_usage.get("total_input_tokens", 0) or 0
+    output_tokens = api_usage.get("total_output_tokens", 0) or 0
+    reasoning_tokens = api_usage.get("total_reasoning_tokens", 0) or 0
+    cached_tokens = api_usage.get("cached_tokens", 0) or 0
 
     return ThreadTokenStats(
-        input_tokens=totals.get("input_tokens", 0),
-        output_tokens=totals.get("output_tokens", 0),
-        reasoning_tokens=totals.get("reasoning_tokens", 0),
-        cached_tokens=totals.get("cached_tokens", 0),
-        total_tokens=totals.get("input_tokens", 0) + totals.get("output_tokens", 0) + totals.get("reasoning_tokens", 0),
-        cost_usd=cost_info.get("total", None),
-        context_tokens=stats.get("context_tokens", 0),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cached_tokens=cached_tokens,
+        total_tokens=input_tokens + output_tokens + reasoning_tokens,
+        cost_usd=cost_info.get("total") if cost_info else None,
+        context_tokens=stats.get("context_tokens", 0) or 0,
     )
 
 

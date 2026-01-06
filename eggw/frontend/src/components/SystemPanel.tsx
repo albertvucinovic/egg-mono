@@ -282,29 +282,21 @@ export function SystemPanel() {
               </div>
               <div className="grid grid-cols-2 gap-1 text-gray-300">
                 <span>Input:</span>
-                <span className="text-right">{stats.input_tokens?.toLocaleString()}</span>
+                <span className="text-right">{(stats.input_tokens || 0).toLocaleString()}</span>
                 <span>Output:</span>
-                <span className="text-right">{stats.output_tokens?.toLocaleString()}</span>
+                <span className="text-right">{(stats.output_tokens || 0).toLocaleString()}</span>
                 <span>Reasoning:</span>
-                <span className="text-right">{stats.reasoning_tokens?.toLocaleString()}</span>
-                {stats.cached_tokens > 0 && (
-                  <>
-                    <span className="text-green-400">Cached:</span>
-                    <span className="text-right text-green-400">{stats.cached_tokens?.toLocaleString()}</span>
-                  </>
-                )}
+                <span className="text-right">{(stats.reasoning_tokens || 0).toLocaleString()}</span>
+                <span className="text-green-400">Cached:</span>
+                <span className="text-right text-green-400">{(stats.cached_tokens || 0).toLocaleString()}</span>
                 <span>Context:</span>
-                <span className="text-right">{stats.context_tokens?.toLocaleString()}</span>
+                <span className="text-right">{(stats.context_tokens || 0).toLocaleString()}</span>
                 <span className="font-medium">Total:</span>
-                <span className="text-right font-medium">{stats.total_tokens?.toLocaleString()}</span>
-                {stats.cost_usd != null && (
-                  <>
-                    <span className="text-yellow-400 font-medium">Cost:</span>
-                    <span className="text-right text-yellow-400 font-medium">
-                      ${stats.cost_usd.toFixed(4)}
-                    </span>
-                  </>
-                )}
+                <span className="text-right font-medium">{(stats.total_tokens || 0).toLocaleString()}</span>
+                <span className="text-yellow-400 font-medium">Cost:</span>
+                <span className="text-right text-yellow-400 font-medium">
+                  ${(stats.cost_usd || 0).toFixed(4)}
+                </span>
               </div>
             </div>
           )}
