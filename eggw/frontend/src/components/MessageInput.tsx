@@ -427,7 +427,8 @@ export function MessageInput() {
               : "Select a thread first"
           }
           disabled={!currentThreadId}
-          className="flex-1 bg-[#111] border border-[var(--panel-border)] rounded px-3 py-2 resize-none focus:outline-none focus:border-blue-500 disabled:opacity-50 min-h-[40px]"
+          className="flex-1 border rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[40px]"
+          style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
           rows={1}
         />
         {/* During streaming: show Run button for commands, Cancel button always */}

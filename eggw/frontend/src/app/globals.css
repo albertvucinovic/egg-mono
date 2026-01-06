@@ -366,6 +366,34 @@
   --scrollbar-thumb: #c0c0c0;
 }
 
+/* ============================================
+   Theme: Light-Mono - Minimalist grayscale light
+   ============================================ */
+[data-theme="light-mono"] {
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --panel-bg: #f8f8f8;
+  --panel-border: #e0e0e0;
+  --user-msg-bg: rgba(0, 0, 0, 0.05);
+  --user-msg-border: #888888;
+  --assistant-msg-bg: #f0f0f0;
+  --assistant-msg-border: #cccccc;
+  --system-msg-bg: rgba(0, 0, 0, 0.03);
+  --system-msg-border: #999999;
+  --tool-msg-bg: rgba(0, 0, 0, 0.03);
+  --tool-msg-border: #888888;
+  --reasoning-bg: rgba(0, 0, 0, 0.05);
+  --reasoning-border: #777777;
+  --tool-call-bg: rgba(0, 0, 0, 0.04);
+  --tool-call-border: #666666;
+  --accent: #333333;
+  --accent-hover: #000000;
+  --heading-color: #000000;
+  --muted: #777777;
+  --code-bg: #f0f0f0;
+  --scrollbar-thumb: #cccccc;
+}
+
 body {
   color: var(--foreground);
   background: var(--background);
