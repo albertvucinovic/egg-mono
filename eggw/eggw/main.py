@@ -302,6 +302,34 @@ async def create_thread(request: CreateThreadRequest):
     )
 
 
+@app.patch("/api/threads/{thread_id}")
+async def update_thread(thread_id: str, name: Optional[str] = None):
+    """Update thread properties (e.g., name)."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    if name is not None:
+        db.conn.execute(
+            "UPDATE threads SET name = ? WHERE thread_id = ?",
+            (name, thread_id)
+        )
+        db.conn.commit()
+
+    t = db.get_thread(thread_id)
+    children = list_children_ids(db, t.thread_id)
+    return ThreadInfo(
+        id=t.thread_id,
+        name=t.name,
+        parent_id=get_parent(db, t.thread_id),
+        model_key=current_thread_model(db, t.thread_id),
+        has_children=len(children) > 0,
+    )
+
+
 @app.delete("/api/threads/{thread_id}")
 async def remove_thread(thread_id: str, delete_subtree: bool = False):
     """Delete a thread."""

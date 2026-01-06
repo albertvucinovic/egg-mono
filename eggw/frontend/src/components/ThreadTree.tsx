@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight,
@@ -9,6 +9,9 @@ import {
   Trash2,
   Copy,
   MessageSquare,
+  Pencil,
+  Check,
+  X,
 } from "lucide-react";
 import {
   fetchRootThreads,
@@ -17,6 +20,7 @@ import {
   deleteThread,
   duplicateThread,
   openThread,
+  renameThread,
 } from "@/lib/api";
 import { useAppStore, Thread } from "@/lib/store";
 import clsx from "clsx";
@@ -28,6 +32,9 @@ interface TreeNodeProps {
 
 function TreeNode({ thread, level }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState(thread.name || "");
+  const inputRef = useRef<HTMLInputElement>(null);
   const { currentThreadId, setCurrentThreadId, addSystemLog } = useAppStore();
   const queryClient = useQueryClient();
 
@@ -58,7 +65,56 @@ function TreeNode({ thread, level }: TreeNodeProps) {
     },
   });
 
+  const renameMutation = useMutation({
+    mutationFn: (name: string) => renameThread(thread.id, name),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+      queryClient.invalidateQueries({ queryKey: ["thread", thread.id] });
+      addSystemLog(`Renamed thread to "${editName}"`, "success");
+      setIsEditing(false);
+    },
+    onError: () => {
+      addSystemLog(`Failed to rename thread`, "error");
+    },
+  });
+
   const isSelected = currentThreadId === thread.id;
+
+  const handleStartEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditName(thread.name || "");
+    setIsEditing(true);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const handleSaveEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (editName.trim()) {
+      renameMutation.mutate(editName.trim());
+    } else {
+      setIsEditing(false);
+    }
+  };
+
+  const handleCancelEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsEditing(false);
+    setEditName(thread.name || "");
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      if (editName.trim()) {
+        renameMutation.mutate(editName.trim());
+      } else {
+        setIsEditing(false);
+      }
+    } else if (e.key === "Escape") {
+      setIsEditing(false);
+      setEditName(thread.name || "");
+    }
+  };
 
   return (
     <div>
@@ -98,39 +154,77 @@ function TreeNode({ thread, level }: TreeNodeProps) {
 
         <MessageSquare className="w-4 h-4 text-gray-400" />
 
-        <span className="flex-1 truncate text-sm">
-          {thread.name || thread.id.slice(-8)}
-        </span>
+        {isEditing ? (
+          <>
+            <input
+              ref={inputRef}
+              type="text"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onClick={(e) => e.stopPropagation()}
+              className="flex-1 bg-[#111] border border-blue-500 rounded px-1 text-sm outline-none"
+              placeholder="Thread name"
+            />
+            <button
+              onClick={handleSaveEdit}
+              className="p-1 hover:bg-green-900 rounded"
+              title="Save"
+            >
+              <Check className="w-3 h-3 text-green-400" />
+            </button>
+            <button
+              onClick={handleCancelEdit}
+              className="p-1 hover:bg-red-900 rounded"
+              title="Cancel"
+            >
+              <X className="w-3 h-3 text-red-400" />
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="flex-1 truncate text-sm">
+              {thread.name || thread.id.slice(-8)}
+            </span>
 
-        <span className="text-xs text-gray-500">
-          {thread.model_key?.split(":")[0]}
-        </span>
+            <span className="text-xs text-gray-500">
+              {thread.model_key?.split(":")[0]}
+            </span>
 
-        {/* Actions (visible on hover) */}
-        <div className="hidden group-hover:flex gap-1">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              duplicateMutation.mutate();
-            }}
-            className="p-1 hover:bg-[#333] rounded"
-            title="Duplicate"
-          >
-            <Copy className="w-3 h-3" />
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              if (confirm("Delete this thread?")) {
-                deleteMutation.mutate();
-              }
-            }}
-            className="p-1 hover:bg-red-900 rounded"
-            title="Delete"
-          >
-            <Trash2 className="w-3 h-3" />
-          </button>
-        </div>
+            {/* Actions (visible on hover) */}
+            <div className="hidden group-hover:flex gap-1">
+              <button
+                onClick={handleStartEdit}
+                className="p-1 hover:bg-[#333] rounded"
+                title="Rename"
+              >
+                <Pencil className="w-3 h-3" />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  duplicateMutation.mutate();
+                }}
+                className="p-1 hover:bg-[#333] rounded"
+                title="Duplicate"
+              >
+                <Copy className="w-3 h-3" />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (confirm("Delete this thread?")) {
+                    deleteMutation.mutate();
+                  }
+                }}
+                className="p-1 hover:bg-red-900 rounded"
+                title="Delete"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Children */}

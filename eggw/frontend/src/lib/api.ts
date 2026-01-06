@@ -48,6 +48,15 @@ export async function deleteThread(threadId: string, deleteSubtree = false) {
   return res.json();
 }
 
+export async function renameThread(threadId: string, name: string) {
+  const res = await fetch(
+    `${API_BASE}/api/threads/${threadId}?name=${encodeURIComponent(name)}`,
+    { method: "PATCH" }
+  );
+  if (!res.ok) throw new Error("Failed to rename thread");
+  return res.json();
+}
+
 export async function duplicateThread(threadId: string, name?: string) {
   const res = await fetch(
     `${API_BASE}/api/threads/${threadId}/duplicate${name ? `?name=${encodeURIComponent(name)}` : ""}`,
