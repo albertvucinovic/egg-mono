@@ -42,6 +42,17 @@ from eggthreads import (
     total_token_stats,
     execute_bash_command,
     interrupt_thread,
+    # Sandbox functions
+    get_thread_sandbox_status,
+    get_thread_sandbox_config,
+    set_thread_sandbox_config,
+    is_user_sandbox_control_enabled,
+    get_sandbox_status,
+    # Tools config functions
+    disable_tool_for_thread,
+    enable_tool_for_thread,
+    set_thread_allow_raw_tool_output,
+    get_thread_tools_config,
 )
 
 from models import (
@@ -97,18 +108,34 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global db, scheduler, llm_client, models_config, default_model_key
 
-    # Initialize database
-    db = ThreadsDB()
+    # Change to the caller's working directory if specified
+    # This ensures sandbox configs, models.json, etc. are found correctly
+    egg_cwd = os.environ.get("EGG_CWD")
+    if egg_cwd:
+        os.chdir(egg_cwd)
+        print(f"Working directory: {egg_cwd}")
+
+    # Initialize database - use EGG_DB_PATH if specified, else default
+    db_path = os.environ.get("EGG_DB_PATH")
+    if db_path:
+        db = ThreadsDB(db_path)
+        print(f"Database: {db_path}")
+    else:
+        db = ThreadsDB()  # Uses default .egg/threads.sqlite
     db.init_schema()  # Create tables if they don't exist
 
     # Load models
     models_config, default_model_key = load_models_config()
 
     # Initialize LLM client
-    models_path = PROJECT_ROOT / "egg" / "models.json"
+    # Look for models.json in CWD first, then fall back to egg directory
+    cwd_models = Path.cwd() / "models.json"
+    egg_models = PROJECT_ROOT / "egg" / "models.json"
+    models_path = cwd_models if cwd_models.exists() else egg_models
     try:
         from eggllm import LLMClient
         llm_client = LLMClient(models_path=models_path)
+        print(f"Models config: {models_path}")
     except Exception as e:
         print(f"Warning: Could not initialize LLM client: {e}")
         llm_client = None
@@ -202,42 +229,89 @@ app.add_middleware(
 
 @app.get("/api/threads", response_model=List[ThreadInfo])
 async def get_threads():
-    """List all threads."""
+    """List all threads (optimized with bulk queries)."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    all_threads = list_threads(db)
+    if not all_threads:
+        return []
+
+    # Bulk fetch parent-child relationships
+    children_set: set[str] = set()  # threads that have children
+    parent_map: Dict[str, str] = {}  # child_id -> parent_id
+    try:
+        cur = db.conn.execute("SELECT parent_id, child_id FROM children")
+        for row in cur.fetchall():
+            children_set.add(row[0])  # parent has children
+            parent_map[row[1]] = row[0]  # child -> parent
+    except Exception:
+        pass
+
+    # Bulk fetch model settings
+    model_map: Dict[str, str] = {}
+    try:
+        cur = db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
+        for row in cur.fetchall():
+            model_map[row[0]] = row[1]
+    except Exception:
+        pass
+
     threads = []
-    for t in list_threads(db):
-        children = list_children_ids(db, t.thread_id)
+    for t in all_threads:
+        model = model_map.get(t.thread_id) or t.initial_model_key
         threads.append(ThreadInfo(
             id=t.thread_id,
             name=t.name,
-            parent_id=get_parent(db, t.thread_id),
-            model_key=current_thread_model(db, t.thread_id),
-            has_children=len(children) > 0,
+            parent_id=parent_map.get(t.thread_id),
+            model_key=model,
+            has_children=t.thread_id in children_set,
         ))
     return threads
 
 
 @app.get("/api/threads/roots", response_model=List[ThreadInfo])
 async def get_root_threads():
-    """List only root threads."""
+    """List only root threads (optimized with bulk queries)."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    all_threads = list_threads(db)
+    if not all_threads:
+        return []
+
+    # Bulk fetch parent-child relationships
+    children_set: set[str] = set()  # threads that have children
+    parent_set: set[str] = set()  # threads that have a parent
+    try:
+        cur = db.conn.execute("SELECT parent_id, child_id FROM children")
+        for row in cur.fetchall():
+            children_set.add(row[0])
+            parent_set.add(row[1])
+    except Exception:
+        pass
+
+    # Bulk fetch model settings
+    model_map: Dict[str, str] = {}
+    try:
+        cur = db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
+        for row in cur.fetchall():
+            model_map[row[0]] = row[1]
+    except Exception:
+        pass
+
     threads = []
-    # list_root_threads returns thread IDs (strings), not ThreadRow objects
-    for thread_id in list_root_threads(db):
-        t = db.get_thread(thread_id)
-        if not t:
+    for t in all_threads:
+        # Skip if thread has a parent (not a root)
+        if t.thread_id in parent_set:
             continue
-        children = list_children_ids(db, thread_id)
+        model = model_map.get(t.thread_id) or t.initial_model_key
         threads.append(ThreadInfo(
-            id=thread_id,
+            id=t.thread_id,
             name=t.name,
             parent_id=None,
-            model_key=current_thread_model(db, thread_id),
-            has_children=len(children) > 0,
+            model_key=model,
+            has_children=t.thread_id in children_set,
         ))
     return threads
 
@@ -525,6 +599,8 @@ async def execute_command(thread_id: str, request: CommandRequest):
             return await _cmd_delete_thread(thread_id, command_arg)
         elif command_name == "duplicateThread":
             return await _cmd_duplicate_thread(thread_id, command_arg)
+        elif command_name == "rename":
+            return await _cmd_rename(thread_id, command_arg)
         elif command_name == "cost":
             return await _cmd_cost(thread_id)
         elif command_name == "toolsOn":
@@ -535,6 +611,37 @@ async def execute_command(thread_id: str, request: CommandRequest):
             return await _cmd_tools_status(thread_id)
         elif command_name == "schedulers":
             return _cmd_schedulers()
+        elif command_name == "toggleSandboxing":
+            return await _cmd_toggle_sandboxing(thread_id)
+        elif command_name == "setSandboxConfiguration":
+            return await _cmd_set_sandbox_configuration(thread_id, command_arg)
+        elif command_name == "getSandboxingConfig":
+            return await _cmd_get_sandboxing_config(thread_id)
+        # P1 Commands
+        elif command_name == "updateAllModels":
+            return await _cmd_update_all_models(command_arg)
+        elif command_name == "disableTool":
+            return await _cmd_disable_tool(thread_id, command_arg)
+        elif command_name == "enableTool":
+            return await _cmd_enable_tool(thread_id, command_arg)
+        elif command_name == "spawnAutoApprovedChildThread":
+            return await _cmd_spawn_auto_approved(thread_id, command_arg)
+        # P2 Commands
+        elif command_name == "toolsSecrets":
+            return await _cmd_tools_secrets(thread_id, command_arg)
+        elif command_name == "waitForThreads":
+            return await _cmd_wait_for_threads(thread_id, command_arg)
+        elif command_name == "togglePanel":
+            return _cmd_toggle_panel(command_arg)
+        # P3 Commands
+        elif command_name == "paste":
+            return _cmd_paste()
+        elif command_name == "enterMode":
+            return _cmd_enter_mode(command_arg)
+        elif command_name == "toggleBorders":
+            return _cmd_toggle_borders()
+        elif command_name == "quit":
+            return _cmd_quit()
         else:
             return CommandResponse(
                 success=False,
@@ -708,9 +815,9 @@ async def _cmd_parent_thread(thread_id: str) -> CommandResponse:
 
 
 async def _cmd_switch_thread(selector: str) -> CommandResponse:
-    """Handle /thread command to switch to a thread by ID or partial ID."""
+    """Handle /thread command to switch to a thread by ID, partial ID, name, or recap."""
     if not selector:
-        return CommandResponse(success=False, message="Usage: /thread <id or partial-id>")
+        return CommandResponse(success=False, message="Usage: /thread <id or partial-id or name or recap>")
 
     # Try exact match first
     t = db.get_thread(selector)
@@ -721,54 +828,102 @@ async def _cmd_switch_thread(selector: str) -> CommandResponse:
             data={"thread_id": selector},
         )
 
-    # Try partial match
+    # Try partial match on id, name, and recap (case-insensitive)
     all_threads = list_threads(db)
-    matches = [t for t in all_threads if selector.lower() in t.thread_id.lower()]
+    sel_lower = selector.lower()
+    matches = []
+    for t in all_threads:
+        # Build searchable string from id, name, and recap
+        hay = f"{t.thread_id} {t.name or ''} {t.short_recap or ''}".lower()
+        if sel_lower in hay:
+            matches.append(t)
 
     if len(matches) == 1:
         tid = matches[0].thread_id
+        name_part = f" ({matches[0].name})" if matches[0].name else ""
         return CommandResponse(
             success=True,
-            message=f"Switched to thread: {tid[-8:]}",
+            message=f"Switched to thread: {tid[-8:]}{name_part}",
             data={"thread_id": tid},
         )
     elif len(matches) > 1:
-        match_list = ", ".join(t.thread_id[-8:] for t in matches[:5])
+        match_list = ", ".join(
+            f"{t.thread_id[-8:]}" + (f" ({t.name})" if t.name else "")
+            for t in matches[:5]
+        )
         return CommandResponse(
             success=False,
-            message=f"Ambiguous thread selector. Matches: {match_list}",
+            message=f"Ambiguous thread selector ({len(matches)} matches): {match_list}",
         )
     else:
         return CommandResponse(success=False, message=f"No thread found matching: {selector}")
 
 
 async def _cmd_list_threads() -> CommandResponse:
-    """Handle /threads command - shows thread tree structure."""
-    roots = list_root_threads(db)
-    if not roots:
+    """Handle /threads command - shows thread tree structure (optimized)."""
+    # Fetch all data in bulk to avoid N+1 queries
+    all_threads = list_threads(db)
+    if not all_threads:
         return CommandResponse(success=True, message="No threads found")
 
-    def format_thread(tid: str, indent: int = 0) -> list[str]:
+    # Build lookup maps
+    threads_by_id = {t.thread_id: t for t in all_threads}
+
+    # Fetch all parent-child relationships in one query
+    children_map: Dict[str, List[str]] = {}  # parent_id -> [child_ids]
+    parent_map: Dict[str, str] = {}  # child_id -> parent_id
+    try:
+        cur = db.conn.execute("SELECT parent_id, child_id FROM children")
+        for row in cur.fetchall():
+            parent_id, child_id = row[0], row[1]
+            if parent_id not in children_map:
+                children_map[parent_id] = []
+            children_map[parent_id].append(child_id)
+            parent_map[child_id] = parent_id
+    except Exception:
+        pass
+
+    # Find roots (threads with no parent)
+    roots = [t.thread_id for t in all_threads if t.thread_id not in parent_map]
+
+    # Fetch all model settings in one query
+    model_map: Dict[str, str] = {}  # thread_id -> model_key
+    try:
+        cur = db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
+        for row in cur.fetchall():
+            model_map[row[0]] = row[1]
+    except Exception:
+        pass
+
+    # For threads without explicit model, use initial_model_key
+    for t in all_threads:
+        if t.thread_id not in model_map and t.initial_model_key:
+            model_map[t.thread_id] = t.initial_model_key
+
+    def format_thread(tid: str, indent: int = 0, max_depth: int = 50) -> list[str]:
         """Format a thread and its children recursively."""
+        if indent > max_depth:
+            return ["  " * indent + "... (max depth reached)"]
+
         lines = []
-        t = db.get_thread(tid)
+        t = threads_by_id.get(tid)
         if not t:
             return lines
 
         # Build thread line
         prefix = "  " * indent + ("├─ " if indent > 0 else "")
         name_part = f" ({t.name})" if t.name else ""
-        model = current_thread_model(db, tid)
+        model = model_map.get(tid, "")
         model_part = f" [{model}]" if model else ""
-        state = thread_state(db, tid)
-        state_part = f" <{state}>" if state != "waiting_user" else ""
+        state = t.status if t.status != "waiting_user" else ""
+        state_part = f" <{state}>" if state else ""
 
         lines.append(f"{prefix}{tid[-8:]}{name_part}{model_part}{state_part}")
 
         # Get children and recurse
-        children = list_children_ids(db, tid)
+        children = children_map.get(tid, [])
         for child_id in children:
-            lines.extend(format_thread(child_id, indent + 1))
+            lines.extend(format_thread(child_id, indent + 1, max_depth))
 
         return lines
 
@@ -776,7 +931,7 @@ async def _cmd_list_threads() -> CommandResponse:
     for root_id in roots:
         lines.extend(format_thread(root_id))
 
-    total = len(list_threads(db))
+    total = len(all_threads)
     return CommandResponse(
         success=True,
         message=f"Threads ({total} total, {len(roots)} roots):\n" + "\n".join(lines),
@@ -834,6 +989,29 @@ async def _cmd_duplicate_thread(thread_id: str, name: str) -> CommandResponse:
         success=True,
         message=f"Duplicated to: {new_id[-8:]}",
         data={"thread_id": new_id, "source_id": thread_id},
+    )
+
+
+async def _cmd_rename(thread_id: str, new_name: str) -> CommandResponse:
+    """Handle /rename command."""
+    if not new_name:
+        t = db.get_thread(thread_id)
+        current_name = t.name if t and t.name else "(no name)"
+        return CommandResponse(
+            success=False,
+            message=f"Usage: /rename <new name>\nCurrent name: {current_name}",
+        )
+
+    db.conn.execute(
+        "UPDATE threads SET name = ? WHERE thread_id = ?",
+        (new_name, thread_id)
+    )
+    db.conn.commit()
+
+    return CommandResponse(
+        success=True,
+        message=f"Thread renamed to: {new_name}",
+        data={"name": new_name},
     )
 
 
@@ -929,14 +1107,393 @@ def _cmd_schedulers() -> CommandResponse:
     )
 
 
+async def _cmd_toggle_sandboxing(thread_id: str) -> CommandResponse:
+    """Handle /toggleSandboxing command - toggle sandboxing for thread subtree."""
+    # Check if user sandbox control is enabled
+    try:
+        if not is_user_sandbox_control_enabled(db, thread_id):
+            return CommandResponse(
+                success=False,
+                message="User sandbox control is disabled for this thread.",
+            )
+    except Exception:
+        pass  # Older version, assume enabled
+
+    try:
+        st = get_thread_sandbox_status(db, thread_id)
+        enabled_before = bool(st.get('enabled'))
+        new_enabled = not enabled_before
+
+        # Toggle only the enabled flag while keeping current settings
+        cfg = get_thread_sandbox_config(db, thread_id)
+        set_thread_sandbox_config(
+            db,
+            thread_id,
+            enabled=new_enabled,
+            settings=cfg.settings,
+            reason='/toggleSandboxing',
+        )
+
+        st2 = get_thread_sandbox_status(db, thread_id)
+        effective = bool(st2.get('effective'))
+        warning = st2.get('warning')
+
+        if effective:
+            return CommandResponse(
+                success=True,
+                message='Sandboxing ENABLED for this thread subtree.',
+                data={"enabled": True, "effective": True},
+            )
+        elif new_enabled:
+            msg = 'Sandboxing ENABLED but not effective'
+            if warning:
+                msg += f": {warning}"
+            return CommandResponse(
+                success=True,
+                message=msg,
+                data={"enabled": True, "effective": False, "warning": warning},
+            )
+        else:
+            return CommandResponse(
+                success=True,
+                message='Sandboxing DISABLED for this thread subtree.',
+                data={"enabled": False, "effective": False},
+            )
+    except Exception as e:
+        return CommandResponse(success=False, message=f'/toggleSandboxing error: {e}')
+
+
+async def _cmd_set_sandbox_configuration(thread_id: str, config_name: str) -> CommandResponse:
+    """Handle /setSandboxConfiguration command - apply sandbox config file."""
+    # Check if user sandbox control is enabled
+    try:
+        if not is_user_sandbox_control_enabled(db, thread_id):
+            return CommandResponse(
+                success=False,
+                message="User sandbox control is disabled for this thread.",
+            )
+    except Exception:
+        pass  # Older version, assume enabled
+
+    name = config_name.strip()
+    if not name:
+        # Return help message
+        return CommandResponse(
+            success=True,
+            message="""Sandbox Configuration Commands:
+  /toggleSandboxing - Toggle sandbox on/off for this thread
+  /setSandboxConfiguration <file.json> - Apply config from .egg/sandbox/
+  /getSandboxingConfig - Show current sandbox configuration
+
+Config files are stored in .egg/sandbox/ directory.
+Use tab completion to see available configs.""",
+        )
+
+    try:
+        set_thread_sandbox_config(
+            db,
+            thread_id,
+            enabled=True,
+            config_name=name,
+            reason='/setSandboxConfiguration',
+        )
+        return CommandResponse(
+            success=True,
+            message=f"Sandbox configuration applied: {name}",
+            data={"config_name": name},
+        )
+    except Exception as e:
+        return CommandResponse(success=False, message=f'/setSandboxConfiguration error: {e}')
+
+
+async def _cmd_get_sandboxing_config(thread_id: str) -> CommandResponse:
+    """Handle /getSandboxingConfig command - show current sandbox config."""
+    try:
+        sb = get_thread_sandbox_status(db, thread_id)
+        lines = [
+            "Current thread sandbox configuration:",
+            f"  Provider: {sb.get('provider', 'unknown')}",
+            f"  Enabled: {sb.get('enabled', False)}",
+            f"  Available: {sb.get('available', False)}",
+            f"  Effective: {sb.get('effective', False)}",
+            f"  Config source: {sb.get('config_source', 'unknown')}",
+        ]
+        config_path = sb.get('config_path')
+        if config_path:
+            lines.append(f"  Config path: {config_path}")
+        warning = sb.get('warning')
+        if warning:
+            lines.append(f"  Warning: {warning}")
+
+        return CommandResponse(
+            success=True,
+            message="\n".join(lines),
+            data={
+                "provider": sb.get('provider'),
+                "enabled": sb.get('enabled'),
+                "available": sb.get('available'),
+                "effective": sb.get('effective'),
+                "warning": warning,
+            },
+        )
+    except Exception as e:
+        return CommandResponse(success=False, message=f'/getSandboxingConfig error: {e}')
+
+
+# --- P1 Commands ---
+
+async def _cmd_update_all_models(provider: str) -> CommandResponse:
+    """Handle /updateAllModels command - refresh model catalog for a provider."""
+    provider = provider.strip()
+    if not provider:
+        return CommandResponse(
+            success=True,
+            message="Usage: /updateAllModels <provider>\nAvailable providers: openai, anthropic, google, etc.",
+        )
+
+    try:
+        if llm_client:
+            count = llm_client.catalog.update_models_for_provider(provider)
+            return CommandResponse(
+                success=True,
+                message=f"Updated {count} models for provider '{provider}'",
+                data={"provider": provider, "count": count},
+            )
+        else:
+            return CommandResponse(success=False, message="LLM client not initialized")
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/updateAllModels error: {e}")
+
+
+async def _cmd_disable_tool(thread_id: str, tool_name: str) -> CommandResponse:
+    """Handle /disableTool command - disable a specific tool for thread."""
+    name = tool_name.strip()
+    if not name:
+        return CommandResponse(
+            success=True,
+            message="Usage: /disableTool <tool_name>",
+        )
+
+    try:
+        disable_tool_for_thread(db, thread_id, name)
+        return CommandResponse(
+            success=True,
+            message=f"Disabled tool: {name}",
+            data={"tool_name": name, "enabled": False},
+        )
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/disableTool error: {e}")
+
+
+async def _cmd_enable_tool(thread_id: str, tool_name: str) -> CommandResponse:
+    """Handle /enableTool command - enable a specific tool for thread."""
+    name = tool_name.strip()
+    if not name:
+        return CommandResponse(
+            success=True,
+            message="Usage: /enableTool <tool_name>",
+        )
+
+    try:
+        enable_tool_for_thread(db, thread_id, name)
+        return CommandResponse(
+            success=True,
+            message=f"Enabled tool: {name}",
+            data={"tool_name": name, "enabled": True},
+        )
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/enableTool error: {e}")
+
+
+async def _cmd_spawn_auto_approved(thread_id: str, context: str) -> CommandResponse:
+    """Handle /spawnAutoApprovedChildThread command - spawn child with global auto-approval."""
+    try:
+        # Get current thread's model
+        current_model = current_thread_model(db, thread_id)
+
+        # Create child thread
+        child_id = create_child_thread(
+            db,
+            parent_id=thread_id,
+            initial_model_key=current_model,
+        )
+
+        # Enable global auto-approval for the child thread
+        approve_tool_calls_for_thread(db, child_id, decision="global_approval")
+
+        # Add context as user message if provided
+        ctx = context.strip()
+        if ctx:
+            append_message(db, child_id, "user", ctx)
+
+        return CommandResponse(
+            success=True,
+            message=f"Spawned auto-approved child thread: {child_id[-8:]}",
+            data={"child_id": child_id, "auto_approved": True},
+        )
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/spawnAutoApprovedChildThread error: {e}")
+
+
+# --- P2 Commands ---
+
+async def _cmd_tools_secrets(thread_id: str, mode: str) -> CommandResponse:
+    """Handle /toolsSecrets command - toggle secrets masking in tool output."""
+    mode = mode.strip().lower()
+    if mode not in ("on", "off"):
+        return CommandResponse(
+            success=True,
+            message="Usage: /toolsSecrets <on|off>\n  on = allow raw tool output (secrets visible)\n  off = mask detected secrets",
+        )
+
+    try:
+        allow_raw = mode == "on"
+        set_thread_allow_raw_tool_output(db, thread_id, allow_raw)
+        if allow_raw:
+            return CommandResponse(
+                success=True,
+                message="Tool output secrets: raw mode ENABLED (secrets will not be masked)",
+                data={"allow_raw": True},
+            )
+        else:
+            return CommandResponse(
+                success=True,
+                message="Tool output secrets: masking ENABLED (attempting to mask detected secrets)",
+                data={"allow_raw": False},
+            )
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/toolsSecrets error: {e}")
+
+
+async def _cmd_wait_for_threads(thread_id: str, thread_selectors: str) -> CommandResponse:
+    """Handle /waitForThreads command - wait for specified threads to complete."""
+    selectors = thread_selectors.strip()
+    if not selectors:
+        return CommandResponse(
+            success=True,
+            message="Usage: /waitForThreads <thread_id>[,<thread_id>...]\nWait for specified child threads to reach waiting_user state.",
+        )
+
+    # Parse thread selectors (comma-separated)
+    thread_ids = [s.strip() for s in selectors.split(",") if s.strip()]
+
+    # Resolve each selector to a thread ID
+    resolved_ids = []
+    for selector in thread_ids:
+        # Try to find thread by ID suffix or name
+        found = None
+        for t in list_threads(db):
+            if t["id"].endswith(selector) or t.get("name") == selector:
+                found = t["id"]
+                break
+        if found:
+            resolved_ids.append(found)
+        else:
+            return CommandResponse(
+                success=False,
+                message=f"Thread not found: {selector}",
+            )
+
+    # Check current states
+    states = {}
+    all_ready = True
+    for tid in resolved_ids:
+        state = thread_state(db, tid)
+        states[tid[-8:]] = state
+        if state not in ("waiting_user", "paused"):
+            all_ready = False
+
+    if all_ready:
+        return CommandResponse(
+            success=True,
+            message=f"All {len(resolved_ids)} threads are ready",
+            data={"states": states, "all_ready": True},
+        )
+    else:
+        return CommandResponse(
+            success=True,
+            message=f"Waiting for threads: {states}",
+            data={"states": states, "all_ready": False, "waiting": True},
+        )
+
+
+def _cmd_toggle_panel(panel_name: str) -> CommandResponse:
+    """Handle /togglePanel command - toggle panel visibility (frontend-only)."""
+    name = panel_name.strip().lower()
+    valid_panels = ["chat", "children", "system"]
+    if name not in valid_panels:
+        return CommandResponse(
+            success=True,
+            message=f"Usage: /togglePanel <{'/'.join(valid_panels)}>",
+        )
+
+    # This is handled client-side, we just return which panel to toggle
+    return CommandResponse(
+        success=True,
+        message=f"Toggle panel: {name}",
+        data={"panel": name, "action": "toggle"},
+    )
+
+
+# --- P3 Commands ---
+
+def _cmd_paste() -> CommandResponse:
+    """Handle /paste command - paste from clipboard (frontend-only)."""
+    return CommandResponse(
+        success=True,
+        message="Use Ctrl+V or Cmd+V to paste from clipboard",
+        data={"action": "paste"},
+    )
+
+
+def _cmd_enter_mode(mode: str) -> CommandResponse:
+    """Handle /enterMode command - set Enter key behavior (frontend-only)."""
+    mode = mode.strip().lower()
+    if mode not in ("send", "newline"):
+        return CommandResponse(
+            success=True,
+            message="Usage: /enterMode <send|newline>\n  send = Enter sends message (Shift+Enter for newline)\n  newline = Enter inserts newline (Ctrl+Enter to send)",
+        )
+
+    return CommandResponse(
+        success=True,
+        message=f"Enter mode set to: {mode}",
+        data={"enter_mode": mode},
+    )
+
+
+def _cmd_toggle_borders() -> CommandResponse:
+    """Handle /toggleBorders command - toggle panel borders (frontend-only)."""
+    return CommandResponse(
+        success=True,
+        message="Panel borders toggled",
+        data={"action": "toggle_borders"},
+    )
+
+
+def _cmd_quit() -> CommandResponse:
+    """Handle /quit command - exit the application."""
+    return CommandResponse(
+        success=True,
+        message="To exit eggw, close this browser tab or press Ctrl+C in the terminal running eggw.sh",
+        data={"action": "quit"},
+    )
+
+
 def _cmd_help() -> CommandResponse:
     """Handle /help command."""
     help_text = """Available commands:
-Model: /model [name]
-Thread: /newThread [name], /spawn <ctx>, /thread <id>, /threads
-        /parentThread, /listChildren, /deleteThread, /duplicateThread
+Model: /model [name], /updateAllModels <provider>
+Thread: /newThread [name], /spawn <ctx>, /spawnAutoApprovedChildThread <ctx>
+        /thread <id>, /threads, /parentThread, /listChildren
+        /deleteThread, /duplicateThread, /rename <name>
+        /waitForThreads <ids>
 Tools: /toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus
-Other: /cost, /schedulers, /help
+       /disableTool <name>, /enableTool <name>, /toolsSecrets <on|off>
+Sandbox: /toggleSandboxing, /setSandboxConfiguration <file.json>,
+         /getSandboxingConfig
+Display: /togglePanel <chat/children/system>, /toggleBorders
+Other: /cost, /schedulers, /enterMode <send/newline>, /paste, /quit, /help
 
 Shell: $ <cmd> (visible), $$ <cmd> (hidden)"""
 
@@ -981,6 +1538,91 @@ async def get_thread_state_endpoint(thread_id: str):
         "state": state,
         "scheduler_running": root_id in active_schedulers,
     }
+
+
+@app.get("/api/threads/{thread_id}/sandbox")
+async def get_thread_sandbox(thread_id: str):
+    """Get sandbox status for a thread."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    try:
+        status = get_thread_sandbox_status(db, thread_id)
+        user_control = True
+        try:
+            user_control = is_user_sandbox_control_enabled(db, thread_id)
+        except Exception:
+            pass
+
+        return {
+            "enabled": status.get("enabled", False),
+            "effective": status.get("effective", False),
+            "available": status.get("available", False),
+            "provider": status.get("provider"),
+            "config_source": status.get("config_source"),
+            "config_path": status.get("config_path"),
+            "warning": status.get("warning"),
+            "user_control_enabled": user_control,
+        }
+    except Exception as e:
+        return {
+            "enabled": False,
+            "effective": False,
+            "available": False,
+            "error": str(e),
+        }
+
+
+@app.post("/api/threads/{thread_id}/sandbox")
+async def set_thread_sandbox(thread_id: str, enabled: bool = True, config_name: Optional[str] = None):
+    """Set sandbox configuration for a thread."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    try:
+        if not is_user_sandbox_control_enabled(db, thread_id):
+            raise HTTPException(status_code=403, detail="User sandbox control is disabled for this thread")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Older version, assume enabled
+
+    try:
+        if config_name:
+            set_thread_sandbox_config(
+                db,
+                thread_id,
+                enabled=enabled,
+                config_name=config_name,
+                reason='API',
+            )
+        else:
+            cfg = get_thread_sandbox_config(db, thread_id)
+            set_thread_sandbox_config(
+                db,
+                thread_id,
+                enabled=enabled,
+                settings=cfg.settings,
+                reason='API',
+            )
+
+        status = get_thread_sandbox_status(db, thread_id)
+        return {
+            "enabled": status.get("enabled", False),
+            "effective": status.get("effective", False),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/threads/{thread_id}/settings/auto-approval")
@@ -1249,6 +1891,298 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, thread_id)
+
+
+# --- Autocomplete endpoint ---
+
+@app.get("/api/autocomplete")
+async def get_autocomplete(
+    line: str,
+    cursor: int = -1,
+    thread_id: Optional[str] = None,
+):
+    """Get autocomplete suggestions for the input line.
+
+    Returns a list of suggestions with:
+    - display: text to show in dropdown
+    - insert: text to insert at cursor
+    - replace: number of chars to delete before inserting (optional)
+    - meta: additional info to show (optional)
+    """
+    if not db:
+        return {"suggestions": []}
+
+    if cursor < 0:
+        cursor = len(line)
+
+    prefix = line[:cursor]
+    suggestions = []
+
+    # Helper to get last token for partial matching
+    import re
+    def last_token(s: str) -> str:
+        m = re.search(r"([\w\-.:/~]+)$", s)
+        return m.group(1) if m else ""
+
+    # Command completion
+    if prefix.startswith('/'):
+        sp = prefix.find(' ')
+        if sp == -1:
+            # Complete command name - always return full command for robust replacement
+            commands = [
+                '/help', '/model', '/updateAllModels',
+                '/spawn', '/spawnAutoApprovedChildThread', '/newThread',
+                '/threads', '/thread', '/parentThread', '/listChildren',
+                '/deleteThread', '/duplicateThread', '/rename', '/waitForThreads',
+                '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus',
+                '/disableTool', '/enableTool', '/toolsSecrets',
+                '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
+                '/togglePanel', '/toggleBorders',
+                '/cost', '/schedulers', '/enterMode', '/paste', '/quit',
+            ]
+            pref_lower = prefix.lower()
+            for cmd in commands:
+                if pref_lower in cmd.lower():
+                    suggestions.append({
+                        "display": cmd,
+                        "insert": cmd,  # Full command for replacement
+                        "replace": len(prefix),
+                    })
+        else:
+            # Complete command arguments
+            cmd = prefix[:sp]
+            arg = prefix[sp+1:]
+            arg_tok = last_token(arg)
+
+            if cmd == '/model':
+                # Model name suggestions - replace entire argument (supports multi-word search)
+                # Strip trailing whitespace from arg for matching
+                arg_stripped = arg.rstrip()
+                if arg_stripped:
+                    # Split into words and check if all words are found in the model name
+                    words = arg_stripped.lower().split()
+                    for key in sorted(models_config.keys()):
+                        if all(w in key.lower() for w in words):
+                            suggestions.append({
+                                "display": key,
+                                "insert": key,
+                                "replace": len(arg_stripped),  # Replace entire argument
+                            })
+                else:
+                    # No argument - show all models
+                    for key in sorted(models_config.keys()):
+                        suggestions.append({
+                            "display": key,
+                            "insert": key,
+                            "replace": 0,
+                        })
+
+            elif cmd in ('/thread', '/deleteThread', '/waitForThreads'):
+                # Thread ID suggestions with rich info like egg.py
+                arg_lower = arg_tok.lower()
+                threads = list_threads(db)
+                # Sort by created_at descending
+                try:
+                    threads.sort(key=lambda t: t.created_at or '', reverse=True)
+                except:
+                    pass
+
+                # Get current thread ID for [CUR] indicator
+                cur_thread_id = thread_id
+
+                # Check which threads are streaming (have active schedulers)
+                streaming_threads = set(active_schedulers.keys())
+
+                # Filter ALL threads first, then limit results
+                matched_count = 0
+                for t in threads:
+                    tid = t.thread_id
+                    name = t.name or ''
+                    recap = t.short_recap or ''
+                    status = t.status or 'unknown'
+                    hay = f"{tid} {name} {recap}".lower()
+                    if arg_lower and arg_lower not in hay:
+                        continue
+
+                    # Build display like egg.py
+                    parts = []
+                    if tid == cur_thread_id:
+                        parts.append("[CUR]")
+                    if tid in streaming_threads:
+                        parts.append("[STREAM]")
+                    parts.append(tid[-8:])
+
+                    # Status indicator
+                    if status == 'active':
+                        parts.append(f"<{status}>")
+                    elif status not in ('waiting_user', 'unknown'):
+                        parts.append(f"<{status}>")
+
+                    if recap:
+                        parts.append(f"- {recap[:30]}")
+                    if name:
+                        parts.append(f"({name})")
+
+                    display = " ".join(parts)
+                    suggestions.append({
+                        "display": display,
+                        "insert": tid,
+                        "replace": len(arg_tok),
+                    })
+                    matched_count += 1
+                    if matched_count >= 50:  # Limit results after filtering
+                        break
+
+            elif cmd == '/setSandboxConfiguration':
+                # Suggest sandbox config files from .egg/sandbox/
+                import os
+                sandbox_dir = Path.cwd() / ".egg" / "sandbox"
+                if sandbox_dir.is_dir():
+                    try:
+                        arg_lower = arg_tok.lower()
+                        for f in sorted(sandbox_dir.iterdir()):
+                            if f.is_file() and f.suffix == '.json':
+                                name = f.name
+                                if not arg_lower or arg_lower in name.lower():
+                                    suggestions.append({
+                                        "display": name,
+                                        "insert": name,
+                                        "replace": len(arg_tok),
+                                    })
+                    except Exception:
+                        pass
+
+            elif cmd in ('/spawn', '/spawnAutoApprovedChildThread'):
+                # Filesystem path suggestions
+                import os
+                import glob as _glob
+                if arg_tok:
+                    expanded = os.path.expanduser(arg_tok)
+                    base_dir = os.path.dirname(expanded) or '.'
+                    needle = os.path.basename(expanded)
+                    try:
+                        if os.path.isdir(base_dir):
+                            entries = os.listdir(base_dir)
+                            for name in sorted(entries)[:20]:
+                                if needle and not name.lower().startswith(needle.lower()):
+                                    continue
+                                path = os.path.join(base_dir, name)
+                                suffix = '/' if os.path.isdir(path) else ''
+                                full_path = path + suffix
+                                suggestions.append({
+                                    "display": name + suffix,
+                                    "insert": full_path,
+                                    "replace": len(arg_tok),
+                                })
+                    except:
+                        pass
+
+            elif cmd == '/updateAllModels':
+                # Provider name suggestions
+                providers = ['openai', 'anthropic', 'google', 'deepseek', 'openrouter', 'xai']
+                arg_lower = arg_tok.lower()
+                for p in providers:
+                    if not arg_lower or arg_lower in p.lower():
+                        suggestions.append({
+                            "display": p,
+                            "insert": p,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd in ('/disableTool', '/enableTool'):
+                # Tool name suggestions
+                tool_names = ['bash', 'computer', 'text_editor', 'mcp']
+                arg_lower = arg_tok.lower()
+                for name in tool_names:
+                    if not arg_lower or arg_lower in name.lower():
+                        suggestions.append({
+                            "display": name,
+                            "insert": name,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd == '/toolsSecrets':
+                # on/off suggestions
+                for opt in ['on', 'off']:
+                    if not arg_tok or arg_tok.lower() in opt:
+                        suggestions.append({
+                            "display": opt,
+                            "insert": opt,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd == '/waitForThreads':
+                # Thread ID suggestions (same as /thread)
+                arg_lower = arg_tok.lower()
+                threads = list_threads(db)
+                for t in threads[:20]:
+                    tid = t.thread_id
+                    name = t.name or ''
+                    hay = f"{tid} {name}".lower()
+                    if not arg_lower or arg_lower in hay:
+                        display = f"{tid[-8:]}"
+                        if name:
+                            display += f"  {name}"
+                        suggestions.append({
+                            "display": display,
+                            "insert": tid,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd == '/togglePanel':
+                # Panel name suggestions
+                for panel in ['chat', 'children', 'system']:
+                    if not arg_tok or arg_tok.lower() in panel:
+                        suggestions.append({
+                            "display": panel,
+                            "insert": panel,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd == '/enterMode':
+                # Mode suggestions
+                for mode in ['send', 'newline']:
+                    if not arg_tok or arg_tok.lower() in mode:
+                        suggestions.append({
+                            "display": mode,
+                            "insert": mode,
+                            "replace": len(arg_tok),
+                        })
+
+    # Shell command completion ($ prefix)
+    elif prefix.startswith('$'):
+        # Could add shell command suggestions here
+        pass
+
+    # Regular text - conversation word completion
+    elif thread_id and prefix:
+        tok = last_token(prefix)
+        if tok and len(tok) >= 2:
+            # Get words from recent messages
+            t = db.get_thread(thread_id)
+            if t and t.snapshot_json:
+                try:
+                    import json
+                    snap = json.loads(t.snapshot_json)
+                    msgs = snap.get('messages', []) or []
+                    words = set()
+                    tok_lower = tok.lower()
+                    for msg in msgs[-100:]:  # Last 100 messages
+                        content = msg.get('content') or ''
+                        if isinstance(content, str):
+                            for word in re.findall(r"[A-Za-z0-9_]{3,}", content):
+                                if word.lower().startswith(tok_lower) and word.lower() != tok_lower:
+                                    words.add(word)
+                    for word in sorted(words)[:15]:
+                        suggestions.append({
+                            "display": word,
+                            "insert": word[len(tok):],
+                            "replace": 0,
+                        })
+                except:
+                    pass
+
+    return {"suggestions": suggestions[:20]}  # Limit total
 
 
 # Health check

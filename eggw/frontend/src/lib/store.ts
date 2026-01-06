@@ -79,6 +79,16 @@ interface AppState {
   // UI state
   isStreaming: boolean;
   setIsStreaming: (streaming: boolean) => void;
+
+  // Panel visibility
+  panelVisibility: { chat: boolean; children: boolean; system: boolean };
+  togglePanel: (panel: "chat" | "children" | "system") => void;
+
+  // UI preferences
+  showBorders: boolean;
+  toggleBorders: () => void;
+  enterMode: "send" | "newline";
+  setEnterMode: (mode: "send" | "newline") => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -155,4 +165,20 @@ export const useAppStore = create<AppState>((set) => ({
   // UI state
   isStreaming: false,
   setIsStreaming: (streaming) => set({ isStreaming: streaming }),
+
+  // Panel visibility
+  panelVisibility: { chat: true, children: true, system: true },
+  togglePanel: (panel) =>
+    set((state) => ({
+      panelVisibility: {
+        ...state.panelVisibility,
+        [panel]: !state.panelVisibility[panel],
+      },
+    })),
+
+  // UI preferences
+  showBorders: true,
+  toggleBorders: () => set((state) => ({ showBorders: !state.showBorders })),
+  enterMode: "send",
+  setEnterMode: (mode) => set({ enterMode: mode }),
 }));

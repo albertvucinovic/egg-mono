@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChatPanel } from "@/components/ChatPanel";
 import { ChildrenPanel } from "@/components/ChildrenPanel";
 import { MessageInput } from "@/components/MessageInput";
@@ -9,7 +9,7 @@ import { SystemPanel } from "@/components/SystemPanel";
 import { ApprovalPanel } from "@/components/ApprovalPanel";
 import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
-import { createThread, openThread, interruptThread, fetchRootThreads } from "@/lib/api";
+import { createThread, openThread, interruptThread, fetchRootThreads, fetchThread, executeCommand, fetchSandboxStatus, SandboxStatus } from "@/lib/api";
 
 export default function Home() {
   const queryClient = useQueryClient();
@@ -22,9 +22,30 @@ export default function Home() {
     setStreamingContent,
     setStreamingReasoning,
     setStreamingToolCalls,
+    panelVisibility,
+    togglePanel,
+    showBorders,
+    toggleBorders,
+    enterMode,
+    setEnterMode,
   } = useAppStore();
   const [showHelp, setShowHelp] = useState(false);
   const [initialized, setInitialized] = useState(false);
+
+  // Fetch current thread data for header
+  const { data: currentThreadData } = useQuery({
+    queryKey: ["thread", currentThreadId],
+    queryFn: () => fetchThread(currentThreadId!),
+    enabled: !!currentThreadId,
+  });
+
+  // Fetch sandbox status
+  const { data: sandboxStatus } = useQuery({
+    queryKey: ["sandbox", currentThreadId],
+    queryFn: () => fetchSandboxStatus(currentThreadId!),
+    enabled: !!currentThreadId,
+    refetchInterval: 5000, // Poll every 5s for changes
+  });
 
   // Auto-create or select a thread on app load
   useEffect(() => {
@@ -99,6 +120,21 @@ export default function Home() {
       });
     }
 
+    // Ctrl/Cmd + S - Spawn child thread
+    if ((e.ctrlKey || e.metaKey) && e.key === "s" && currentThreadId) {
+      e.preventDefault();
+      executeCommand(currentThreadId, "/spawn").then((result) => {
+        if (result.success && result.data?.child_id) {
+          queryClient.invalidateQueries({ queryKey: ["threadChildren", currentThreadId] });
+          setCurrentThreadId(result.data.child_id);
+          openThread(result.data.child_id);
+          addSystemLog(`Spawned child ${result.data.child_id.slice(-8)}`, "success");
+        } else {
+          addSystemLog(result.message || "Failed to spawn child", "error");
+        }
+      });
+    }
+
     // / - Focus input with slash
     if (e.key === "/" && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
@@ -121,6 +157,41 @@ export default function Home() {
       e.preventDefault();
       const input = document.querySelector("textarea") as HTMLTextAreaElement;
       if (input) input.focus();
+    }
+
+    // Ctrl/Cmd + E - Clear input
+    if ((e.ctrlKey || e.metaKey) && e.key === "e") {
+      e.preventDefault();
+      const input = document.querySelector("textarea") as HTMLTextAreaElement;
+      if (input) {
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.focus();
+        addSystemLog("Input cleared (Ctrl+E)", "info");
+      }
+    }
+
+    // Ctrl/Cmd + P - Paste from clipboard
+    if ((e.ctrlKey || e.metaKey) && e.key === "p") {
+      e.preventDefault();
+      const input = document.querySelector("textarea") as HTMLTextAreaElement;
+      if (input) {
+        navigator.clipboard.readText().then((text) => {
+          if (text) {
+            const start = input.selectionStart || 0;
+            const end = input.selectionEnd || 0;
+            const before = input.value.substring(0, start);
+            const after = input.value.substring(end);
+            input.value = before + text + after;
+            input.selectionStart = input.selectionEnd = start + text.length;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.focus();
+            addSystemLog("Pasted from clipboard (Ctrl+P)", "info");
+          }
+        }).catch(() => {
+          addSystemLog("Failed to read clipboard", "error");
+        });
+      }
     }
   }, [queryClient, setCurrentThreadId, addSystemLog, showHelp, isStreaming, currentThreadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls]);
 
@@ -152,6 +223,18 @@ export default function Home() {
                 <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+N</kbd>
               </div>
               <div className="flex justify-between">
+                <span className="text-gray-400">Spawn child thread</span>
+                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+S</kbd>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Clear input</span>
+                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+E</kbd>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">Paste clipboard</span>
+                <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">Ctrl+P</kbd>
+              </div>
+              <div className="flex justify-between">
                 <span className="text-gray-400">Focus input</span>
                 <kbd className="px-2 py-0.5 bg-[#333] rounded text-xs">i</kbd>
               </div>
@@ -166,9 +249,13 @@ export default function Home() {
             </div>
             <div className="mt-4 pt-4 border-t border-[var(--panel-border)] text-sm text-gray-400">
               <p className="font-medium text-gray-300 mb-2">Commands:</p>
-              <p>/model, /spawn, /newThread, /threads</p>
-              <p>/parentThread, /listChildren, /cost</p>
-              <p>/toggleAutoApproval, /toolsOn, /toolsOff</p>
+              <p>/model, /updateAllModels, /spawn, /spawnAutoApprovedChildThread</p>
+              <p>/newThread, /threads, /thread, /rename, /waitForThreads</p>
+              <p>/parentThread, /listChildren, /deleteThread, /duplicateThread</p>
+              <p>/toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus</p>
+              <p>/disableTool, /enableTool, /toolsSecrets</p>
+              <p>/toggleSandboxing, /setSandboxConfiguration, /getSandboxingConfig</p>
+              <p>/togglePanel, /toggleBorders, /enterMode, /cost, /quit</p>
               <p>$ cmd - Shell, $$ cmd - Hidden shell</p>
             </div>
             <button
@@ -184,9 +271,43 @@ export default function Home() {
       {/* Header */}
       <header className="h-12 border-b border-[var(--panel-border)] flex items-center px-4 bg-[var(--panel-bg)]">
         <h1 className="text-lg font-semibold">eggw</h1>
-        <span className="ml-4 text-sm text-gray-400">
-          {currentThreadId ? `Thread: ${currentThreadId.slice(-8)}` : "No thread selected"}
-        </span>
+        {currentThreadId && (
+          <span className="ml-4 text-sm">
+            <span className="text-gray-400">Thread:</span>{" "}
+            {currentThreadData?.name ? (
+              <>
+                <span className="text-gray-200">{currentThreadData.name}</span>
+                <span className="text-gray-500 ml-1">({currentThreadId.slice(-8)})</span>
+              </>
+            ) : (
+              <span className="text-gray-400">{currentThreadId.slice(-8)}</span>
+            )}
+          </span>
+        )}
+        {!currentThreadId && (
+          <span className="ml-4 text-sm text-gray-400">No thread selected</span>
+        )}
+        {/* Sandbox status */}
+        {currentThreadId && sandboxStatus && (
+          <span
+            className={`ml-4 text-xs px-2 py-0.5 rounded ${
+              sandboxStatus.effective
+                ? "bg-green-900/50 text-green-300 border border-green-700"
+                : sandboxStatus.enabled
+                ? "bg-yellow-900/50 text-yellow-300 border border-yellow-700"
+                : "bg-red-900/30 text-red-400 border border-red-800"
+            }`}
+            title={
+              sandboxStatus.effective
+                ? `Sandbox ON (${sandboxStatus.provider || 'unknown'})`
+                : sandboxStatus.enabled
+                ? `Sandbox enabled but not effective: ${sandboxStatus.warning || 'provider unavailable'}`
+                : "Sandbox OFF"
+            }
+          >
+            Sandbox[{sandboxStatus.effective ? "ON" : sandboxStatus.enabled ? "!" : "OFF"}]
+          </span>
+        )}
         <div className="ml-auto">
           <button
             onClick={() => setShowHelp(true)}
@@ -201,16 +322,18 @@ export default function Home() {
       <div className="flex-1 flex overflow-hidden">
         {/* Center - Chat */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <ChildrenPanel />
-          <ChatPanel />
+          {panelVisibility.children && <ChildrenPanel />}
+          {panelVisibility.chat && <ChatPanel />}
           <ApprovalPanel />
           <MessageInput />
         </div>
 
         {/* Right sidebar - System log */}
-        <div className="w-80 border-l border-[var(--panel-border)] flex flex-col overflow-hidden">
-          <SystemPanel />
-        </div>
+        {panelVisibility.system && (
+          <div className={`w-80 flex flex-col overflow-hidden ${showBorders ? 'border-l border-[var(--panel-border)]' : ''}`}>
+            <SystemPanel />
+          </div>
+        )}
       </div>
     </main>
   );

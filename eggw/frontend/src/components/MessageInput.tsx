@@ -1,15 +1,21 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Send, Loader2, Terminal, StopCircle } from "lucide-react";
-import { sendMessage, executeCommand, isCommand, interruptThread } from "@/lib/api";
+import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, AutocompleteSuggestion } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+import clsx from "clsx";
 
 export function MessageInput() {
   const [input, setInput] = useState("");
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
+  const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const suggestionsRef = useRef<HTMLDivElement>(null);
+  const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const queryClient = useQueryClient();
   const {
     currentThreadId,
@@ -34,6 +40,8 @@ export function MessageInput() {
         content: content,
       });
       setInput("");
+      setSuggestions([]);
+      setShowSuggestions(false);
       // Focus input after sending
       textareaRef.current?.focus();
     },
@@ -74,6 +82,8 @@ export function MessageInput() {
     mutationFn: (command: string) => executeCommand(currentThreadId!, command),
     onMutate: (command: string) => {
       setInput("");
+      setSuggestions([]);
+      setShowSuggestions(false);
       // Focus input after sending
       textareaRef.current?.focus();
       // For shell commands, show them in the chat
@@ -125,6 +135,10 @@ export function MessageInput() {
           // Shell command - refresh messages and tools
           queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
           queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+        } else if (response.data?.name !== undefined) {
+          // Thread renamed - refresh thread data
+          queryClient.invalidateQueries({ queryKey: ["thread", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
         }
       } else {
         // Show errors in chat for better visibility
@@ -140,6 +154,110 @@ export function MessageInput() {
       addSystemLog("Failed to execute command", "error");
     },
   });
+
+  // Fetch autocomplete suggestions
+  const fetchSuggestions = useCallback(async (value: string, cursorPos: number) => {
+    if (!value || !currentThreadId) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    try {
+      const results = await fetchAutocomplete(value, cursorPos, currentThreadId);
+      setSuggestions(results);
+      setSelectedIndex(0);
+      setShowSuggestions(results.length > 0);
+    } catch {
+      setSuggestions([]);
+      setShowSuggestions(false);
+    }
+  }, [currentThreadId]);
+
+  // Debounced fetch on input change
+  useEffect(() => {
+    if (fetchTimeoutRef.current) {
+      clearTimeout(fetchTimeoutRef.current);
+    }
+
+    fetchTimeoutRef.current = setTimeout(() => {
+      const cursorPos = textareaRef.current?.selectionStart ?? input.length;
+      fetchSuggestions(input, cursorPos);
+    }, 100); // 100ms debounce
+
+    return () => {
+      if (fetchTimeoutRef.current) {
+        clearTimeout(fetchTimeoutRef.current);
+      }
+    };
+  }, [input, fetchSuggestions]);
+
+  // Apply suggestion - use replace value to determine how much to delete
+  const applySuggestion = useCallback((suggestion: AutocompleteSuggestion) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    const cursorPos = textarea.selectionStart;
+    const replaceCount = suggestion.replace || 0;
+
+    // Skip any trailing whitespace to find where content ends
+    let contentEnd = cursorPos;
+    while (contentEnd > 0 && /\s/.test(input[contentEnd - 1])) {
+      contentEnd--;
+    }
+
+    let tokenStart: number;
+    let tokenEnd: number;
+
+    if (replaceCount > 0) {
+      // Use replace value to determine how far back to go
+      // This handles multi-word replacements like "/model gemini flash"
+      tokenStart = Math.max(0, contentEnd - replaceCount);
+
+      // Extend backwards to include any additional characters typed after suggestions fetch
+      while (tokenStart > 0 && !/\s/.test(input[tokenStart - 1])) {
+        tokenStart--;
+      }
+
+      // For commands, include the / if present
+      if (tokenStart > 0 && input[tokenStart - 1] === '/') {
+        tokenStart--;
+      }
+
+      tokenEnd = cursorPos; // Delete up to original cursor position
+    } else {
+      // No replace value - find single token at cursor
+      tokenStart = cursorPos;
+      while (tokenStart > 0 && /[\w\-.:/~]/.test(input[tokenStart - 1])) {
+        tokenStart--;
+      }
+
+      tokenEnd = cursorPos;
+      while (tokenEnd < input.length && /[\w\-.:/~]/.test(input[tokenEnd])) {
+        tokenEnd++;
+      }
+
+      // For commands starting with /, include the /
+      if (tokenStart > 0 && input[tokenStart - 1] === '/') {
+        tokenStart--;
+      }
+    }
+
+    const before = input.slice(0, tokenStart);
+    const after = input.slice(tokenEnd);
+    const newValue = before + suggestion.insert + after;
+
+    setInput(newValue);
+    setSuggestions([]);
+    setShowSuggestions(false);
+
+    // Set cursor position after the inserted text
+    setTimeout(() => {
+      const newCursorPos = before.length + suggestion.insert.length;
+      textarea.setSelectionRange(newCursorPos, newCursorPos);
+      textarea.focus();
+    }, 0);
+  }, [input]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -188,6 +306,19 @@ export function MessageInput() {
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [currentThreadId]);
 
+  // Close suggestions when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (suggestionsRef.current && !suggestionsRef.current.contains(e.target as Node) &&
+          textareaRef.current && !textareaRef.current.contains(e.target as Node)) {
+        setShowSuggestions(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const handleSubmit = () => {
     const trimmed = input.trim();
     if (!trimmed || !currentThreadId) return;
@@ -202,6 +333,31 @@ export function MessageInput() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Handle autocomplete navigation
+    if (showSuggestions && suggestions.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((prev) => (prev + 1) % suggestions.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        applySuggestion(suggestions[selectedIndex]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setShowSuggestions(false);
+        return;
+      }
+    }
+
+    // Normal submit on Enter
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -212,7 +368,37 @@ export function MessageInput() {
   const inputIsCommand = isCommand(input);
 
   return (
-    <div className="border-t border-[var(--panel-border)] p-4 bg-[var(--panel-bg)]">
+    <div className="border-t border-[var(--panel-border)] p-4 bg-[var(--panel-bg)] relative">
+      {/* Autocomplete dropdown */}
+      {showSuggestions && suggestions.length > 0 && (
+        <div
+          ref={suggestionsRef}
+          className="absolute bottom-full left-4 right-4 mb-1 bg-[#1a1a1a] border border-[var(--panel-border)] rounded-lg shadow-lg max-h-64 overflow-auto z-50"
+        >
+          {suggestions.map((suggestion, index) => (
+            <div
+              key={`${suggestion.display}-${index}`}
+              className={clsx(
+                "px-3 py-2 cursor-pointer flex items-center gap-3",
+                index === selectedIndex ? "bg-blue-600/30" : "hover:bg-[#333]"
+              )}
+              onClick={() => applySuggestion(suggestion)}
+              onMouseEnter={() => setSelectedIndex(index)}
+            >
+              <span className="font-mono text-sm flex-1 whitespace-nowrap overflow-hidden text-ellipsis">{suggestion.display}</span>
+              {suggestion.meta && (
+                <span className="text-xs text-gray-500 flex-shrink-0 max-w-[200px] truncate">{suggestion.meta}</span>
+              )}
+            </div>
+          ))}
+          <div className="px-3 py-1 text-xs text-gray-500 border-t border-[var(--panel-border)]">
+            <kbd className="px-1 bg-[#333] rounded">Tab</kbd> to select,{" "}
+            <kbd className="px-1 bg-[#333] rounded">↑↓</kbd> to navigate,{" "}
+            <kbd className="px-1 bg-[#333] rounded">Esc</kbd> to close
+          </div>
+        </div>
+      )}
+
       <div className="flex gap-2 items-end">
         <textarea
           ref={textareaRef}

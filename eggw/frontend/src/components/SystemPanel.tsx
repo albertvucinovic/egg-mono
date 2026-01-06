@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, ArrowUp, ArrowDown, GitBranch } from "lucide-react";
-import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadChildren, openThread, fetchThreadSettings, fetchThreadState, setAutoApproval } from "@/lib/api";
+import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadChildren, openThread, fetchThreadSettings, fetchThreadState, setAutoApproval, fetchSandboxStatus, executeCommand } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -83,6 +83,32 @@ export function SystemPanel() {
     },
     onError: () => {
       addSystemLog("Failed to toggle auto-approval", "error");
+    },
+  });
+
+  // Fetch sandbox status
+  const { data: sandboxStatus, refetch: refetchSandbox } = useQuery({
+    queryKey: ["sandbox", currentThreadId],
+    queryFn: () => fetchSandboxStatus(currentThreadId!),
+    enabled: !!currentThreadId,
+    refetchInterval: 5000,
+  });
+
+  // Sandbox toggle mutation (uses /toggleSandboxing command)
+  const sandboxMutation = useMutation({
+    mutationFn: () => executeCommand(currentThreadId!, "/toggleSandboxing"),
+    onSuccess: (result) => {
+      if (result.success) {
+        addSystemLog(result.message, "success");
+      } else {
+        addSystemLog(result.message, "error");
+      }
+      refetchSandbox();
+      // Also invalidate the sandbox query in page.tsx header
+      queryClient.invalidateQueries({ queryKey: ["sandbox", currentThreadId] });
+    },
+    onError: () => {
+      addSystemLog("Failed to toggle sandboxing", "error");
     },
   });
 
@@ -210,6 +236,45 @@ export function SystemPanel() {
                   className={clsx(
                     "absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform",
                     threadSettings?.auto_approval ? "left-5" : "left-0.5"
+                  )}
+                />
+              </button>
+            </div>
+
+            {/* Sandbox toggle */}
+            <div className="flex justify-between items-center">
+              <span
+                className={clsx(
+                  "text-xs px-1.5 py-0.5 rounded border",
+                  sandboxStatus?.effective
+                    ? "bg-green-900/50 text-green-300 border-green-700"
+                    : sandboxStatus?.enabled
+                    ? "bg-yellow-900/50 text-yellow-300 border-yellow-700"
+                    : "bg-red-900/30 text-red-400 border-red-800"
+                )}
+                title={
+                  sandboxStatus?.effective
+                    ? `Sandbox ON (${sandboxStatus.provider || 'unknown'})`
+                    : sandboxStatus?.enabled
+                    ? `Enabled but not effective: ${sandboxStatus.warning || 'provider unavailable'}`
+                    : "Sandbox OFF"
+                }
+              >
+                Sandbox[{sandboxStatus?.effective ? "ON" : sandboxStatus?.enabled ? "!" : "OFF"}]
+              </span>
+              <button
+                onClick={() => sandboxMutation.mutate()}
+                disabled={sandboxMutation.isPending || sandboxStatus?.user_control_enabled === false}
+                title={sandboxStatus?.user_control_enabled === false ? "User sandbox control is disabled" : "Toggle sandboxing"}
+                className={clsx(
+                  "relative w-10 h-5 rounded-full transition-colors disabled:opacity-50",
+                  sandboxStatus?.enabled ? "bg-green-600" : "bg-gray-600"
+                )}
+              >
+                <span
+                  className={clsx(
+                    "absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform",
+                    sandboxStatus?.enabled ? "left-5" : "left-0.5"
                   )}
                 />
               </button>

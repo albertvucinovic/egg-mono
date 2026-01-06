@@ -194,3 +194,56 @@ export function createWebSocket(threadId: string) {
   const wsBase = API_BASE.replace(/^http/, "ws");
   return new WebSocket(`${wsBase}/ws/${threadId}`);
 }
+
+export interface AutocompleteSuggestion {
+  display: string;
+  insert: string;
+  replace?: number;
+  meta?: string;
+}
+
+export async function fetchAutocomplete(
+  line: string,
+  cursor: number,
+  threadId?: string
+): Promise<AutocompleteSuggestion[]> {
+  const params = new URLSearchParams({
+    line,
+    cursor: cursor.toString(),
+  });
+  if (threadId) {
+    params.set("thread_id", threadId);
+  }
+  const res = await fetch(`${API_BASE}/api/autocomplete?${params}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.suggestions || [];
+}
+
+export interface SandboxStatus {
+  enabled: boolean;
+  effective: boolean;
+  available: boolean;
+  provider?: string;
+  config_source?: string;
+  config_path?: string;
+  warning?: string;
+  user_control_enabled?: boolean;
+  error?: string;
+}
+
+export async function fetchSandboxStatus(threadId: string): Promise<SandboxStatus> {
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/sandbox`);
+  if (!res.ok) {
+    return { enabled: false, effective: false, available: false };
+  }
+  return res.json();
+}
+
+export async function setSandboxEnabled(threadId: string, enabled: boolean): Promise<SandboxStatus> {
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/sandbox?enabled=${enabled}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to set sandbox");
+  return res.json();
+}
