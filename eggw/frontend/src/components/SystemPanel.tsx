@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw } from "lucide-react";
 import { fetchTokenStats, fetchModels, setThreadModel } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
@@ -9,13 +9,16 @@ import clsx from "clsx";
 
 export function SystemPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
   const {
     currentThreadId,
     systemLogs,
     clearSystemLogs,
+    addSystemLog,
     models,
     setModels,
     threads,
+    setThreads,
   } = useAppStore();
 
   // Fetch models on mount
@@ -25,10 +28,32 @@ export function SystemPanel() {
   });
 
   useEffect(() => {
-    if (modelsData) {
-      setModels(modelsData);
+    if (modelsData?.models) {
+      setModels(modelsData.models);
     }
   }, [modelsData, setModels]);
+
+  // Model change mutation
+  const modelMutation = useMutation({
+    mutationFn: ({ threadId, modelKey }: { threadId: string; modelKey: string }) =>
+      setThreadModel(threadId, modelKey),
+    onMutate: ({ threadId, modelKey }) => {
+      // Optimistically update the thread's model in the store
+      setThreads(threads.map(t =>
+        t.id === threadId ? { ...t, model_key: modelKey } : t
+      ));
+    },
+    onSuccess: () => {
+      addSystemLog("Model changed", "success");
+      // Refetch threads to ensure sync
+      queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+    },
+    onError: () => {
+      addSystemLog("Failed to change model", "error");
+      // Refetch to restore correct state
+      queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+    },
+  });
 
   // Fetch token stats for current thread
   const { data: stats, refetch: refetchStats } = useQuery({
@@ -67,10 +92,11 @@ export function SystemPanel() {
                 value={currentThread?.model_key || ""}
                 onChange={(e) => {
                   if (currentThreadId && e.target.value) {
-                    setThreadModel(currentThreadId, e.target.value);
+                    modelMutation.mutate({ threadId: currentThreadId, modelKey: e.target.value });
                   }
                 }}
-                className="bg-[#111] border border-[var(--panel-border)] rounded px-1 py-0.5 text-xs"
+                disabled={modelMutation.isPending}
+                className="bg-[#111] border border-[var(--panel-border)] rounded px-1 py-0.5 text-xs disabled:opacity-50"
               >
                 {models.map((m) => (
                   <option key={m.key} value={m.key}>

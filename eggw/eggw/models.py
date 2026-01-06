@@ -81,6 +81,12 @@ class ModelInfo(BaseModel):
     display_name: Optional[str] = None
 
 
+class ModelsResponse(BaseModel):
+    """Response with models list and default."""
+    models: List[ModelInfo]
+    default_model: Optional[str] = None
+
+
 # WebSocket message types
 class WSMessage(BaseModel):
     """WebSocket message wrapper."""

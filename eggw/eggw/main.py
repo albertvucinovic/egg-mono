@@ -52,40 +52,53 @@ from models import (
     ApprovalRequest,
     ThreadTokenStats,
     ModelInfo,
+    ModelsResponse,
 )
 
 # Global state
 db: Optional[ThreadsDB] = None
 llm_client = None
 models_config: Dict[str, Any] = {}
+default_model_key: Optional[str] = None
 active_schedulers: Dict[str, Dict[str, Any]] = {}  # root_thread_id -> {"scheduler": SubtreeScheduler, "task": Task}
 MODELS_PATH = PROJECT_ROOT / "egg" / "models.json"
 ALL_MODELS_PATH = PROJECT_ROOT / "egg" / "all-models.json"
 
 
-def load_models_config() -> Dict[str, Any]:
+def load_models_config() -> tuple[Dict[str, Any], Optional[str]]:
     """Load models configuration using eggllm's config loader."""
     from eggllm.config import load_models_config as eggllm_load_models
 
     models_path = PROJECT_ROOT / "egg" / "models.json"
     if not models_path.exists():
-        return {}
+        return {}, None
 
     models_config, _ = eggllm_load_models(models_path)
-    return models_config
+
+    # Get default_model from the raw JSON
+    default_model = None
+    try:
+        import json
+        with open(models_path) as f:
+            raw_config = json.load(f)
+            default_model = raw_config.get("default_model")
+    except:
+        pass
+
+    return models_config, default_model
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global db, scheduler, llm_client, models_config
+    global db, scheduler, llm_client, models_config, default_model_key
 
     # Initialize database
     db = ThreadsDB()
     db.init_schema()  # Create tables if they don't exist
 
     # Load models
-    models_config = load_models_config()
+    models_config, default_model_key = load_models_config()
 
     # Initialize LLM client
     models_path = PROJECT_ROOT / "egg" / "models.json"
@@ -254,7 +267,7 @@ async def create_thread(request: CreateThreadRequest):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    model_key = request.model_key or next(iter(models_config.keys()), None)
+    model_key = request.model_key or default_model_key or next(iter(models_config.keys()), None)
 
     models_path = str(PROJECT_ROOT / "egg" / "models.json")
 
@@ -412,9 +425,9 @@ async def open_thread(thread_id: str):
 
 # --- Model endpoints ---
 
-@app.get("/api/models", response_model=List[ModelInfo])
+@app.get("/api/models", response_model=ModelsResponse)
 async def get_models():
-    """Get available models."""
+    """Get available models with default."""
     models = []
     for key, config in models_config.items():
         models.append(ModelInfo(
@@ -423,7 +436,7 @@ async def get_models():
             model_id=config.get("model_name", key),
             display_name=key,  # The key is the display name in eggllm format
         ))
-    return models
+    return ModelsResponse(models=models, default_model=default_model_key)
 
 
 @app.post("/api/threads/{thread_id}/model")
