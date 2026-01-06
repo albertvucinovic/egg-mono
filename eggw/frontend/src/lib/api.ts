@@ -74,6 +74,14 @@ export async function openThread(threadId: string) {
   return res.json();
 }
 
+export async function interruptThread(threadId: string) {
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/interrupt`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to interrupt thread");
+  return res.json();
+}
+
 export async function fetchMessages(threadId: string) {
   const res = await fetch(`${API_BASE}/api/threads/${threadId}/messages`);
   if (!res.ok) throw new Error("Failed to fetch messages");

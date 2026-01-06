@@ -22,10 +22,16 @@ export function useSSE(threadId: string | null) {
   const connect = useCallback(() => {
     if (!threadId) return;
 
-    // Close existing connection
+    // Close existing connection and clear streaming state
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
+
+    // Clear any previous streaming state when connecting to a new thread
+    setStreamingContent("");
+    setStreamingReasoning("");
+    setStreamingToolCalls({});
+    setIsStreaming(false);
 
     const es = createEventSource(threadId);
     eventSourceRef.current = es;

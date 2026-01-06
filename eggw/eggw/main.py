@@ -41,6 +41,7 @@ from eggthreads import (
     approve_tool_calls_for_thread,
     total_token_stats,
     execute_bash_command,
+    interrupt_thread,
 )
 
 from models import (
@@ -451,6 +452,26 @@ async def open_thread(thread_id: str):
         "thread_id": thread_id,
         "root_id": root_id,
         "scheduler_running": root_id in active_schedulers,
+    }
+
+
+@app.post("/api/threads/{thread_id}/interrupt")
+async def interrupt_thread_endpoint(thread_id: str):
+    """Interrupt/cancel current streaming or pending work (Ctrl+C equivalent)."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    # Interrupt the thread
+    result = interrupt_thread(db, thread_id, reason="user")
+
+    return {
+        "status": "interrupted",
+        "thread_id": thread_id,
+        "invoke_id": result,
     }
 
 

@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { fetchMessages } from "@/lib/api";
+import { StopCircle } from "lucide-react";
+import { fetchMessages, interruptThread } from "@/lib/api";
 import { useAppStore, Message } from "@/lib/store";
 import clsx from "clsx";
 
@@ -179,12 +180,40 @@ function MessageBlock({ message }: MessageBlockProps) {
 
 export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const { currentThreadId, messages, setMessages, streamingContent, streamingReasoning, streamingToolCalls } = useAppStore();
+  const {
+    currentThreadId,
+    messages,
+    setMessages,
+    streamingContent,
+    streamingReasoning,
+    streamingToolCalls,
+    isStreaming,
+    setIsStreaming,
+    setStreamingContent,
+    setStreamingReasoning,
+    setStreamingToolCalls,
+    addSystemLog,
+  } = useAppStore();
 
   const { data, isLoading } = useQuery({
     queryKey: ["messages", currentThreadId],
     queryFn: () => fetchMessages(currentThreadId!),
     enabled: !!currentThreadId,
+  });
+
+  // Cancel/interrupt mutation
+  const cancelMutation = useMutation({
+    mutationFn: () => interruptThread(currentThreadId!),
+    onSuccess: () => {
+      setStreamingContent("");
+      setStreamingReasoning("");
+      setStreamingToolCalls({});
+      setIsStreaming(false);
+      addSystemLog("Streaming cancelled", "info");
+    },
+    onError: () => {
+      addSystemLog("Failed to cancel streaming", "error");
+    },
   });
 
   // Sync fetched messages to store (but don't overwrite optimistic updates)
@@ -226,9 +255,20 @@ export function ChatPanel() {
           {/* Streaming content */}
           {(streamingContent || streamingReasoning || Object.keys(streamingToolCalls).length > 0) && (
             <div className="rounded border p-3 mb-3 bg-slate-800 border-slate-600">
-              <div className="text-xs text-gray-400 mb-2">
-                <span className="font-medium text-gray-300">Assistant</span>
-                <span className="ml-2 text-blue-400 animate-pulse">streaming...</span>
+              <div className="flex items-center justify-between text-xs text-gray-400 mb-2">
+                <div>
+                  <span className="font-medium text-gray-300">Assistant</span>
+                  <span className="ml-2 text-blue-400 animate-pulse">streaming...</span>
+                </div>
+                <button
+                  onClick={() => cancelMutation.mutate()}
+                  disabled={cancelMutation.isPending}
+                  className="flex items-center gap-1 px-2 py-1 text-red-400 hover:bg-red-900/30 rounded transition-colors disabled:opacity-50"
+                  title="Cancel streaming (Ctrl+C)"
+                >
+                  <StopCircle className="w-4 h-4" />
+                  <span>Cancel</span>
+                </button>
               </div>
 
               {/* Streaming reasoning */}
@@ -264,27 +304,30 @@ export function ChatPanel() {
                     const script = isBash && parsedArgs?.script;
 
                     return (
-                      <div
+                      <details
                         key={tcId}
-                        className="bg-amber-900/30 rounded p-2 border border-amber-700"
+                        open
+                        className="bg-amber-900/30 rounded border border-amber-700"
                       >
-                        <div className="flex items-center gap-2 text-sm">
+                        <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
                           <span className="text-amber-400 font-medium">{tc.name || "tool"}</span>
                           <span className="text-xs text-gray-500 font-mono">
                             {tcId.slice(-8)}
                           </span>
                           <span className="text-xs text-amber-300 animate-pulse">streaming...</span>
+                        </summary>
+                        <div className="px-2 pb-2">
+                          {isBash && script ? (
+                            <pre className="text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
+                              $ {script}
+                            </pre>
+                          ) : (
+                            <pre className="text-xs text-gray-200 bg-black/30 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-all">
+                              {tc.arguments || "..."}
+                            </pre>
+                          )}
                         </div>
-                        {isBash && script ? (
-                          <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
-                            $ {script}
-                          </pre>
-                        ) : (
-                          <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-all">
-                            {tc.arguments || "..."}
-                          </pre>
-                        )}
-                      </div>
+                      </details>
                     );
                   })}
                 </div>
