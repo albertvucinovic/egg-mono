@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Plus } from "lucide-react";
-import { fetchThreadChildren } from "@/lib/api";
+import { fetchThreadChildren, openThread } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
 interface ChildThread {
@@ -13,13 +13,20 @@ interface ChildThread {
 }
 
 export function ChildrenPanel() {
-  const { currentThreadId, setCurrentThreadId } = useAppStore();
+  const { currentThreadId, setCurrentThreadId, addSystemLog } = useAppStore();
 
   const { data: children = [], isLoading } = useQuery({
     queryKey: ["threadChildren", currentThreadId],
     queryFn: () => fetchThreadChildren(currentThreadId!),
     enabled: !!currentThreadId,
   });
+
+  const navigateToChild = (childId: string) => {
+    setCurrentThreadId(childId);
+    openThread(childId).then(() => {
+      addSystemLog(`Switched to child ${childId.slice(-8)}`, "info");
+    });
+  };
 
   if (!currentThreadId) {
     return null;
@@ -42,7 +49,7 @@ export function ChildrenPanel() {
           {children.map((child: ChildThread) => (
             <button
               key={child.id}
-              onClick={() => setCurrentThreadId(child.id)}
+              onClick={() => navigateToChild(child.id)}
               className="w-full px-3 py-1.5 text-left text-sm hover:bg-[var(--item-hover)] flex items-center gap-2 group"
             >
               <ChevronRight className="w-3 h-3 text-gray-500" />

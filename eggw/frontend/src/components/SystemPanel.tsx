@@ -18,8 +18,6 @@ export function SystemPanel() {
     addSystemLog,
     models,
     setModels,
-    threads,
-    setThreads,
   } = useAppStore();
 
   // Fetch models on mount
@@ -38,21 +36,15 @@ export function SystemPanel() {
   const modelMutation = useMutation({
     mutationFn: ({ threadId, modelKey }: { threadId: string; modelKey: string }) =>
       setThreadModel(threadId, modelKey),
-    onMutate: ({ threadId, modelKey }) => {
-      // Optimistically update the thread's model in the store
-      setThreads(threads.map(t =>
-        t.id === threadId ? { ...t, model_key: modelKey } : t
-      ));
-    },
     onSuccess: () => {
       addSystemLog("Model changed", "success");
-      // Refetch threads to ensure sync
-      queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+      // Refetch thread settings to get updated model
+      refetchSettings();
     },
     onError: () => {
       addSystemLog("Failed to change model", "error");
       // Refetch to restore correct state
-      queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+      refetchSettings();
     },
   });
 
@@ -145,8 +137,6 @@ export function SystemPanel() {
     }
   }, [systemLogs]);
 
-  const currentThread = threads.find((t) => t.id === currentThreadId);
-
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Thread info - scrollable if needed */}
@@ -188,7 +178,7 @@ export function SystemPanel() {
             <div className="flex justify-between items-center">
               <span className="text-gray-400">Model:</span>
               <select
-                value={currentThread?.model_key || ""}
+                value={threadSettings?.model_key || ""}
                 onChange={(e) => {
                   if (currentThreadId && e.target.value) {
                     modelMutation.mutate({ threadId: currentThreadId, modelKey: e.target.value });
