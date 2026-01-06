@@ -469,15 +469,48 @@ async def get_messages(thread_id: str):
     if t.snapshot_json:
         try:
             snap = json.loads(t.snapshot_json)
+            # Get per-message token stats if available
+            token_stats = snap.get("token_stats", {})
+            per_message_tokens = token_stats.get("per_message", {}) if isinstance(token_stats, dict) else {}
+
             for msg in snap.get("messages", []):
+                msg_id = msg.get("id", "")
+
+                # Get per-message token count
+                pm_info = per_message_tokens.get(msg_id, {}) if msg_id else {}
+                total_tokens = None
+                if pm_info:
+                    content_tok = int(pm_info.get("content_tokens", 0) or 0)
+                    reasoning_tok = int(pm_info.get("reasoning_tokens", 0) or 0)
+                    tool_calls_tok = int(pm_info.get("tool_calls_tokens", 0) or 0)
+                    total_tokens = pm_info.get("total_tokens") or (content_tok + reasoning_tok + tool_calls_tok)
+                    if total_tokens:
+                        total_tokens = int(total_tokens)
+
+                # Parse timestamp
+                ts_raw = msg.get("ts")
+                timestamp = None
+                if ts_raw:
+                    try:
+                        # Try ISO format with microseconds
+                        timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                    except Exception:
+                        try:
+                            # Try without timezone
+                            timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", ""))
+                        except Exception:
+                            pass
+
                 messages.append(MessageContent(
-                    id=msg.get("id", ""),
+                    id=msg_id,
                     role=msg.get("role", ""),
                     content=msg.get("content"),
                     reasoning=msg.get("reasoning"),
                     tool_calls=msg.get("tool_calls"),
                     tool_call_id=msg.get("tool_call_id"),
                     model_key=msg.get("model_key"),
+                    timestamp=timestamp,
+                    tokens=total_tokens,
                 ))
         except json.JSONDecodeError:
             pass

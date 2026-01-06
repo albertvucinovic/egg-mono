@@ -16,6 +16,8 @@ export interface Message {
   tool_calls?: any[];
   tool_call_id?: string;
   model_key?: string;
+  timestamp?: string;  // ISO datetime string
+  tokens?: number;     // Per-message token count
 }
 
 export interface ToolCall {

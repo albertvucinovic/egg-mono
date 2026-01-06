@@ -89,12 +89,32 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
       style={isShellCommand ? shellStyle : (roleStyles[message.role] || shellStyle)}
     >
       {/* Header */}
-      <div className="flex items-center gap-2 mb-2 text-xs" style={{ color: "var(--muted)" }}>
+      <div className="flex items-center gap-2 mb-2 text-xs flex-wrap" style={{ color: "var(--muted)" }}>
         <span className="font-medium" style={roleStyles[message.role] ? { color: roleStyles[message.role].color } : { color: "var(--foreground)" }}>
           {isShellCommand ? "Shell" : roleLabels[message.role] || message.role}
         </span>
         {message.model_key && (
           <span style={{ color: "var(--muted)" }}>({message.model_key})</span>
+        )}
+        {message.tokens && message.tokens > 0 && (
+          <span style={{ color: "var(--muted)" }}>(tok={message.tokens.toLocaleString()})</span>
+        )}
+        {message.timestamp && (
+          <span className="font-mono" style={{ color: "var(--muted)" }}>
+            {new Date(message.timestamp).toLocaleString(undefined, {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })}
+          </span>
+        )}
+        {message.id && message.id.length >= 8 && !message.id.startsWith('temp-') && (
+          <span className="font-mono" style={{ color: "var(--muted)" }}>
+            {message.id.slice(-8)}
+          </span>
         )}
         {message.tool_call_id && (
           <span className="font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
