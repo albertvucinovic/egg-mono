@@ -164,6 +164,12 @@ export async function fetchThreadSettings(threadId: string) {
   return res.json();
 }
 
+export async function fetchThreadState(threadId: string) {
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/state`);
+  if (!res.ok) throw new Error("Failed to fetch state");
+  return res.json();
+}
+
 export async function setAutoApproval(threadId: string, enabled: boolean) {
   const res = await fetch(`${API_BASE}/api/threads/${threadId}/settings/auto-approval?enabled=${enabled}`, {
     method: "POST",

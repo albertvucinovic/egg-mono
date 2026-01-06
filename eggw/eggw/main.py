@@ -686,6 +686,25 @@ async def get_thread_settings(thread_id: str):
     }
 
 
+@app.get("/api/threads/{thread_id}/state")
+async def get_thread_state_endpoint(thread_id: str):
+    """Get the current state of a thread (running, waiting, etc.)."""
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    state = thread_state(db, thread_id)
+    root_id = get_thread_root_id(thread_id)
+
+    return {
+        "state": state,
+        "scheduler_running": root_id in active_schedulers,
+    }
+
+
 @app.post("/api/threads/{thread_id}/settings/auto-approval")
 async def set_auto_approval(thread_id: str, enabled: bool = True):
     """Enable or disable auto-approval for a thread."""

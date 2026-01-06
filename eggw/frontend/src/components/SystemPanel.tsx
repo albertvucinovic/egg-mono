@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, ArrowUp, ArrowDown, GitBranch } from "lucide-react";
-import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadChildren, openThread, fetchThreadSettings, setAutoApproval } from "@/lib/api";
+import { fetchTokenStats, fetchModels, setThreadModel, fetchThread, fetchThreadChildren, openThread, fetchThreadSettings, fetchThreadState, setAutoApproval } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -71,6 +71,14 @@ export function SystemPanel() {
     refetchInterval: 5000,
   });
 
+  // Fetch thread state
+  const { data: threadState } = useQuery({
+    queryKey: ["threadState", currentThreadId],
+    queryFn: () => fetchThreadState(currentThreadId!),
+    enabled: !!currentThreadId,
+    refetchInterval: 1000, // Poll frequently for state changes
+  });
+
   // Auto-approval toggle mutation
   const autoApprovalMutation = useMutation({
     mutationFn: (enabled: boolean) => setAutoApproval(currentThreadId!, enabled),
@@ -85,6 +93,24 @@ export function SystemPanel() {
       addSystemLog("Failed to toggle auto-approval", "error");
     },
   });
+
+  // Helper to get state display info
+  const getStateDisplay = (state: string) => {
+    switch (state) {
+      case "running":
+        return { label: "Running", color: "bg-green-500", pulse: true };
+      case "waiting_tool_approval":
+        return { label: "Waiting Approval", color: "bg-yellow-500", pulse: true };
+      case "waiting_output_approval":
+        return { label: "Output Approval", color: "bg-purple-500", pulse: true };
+      case "waiting_user":
+        return { label: "Ready", color: "bg-blue-500", pulse: false };
+      case "paused":
+        return { label: "Paused", color: "bg-gray-500", pulse: false };
+      default:
+        return { label: state, color: "bg-gray-500", pulse: false };
+    }
+  };
 
   // Fetch children of current thread
   const { data: children } = useQuery({
@@ -131,6 +157,30 @@ export function SystemPanel() {
               <span className="text-gray-400">ID:</span>
               <span className="font-mono">{currentThreadId.slice(-12)}</span>
             </div>
+
+            {/* Thread State */}
+            {threadState && (
+              <div className="flex justify-between items-center">
+                <span className="text-gray-400">Status:</span>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={clsx(
+                      "w-2 h-2 rounded-full",
+                      getStateDisplay(threadState.state).color,
+                      getStateDisplay(threadState.state).pulse && "animate-pulse"
+                    )}
+                  />
+                  <span className={clsx(
+                    threadState.state === "running" && "text-green-400",
+                    threadState.state === "waiting_tool_approval" && "text-yellow-400",
+                    threadState.state === "waiting_output_approval" && "text-purple-400",
+                    threadState.state === "waiting_user" && "text-blue-400",
+                  )}>
+                    {getStateDisplay(threadState.state).label}
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* Model selector */}
             <div className="flex justify-between items-center">
