@@ -87,15 +87,15 @@ function MessageBlock({ message }: MessageBlockProps) {
       style={isShellCommand ? shellStyle : (roleStyles[message.role] || shellStyle)}
     >
       {/* Header */}
-      <div className="flex items-center gap-2 mb-2 text-xs text-gray-400">
-        <span className="font-medium text-gray-300">
+      <div className="flex items-center gap-2 mb-2 text-xs" style={{ color: "var(--muted)" }}>
+        <span className="font-medium" style={{ color: "var(--foreground)" }}>
           {isShellCommand ? "Shell" : roleLabels[message.role] || message.role}
         </span>
         {message.model_key && (
-          <span className="text-gray-500">({message.model_key})</span>
+          <span style={{ color: "var(--muted)" }}>({message.model_key})</span>
         )}
         {message.tool_call_id && (
-          <span className="text-emerald-500 font-mono">
+          <span className="font-mono" style={{ color: "var(--tool-msg-border)" }}>
             ← {message.tool_call_id.slice(-8)}
           </span>
         )}
@@ -132,16 +132,16 @@ function MessageBlock({ message }: MessageBlockProps) {
           ) : message.role === "tool" ? (
             /* Tool output - collapsible if long */
             isLongToolOutput ? (
-              <details className="bg-black/30 rounded border border-emerald-800">
-                <summary className="cursor-pointer p-2 text-sm text-emerald-300">
+              <details className="rounded border" style={{ background: "var(--code-bg)", borderColor: "var(--tool-msg-border)" }}>
+                <summary className="cursor-pointer p-2 text-sm" style={{ color: "var(--tool-msg-border)" }}>
                   Output ({message.content.length.toLocaleString()} chars) - click to expand
                 </summary>
-                <pre className="p-2 text-xs text-gray-300 overflow-auto max-h-96 whitespace-pre-wrap">
+                <pre className="p-2 text-xs overflow-auto max-h-96 whitespace-pre-wrap" style={{ color: "var(--foreground)" }}>
                   {message.content}
                 </pre>
               </details>
             ) : (
-              <pre className="text-xs text-gray-300 bg-black/30 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap">
+              <pre className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
                 {message.content}
               </pre>
             )
@@ -237,11 +237,11 @@ function MessageBlock({ message }: MessageBlockProps) {
                 </div>
                 {/* Special display for bash scripts */}
                 {isBash && script ? (
-                  <pre className="mt-1 text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
+                  <pre className="mt-1 text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
                     $ {script}
                   </pre>
                 ) : (
-                  <pre className="mt-1 text-xs text-gray-200 bg-black/30 p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words">
+                  <pre className="mt-1 text-xs p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
                     {typeof args === "string"
                       ? args
                       : JSON.stringify(args, null, 2)}

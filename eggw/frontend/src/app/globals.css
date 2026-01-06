@@ -421,6 +421,10 @@ code {
 /* ============================================
    Markdown Prose Styles
    ============================================ */
+.prose {
+  color: var(--foreground);
+}
+
 .prose h1 {
   color: var(--heading-color);
   font-size: 1.75rem;
@@ -466,18 +470,21 @@ code {
 }
 
 .prose p {
+  color: var(--foreground);
   margin-top: 0.5rem;
   margin-bottom: 0.5rem;
   line-height: 1.625;
 }
 
 .prose ul, .prose ol {
+  color: var(--foreground);
   margin-top: 0.5rem;
   margin-bottom: 0.5rem;
   padding-left: 1.5rem;
 }
 
 .prose li {
+  color: var(--foreground);
   margin-top: 0.25rem;
   margin-bottom: 0.25rem;
 }
