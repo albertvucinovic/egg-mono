@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { StopCircle } from "lucide-react";
-import { fetchMessages, interruptThread } from "@/lib/api";
+import { fetchMessages } from "@/lib/api";
 import { useAppStore, Message } from "@/lib/store";
 import clsx from "clsx";
 
@@ -187,33 +186,12 @@ export function ChatPanel() {
     streamingContent,
     streamingReasoning,
     streamingToolCalls,
-    isStreaming,
-    setIsStreaming,
-    setStreamingContent,
-    setStreamingReasoning,
-    setStreamingToolCalls,
-    addSystemLog,
   } = useAppStore();
 
   const { data, isLoading } = useQuery({
     queryKey: ["messages", currentThreadId],
     queryFn: () => fetchMessages(currentThreadId!),
     enabled: !!currentThreadId,
-  });
-
-  // Cancel/interrupt mutation
-  const cancelMutation = useMutation({
-    mutationFn: () => interruptThread(currentThreadId!),
-    onSuccess: () => {
-      setStreamingContent("");
-      setStreamingReasoning("");
-      setStreamingToolCalls({});
-      setIsStreaming(false);
-      addSystemLog("Streaming cancelled", "info");
-    },
-    onError: () => {
-      addSystemLog("Failed to cancel streaming", "error");
-    },
   });
 
   // Sync fetched messages to store (but don't overwrite optimistic updates)
@@ -255,20 +233,9 @@ export function ChatPanel() {
           {/* Streaming content */}
           {(streamingContent || streamingReasoning || Object.keys(streamingToolCalls).length > 0) && (
             <div className="rounded border p-3 mb-3 bg-slate-800 border-slate-600">
-              <div className="flex items-center justify-between text-xs text-gray-400 mb-2">
-                <div>
-                  <span className="font-medium text-gray-300">Assistant</span>
-                  <span className="ml-2 text-blue-400 animate-pulse">streaming...</span>
-                </div>
-                <button
-                  onClick={() => cancelMutation.mutate()}
-                  disabled={cancelMutation.isPending}
-                  className="flex items-center gap-1 px-2 py-1 text-red-400 hover:bg-red-900/30 rounded transition-colors disabled:opacity-50"
-                  title="Cancel streaming (Ctrl+C)"
-                >
-                  <StopCircle className="w-4 h-4" />
-                  <span>Cancel</span>
-                </button>
+              <div className="text-xs text-gray-400 mb-2">
+                <span className="font-medium text-gray-300">Assistant</span>
+                <span className="ml-2 text-blue-400 animate-pulse">streaming...</span>
               </div>
 
               {/* Streaming reasoning */}

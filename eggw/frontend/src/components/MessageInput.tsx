@@ -2,8 +2,8 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Send, Loader2, Terminal } from "lucide-react";
-import { sendMessage, executeCommand, isCommand } from "@/lib/api";
+import { Send, Loader2, Terminal, StopCircle } from "lucide-react";
+import { sendMessage, executeCommand, isCommand, interruptThread } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
 export function MessageInput() {
@@ -36,6 +36,17 @@ export function MessageInput() {
     },
     onError: () => {
       addSystemLog("Failed to send message", "error");
+    },
+  });
+
+  // Cancel/interrupt mutation
+  const cancelMutation = useMutation({
+    mutationFn: () => interruptThread(currentThreadId!),
+    onSuccess: () => {
+      addSystemLog("Streaming cancelled", "info");
+    },
+    onError: () => {
+      addSystemLog("Failed to cancel streaming", "error");
     },
   });
 
@@ -130,20 +141,36 @@ export function MessageInput() {
           className="flex-1 bg-[#111] border border-[var(--panel-border)] rounded px-3 py-2 resize-none focus:outline-none focus:border-blue-500 disabled:opacity-50 min-h-[40px]"
           rows={1}
         />
-        <button
-          onClick={handleSubmit}
-          disabled={!input.trim() || !currentThreadId || isStreaming || isPending}
-          className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {isPending || isStreaming ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : inputIsCommand ? (
-            <Terminal className="w-4 h-4" />
-          ) : (
-            <Send className="w-4 h-4" />
-          )}
-          {inputIsCommand ? "Run" : "Send"}
-        </button>
+        {isStreaming ? (
+          <button
+            onClick={() => cancelMutation.mutate()}
+            disabled={cancelMutation.isPending}
+            className="px-4 py-2 bg-red-600 rounded hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            title="Cancel streaming (Ctrl+C)"
+          >
+            {cancelMutation.isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <StopCircle className="w-4 h-4" />
+            )}
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={handleSubmit}
+            disabled={!input.trim() || !currentThreadId || isPending}
+            className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : inputIsCommand ? (
+              <Terminal className="w-4 h-4" />
+            ) : (
+              <Send className="w-4 h-4" />
+            )}
+            {inputIsCommand ? "Run" : "Send"}
+          </button>
+        )}
       </div>
 
       {/* Status line */}
