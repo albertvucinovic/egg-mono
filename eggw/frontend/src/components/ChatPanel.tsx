@@ -12,6 +12,39 @@ import { fetchMessages } from "@/lib/api";
 import { useAppStore, Message } from "@/lib/store";
 import clsx from "clsx";
 
+/**
+ * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
+ * Supports:
+ * - \[...\] → $$...$$ (display math)
+ * - \(...\) → $...$ (inline math)
+ * - [ ... ] with LaTeX commands → $$...$$ (common AI output format)
+ */
+function preprocessLatex(content: string): string {
+  if (!content) return content;
+
+  // Convert \[...\] to $$...$$ for display math
+  let processed = content.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => `$$${math}$$`);
+
+  // Convert \(...\) to $...$ for inline math
+  processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => `$${math}$`);
+
+  // Convert [ ... ] when it starts with a LaTeX command (common AI output format)
+  // This handles multiline content like [ \begin{aligned} ... \end{aligned} ]
+  // Match [ followed by whitespace and backslash, capture until closing ]
+  processed = processed.replace(
+    /\[\s*(\\[\s\S]*?)\s*\]/g,
+    (match, math) => {
+      // Only convert if it looks like LaTeX (contains common LaTeX commands)
+      if (/\\(?:begin|end|frac|sum|int|prod|lim|nabla|partial|sqrt|text|mathbf|mathrm|left|right|aligned|equation|matrix|cases)/.test(math)) {
+        return `$$${math}$$`;
+      }
+      return match; // Keep original if not LaTeX
+    }
+  );
+
+  return processed;
+}
+
 interface MessageBlockProps {
   message: Message;
 }
@@ -124,7 +157,7 @@ function MessageBlock({ message }: MessageBlockProps) {
                   },
                 }}
               >
-                {message.content}
+                {preprocessLatex(message.content)}
               </ReactMarkdown>
             </div>
           )}
@@ -262,7 +295,7 @@ export function ChatPanel() {
                     remarkPlugins={[remarkMath]}
                     rehypePlugins={[rehypeKatex]}
                   >
-                    {streamingContent}
+                    {preprocessLatex(streamingContent)}
                   </ReactMarkdown>
                 </div>
               )}
