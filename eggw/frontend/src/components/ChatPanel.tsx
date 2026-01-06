@@ -52,11 +52,12 @@ interface MessageBlockProps {
 }
 
 function MessageBlock({ message }: MessageBlockProps) {
-  const roleColors: Record<string, string> = {
-    user: "bg-blue-900/50 border-blue-700",
-    assistant: "bg-slate-800 border-slate-600",
-    system: "bg-cyan-900/40 border-cyan-700",
-    tool: "bg-emerald-900/30 border-emerald-700",
+  // Use CSS variables for theme-aware colors
+  const roleStyles: Record<string, React.CSSProperties> = {
+    user: { background: "var(--user-msg-bg)", borderColor: "var(--user-msg-border)" },
+    assistant: { background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)" },
+    system: { background: "var(--system-msg-bg)", borderColor: "var(--system-msg-border)" },
+    tool: { background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" },
   };
 
   const roleLabels: Record<string, string> = {
@@ -78,12 +79,12 @@ function MessageBlock({ message }: MessageBlockProps) {
   const isLongToolOutput = message.role === "tool" &&
     message.content && message.content.length > 500;
 
+  const shellStyle: React.CSSProperties = { background: "var(--code-bg)", borderColor: "var(--panel-border)" };
+
   return (
     <div
-      className={clsx(
-        "rounded border p-3 mb-3",
-        isShellCommand ? "bg-gray-900 border-gray-600" : roleColors[message.role] || "bg-gray-800 border-gray-600"
-      )}
+      className="rounded border p-3 mb-3"
+      style={isShellCommand ? shellStyle : (roleStyles[message.role] || shellStyle)}
     >
       {/* Header */}
       <div className="flex items-center gap-2 mb-2 text-xs text-gray-400">
@@ -102,11 +103,14 @@ function MessageBlock({ message }: MessageBlockProps) {
 
       {/* Reasoning (collapsible) */}
       {message.reasoning && (
-        <details className="mb-2 bg-purple-900/30 rounded p-2 border border-purple-700">
-          <summary className="cursor-pointer text-sm text-purple-300">
+        <details
+          className="mb-2 rounded p-2 border"
+          style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
+        >
+          <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-border)" }}>
             Reasoning
           </summary>
-          <div className="mt-2 text-sm text-purple-200 whitespace-pre-wrap">
+          <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--foreground)", opacity: 0.9 }}>
             {message.reasoning}
           </div>
         </details>
@@ -222,11 +226,12 @@ function MessageBlock({ message }: MessageBlockProps) {
             return (
               <div
                 key={tc.id || idx}
-                className="bg-amber-900/30 rounded p-2 border border-amber-700"
+                className="rounded p-2 border"
+                style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
               >
                 <div className="flex items-center gap-2 text-sm">
-                  <span className="text-amber-400 font-medium">{toolName}</span>
-                  <span className="text-xs text-gray-500 font-mono">
+                  <span className="font-medium" style={{ color: "var(--tool-call-border)" }}>{toolName}</span>
+                  <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
                     {tc.id?.slice(-8)}
                   </span>
                 </div>
@@ -306,19 +311,26 @@ export function ChatPanel() {
 
           {/* Streaming content */}
           {(streamingContent || streamingReasoning || Object.keys(streamingToolCalls).length > 0) && (
-            <div className="rounded border p-3 mb-3 bg-slate-800 border-slate-600">
-              <div className="text-xs text-gray-400 mb-2">
-                <span className="font-medium text-gray-300">Assistant</span>
-                <span className="ml-2 text-blue-400 animate-pulse">streaming...</span>
+            <div
+              className="rounded border p-3 mb-3"
+              style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)" }}
+            >
+              <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+                <span className="font-medium" style={{ color: "var(--foreground)" }}>Assistant</span>
+                <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
               </div>
 
               {/* Streaming reasoning */}
               {streamingReasoning && (
-                <details open className="mb-2 bg-purple-900/30 rounded p-2 border border-purple-700">
-                  <summary className="cursor-pointer text-sm text-purple-300">
-                    Reasoning <span className="text-xs text-purple-400 animate-pulse">(streaming...)</span>
+                <details
+                  open
+                  className="mb-2 rounded p-2 border"
+                  style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
+                >
+                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-border)" }}>
+                    Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
                   </summary>
-                  <div className="mt-2 text-sm text-purple-200 whitespace-pre-wrap">
+                  <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--foreground)", opacity: 0.9 }}>
                     {streamingReasoning}
                   </div>
                 </details>
@@ -381,22 +393,23 @@ export function ChatPanel() {
                       <details
                         key={tcId}
                         open
-                        className="bg-amber-900/30 rounded border border-amber-700"
+                        className="rounded border"
+                        style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
                       >
                         <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                          <span className="text-amber-400 font-medium">{tc.name || "tool"}</span>
-                          <span className="text-xs text-gray-500 font-mono">
+                          <span className="font-medium" style={{ color: "var(--tool-call-border)" }}>{tc.name || "tool"}</span>
+                          <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
                             {tcId.slice(-8)}
                           </span>
-                          <span className="text-xs text-amber-300 animate-pulse">streaming...</span>
+                          <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-border)" }}>streaming...</span>
                         </summary>
                         <div className="px-2 pb-2">
                           {isBash && script ? (
-                            <pre className="text-sm text-green-400 font-mono bg-black/40 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
+                            <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
                               $ {script}
                             </pre>
                           ) : (
-                            <pre className="text-xs text-gray-200 bg-black/30 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-all">
+                            <pre className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
                               {tc.arguments || "..."}
                             </pre>
                           )}

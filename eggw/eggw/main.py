@@ -1483,7 +1483,7 @@ def _cmd_quit() -> CommandResponse:
 
 
 # Available themes
-THEMES = ["dark", "midnight", "forest", "ocean", "warm", "mono"]
+THEMES = ["dark", "cyberpunk", "forest", "ocean", "sunset", "mono"]
 
 
 def _cmd_theme(theme_name: str) -> CommandResponse:
