@@ -369,15 +369,21 @@ class PanelsMixin:
             title += f" [dim](model: {model_key})[/dim]"
         panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
 
-    def console_print_block(self, title: str, text: str, border_style: str = 'blue') -> None:
+    def console_print_block(self, title: str, text: str, border_style: str = 'blue', markup: bool = True) -> None:
         """Print a titled block to the console."""
         try:
-            # Apply border_style as the text color for consistency
-            styled_text = Text(text, style=border_style)
-            self.console.print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
-        except Exception:
-            # Fallback plain
-            self.console.print(f"{title}\n{text}")
+            if markup and ('[' in text and ']' in text):
+                # Text contains Rich markup - parse it via Text.from_markup
+                styled_text = Text.from_markup(text)
+                self.console.print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
+            else:
+                # Plain text - apply border_style as text color
+                styled_text = Text(text, style=border_style)
+                self.console.print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
+        except Exception as e:
+            # Fallback plain - show error for debugging
+            import traceback
+            self.console.print(f"{title}\n{text}\n[Error: {e}]\n{traceback.format_exc()}")
 
     def print_static_view_current(self, heading: Optional[str] = None) -> None:
         """Print a static view of recent messages for the selected thread."""
