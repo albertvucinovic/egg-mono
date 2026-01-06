@@ -1133,12 +1133,23 @@ async def get_token_stats(thread_id: str):
 
 @app.get("/api/threads/{thread_id}/events")
 async def stream_events(thread_id: str):
-    """Stream events for a thread via SSE."""
+    """Stream events for a thread via SSE.
+
+    Starts from the current max event_seq to avoid replaying history.
+    Historical messages are fetched via the /messages endpoint.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
+    # Get current max event_seq to start from - don't replay historical events
+    # This prevents UI freeze when switching to a thread with many events
+    try:
+        current_max_seq = db.max_event_seq(thread_id)
+    except Exception:
+        current_max_seq = -1
+
     async def event_generator():
-        watcher = EventWatcher(db, thread_id)
+        watcher = EventWatcher(db, thread_id, after_seq=current_max_seq)
         try:
             async for batch in watcher.aiter():
                 for row in batch:
