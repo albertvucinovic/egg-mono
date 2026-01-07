@@ -289,11 +289,12 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   const lastContentIndexRef = useRef(0);
   const lastReasoningIndexRef = useRef(0);
 
-  // Smart auto-scroll: only scroll if user is at/near bottom
+  // Smart auto-scroll: only scroll if user hasn't scrolled away
   // This allows users to scroll up to read while streaming continues
   const shouldAutoScrollRef = useRef(true);
   const scrollPendingRef = useRef(false);
-  const SCROLL_THRESHOLD = 50; // pixels from bottom to consider "at bottom"
+  const lastScrollTopRef = useRef(0);
+  const SCROLL_THRESHOLD = 100; // pixels from bottom to consider "at bottom"
 
   const {
     currentThreadId,
@@ -310,9 +311,23 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     return scrollHeight - scrollTop - clientHeight < SCROLL_THRESHOLD;
   };
 
-  // Handle user scroll - update shouldAutoScroll based on position
+  // Handle user scroll - only disable auto-scroll when user scrolls UP
+  // This prevents content expansion from disabling auto-scroll
   const handleScroll = () => {
-    shouldAutoScrollRef.current = isAtBottom();
+    if (!scrollRef.current) return;
+
+    const currentScrollTop = scrollRef.current.scrollTop;
+    const scrolledUp = currentScrollTop < lastScrollTopRef.current - 5; // 5px tolerance
+
+    if (scrolledUp) {
+      // User scrolled up - disable auto-scroll
+      shouldAutoScrollRef.current = false;
+    } else if (isAtBottom()) {
+      // User scrolled back to bottom - re-enable auto-scroll
+      shouldAutoScrollRef.current = true;
+    }
+
+    lastScrollTopRef.current = currentScrollTop;
   };
 
   // Auto-scroll helper that respects user scroll position
