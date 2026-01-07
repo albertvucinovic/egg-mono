@@ -1,17 +1,15 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Check, X, AlertTriangle } from "lucide-react";
 import { fetchToolCalls, approveTool } from "@/lib/api";
 import { useAppStore, ToolCall } from "@/lib/store";
-import clsx from "clsx";
 
 interface ApprovalPanelProps {
   showBorders?: boolean;
 }
 
 export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
-  const queryClient = useQueryClient();
   const { currentThreadId, addSystemLog } = useAppStore();
 
   // Tool calls are updated via SSE events - no polling needed
@@ -32,33 +30,10 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
       approved: boolean;
       outputDecision?: string;
     }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision),
-    // Optimistic update - remove from list immediately
-    onMutate: async ({ toolCallId }) => {
-      // Cancel any outgoing refetches
-      await queryClient.cancelQueries({ queryKey: ["toolCalls", currentThreadId] });
-
-      // Snapshot current value
-      const previousToolCalls = queryClient.getQueryData(["toolCalls", currentThreadId]);
-
-      // Optimistically remove the tool call from the list
-      queryClient.setQueryData(["toolCalls", currentThreadId], (old: ToolCall[] | undefined) =>
-        old?.filter((tc) => tc.id !== toolCallId) ?? []
-      );
-
-      return { previousToolCalls };
-    },
     onSuccess: () => {
-      // Invalidate to get fresh data from server
-      queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
-      queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
-      queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Tool approval updated", "success");
     },
-    onError: (_err, _vars, context) => {
-      // Restore previous state on error
-      if (context?.previousToolCalls) {
-        queryClient.setQueryData(["toolCalls", currentThreadId], context.previousToolCalls);
-      }
+    onError: () => {
       addSystemLog("Failed to approve tool", "error");
     },
   });
