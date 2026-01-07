@@ -1829,14 +1829,8 @@ async def get_token_stats(thread_id: str):
 
     input_tokens = api_usage.get("total_input_tokens", 0) or 0
     output_tokens = api_usage.get("total_output_tokens", 0) or 0
+    reasoning_tokens = api_usage.get("total_reasoning_tokens", 0) or 0  # Subset of output
     cached_tokens = api_usage.get("cached_tokens", 0) or 0
-
-    # Calculate reasoning tokens from per_message data (not in api_usage)
-    per_message = stats.get("per_message", {})
-    reasoning_tokens = 0
-    for msg_stats in per_message.values():
-        if isinstance(msg_stats, dict):
-            reasoning_tokens += int(msg_stats.get("reasoning_tokens", 0) or 0)
 
     return ThreadTokenStats(
         input_tokens=input_tokens,
