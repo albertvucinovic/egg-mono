@@ -112,13 +112,12 @@ export function useSSE(threadId: string | null) {
     // Handle msg.create - new message created
     es.addEventListener("msg.create", (e) => {
       try {
+        console.log("[SSE] msg.create received:", e.data?.slice(0, 200));
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const role = payload.role || "unknown";
-        if (role !== "assistant") {
-          addSystemLog(`Message created: ${role}`, "info");
-          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
-        }
+        addSystemLog(`Message created: ${role}`, "info");
+        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
       }

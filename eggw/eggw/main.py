@@ -122,9 +122,10 @@ async def lifespan(app: FastAPI):
     db_path = os.environ.get("EGG_DB_PATH")
     if db_path:
         db = ThreadsDB(db_path)
-        print(f"Database: {db_path}")
     else:
         db = ThreadsDB()  # Uses default .egg/threads.sqlite
+    # Log the absolute path being used
+    print(f"Database: {db.path.absolute()}")
     db.init_schema()  # Create tables if they don't exist
 
     # Load models
@@ -1886,6 +1887,7 @@ async def stream_events(thread_id: str):
         # the same data (including events from other processes like TUI).
         from eggthreads import ThreadsDB
         sse_db = ThreadsDB(db.path)
+        print(f"[SSE] Connected to {sse_db.path.absolute()} for thread {thread_id}")
 
         # Use a short poll interval for responsive streaming
         watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq, poll_sec=0.015)
@@ -1912,9 +1914,9 @@ async def stream_events(thread_id: str):
                         "payload": payload,
                     }
 
-                    # Debug: log approval events
-                    if "approval" in event_type:
-                        print(f"[SSE] Emitting {event_type}: {event_data}")
+                    # Debug: log important events
+                    if "approval" in event_type or event_type == "msg.create":
+                        print(f"[SSE] Emitting {event_type}: seq={event_data.get('event_seq')}")
 
                     yield {
                         "event": event_type,
@@ -1939,9 +1941,9 @@ async def stream_events(thread_id: str):
                             "payload": payload,
                         }
 
-                        # Debug: log approval events
-                        if "approval" in event_type:
-                            print(f"[SSE] Emitting (batch) {event_type}: {event_data}")
+                        # Debug: log important events
+                        if "approval" in event_type or event_type == "msg.create":
+                            print(f"[SSE] Emitting (batch) {event_type}: seq={event_data.get('event_seq')}")
 
                         yield {
                             "event": event_type,
