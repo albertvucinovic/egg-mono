@@ -142,12 +142,12 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
 
   const { isStreaming } = useAppStore();
 
-  // Fetch token stats for current thread - faster during streaming
+  // Fetch token stats for current thread - poll during streaming for live updates
   const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ["stats", currentThreadId],
     queryFn: () => fetchTokenStats(currentThreadId!),
     enabled: !!currentThreadId,
-    // Stats are invalidated via SSE on stream.close
+    refetchInterval: isStreaming ? 2000 : false, // Poll every 2s during streaming
   });
 
   // Navigate to thread helper
