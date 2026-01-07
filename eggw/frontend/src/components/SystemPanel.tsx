@@ -94,7 +94,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["sandbox", currentThreadId],
     queryFn: () => fetchSandboxStatus(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 30000, // Fallback polling - sandbox status rarely changes
+    refetchInterval: 3000, // Poll for sandbox changes (can change externally via CLI)
   });
 
   // Sandbox toggle mutation (uses /toggleSandboxing command)
