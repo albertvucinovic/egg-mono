@@ -33,10 +33,12 @@ export function useSSE(threadId: string | null) {
     eventSourceRef.current = es;
 
     es.onopen = () => {
+      console.log("[SSE] Connection opened for thread:", threadId);
       addSystemLog("SSE connected", "info");
     };
 
-    es.onerror = () => {
+    es.onerror = (err) => {
+      console.error("[SSE] Connection error:", err);
       addSystemLog("SSE connection error", "error");
       setIsStreaming(false);
     };
