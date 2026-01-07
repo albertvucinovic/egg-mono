@@ -152,6 +152,16 @@ export function useSSE(threadId: string | null) {
       }
     });
 
+    // Handle sandbox.config events
+    es.addEventListener("sandbox.config", (e) => {
+      try {
+        addSystemLog("Sandbox config changed", "info");
+        queryClient.invalidateQueries({ queryKey: ["sandbox", threadId] });
+      } catch (err) {
+        console.error("Failed to parse sandbox.config:", err);
+      }
+    });
+
     return es;
   }, [
     threadId,
