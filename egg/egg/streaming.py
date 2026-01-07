@@ -3,13 +3,25 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from eggthreads import create_snapshot, EventWatcher
+from eggthreads import create_snapshot, EventWatcher, ThreadsDB
 
 
 class StreamingMixin:
     """Mixin providing async streaming/watching methods for EggDisplayApp."""
+
+    # Dedicated database connection for event watching to avoid contention
+    # with the scheduler's write operations on the main db connection
+    _watcher_db: Optional[ThreadsDB] = None
+
+    def _get_watcher_db(self) -> ThreadsDB:
+        """Get or create a dedicated database connection for event watching."""
+        if self._watcher_db is None:
+            # Use the same database path as the main connection
+            db_path = getattr(self.db, 'path', '.egg/threads.sqlite')
+            self._watcher_db = ThreadsDB(db_path)
+        return self._watcher_db
 
     async def start_watching_current(self):
         if self._watch_task is not None:
@@ -85,7 +97,10 @@ class StreamingMixin:
 
         # Poll a bit less aggressively to reduce idle CPU; EventWatcher
         # itself backs off further when idle.
-        ew = EventWatcher(self.db, thread_id, after_seq=after_for_watch, poll_sec=0.1)
+        # Use dedicated watcher_db connection to avoid SQLite contention
+        # with the scheduler's write operations on the main db connection.
+        watcher_db = self._get_watcher_db()
+        ew = EventWatcher(watcher_db, thread_id, after_seq=after_for_watch, poll_sec=0.1)
         async for batch in ew.aiter():
             saw_non_stream_msg = False
             for e in batch:
