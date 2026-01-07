@@ -404,14 +404,24 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     enabled: !!currentThreadId,
   });
 
-  // Sync fetched messages to store and scroll to bottom if sticking
+  // Sync fetched messages to store and scroll to bottom if we were at bottom
   useEffect(() => {
     if (data) {
+      // Capture scroll state BEFORE DOM update (messages change will cause scroll events)
+      const wasAtBottom = isAtBottom();
       setMessages(data);
-      // Scroll to bottom after messages update if we're sticking to bottom
-      requestAnimationFrame(() => {
-        scrollToBottom();
-      });
+      // Scroll to bottom after DOM update if we were at bottom before
+      if (wasAtBottom) {
+        requestAnimationFrame(() => {
+          if (scrollRef.current) {
+            isAutoScrollingRef.current = true;
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            requestAnimationFrame(() => {
+              isAutoScrollingRef.current = false;
+            });
+          }
+        });
+      }
     }
   }, [data, setMessages]);
 
