@@ -31,13 +31,24 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
       approved: boolean;
       outputDecision?: string;
     }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision),
+    // Optimistic update - remove from list immediately on click
+    onMutate: async ({ toolCallId }) => {
+      await queryClient.cancelQueries({ queryKey: ["toolCalls", currentThreadId] });
+      const previous = queryClient.getQueryData(["toolCalls", currentThreadId]);
+      queryClient.setQueryData(["toolCalls", currentThreadId], (old: ToolCall[] | undefined) =>
+        old?.filter((tc) => tc.id !== toolCallId) ?? []
+      );
+      return { previous };
+    },
     onSuccess: () => {
-      // Invalidate immediately - don't wait for SSE
       queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
       queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Tool approval updated", "success");
     },
-    onError: () => {
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(["toolCalls", currentThreadId], context.previous);
+      }
       addSystemLog("Failed to approve tool", "error");
     },
   });

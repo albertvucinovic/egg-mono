@@ -290,12 +290,6 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   const lastContentIndexRef = useRef(0);
   const lastReasoningIndexRef = useRef(0);
 
-  // Smart auto-scroll: only scroll if user hasn't scrolled away
-  // This allows users to scroll up to read while streaming continues
-  const shouldAutoScrollRef = useRef(true);
-  const lastScrollTopRef = useRef(0);
-  const SCROLL_THRESHOLD = 100; // pixels from bottom to consider "at bottom"
-
   const {
     currentThreadId,
     messages,
@@ -304,47 +298,11 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     isStreaming,
   } = useAppStore();
 
-  // Check if scrolled to bottom (within threshold)
-  const isAtBottom = () => {
-    if (!scrollRef.current) return true;
-    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    return scrollHeight - scrollTop - clientHeight < SCROLL_THRESHOLD;
-  };
-
-  // Handle user scroll - only disable auto-scroll when user scrolls UP
-  // This prevents content expansion from disabling auto-scroll
-  const handleScroll = () => {
-    if (!scrollRef.current) return;
-
-    const currentScrollTop = scrollRef.current.scrollTop;
-    const scrolledUp = currentScrollTop < lastScrollTopRef.current - 5; // 5px tolerance
-
-    if (scrolledUp) {
-      // User scrolled up - disable auto-scroll
-      shouldAutoScrollRef.current = false;
-    } else if (isAtBottom()) {
-      // User scrolled back to bottom - re-enable auto-scroll
-      shouldAutoScrollRef.current = true;
-    }
-
-    lastScrollTopRef.current = currentScrollTop;
-  };
-
-  // Auto-scroll helper that respects user scroll position
-  // Uses scrollIntoView on a bottom anchor for reliable scrolling
+  // Simple auto-scroll - always scroll to bottom during streaming
   const autoScroll = () => {
-    if (!shouldAutoScrollRef.current) return;
-
-    // Use RAF to ensure DOM has updated before scrolling
-    requestAnimationFrame(() => {
-      if (bottomRef.current && shouldAutoScrollRef.current) {
-        bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
-        // Update lastScrollTop after scroll
-        if (scrollRef.current) {
-          lastScrollTopRef.current = scrollRef.current.scrollTop;
-        }
-      }
-    });
+    if (bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
+    }
   };
 
   // Subscribe to streaming buffer updates - bypasses React entirely
@@ -418,18 +376,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     }
   }, [data, setMessages]);
 
-  // Reset scroll state when thread changes
+  // Scroll to bottom when thread changes
   useEffect(() => {
-    shouldAutoScrollRef.current = true;
-    lastScrollTopRef.current = 0;
-    // Scroll to bottom when switching threads
     requestAnimationFrame(() => {
-      if (bottomRef.current) {
-        bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
-      }
-      if (scrollRef.current) {
-        lastScrollTopRef.current = scrollRef.current.scrollTop;
-      }
+      autoScroll();
     });
   }, [currentThreadId]);
 
@@ -438,10 +388,9 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     autoScroll();
   }, [messages]);
 
-  // Reset auto-scroll when streaming starts (scroll to bottom to see new content)
+  // Scroll to bottom when streaming starts
   useEffect(() => {
     if (isStreaming) {
-      shouldAutoScrollRef.current = true;
       autoScroll();
     }
   }, [isStreaming]);
@@ -455,7 +404,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   }
 
   return (
-    <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
+    <div ref={scrollRef} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
       {isLoading ? (
         <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
       ) : messages.length === 0 ? (
