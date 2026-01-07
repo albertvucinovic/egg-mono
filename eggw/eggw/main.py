@@ -14,6 +14,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
+# Mock LLM for testing
+from mock_llm import is_test_mode, get_llm_client
+
 # Add parent directories to path for eggthreads/eggllm imports
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "eggthreads"))
@@ -174,9 +177,16 @@ def start_scheduler(root_tid: str) -> None:
 
     poll_sec = float(os.environ.get("EGG_POLL_SEC", "0.15"))
 
+    # Use mock LLM in test mode
+    llm = None
+    if is_test_mode():
+        llm = get_llm_client(str(MODELS_PATH), str(ALL_MODELS_PATH))
+        print(f"Using MockLLMClient for scheduler (test mode)")
+
     sched = SubtreeScheduler(
         db,
         root_thread_id=root_tid,
+        llm=llm,  # Pass mock LLM if in test mode, None otherwise (scheduler creates its own)
         models_path=str(MODELS_PATH),
         all_models_path=str(ALL_MODELS_PATH),
     )

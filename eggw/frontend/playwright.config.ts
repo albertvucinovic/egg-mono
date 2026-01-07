@@ -33,7 +33,8 @@ export default defineConfig({
   // Run backend and frontend before tests on dedicated test ports
   webServer: [
     {
-      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && cd ../backend && EGG_DB_PATH="${TEST_DB_PATH}" uvicorn main:app --host 0.0.0.0 --port ${TEST_BACKEND_PORT}`,
+      // Enable test mode for mock LLM responses
+      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && cd ../backend && EGG_TEST_MODE=true EGG_DB_PATH="${TEST_DB_PATH}" uvicorn main:app --host 0.0.0.0 --port ${TEST_BACKEND_PORT}`,
       url: `http://localhost:${TEST_BACKEND_PORT}/health`,
       reuseExistingServer: false, // Always start fresh for tests
       timeout: 30000,

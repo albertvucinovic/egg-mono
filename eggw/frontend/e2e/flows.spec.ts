@@ -227,3 +227,118 @@ test.describe('Commands', () => {
     await expect(page.locator('text=Available commands').or(page.locator('text=/help'))).toBeVisible({ timeout: 5000 });
   });
 });
+
+test.describe('Mock LLM Responses', () => {
+  // These tests use the MockLLMClient (EGG_TEST_MODE=true)
+  // Note: Tests create a new thread each time to ensure clean state
+
+  test('receives mock LLM text response', async ({ page }) => {
+    await page.goto('/');
+
+    // Create a fresh thread via /newThread command
+    const input = page.locator('[data-testid="message-input"]');
+    await page.waitForSelector('[data-testid="message-input"]', { timeout: 15000 });
+    await input.fill('/newThread');
+    await input.press('Enter');
+    await page.waitForTimeout(1000);
+
+    // Send a simple message that triggers "hello" response
+    await input.fill('Hello there!');
+    await input.press('Enter');
+
+    // Wait for mock LLM response - the mock returns "Hello! I'm a mock LLM for testing"
+    await expect(
+      page.locator('text=mock LLM for testing').first()
+    ).toBeVisible({ timeout: 20000 });
+  });
+
+  test('assistant response appears in chat', async ({ page }) => {
+    await page.goto('/');
+
+    // Create a fresh thread
+    const input = page.locator('[data-testid="message-input"]');
+    await page.waitForSelector('[data-testid="message-input"]', { timeout: 15000 });
+    await input.fill('/newThread');
+    await input.press('Enter');
+    await page.waitForTimeout(1000);
+
+    // Send a message
+    await input.fill('What is this?');
+    await input.press('Enter');
+
+    // Should see an assistant message appear
+    await expect(
+      page.locator('text=Assistant').first()
+    ).toBeVisible({ timeout: 20000 });
+  });
+});
+
+test.describe('Mock LLM Tool Calls', () => {
+  // These tests verify tool call flow with MockLLMClient
+  // Each test creates a fresh thread to ensure clean state
+
+  test('triggers bash tool call from command request', async ({ page }) => {
+    await page.goto('/');
+
+    // Create a fresh thread
+    const input = page.locator('[data-testid="message-input"]');
+    await page.waitForSelector('[data-testid="message-input"]', { timeout: 15000 });
+    await input.fill('/newThread');
+    await input.press('Enter');
+    await page.waitForTimeout(1000);
+
+    // Send a message that triggers bash tool
+    await input.fill('Please run the command: $ ls -la');
+    await input.press('Enter');
+
+    // Should see the bash tool call appear (either in approval panel or chat)
+    await expect(
+      page.locator('text=bash').first()
+    ).toBeVisible({ timeout: 20000 });
+  });
+
+  test('tool call shows in approval panel', async ({ page }) => {
+    await page.goto('/');
+
+    // Create a fresh thread
+    const input = page.locator('[data-testid="message-input"]');
+    await page.waitForSelector('[data-testid="message-input"]', { timeout: 15000 });
+    await input.fill('/newThread');
+    await input.press('Enter');
+    await page.waitForTimeout(1000);
+
+    // Send a message that triggers a tool call
+    await input.fill('Execute command $ pwd');
+    await input.press('Enter');
+
+    // Should see Pending Approvals or Approve button
+    await expect(
+      page.locator('text=Pending Approvals').or(page.locator('text=Approve'))
+    ).toBeVisible({ timeout: 20000 });
+  });
+
+  test('tool execution with auto-approve shows result', async ({ page }) => {
+    await page.goto('/');
+
+    // Create a fresh thread
+    const input = page.locator('[data-testid="message-input"]');
+    await page.waitForSelector('[data-testid="message-input"]', { timeout: 15000 });
+    await input.fill('/newThread');
+    await input.press('Enter');
+    await page.waitForTimeout(1000);
+
+    // Enable auto-approve via command
+    await input.fill('/toggleAutoApproval');
+    await input.press('Enter');
+    await page.waitForTimeout(500);
+
+    // Send a message that triggers a tool call
+    await input.fill('Run command $ echo test');
+    await input.press('Enter');
+
+    // With auto-approve, should see Tool Result or execution
+    await expect(
+      page.locator('text=Tool Result').first()
+    ).toBeVisible({ timeout: 20000 });
+  });
+});
