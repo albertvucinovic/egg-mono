@@ -283,6 +283,7 @@ def _token_stats_for_messages(
 
     total_input_tokens = 0
     total_output_tokens = 0
+    total_reasoning_tokens = 0  # Subset of output tokens (for display, not cost)
     approx_call_count = 0
     cached_tokens = 0
 
@@ -321,6 +322,7 @@ def _token_stats_for_messages(
                 "total_input_tokens": 0,
                 "cached_input_tokens": 0,
                 "total_output_tokens": 0,
+                "total_reasoning_tokens": 0,  # Subset of output tokens
                 "approx_call_count": 0,
             }
         return by_model[k]
@@ -359,8 +361,11 @@ def _token_stats_for_messages(
         msg_id = m.get("msg_id")
         if not isinstance(msg_id, str) or not msg_id:
             msg_id = f"idx-{idx}"
-        out_tok = int(per_message.get(msg_id, {}).get("total_tokens", 0))
+        msg_stats = per_message.get(msg_id, {})
+        out_tok = int(msg_stats.get("total_tokens", 0))
+        reason_tok = int(msg_stats.get("reasoning_tokens", 0))
         total_output_tokens += out_tok
+        total_reasoning_tokens += reason_tok
 
         cached_tokens = input_tok
         last_call_input_tokens = input_tok
@@ -371,10 +376,12 @@ def _token_stats_for_messages(
         bm["total_input_tokens"] += int(input_tok)
         bm["cached_input_tokens"] += int(cached_for_call)
         bm["total_output_tokens"] += int(out_tok)
+        bm["total_reasoning_tokens"] += int(reason_tok)
 
     api_usage = {
         "total_input_tokens": int(total_input_tokens),
         "total_output_tokens": int(total_output_tokens),
+        "total_reasoning_tokens": int(total_reasoning_tokens),  # Subset of output
         "cached_tokens": int(cached_tokens),
         "approx_call_count": int(approx_call_count),
         "cached_input_tokens": int(cached_input_tokens),
@@ -671,6 +678,7 @@ def _merge_token_stats(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
 
     total_input = _int(au_a.get("total_input_tokens")) + _int(au_b.get("total_input_tokens"))
     total_output = _int(au_a.get("total_output_tokens")) + _int(au_b.get("total_output_tokens"))
+    total_reasoning = _int(au_a.get("total_reasoning_tokens")) + _int(au_b.get("total_reasoning_tokens"))
     cached_in = _int(au_a.get("cached_input_tokens")) + _int(au_b.get("cached_input_tokens"))
     call_count = _int(au_a.get("approx_call_count")) + _int(au_b.get("approx_call_count"))
 
@@ -702,16 +710,18 @@ def _merge_token_stats(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             bm = by_model.setdefault(
                 mk,
-                {"total_input_tokens": 0, "cached_input_tokens": 0, "total_output_tokens": 0, "approx_call_count": 0},
+                {"total_input_tokens": 0, "cached_input_tokens": 0, "total_output_tokens": 0, "total_reasoning_tokens": 0, "approx_call_count": 0},
             )
             bm["total_input_tokens"] += _int(usage.get("total_input_tokens"))
             bm["cached_input_tokens"] += _int(usage.get("cached_input_tokens"))
             bm["total_output_tokens"] += _int(usage.get("total_output_tokens"))
+            bm["total_reasoning_tokens"] += _int(usage.get("total_reasoning_tokens"))
             bm["approx_call_count"] += _int(usage.get("approx_call_count"))
 
     out["api_usage"] = {
         "total_input_tokens": int(total_input),
         "total_output_tokens": int(total_output),
+        "total_reasoning_tokens": int(total_reasoning),  # Subset of output tokens
         "cached_tokens": int(_int(cached_tokens)),
         "approx_call_count": int(call_count),
         "cached_input_tokens": int(cached_in),
