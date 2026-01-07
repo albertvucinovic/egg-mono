@@ -299,12 +299,13 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   } = useAppStore();
 
   // Throttled auto-scroll - only scroll every 100ms max during streaming
+  // Uses scrollTop = scrollHeight which is more reliable than scrollIntoView
   const scrollTimeoutRef = useRef<number | null>(null);
   const autoScroll = () => {
     if (scrollTimeoutRef.current) return; // Already scheduled
     scrollTimeoutRef.current = window.setTimeout(() => {
-      if (bottomRef.current) {
-        bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }
       scrollTimeoutRef.current = null;
     }, 100);
