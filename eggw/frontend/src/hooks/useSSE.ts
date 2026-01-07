@@ -68,10 +68,7 @@ export function useSSE(threadId: string | null) {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
 
-        // Ensure streaming flag is set (handles joining mid-stream)
-        setIsStreaming(true);
-
-        // Direct buffer append - O(1), bypasses React
+        // Direct buffer append - O(1), bypasses React entirely
         if (payload.reason) {
           streamingBuffer.appendReasoning(payload.reason);
         }
@@ -80,7 +77,7 @@ export function useSSE(threadId: string | null) {
           streamingBuffer.appendContent(payload.text);
         }
 
-        // Tool calls still go through Zustand (they're not the performance issue)
+        // Tool calls still go through Zustand (less frequent, acceptable)
         if (payload.tool_call) {
           const tc = payload.tool_call;
           const tcId = tc.id || "";

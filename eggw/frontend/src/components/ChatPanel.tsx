@@ -298,11 +298,16 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     isStreaming,
   } = useAppStore();
 
-  // Simple auto-scroll - always scroll to bottom during streaming
+  // Throttled auto-scroll - only scroll every 100ms max during streaming
+  const scrollTimeoutRef = useRef<number | null>(null);
   const autoScroll = () => {
-    if (bottomRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
-    }
+    if (scrollTimeoutRef.current) return; // Already scheduled
+    scrollTimeoutRef.current = window.setTimeout(() => {
+      if (bottomRef.current) {
+        bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
+      }
+      scrollTimeoutRef.current = null;
+    }, 100);
   };
 
   // Subscribe to streaming buffer updates - bypasses React entirely
@@ -321,7 +326,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       }
       lastContentIndexRef.current = chunks.length;
 
-      // Auto-scroll (respects user scroll position)
+      // Throttled auto-scroll
       autoScroll();
     };
 
@@ -346,6 +351,9 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     return () => {
       unsubContent();
       unsubReasoning();
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
     };
   }, []);
 
