@@ -284,6 +284,7 @@ interface ChatPanelProps {
 
 export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
   const streamingReasoningRef = useRef<HTMLDivElement>(null);
   const lastContentIndexRef = useRef(0);
@@ -330,15 +331,18 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   };
 
   // Auto-scroll helper that respects user scroll position
-  // Uses requestAnimationFrame to ensure scroll happens after layout update
+  // Uses scrollIntoView on a bottom anchor for reliable scrolling
   const autoScroll = () => {
-    if (!shouldAutoScrollRef.current || !scrollRef.current) return;
+    if (!shouldAutoScrollRef.current) return;
 
     // Use RAF to ensure DOM has updated before scrolling
     requestAnimationFrame(() => {
-      if (scrollRef.current && shouldAutoScrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        lastScrollTopRef.current = scrollRef.current.scrollTop;
+      if (bottomRef.current && shouldAutoScrollRef.current) {
+        bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
+        // Update lastScrollTop after scroll
+        if (scrollRef.current) {
+          lastScrollTopRef.current = scrollRef.current.scrollTop;
+        }
       }
     });
   };
@@ -420,8 +424,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     lastScrollTopRef.current = 0;
     // Scroll to bottom when switching threads
     requestAnimationFrame(() => {
+      if (bottomRef.current) {
+        bottomRef.current.scrollIntoView({ behavior: "instant", block: "end" });
+      }
       if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         lastScrollTopRef.current = scrollRef.current.scrollTop;
       }
     });
@@ -548,6 +554,8 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
           )}
         </>
       )}
+      {/* Scroll anchor for auto-scroll */}
+      <div ref={bottomRef} />
     </div>
   );
 }

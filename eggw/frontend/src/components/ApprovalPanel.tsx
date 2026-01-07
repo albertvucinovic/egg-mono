@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, X, AlertTriangle } from "lucide-react";
 import { fetchToolCalls, approveTool } from "@/lib/api";
 import { useAppStore, ToolCall } from "@/lib/store";
@@ -10,6 +10,7 @@ interface ApprovalPanelProps {
 }
 
 export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
+  const queryClient = useQueryClient();
   const { currentThreadId, addSystemLog } = useAppStore();
 
   // Tool calls are updated via SSE events - no polling needed
@@ -31,6 +32,9 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
       outputDecision?: string;
     }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision),
     onSuccess: () => {
+      // Invalidate immediately - don't wait for SSE
+      queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+      queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Tool approval updated", "success");
     },
     onError: () => {
