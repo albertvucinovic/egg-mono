@@ -1084,27 +1084,76 @@ async def _cmd_rename(thread_id: str, new_name: str) -> CommandResponse:
 
 
 async def _cmd_cost(thread_id: str) -> CommandResponse:
-    """Handle /cost command."""
+    """Handle /cost command - show token usage and cost (matches egg.py format)."""
     stats = total_token_stats(db, thread_id, llm=llm_client)
-    api_usage = stats.get("api_usage", {})
-    totals = api_usage.get("totals", {})
-    cost_info = api_usage.get("cost_usd", {})
+    api = stats.get("api_usage", {})
+    ctx_tokens = stats.get("context_tokens", 0)
 
-    input_tokens = totals.get("input_tokens", 0)
-    output_tokens = totals.get("output_tokens", 0)
-    reasoning_tokens = totals.get("reasoning_tokens", 0)
-    cached_tokens = totals.get("cached_tokens", 0)
-    cost_usd = cost_info.get("total", 0)
+    if not api:
+        return CommandResponse(
+            success=False,
+            message="No token statistics available for this thread yet; send a message first."
+        )
+
+    ti = api.get("total_input_tokens", 0) or 0
+    to = api.get("total_output_tokens", 0) or 0
+    tr = api.get("total_reasoning_tokens", 0) or 0
+    cached_last = api.get("cached_tokens", 0) or 0  # Most recent call
+    cached_total = api.get("cached_input_tokens", 0) or 0  # Total across all calls
+    calls = api.get("approx_call_count", 0) or 0
+
+    def fmt_tok(n: int) -> str:
+        if n < 1000:
+            return str(n)
+        return f"{n/1000:.2f}k"
+
+    lines = [
+        f"Thread {thread_id[-8:]} token usage:",
+        f"  context_tokens:        {ctx_tokens} ({fmt_tok(ctx_tokens)})",
+        f"  total_input_tokens:    {ti} ({fmt_tok(ti)})",
+        f"  cached_input_tokens:   {cached_total} ({fmt_tok(cached_total)})",
+        f"  cached_tokens (last):  {cached_last} ({fmt_tok(cached_last)})",
+        f"  total_output_tokens:   {to} ({fmt_tok(to)})",
+        f"  total_reasoning_tokens: {tr} ({fmt_tok(tr)})",
+        f"  approx_call_count:     {calls}",
+    ]
+
+    # Cost breakdown
+    cu = api.get("cost_usd", {}) if isinstance(api.get("cost_usd"), dict) else {}
+    total_cost = float(cu.get("total", 0) or 0)
+
+    lines.append("")
+    lines.append(f"Approximate cost (USD): ${total_cost:.4f}")
+
+    # Per-model breakdown if available
+    by_model_cost = cu.get("by_model", {}) if isinstance(cu.get("by_model"), dict) else {}
+    by_model_usage = api.get("by_model", {}) if isinstance(api.get("by_model"), dict) else {}
+
+    if by_model_usage or by_model_cost:
+        lines.append("")
+        lines.append("Per-model breakdown:")
+        model_keys = set(by_model_usage.keys()) | set(by_model_cost.keys())
+        for mk in sorted(model_keys, key=lambda k: -float((by_model_cost.get(k, {}).get("total") or 0))):
+            u = by_model_usage.get(mk, {})
+            c = by_model_cost.get(mk, {})
+            m_in = u.get("total_input_tokens", 0) or 0
+            m_out = u.get("total_output_tokens", 0) or 0
+            m_cached = u.get("cached_input_tokens", 0) or 0
+            m_cost = float(c.get("total", 0) or 0)
+            lines.append(f"  {mk}: {fmt_tok(m_in)} in, {fmt_tok(m_out)} out, {fmt_tok(m_cached)} cached, ${m_cost:.4f}")
 
     return CommandResponse(
         success=True,
-        message=f"Tokens: {input_tokens:,} in, {output_tokens:,} out, {reasoning_tokens:,} reasoning, {cached_tokens:,} cached\nCost: ${cost_usd:.4f}",
+        message="\n".join(lines),
         data={
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "reasoning_tokens": reasoning_tokens,
-            "cached_tokens": cached_tokens,
-            "cost_usd": cost_usd,
+            "context_tokens": ctx_tokens,
+            "input_tokens": ti,
+            "output_tokens": to,
+            "reasoning_tokens": tr,
+            "cached_input_tokens": cached_total,
+            "cached_tokens_last": cached_last,
+            "approx_call_count": calls,
+            "cost_usd": total_cost,
         },
     )
 
@@ -1867,7 +1916,7 @@ async def get_token_stats(thread_id: str):
     input_tokens = api_usage.get("total_input_tokens", 0) or 0
     output_tokens = api_usage.get("total_output_tokens", 0) or 0
     reasoning_tokens = api_usage.get("total_reasoning_tokens", 0) or 0  # Subset of output
-    cached_tokens = api_usage.get("cached_tokens", 0) or 0
+    cached_tokens = api_usage.get("cached_input_tokens", 0) or 0  # Total cached across all calls
 
     return ThreadTokenStats(
         input_tokens=input_tokens,
