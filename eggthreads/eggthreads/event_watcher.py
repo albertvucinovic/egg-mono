@@ -34,13 +34,13 @@ class EventWatcher:
                 idle = 0
                 yield rows
             else:
-                # lightweight backoff to reduce CPU when idle, but still responsive.
-                # When idle, increase sleep up to ~1s to reduce CPU usage.
-                idle = min(idle + 1, 10)
-            # For the first few idle cycles, stay responsive; after that,
-            # back off more aggressively.
-            if idle < 3:
+                # Lightweight backoff to reduce CPU when idle, but stay responsive
+                # during active streaming. Cap at 200ms to avoid chunky delivery.
+                idle = min(idle + 1, 4)
+            # Stay responsive for the first few idle cycles, then back off gently.
+            # Max delay is 200ms to keep streaming smooth.
+            if idle < 2:
                 delay = self.poll_sec
             else:
-                delay = min(self.poll_sec * (idle + 1), 1.0)
+                delay = min(self.poll_sec * (idle + 1), 0.2)
             await asyncio.sleep(delay)
