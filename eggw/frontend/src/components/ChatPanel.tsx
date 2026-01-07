@@ -296,6 +296,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     setMessages,
     streamingToolCalls,
     isStreaming,
+    scrollTrigger,
   } = useAppStore();
 
   // Stick-to-bottom scrolling: track if user intentionally scrolled away
@@ -441,6 +442,21 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       stickToBottomRef.current = true;
     }
   }, [isStreaming]);
+
+  // Scroll to bottom when UI-only messages are added (e.g., /cost, /help)
+  useEffect(() => {
+    if (scrollTrigger > 0) {
+      requestAnimationFrame(() => {
+        if (scrollRef.current) {
+          isAutoScrollingRef.current = true;
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+          requestAnimationFrame(() => {
+            isAutoScrollingRef.current = false;
+          });
+        }
+      });
+    }
+  }, [scrollTrigger]);
 
   if (!currentThreadId) {
     return (

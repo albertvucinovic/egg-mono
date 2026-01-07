@@ -97,6 +97,10 @@ interface AppState {
   // Theme
   theme: string;
   setTheme: (theme: string) => void;
+
+  // Scroll trigger - incremented when UI-only messages are added
+  scrollTrigger: number;
+  triggerScroll: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -122,7 +126,10 @@ export const useAppStore = create<AppState>((set) => ({
   messages: [],
   setMessages: (messages) => set({ messages }),
   addMessage: (message) =>
-    set((state) => ({ messages: [...state.messages, message] })),
+    set((state) => ({
+      messages: [...state.messages, message],
+      scrollTrigger: state.scrollTrigger + 1,  // Trigger scroll when UI-only message added
+    })),
 
   // Streaming content - use chunks array for O(1) append
   // Components should use streamingContentChunks.join("") for display (memoized)
@@ -217,6 +224,10 @@ export const useAppStore = create<AppState>((set) => ({
     }
     set({ theme });
   },
+
+  // Scroll trigger - incremented when UI-only messages are added
+  scrollTrigger: 0,
+  triggerScroll: () => set((state) => ({ scrollTrigger: state.scrollTrigger + 1 })),
 }));
 
 // Initialize theme from localStorage on client side
