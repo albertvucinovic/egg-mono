@@ -1886,18 +1886,39 @@ async def get_token_stats(thread_id: str):
 async def stream_events(thread_id: str):
     """Stream events for a thread via SSE.
 
-    Starts from the current max event_seq to avoid replaying history.
-    Historical messages are fetched via the /messages endpoint.
+    If a stream is already in progress, starts from that stream.open event
+    to catch up with the current streaming session. Otherwise starts from
+    current max event_seq to avoid replaying history.
 
     Uses server-side batching to reduce HTTP overhead during streaming.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    # Get current max event_seq to start from - don't replay historical events
-    # This prevents UI freeze when switching to a thread with many events
+    # Check if there's an active streaming session we should catch up to.
+    # Find the last stream.open and stream.close events to determine if streaming
+    # is in progress. If stream.open is more recent, we're mid-stream and should
+    # replay from just before that stream.open.
     try:
+        cur = db.conn.execute("""
+            SELECT type, event_seq FROM events
+            WHERE thread_id = ? AND type IN ('stream.open', 'stream.close')
+            ORDER BY event_seq DESC LIMIT 2
+        """, (thread_id,))
+        recent_stream_events = cur.fetchall()
+
+        # Default to current max seq (don't replay history)
         current_max_seq = db.max_event_seq(thread_id)
+
+        if recent_stream_events:
+            last_event = recent_stream_events[0]
+            last_type = last_event["type"] if "type" in last_event.keys() else last_event[0]
+            last_seq = last_event["event_seq"] if "event_seq" in last_event.keys() else last_event[1]
+
+            if last_type == "stream.open":
+                # Stream is in progress - start from just before stream.open
+                # so we catch up with the current streaming session
+                current_max_seq = last_seq - 1
     except Exception:
         current_max_seq = -1
 
