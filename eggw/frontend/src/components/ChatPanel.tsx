@@ -292,7 +292,6 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   // Smart auto-scroll: only scroll if user hasn't scrolled away
   // This allows users to scroll up to read while streaming continues
   const shouldAutoScrollRef = useRef(true);
-  const scrollPendingRef = useRef(false);
   const lastScrollTopRef = useRef(0);
   const SCROLL_THRESHOLD = 100; // pixels from bottom to consider "at bottom"
 
@@ -332,17 +331,15 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
 
   // Auto-scroll helper that respects user scroll position
   // Uses requestAnimationFrame to ensure scroll happens after layout update
-  // Debounced to prevent multiple scroll operations from stacking up
   const autoScroll = () => {
     if (!shouldAutoScrollRef.current || !scrollRef.current) return;
-    if (scrollPendingRef.current) return; // Already have a pending scroll
 
-    scrollPendingRef.current = true;
+    // Use RAF to ensure DOM has updated before scrolling
     requestAnimationFrame(() => {
-      if (scrollRef.current) {
+      if (scrollRef.current && shouldAutoScrollRef.current) {
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        lastScrollTopRef.current = scrollRef.current.scrollTop;
       }
-      scrollPendingRef.current = false;
     });
   };
 
@@ -416,6 +413,19 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       setMessages(data);
     }
   }, [data, setMessages]);
+
+  // Reset scroll state when thread changes
+  useEffect(() => {
+    shouldAutoScrollRef.current = true;
+    lastScrollTopRef.current = 0;
+    // Scroll to bottom when switching threads
+    requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        lastScrollTopRef.current = scrollRef.current.scrollTop;
+      }
+    });
+  }, [currentThreadId]);
 
   // Auto-scroll to bottom on new messages (respects user scroll position)
   useEffect(() => {
