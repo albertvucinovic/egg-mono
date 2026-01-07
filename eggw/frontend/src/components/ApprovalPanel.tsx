@@ -14,15 +14,12 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
   const queryClient = useQueryClient();
   const { currentThreadId, addSystemLog } = useAppStore();
 
-  // Tool calls are primarily updated via SSE events.
-  // Light polling (3s) handles cross-process updates (e.g., approval from TUI)
-  // when SSE might miss events due to separate database connections.
+  // Tool calls are updated via SSE events - no polling needed
+  // SSE uses db.path to ensure cross-process events (e.g., TUI approvals) are seen
   const { data: toolCalls } = useQuery({
     queryKey: ["toolCalls", currentThreadId],
     queryFn: () => fetchToolCalls(currentThreadId!),
     enabled: !!currentThreadId,
-    staleTime: 2000, // Consider stale after 2s
-    refetchInterval: 3000, // Poll every 3s for cross-process updates
   });
 
   const approveMutation = useMutation({

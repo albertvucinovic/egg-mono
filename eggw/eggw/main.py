@@ -1881,10 +1881,11 @@ async def stream_events(thread_id: str):
 
     async def event_generator():
         # Use a dedicated database connection for SSE to avoid contention
-        # with the scheduler which uses the global db connection
+        # with the scheduler which uses the global db connection.
+        # IMPORTANT: Use the same path as the global db to ensure we see
+        # the same data (including events from other processes like TUI).
         from eggthreads import ThreadsDB
-        db_path = os.environ.get("EGG_DB_PATH", ".egg/threads.sqlite")
-        sse_db = ThreadsDB(db_path)
+        sse_db = ThreadsDB(db.path)
 
         # Use a short poll interval for responsive streaming
         watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq, poll_sec=0.015)
