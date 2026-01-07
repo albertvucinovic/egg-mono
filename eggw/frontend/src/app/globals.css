@@ -904,6 +904,68 @@
   --scrollbar-thumb: #404040;
 }
 
+/* ============================================
+   Theme: Colorful-Light - Light version of colorful theme
+   ============================================ */
+[data-theme="colorful-light"] {
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --panel-bg: #ffffff;
+  --panel-border: #d4d4d4;
+  --user-msg-bg: #ffffff;
+  --user-msg-border: #d4d4d4;
+  --user-msg-text: #16a34a;
+  --assistant-msg-bg: #ffffff;
+  --assistant-msg-border: #d4d4d4;
+  --assistant-msg-text: #0891b2;
+  --system-msg-bg: #ffffff;
+  --system-msg-border: #d4d4d4;
+  --system-msg-text: #2563eb;
+  --tool-msg-bg: #ffffff;
+  --tool-msg-border: #d4d4d4;
+  --tool-msg-text: #ca8a04;
+  --reasoning-bg: #ffffff;
+  --reasoning-border: #d4d4d4;
+  --reasoning-text: #c026d3;
+  --tool-call-bg: #ffffff;
+  --tool-call-border: #d4d4d4;
+  --tool-call-text: #d97706;
+  --accent: #0891b2;
+  --accent-hover: #0e7490;
+  --heading-color: #0a0a0a;
+  --muted: #737373;
+  --code-bg: #f5f5f5;
+  --scrollbar-thumb: #a3a3a3;
+}
+
+/* ============================================
+   Theme: Colorful-Light-Background - Light colorful with tinted backgrounds
+   ============================================ */
+[data-theme="colorful-light-background"] {
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --panel-bg: #fafafa;
+  --panel-border: #d4d4d4;
+  --user-msg-bg: rgba(22, 163, 74, 0.08);
+  --user-msg-border: #16a34a;
+  --assistant-msg-bg: rgba(8, 145, 178, 0.08);
+  --assistant-msg-border: #0891b2;
+  --system-msg-bg: rgba(37, 99, 235, 0.08);
+  --system-msg-border: #2563eb;
+  --tool-msg-bg: rgba(202, 138, 4, 0.08);
+  --tool-msg-border: #ca8a04;
+  --reasoning-bg: rgba(192, 38, 211, 0.08);
+  --reasoning-border: #c026d3;
+  --tool-call-bg: rgba(217, 119, 6, 0.1);
+  --tool-call-border: #d97706;
+  --accent: #0891b2;
+  --accent-hover: #0e7490;
+  --heading-color: #0a0a0a;
+  --muted: #737373;
+  --code-bg: #f0f0f0;
+  --scrollbar-thumb: #a3a3a3;
+}
+
 body {
   color: var(--foreground);
   background: var(--background);
