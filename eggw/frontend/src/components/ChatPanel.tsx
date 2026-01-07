@@ -292,6 +292,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   // Smart auto-scroll: only scroll if user is at/near bottom
   // This allows users to scroll up to read while streaming continues
   const shouldAutoScrollRef = useRef(true);
+  const scrollPendingRef = useRef(false);
   const SCROLL_THRESHOLD = 50; // pixels from bottom to consider "at bottom"
 
   const {
@@ -315,10 +316,19 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   };
 
   // Auto-scroll helper that respects user scroll position
+  // Uses requestAnimationFrame to ensure scroll happens after layout update
+  // Debounced to prevent multiple scroll operations from stacking up
   const autoScroll = () => {
-    if (shouldAutoScrollRef.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    if (!shouldAutoScrollRef.current || !scrollRef.current) return;
+    if (scrollPendingRef.current) return; // Already have a pending scroll
+
+    scrollPendingRef.current = true;
+    requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+      scrollPendingRef.current = false;
+    });
   };
 
   // Subscribe to streaming buffer updates - bypasses React entirely
