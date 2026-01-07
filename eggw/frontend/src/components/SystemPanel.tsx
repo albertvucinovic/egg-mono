@@ -147,7 +147,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["stats", currentThreadId],
     queryFn: () => fetchTokenStats(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: isStreaming ? 2000 : false, // Poll every 2s during streaming
+    refetchInterval: isStreaming ? 5000 : false, // Poll every 5s during streaming (reduced to minimize backend load)
   });
 
   // Navigate to thread helper

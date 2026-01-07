@@ -284,14 +284,78 @@ interface ChatPanelProps {
 
 export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const streamingContentRef = useRef<HTMLDivElement>(null);
+  const streamingReasoningRef = useRef<HTMLDivElement>(null);
+  const lastContentIndexRef = useRef(0);
+  const lastReasoningIndexRef = useRef(0);
+
   const {
     currentThreadId,
     messages,
     setMessages,
-    streamingContent,
-    streamingReasoning,
     streamingToolCalls,
+    isStreaming,
   } = useAppStore();
+
+  // Subscribe to streaming buffer updates - bypasses React entirely
+  // This is O(1) per chunk with direct DOM manipulation
+  useEffect(() => {
+    // Import here to avoid SSR issues
+    const { streamingBuffer } = require("@/lib/streamingBuffer");
+
+    const handleContentUpdate = () => {
+      if (!streamingContentRef.current) return;
+
+      const chunks = streamingBuffer.contentChunks;
+      // Only append new chunks since last update
+      for (let i = lastContentIndexRef.current; i < chunks.length; i++) {
+        streamingContentRef.current.appendChild(document.createTextNode(chunks[i]));
+      }
+      lastContentIndexRef.current = chunks.length;
+
+      // Auto-scroll
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+    };
+
+    const handleReasoningUpdate = () => {
+      if (!streamingReasoningRef.current) return;
+
+      const chunks = streamingBuffer.reasoningChunks;
+      // Show the reasoning container when first chunk arrives
+      if (chunks.length > 0 && lastReasoningIndexRef.current === 0) {
+        const container = document.getElementById('streaming-reasoning-container');
+        if (container) container.style.display = 'block';
+      }
+      for (let i = lastReasoningIndexRef.current; i < chunks.length; i++) {
+        streamingReasoningRef.current.appendChild(document.createTextNode(chunks[i]));
+      }
+      lastReasoningIndexRef.current = chunks.length;
+    };
+
+    const unsubContent = streamingBuffer.subscribeContent(handleContentUpdate);
+    const unsubReasoning = streamingBuffer.subscribeReasoning(handleReasoningUpdate);
+
+    return () => {
+      unsubContent();
+      unsubReasoning();
+    };
+  }, []);
+
+  // Reset DOM when streaming stops
+  useEffect(() => {
+    if (!isStreaming) {
+      lastContentIndexRef.current = 0;
+      lastReasoningIndexRef.current = 0;
+      if (streamingContentRef.current) {
+        streamingContentRef.current.textContent = '';
+      }
+      if (streamingReasoningRef.current) {
+        streamingReasoningRef.current.textContent = '';
+      }
+    }
+  }, [isStreaming]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["messages", currentThreadId],
@@ -306,12 +370,12 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     }
   }, [data, setMessages]);
 
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom on new messages (not during streaming - that's handled above)
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, streamingContent, streamingReasoning, streamingToolCalls]);
+  }, [messages]);
 
   if (!currentThreadId) {
     return (
@@ -336,7 +400,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
           ))}
 
           {/* Streaming content */}
-          {(streamingContent || streamingReasoning || Object.keys(streamingToolCalls).length > 0) && (
+          {isStreaming && (
             <div
               className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
               style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
@@ -346,61 +410,33 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
                 <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
               </div>
 
-              {/* Streaming reasoning */}
-              {streamingReasoning && (
-                <details
-                  open
-                  className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-                  style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
-                >
-                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
-                    Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
-                  </summary>
-                  <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
-                    {streamingReasoning}
-                  </div>
-                </details>
-              )}
+              {/* Streaming reasoning - direct DOM updates via ref */}
+              <details
+                open
+                className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
+                style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
+                id="streaming-reasoning-container"
+              >
+                <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+                  Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
+                </summary>
+                <div
+                  ref={streamingReasoningRef}
+                  className="mt-2 text-sm whitespace-pre-wrap"
+                  style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
+                />
+              </details>
 
-              {/* Streaming content with GFM tables and LaTeX support */}
-              {streamingContent && (
-                <div className="prose prose-sm max-w-none" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeRaw, rehypeKatex]}
-                    components={{
-                      table({ children }) {
-                        return (
-                          <div className="overflow-x-auto my-4">
-                            <table className="min-w-full border-collapse border" style={{ borderColor: "var(--panel-border)" }}>
-                              {children}
-                            </table>
-                          </div>
-                        );
-                      },
-                      thead({ children }) {
-                        return <thead style={{ background: "var(--panel-bg)" }}>{children}</thead>;
-                      },
-                      th({ children }) {
-                        return (
-                          <th className="px-4 py-2 text-left border font-semibold" style={{ borderColor: "var(--panel-border)", color: "var(--heading-color)" }}>
-                            {children}
-                          </th>
-                        );
-                      },
-                      td({ children }) {
-                        return (
-                          <td className="px-4 py-2 border" style={{ borderColor: "var(--panel-border)" }}>
-                            {children}
-                          </td>
-                        );
-                      },
-                    }}
-                  >
-                    {preprocessLatex(streamingContent)}
-                  </ReactMarkdown>
-                </div>
-              )}
+              {/* Streaming content - direct DOM updates via ref for O(1) performance */}
+              <div
+                ref={streamingContentRef}
+                className="text-sm"
+                style={{
+                  color: "var(--assistant-msg-text, var(--foreground))",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              />
 
               {/* Streaming tool calls */}
               {Object.keys(streamingToolCalls).length > 0 && (

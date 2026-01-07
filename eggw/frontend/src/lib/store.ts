@@ -50,13 +50,15 @@ interface AppState {
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
 
-  // Streaming content
+  // Streaming content - stored as array of chunks for O(1) append
   streamingContent: string;
+  streamingContentChunks: string[];
   setStreamingContent: (content: string) => void;
   appendStreamingContent: (chunk: string) => void;
 
-  // Streaming reasoning
+  // Streaming reasoning - stored as array of chunks for O(1) append
   streamingReasoning: string;
+  streamingReasoningChunks: string[];
   setStreamingReasoning: (content: string) => void;
   appendStreamingReasoning: (chunk: string) => void;
 
@@ -105,7 +107,9 @@ export const useAppStore = create<AppState>((set) => ({
     // Clear messages immediately for instant UI feedback when switching threads
     messages: [],
     streamingContent: "",
+    streamingContentChunks: [],
     streamingReasoning: "",
+    streamingReasoningChunks: [],
     streamingToolCalls: {},
     isStreaming: false,
   }),
@@ -120,17 +124,31 @@ export const useAppStore = create<AppState>((set) => ({
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
 
-  // Streaming content
-  streamingContent: "",
-  setStreamingContent: (content) => set({ streamingContent: content }),
+  // Streaming content - use chunks array for O(1) append
+  // Components should use streamingContentChunks.join("") for display (memoized)
+  streamingContent: "",  // Kept for backwards compat, set on clear only
+  streamingContentChunks: [],
+  setStreamingContent: (content) => set({
+    streamingContent: content,
+    streamingContentChunks: content ? [content] : [],
+  }),
   appendStreamingContent: (chunk) =>
-    set((state) => ({ streamingContent: state.streamingContent + chunk })),
+    set((state) => ({
+      // O(1) array spread - no join here, components memoize the join
+      streamingContentChunks: [...state.streamingContentChunks, chunk],
+    })),
 
-  // Streaming reasoning
-  streamingReasoning: "",
-  setStreamingReasoning: (content) => set({ streamingReasoning: content }),
+  // Streaming reasoning - use chunks array for O(1) append
+  streamingReasoning: "",  // Kept for backwards compat, set on clear only
+  streamingReasoningChunks: [],
+  setStreamingReasoning: (content) => set({
+    streamingReasoning: content,
+    streamingReasoningChunks: content ? [content] : [],
+  }),
   appendStreamingReasoning: (chunk) =>
-    set((state) => ({ streamingReasoning: state.streamingReasoning + chunk })),
+    set((state) => ({
+      streamingReasoningChunks: [...state.streamingReasoningChunks, chunk],
+    })),
 
   // Streaming tool calls
   streamingToolCalls: {},

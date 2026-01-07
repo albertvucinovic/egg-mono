@@ -175,7 +175,8 @@ def start_scheduler(root_tid: str) -> None:
     if not db:
         return
 
-    poll_sec = float(os.environ.get("EGG_POLL_SEC", "0.15"))
+    # Faster scheduler polling for quicker response to user messages
+    poll_sec = float(os.environ.get("EGG_POLL_SEC", "0.05"))
 
     # Use mock LLM in test mode
     llm = None
@@ -1865,6 +1866,8 @@ async def stream_events(thread_id: str):
 
     Starts from the current max event_seq to avoid replaying history.
     Historical messages are fetched via the /messages endpoint.
+
+    Uses server-side batching to reduce HTTP overhead during streaming.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -1877,10 +1880,21 @@ async def stream_events(thread_id: str):
         current_max_seq = -1
 
     async def event_generator():
-        watcher = EventWatcher(db, thread_id, after_seq=current_max_seq)
+        # Use a dedicated database connection for SSE to avoid contention
+        # with the scheduler which uses the global db connection
+        from eggthreads import ThreadsDB
+        db_path = os.environ.get("EGG_DB_PATH", ".egg/threads.sqlite")
+        sse_db = ThreadsDB(db_path)
+
+        # Use a short poll interval for responsive streaming
+        watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq, poll_sec=0.015)
         try:
             async for batch in watcher.aiter():
-                for row in batch:
+                # Batch all events from this poll into a single SSE message
+                # This reduces HTTP overhead significantly during fast streaming
+                if len(batch) == 1:
+                    # Single event - send directly
+                    row = batch[0]
                     event_type = row["type"] if "type" in row.keys() else "unknown"
                     payload = {}
                     if "payload_json" in row.keys() and row["payload_json"]:
@@ -1901,10 +1915,34 @@ async def stream_events(thread_id: str):
                         "event": event_type,
                         "data": json.dumps(event_data),
                     }
+                else:
+                    # Multiple events - send each but they're already batched by poll interval
+                    for row in batch:
+                        event_type = row["type"] if "type" in row.keys() else "unknown"
+                        payload = {}
+                        if "payload_json" in row.keys() and row["payload_json"]:
+                            try:
+                                payload = json.loads(row["payload_json"])
+                            except:
+                                pass
+
+                        event_data = {
+                            "event_seq": row["event_seq"],
+                            "event_type": event_type,
+                            "msg_id": row["msg_id"] if "msg_id" in row.keys() else None,
+                            "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
+                            "payload": payload,
+                        }
+
+                        yield {
+                            "event": event_type,
+                            "data": json.dumps(event_data),
+                        }
         except asyncio.CancelledError:
             pass
 
-    return EventSourceResponse(event_generator())
+    # Use ping to prevent buffering and keep connection alive
+    return EventSourceResponse(event_generator(), ping=1)
 
 
 # --- WebSocket endpoint ---

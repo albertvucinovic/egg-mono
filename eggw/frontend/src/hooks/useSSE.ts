@@ -3,16 +3,13 @@
 import { useEffect, useRef, useCallback } from "react";
 import { createEventSource } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+import { streamingBuffer } from "@/lib/streamingBuffer";
 import { useQueryClient } from "@tanstack/react-query";
 
 export function useSSE(threadId: string | null) {
   const eventSourceRef = useRef<EventSource | null>(null);
   const queryClient = useQueryClient();
   const {
-    setStreamingContent,
-    appendStreamingContent,
-    setStreamingReasoning,
-    appendStreamingReasoning,
     setStreamingToolCalls,
     appendToolCallArguments,
     setIsStreaming,
@@ -22,14 +19,13 @@ export function useSSE(threadId: string | null) {
   const connect = useCallback(() => {
     if (!threadId) return;
 
-    // Close existing connection and clear streaming state
+    // Close existing connection
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
 
-    // Clear any previous streaming state when connecting to a new thread
-    setStreamingContent("");
-    setStreamingReasoning("");
+    // Clear streaming state
+    streamingBuffer.clear();
     setStreamingToolCalls({});
     setIsStreaming(false);
 
@@ -46,13 +42,11 @@ export function useSSE(threadId: string | null) {
     };
 
     // Handle stream.open - streaming started
-    es.addEventListener("stream.open", (e) => {
+    es.addEventListener("stream.open", () => {
       try {
-        setStreamingContent("");
-        setStreamingReasoning("");
+        streamingBuffer.clear();
         setStreamingToolCalls({});
         setIsStreaming(true);
-        // State changed to running - invalidate threadState query
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
         addSystemLog("Streaming started", "info");
       } catch (err) {
@@ -61,25 +55,25 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle stream.delta - streaming content/reasoning/tool_call chunks
+    // Direct buffer updates - O(1) per chunk, no React re-render
     es.addEventListener("stream.delta", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
 
-        // If we receive deltas, we're streaming (handles joining mid-stream)
+        // Ensure streaming flag is set (handles joining mid-stream)
         setIsStreaming(true);
 
-        // Handle reasoning deltas (backend sends 'reason' field)
+        // Direct buffer append - O(1), bypasses React
         if (payload.reason) {
-          appendStreamingReasoning(payload.reason);
+          streamingBuffer.appendReasoning(payload.reason);
         }
 
-        // Handle content deltas (backend sends 'text' field)
         if (payload.text) {
-          appendStreamingContent(payload.text);
+          streamingBuffer.appendContent(payload.text);
         }
 
-        // Handle tool call argument streaming
+        // Tool calls still go through Zustand (they're not the performance issue)
         if (payload.tool_call) {
           const tc = payload.tool_call;
           const tcId = tc.id || "";
@@ -95,15 +89,12 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle stream.close - streaming finished
-    es.addEventListener("stream.close", (e) => {
+    es.addEventListener("stream.close", () => {
       try {
-        setStreamingContent("");
-        setStreamingReasoning("");
+        streamingBuffer.clear();
         setStreamingToolCalls({});
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
-        // Refresh messages, stats, state, and tool calls
-        // Tool calls need to be refreshed because LLM may have requested tools
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
         queryClient.invalidateQueries({ queryKey: ["stats", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
@@ -113,14 +104,12 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle msg.create - new message created (but not during streaming)
+    // Handle msg.create - new message created
     es.addEventListener("msg.create", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const role = payload.role || "unknown";
-        // Only log and refresh for non-assistant messages during streaming
-        // Assistant messages are handled by stream.close
         if (role !== "assistant") {
           addSystemLog(`Message created: ${role}`, "info");
           queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
@@ -130,7 +119,7 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle tool_call.execution_started - tool is about to run
+    // Handle tool_call.execution_started
     es.addEventListener("tool_call.execution_started", (e) => {
       try {
         const data = JSON.parse(e.data);
@@ -143,8 +132,8 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle tool_call.finished - tool completed
-    es.addEventListener("tool_call.finished", (e) => {
+    // Handle tool_call.finished
+    es.addEventListener("tool_call.finished", () => {
       try {
         addSystemLog("Tool finished", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -155,8 +144,8 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle tool_call.approval - approval decision made
-    es.addEventListener("tool_call.approval", (e) => {
+    // Handle tool_call.approval
+    es.addEventListener("tool_call.approval", () => {
       try {
         addSystemLog("Tool approval processed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -166,8 +155,8 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle tool_call.output_approval - output approval needed
-    es.addEventListener("tool_call.output_approval", (e) => {
+    // Handle tool_call.output_approval
+    es.addEventListener("tool_call.output_approval", () => {
       try {
         addSystemLog("Tool output approval needed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -178,7 +167,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle sandbox.config events
-    es.addEventListener("sandbox.config", (e) => {
+    es.addEventListener("sandbox.config", () => {
       try {
         addSystemLog("Sandbox config changed", "info");
         queryClient.invalidateQueries({ queryKey: ["sandbox", threadId] });
@@ -190,10 +179,6 @@ export function useSSE(threadId: string | null) {
     return es;
   }, [
     threadId,
-    setStreamingContent,
-    appendStreamingContent,
-    setStreamingReasoning,
-    appendStreamingReasoning,
     setStreamingToolCalls,
     appendToolCallArguments,
     setIsStreaming,
