@@ -446,7 +446,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
               data-index={index}
               className="px-3 py-2 cursor-pointer flex items-center gap-3"
               style={{
-                background: index === selectedIndex ? "var(--user-msg-bg)" : undefined,
+                background: index === selectedIndex ? "var(--selection-bg)" : undefined,
               }}
               onClick={() => applySuggestion(suggestion)}
               onMouseEnter={() => setSelectedIndex(index)}
