@@ -14,15 +14,10 @@ run_backend_tests() {
     echo ">>> Running Backend API Tests..."
     cd "$SCRIPT_DIR/backend"
 
-    # Activate virtualenv
-    if [ -f "$SCRIPT_DIR/../egg/venv/bin/activate" ]; then
-        source "$SCRIPT_DIR/../egg/venv/bin/activate"
-    fi
-
     # Install test dependencies if needed
     pip install -q pytest httpx httpx-sse 2>/dev/null || true
 
-    # Run tests
+    # Run tests (uses isolated test database automatically)
     pytest test_api.py -v --tb=short
     echo ""
 }
@@ -38,7 +33,10 @@ run_frontend_tests() {
         npx playwright install chromium
     fi
 
-    # Run tests
+    # Clean test database to ensure isolation
+    rm -rf /tmp/eggw-test
+
+    # Run tests (uses isolated test database on ports 8099/3099)
     npx playwright test --reporter=list
     echo ""
 }
@@ -60,6 +58,9 @@ case "$TEST_TYPE" in
         echo "  backend  - Run backend API tests (pytest)"
         echo "  frontend - Run frontend E2E tests (Playwright)"
         echo "  all      - Run all tests (default)"
+        echo ""
+        echo "Tests use isolated databases and ports (8099/3099) to avoid"
+        echo "conflicts with running instances."
         exit 1
         ;;
 esac

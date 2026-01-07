@@ -12,29 +12,35 @@ import { test, expect, Page } from '@playwright/test';
  * Run with: npx playwright test
  */
 
-// Helper to wait for backend to be ready
-async function waitForBackend(page: Page) {
-  await page.waitForResponse(
-    response => response.url().includes('/api/health') && response.status() === 200,
-    { timeout: 10000 }
-  );
+// Helper to wait for page to be fully loaded
+async function waitForPageLoad(page: Page) {
+  // Wait for the page to have the header
+  await page.waitForSelector('h1:has-text("eggw")', { timeout: 15000 });
+  // Wait for a thread to be auto-selected (current UI auto-selects most recent thread)
+  await page.waitForTimeout(2000);
 }
 
-// Helper to create a new thread
-async function createThread(page: Page, name: string = 'Test Thread'): Promise<string> {
-  // Click new thread button
-  await page.click('[data-testid="new-thread-btn"]');
+// Helper to ensure we have a thread (creates one if none exists)
+async function ensureThread(page: Page): Promise<void> {
+  // Wait for page to load
+  await waitForPageLoad(page);
 
-  // Wait for thread to be created (URL should change or thread ID should appear)
-  await page.waitForSelector('[data-testid="thread-id"]', { timeout: 5000 });
-
-  const threadId = await page.getAttribute('[data-testid="thread-id"]', 'data-value');
-  return threadId || '';
+  // Check if thread info panel is visible (indicates a thread is selected)
+  const threadInfo = page.locator('text=Thread Info');
+  try {
+    await expect(threadInfo).toBeVisible({ timeout: 3000 });
+  } catch {
+    // No thread selected - create one via Ctrl+N
+    await page.keyboard.press('Control+n');
+    await page.waitForTimeout(1000);
+    await expect(threadInfo).toBeVisible({ timeout: 5000 });
+  }
 }
 
 // Helper to send a message
 async function sendMessage(page: Page, content: string) {
   const input = page.locator('[data-testid="message-input"]');
+  await expect(input).toBeVisible({ timeout: 5000 });
   await input.fill(content);
   await input.press('Enter');
 }
@@ -42,69 +48,74 @@ async function sendMessage(page: Page, content: string) {
 test.describe('Basic Operations', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    await waitForPageLoad(page);
   });
 
   test('page loads with correct title', async ({ page }) => {
     await expect(page).toHaveTitle(/eggw/i);
   });
 
-  test('can see thread list panel', async ({ page }) => {
-    await expect(page.locator('text=Threads')).toBeVisible();
+  test('can see header with eggw title', async ({ page }) => {
+    await expect(page.locator('h1:has-text("eggw")')).toBeVisible();
   });
 
-  test('can see system panel', async ({ page }) => {
-    await expect(page.locator('text=System Log')).toBeVisible();
+  test('can see system log panel', async ({ page }) => {
+    await expect(page.locator('text=System Log')).toBeVisible({ timeout: 5000 });
   });
 });
 
 test.describe('Thread Operations', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    await waitForPageLoad(page);
   });
 
-  test('can create a new thread', async ({ page }) => {
-    // Find and click new thread button (+ icon)
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
+  test('can create a new thread via /newThread command', async ({ page }) => {
+    // Use /newThread command to create a new thread
+    const input = page.locator('[data-testid="message-input"]');
+    await expect(input).toBeVisible({ timeout: 5000 });
+    await input.fill('/newThread');
+    await input.press('Enter');
 
-    // Should see the new thread in the list or chat area becomes active
-    await expect(page.locator('[data-testid="chat-panel"]')).toBeVisible({ timeout: 5000 });
+    // Should see system log about created thread (text is "Created new thread: XXXX")
+    await expect(page.locator('text=Created new thread')).toBeVisible({ timeout: 5000 });
   });
 
   test('can send a message', async ({ page }) => {
-    // Create thread first
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
+    // Ensure we have a thread
+    await ensureThread(page);
 
-    // Wait for message input to be available
-    await page.waitForSelector('textarea, input[type="text"]', { timeout: 5000 });
+    // Wait for message input
+    const input = page.locator('[data-testid="message-input"]');
+    await expect(input).toBeVisible({ timeout: 5000 });
 
     // Type and send message
-    const input = page.locator('textarea, input[type="text"]').first();
     await input.fill('Hello, this is a test message');
     await input.press('Enter');
 
-    // Should see "Message sent" in system log or message appears in chat
-    await expect(page.locator('text=Message sent').or(page.locator('text=Hello, this is a test'))).toBeVisible({ timeout: 5000 });
+    // Should see "Message sent" in system log
+    await expect(page.locator('text=Message sent')).toBeVisible({ timeout: 5000 });
   });
 });
 
 test.describe('Streaming', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    await ensureThread(page);
   });
 
-  test('shows streaming indicator when receiving response', async ({ page }) => {
-    // Create thread and send message
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
+  test('shows SSE connected after thread selection', async ({ page }) => {
+    // Should see "SSE connected" in system log
+    await expect(page.locator('text=SSE connected')).toBeVisible({ timeout: 5000 });
+  });
 
-    await page.waitForSelector('textarea, input[type="text"]', { timeout: 5000 });
-    const input = page.locator('textarea, input[type="text"]').first();
+  test('shows streaming when receiving response', async ({ page }) => {
+    const input = page.locator('[data-testid="message-input"]');
+    await expect(input).toBeVisible({ timeout: 5000 });
     await input.fill('Say "Hello World"');
     await input.press('Enter');
 
-    // Should see streaming indicator or "Streaming started" log
+    // Should see streaming indicator or "Streaming" log
     // This depends on LLM being available
     const streamingIndicator = page.locator('text=Streaming').or(page.locator('text=Running'));
 
@@ -116,50 +127,12 @@ test.describe('Streaming', () => {
       await expect(page.locator('text=Message sent')).toBeVisible();
     }
   });
-
-  test('SSE connection established on thread open', async ({ page }) => {
-    // Create thread
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
-
-    // Should see "SSE connected" in system log
-    await expect(page.locator('text=SSE connected')).toBeVisible({ timeout: 5000 });
-  });
-});
-
-test.describe('Tool Approval', () => {
-  // These tests require a thread with tool calls - may need mock or real LLM
-
-  test('approval panel shows when tool needs approval', async ({ page }) => {
-    await page.goto('/');
-
-    // This test is harder without mocking - we'd need to either:
-    // 1. Have a real LLM that calls tools
-    // 2. Mock the backend to return tool call states
-    // 3. Inject test data directly into the database
-
-    // For now, just verify the approval panel component renders correctly
-    // when there are pending approvals (can be enhanced with fixtures)
-
-    // Create thread
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
-
-    // The approval panel should not be visible when there are no pending tools
-    // (it returns null when pendingTools.length === 0)
-    await page.waitForTimeout(1000); // Wait for queries to settle
-
-    // Verify thread loaded
-    await expect(page.locator('text=Thread Info')).toBeVisible();
-  });
 });
 
 test.describe('Settings and Controls', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    // Create a thread to have settings available
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
+    await ensureThread(page);
   });
 
   test('shows thread info in system panel', async ({ page }) => {
@@ -171,6 +144,12 @@ test.describe('Settings and Controls', () => {
     await expect(page.locator('text=Model:')).toBeVisible({ timeout: 5000 });
     // Should have a select dropdown
     await expect(page.locator('select')).toBeVisible();
+  });
+
+  test('shows token stats', async ({ page }) => {
+    await expect(page.locator('text=Token Stats')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Input:')).toBeVisible();
+    await expect(page.locator('text=Output:')).toBeVisible();
   });
 
   test('can toggle auto-approval', async ({ page }) => {
@@ -186,52 +165,65 @@ test.describe('Settings and Controls', () => {
     // Should see confirmation in system log
     await expect(page.locator('text=Auto-approval')).toBeVisible({ timeout: 3000 });
   });
-
-  test('shows token stats', async ({ page }) => {
-    await expect(page.locator('text=Token Stats')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Input:')).toBeVisible();
-    await expect(page.locator('text=Output:')).toBeVisible();
-  });
 });
 
 test.describe('Keyboard Shortcuts', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
+    await ensureThread(page);
   });
 
-  test('Escape cancels streaming', async ({ page }) => {
-    // Send a message to start streaming
-    await page.waitForSelector('textarea, input[type="text"]', { timeout: 5000 });
-    const input = page.locator('textarea, input[type="text"]').first();
-    await input.fill('Write a long essay about testing');
-    await input.press('Enter');
+  test('help modal opens via button click', async ({ page }) => {
+    // Click the "Press ? for help" button to open help modal
+    await page.click('text=Press ? for help');
+    await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible({ timeout: 3000 });
+  });
 
-    // Wait a bit then press Escape
-    await page.waitForTimeout(500);
-    await page.keyboard.press('Escape');
+  test('help modal closes with Close button', async ({ page }) => {
+    // Click the "Press ? for help" button to open help modal
+    await page.click('text=Press ? for help');
+    await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible({ timeout: 3000 });
+    // Click the Close button
+    await page.click('button:has-text("Close")');
+    await expect(page.locator('text=Keyboard Shortcuts')).not.toBeVisible({ timeout: 2000 });
+  });
 
-    // Should see cancellation message or streaming stopped
-    // (depends on whether streaming actually started)
+  test('i focuses input', async ({ page }) => {
+    // First click somewhere to unfocus input
+    await page.click('h1');
+    await page.keyboard.press('i');
+
+    const input = page.locator('[data-testid="message-input"]');
+    await expect(input).toBeFocused({ timeout: 2000 });
   });
 });
 
-test.describe('Theme', () => {
-  test('can change theme via autocomplete', async ({ page }) => {
+test.describe('Commands', () => {
+  test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    await ensureThread(page);
+  });
 
-    // Create thread
-    const newThreadBtn = page.locator('button').filter({ has: page.locator('svg') }).first();
-    await newThreadBtn.click();
+  test('slash shows autocomplete', async ({ page }) => {
+    const input = page.locator('[data-testid="message-input"]');
+    await expect(input).toBeVisible({ timeout: 5000 });
 
-    await page.waitForSelector('textarea, input[type="text"]', { timeout: 5000 });
-    const input = page.locator('textarea, input[type="text"]').first();
-
-    // Type /theme command
-    await input.fill('/theme');
+    // Type /
+    await input.fill('/');
 
     // Should see autocomplete suggestions
-    await expect(page.locator('text=theme').first()).toBeVisible({ timeout: 2000 });
+    await expect(page.locator('[data-testid="autocomplete"]').or(page.locator('text=/newThread'))).toBeVisible({ timeout: 2000 });
+  });
+
+  test('/help command works', async ({ page }) => {
+    const input = page.locator('[data-testid="message-input"]');
+    await expect(input).toBeVisible({ timeout: 5000 });
+
+    // Type /help
+    await input.fill('/help');
+    await input.press('Enter');
+
+    // Should see help response
+    await expect(page.locator('text=Available commands').or(page.locator('text=/help'))).toBeVisible({ timeout: 5000 });
   });
 });
