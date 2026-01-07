@@ -33,19 +33,12 @@ export function useSSE(threadId: string | null) {
     eventSourceRef.current = es;
 
     es.onopen = () => {
-      console.log("[SSE] Connection opened for thread:", threadId);
       addSystemLog("SSE connected", "info");
     };
 
-    es.onerror = (err) => {
-      console.error("[SSE] Connection error:", err);
+    es.onerror = () => {
       addSystemLog("SSE connection error", "error");
       setIsStreaming(false);
-    };
-
-    // Debug: log all SSE events
-    es.onmessage = (event) => {
-      console.log("[SSE] generic message:", event.type, event.data?.slice(0, 200));
     };
 
     // Handle stream.open - streaming started
@@ -111,7 +104,6 @@ export function useSSE(threadId: string | null) {
     // Handle msg.create - new message created
     es.addEventListener("msg.create", (e) => {
       try {
-        console.log("[SSE] msg.create received:", e.data?.slice(0, 200));
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const role = payload.role || "unknown";
@@ -148,9 +140,8 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool_call.approval
-    es.addEventListener("tool_call.approval", (event) => {
+    es.addEventListener("tool_call.approval", () => {
       try {
-        console.log("[SSE] tool_call.approval received:", event.data);
         addSystemLog("Tool approval processed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });

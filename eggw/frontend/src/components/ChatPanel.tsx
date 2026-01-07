@@ -298,17 +298,34 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     isStreaming,
   } = useAppStore();
 
-  // Throttled auto-scroll - only scroll every 100ms max during streaming
-  // Uses scrollTop = scrollHeight which is more reliable than scrollIntoView
+  // Smart scroll: track if user has scrolled away from bottom
+  const userScrolledAwayRef = useRef(false);
   const scrollTimeoutRef = useRef<number | null>(null);
+
+  // Check if near bottom (within 150px)
+  const isNearBottom = () => {
+    if (!scrollRef.current) return true;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    return scrollHeight - scrollTop - clientHeight < 150;
+  };
+
+  // Handle user scroll - detect if they scrolled away or back to bottom
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    userScrolledAwayRef.current = !isNearBottom();
+  };
+
+  // Throttled auto-scroll - respects user scroll position
   const autoScroll = () => {
+    if (userScrolledAwayRef.current) return; // User scrolled away, don't auto-scroll
     if (scrollTimeoutRef.current) return; // Already scheduled
+
     scrollTimeoutRef.current = window.setTimeout(() => {
-      if (scrollRef.current) {
+      if (scrollRef.current && !userScrolledAwayRef.current) {
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }
       scrollTimeoutRef.current = null;
-    }, 100);
+    }, 50); // 50ms throttle for smoother scrolling
   };
 
   // Subscribe to streaming buffer updates - bypasses React entirely
@@ -385,22 +402,20 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     }
   }, [data, setMessages]);
 
-  // Scroll to bottom when thread changes
+  // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
+    userScrolledAwayRef.current = false;
     requestAnimationFrame(() => {
-      autoScroll();
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
     });
   }, [currentThreadId]);
 
-  // Auto-scroll to bottom on new messages (respects user scroll position)
-  useEffect(() => {
-    autoScroll();
-  }, [messages]);
-
-  // Scroll to bottom when streaming starts
+  // Reset scroll state when streaming starts
   useEffect(() => {
     if (isStreaming) {
-      autoScroll();
+      userScrolledAwayRef.current = false;
     }
   }, [isStreaming]);
 
@@ -413,7 +428,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   }
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
+    <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
       {isLoading ? (
         <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
       ) : messages.length === 0 ? (

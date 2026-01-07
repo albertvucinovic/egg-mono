@@ -1891,10 +1891,8 @@ async def stream_events(thread_id: str):
 
         # Use a short poll interval for responsive streaming
         watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq, poll_sec=0.015)
-        print(f"[SSE] Starting watcher from seq={current_max_seq}")
         try:
             async for batch in watcher.aiter():
-                print(f"[SSE] Got batch of {len(batch)} events: {[r['type'] for r in batch]}")
                 # Batch all events from this poll into a single SSE message
                 # This reduces HTTP overhead significantly during fast streaming
                 if len(batch) == 1:
@@ -1915,10 +1913,6 @@ async def stream_events(thread_id: str):
                         "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
                         "payload": payload,
                     }
-
-                    # Debug: log important events
-                    if "approval" in event_type or event_type == "msg.create":
-                        print(f"[SSE] Emitting {event_type}: seq={event_data.get('event_seq')}")
 
                     yield {
                         "event": event_type,
@@ -1942,10 +1936,6 @@ async def stream_events(thread_id: str):
                             "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
                             "payload": payload,
                         }
-
-                        # Debug: log important events
-                        if "approval" in event_type or event_type == "msg.create":
-                            print(f"[SSE] Emitting (batch) {event_type}: seq={event_data.get('event_seq')}")
 
                         yield {
                             "event": event_type,
