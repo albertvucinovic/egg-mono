@@ -1976,6 +1976,20 @@ class SubtreeScheduler:
                     continue
                 last_checked_seq[tid] = max_seq
 
+                # Skip threads with an active lease held by another process.
+                # This prevents unnecessary is_thread_runnable() calls and
+                # failed try_open_stream() attempts when TUI or another eggw
+                # instance is already running the thread.
+                try:
+                    row = self.db.current_open(tid)
+                    if row:
+                        lease_until = row['lease_until']
+                        now_iso = datetime.utcnow().strftime(ISO)
+                        if lease_until and lease_until > now_iso:
+                            continue  # Another process has the lease
+                except Exception:
+                    pass  # On error, proceed with normal check
+
                 if is_thread_runnable(self.db, tid):
                     running_threads.add(tid)
                     asyncio.create_task(drive(tid))

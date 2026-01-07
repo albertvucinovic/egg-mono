@@ -15,11 +15,13 @@ class EventWatcher:
           ...
     """
 
-    def __init__(self, db: ThreadsDB, thread_id: str, after_seq: int = -1, poll_sec: float = 0.05):
+    def __init__(self, db: ThreadsDB, thread_id: str, after_seq: int = -1,
+                 poll_sec: float = 0.05, max_backoff: float = 0.2):
         self.db = db
         self.thread_id = thread_id
         self.after_seq = after_seq
         self.poll_sec = poll_sec
+        self.max_backoff = max_backoff
 
     async def aiter(self) -> AsyncIterator[List]:
         idle = 0
@@ -33,14 +35,16 @@ class EventWatcher:
                 self.after_seq = rows[-1]["event_seq"]
                 idle = 0
                 yield rows
+                # During active streaming, poll immediately without sleeping
+                # to stay responsive. Only sleep after idle iterations.
+                continue
             else:
                 # Lightweight backoff to reduce CPU when idle, but stay responsive
-                # during active streaming. Cap at 200ms to avoid chunky delivery.
+                # during active streaming.
                 idle = min(idle + 1, 4)
             # Stay responsive for the first few idle cycles, then back off gently.
-            # Max delay is 200ms to keep streaming smooth.
             if idle < 2:
                 delay = self.poll_sec
             else:
-                delay = min(self.poll_sec * (idle + 1), 0.2)
+                delay = min(self.poll_sec * (idle + 1), self.max_backoff)
             await asyncio.sleep(delay)
