@@ -64,7 +64,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["threadSettings", currentThreadId],
     queryFn: () => fetchThreadSettings(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 5000,
+    refetchInterval: 30000, // Fallback polling - settings rarely change
   });
 
   // Fetch thread state - updated via SSE events (no polling needed)
@@ -94,7 +94,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["sandbox", currentThreadId],
     queryFn: () => fetchSandboxStatus(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 5000,
+    refetchInterval: 30000, // Fallback polling - sandbox status rarely changes
   });
 
   // Sandbox toggle mutation (uses /toggleSandboxing command)
@@ -147,7 +147,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["stats", currentThreadId],
     queryFn: () => fetchTokenStats(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: isStreaming ? 1000 : 5000, // 1s during streaming, 5s otherwise
+    // Stats are invalidated via SSE on stream.close
   });
 
   // Navigate to thread helper

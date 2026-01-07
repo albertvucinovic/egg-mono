@@ -39,12 +39,11 @@ export default function Home() {
     enabled: !!currentThreadId,
   });
 
-  // Fetch sandbox status
+  // Fetch sandbox status (shared query with SystemPanel, which handles polling)
   const { data: sandboxStatus } = useQuery({
     queryKey: ["sandbox", currentThreadId],
     queryFn: () => fetchSandboxStatus(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 5000, // Poll every 5s for changes
   });
 
   // Auto-create or select a thread on app load

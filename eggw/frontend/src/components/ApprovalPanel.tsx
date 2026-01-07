@@ -14,11 +14,11 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
   const queryClient = useQueryClient();
   const { currentThreadId, addSystemLog } = useAppStore();
 
+  // Tool calls are updated via SSE events (tool_call.create, tool_call.approval)
   const { data: toolCalls } = useQuery({
     queryKey: ["toolCalls", currentThreadId],
     queryFn: () => fetchToolCalls(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 2000, // Poll for updates
   });
 
   const approveMutation = useMutation({
