@@ -1889,8 +1889,10 @@ async def stream_events(thread_id: str):
         sse_db = ThreadsDB(db.path)
         print(f"[SSE] Connected to {sse_db.path.absolute()} for thread {thread_id}")
 
-        # Use a short poll interval for responsive streaming
-        watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq, poll_sec=0.015)
+        # Use short poll interval and minimal backoff for responsive streaming
+        # max_backoff=0.03 (30ms) prevents event accumulation during idle periods
+        watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq,
+                               poll_sec=0.015, max_backoff=0.03)
         try:
             async for batch in watcher.aiter():
                 # Batch all events from this poll into a single SSE message
