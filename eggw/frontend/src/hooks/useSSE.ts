@@ -102,10 +102,12 @@ export function useSSE(threadId: string | null) {
         setStreamingToolCalls({});
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
-        // Refresh messages, stats, and state to get the final content and new state
+        // Refresh messages, stats, state, and tool calls
+        // Tool calls need to be refreshed because LLM may have requested tools
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
         queryClient.invalidateQueries({ queryKey: ["stats", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
       } catch (err) {
         console.error("Failed to handle stream.close:", err);
       }
@@ -128,27 +130,50 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    // Handle tool_call events
-    es.addEventListener("tool_call.create", (e) => {
+    // Handle tool_call.execution_started - tool is about to run
+    es.addEventListener("tool_call.execution_started", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
-        addSystemLog(`Tool call: ${payload.name || "unknown"}`, "info");
+        addSystemLog(`Tool executing: ${payload.name || "unknown"}`, "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
-        console.error("Failed to parse tool_call.create:", err);
+        console.error("Failed to parse tool_call.execution_started:", err);
       }
     });
 
-    // Handle tool_call approval events
+    // Handle tool_call.finished - tool completed
+    es.addEventListener("tool_call.finished", (e) => {
+      try {
+        addSystemLog("Tool finished", "info");
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+      } catch (err) {
+        console.error("Failed to parse tool_call.finished:", err);
+      }
+    });
+
+    // Handle tool_call.approval - approval decision made
     es.addEventListener("tool_call.approval", (e) => {
       try {
-        addSystemLog("Tool approval needed", "info");
+        addSystemLog("Tool approval processed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.approval:", err);
+      }
+    });
+
+    // Handle tool_call.output_approval - output approval needed
+    es.addEventListener("tool_call.output_approval", (e) => {
+      try {
+        addSystemLog("Tool output approval needed", "info");
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
+      } catch (err) {
+        console.error("Failed to parse tool_call.output_approval:", err);
       }
     });
 
