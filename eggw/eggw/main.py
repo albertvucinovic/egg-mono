@@ -1984,7 +1984,30 @@ async def stream_events(thread_id: str):
         watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq,
                                poll_sec=0.015, max_backoff=0.03)
         try:
+            import time
+            from datetime import datetime
+            last_batch_time = time.monotonic()
+
             async for batch in watcher.aiter():
+                now = time.monotonic()
+                elapsed_ms = (now - last_batch_time) * 1000
+
+                # Log large batches with detailed timing info to diagnose delays
+                if len(batch) > 5:
+                    # Check if events were written in burst or read delay
+                    event_types = [row["type"] if "type" in row.keys() else "?" for row in batch]
+                    first_seq = batch[0]["event_seq"]
+                    last_seq = batch[-1]["event_seq"]
+
+                    # Check which scheduler is running (if any)
+                    eggw_scheduler = thread_id and get_thread_root_id(thread_id) in active_schedulers
+
+                    print(f"[SSE] Large batch: {len(batch)} events (seq {first_seq}-{last_seq}), "
+                          f"{elapsed_ms:.0f}ms since last, eggw_sched={eggw_scheduler}, "
+                          f"types={event_types[:5]}{'...' if len(event_types) > 5 else ''}")
+
+                last_batch_time = now
+
                 # Batch all events from this poll into a single SSE message
                 # This reduces HTTP overhead significantly during fast streaming
                 if len(batch) == 1:
