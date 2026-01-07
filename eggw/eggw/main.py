@@ -509,8 +509,6 @@ async def get_messages(thread_id: str):
         except:
             pass
 
-    print(f"[API] GET /messages for {thread_id}: {len(snap.get('messages', []))} messages (fresh from events)")
-
     messages = []
     for msg in snap.get("messages", []):
         msg_id = msg.get("id", "")
@@ -1910,7 +1908,6 @@ async def stream_events(thread_id: str):
         # the same data (including events from other processes like TUI).
         from eggthreads import ThreadsDB
         sse_db = ThreadsDB(db.path)
-        print(f"[SSE] Connected to {sse_db.path.absolute()} for thread {thread_id}, starting after seq {current_max_seq}")
 
         # Use short poll interval and minimal backoff for responsive streaming
         # max_backoff=0.03 (30ms) prevents event accumulation during idle periods
@@ -1918,20 +1915,6 @@ async def stream_events(thread_id: str):
                                poll_sec=0.015, max_backoff=0.03)
         try:
             async for batch in watcher.aiter():
-                event_types = [row["type"] if "type" in row.keys() else "?" for row in batch]
-                # Log msg.create events with role for debugging cross-process issues
-                for row in batch:
-                    row_type = row["type"] if "type" in row.keys() else None
-                    if row_type == "msg.create":
-                        try:
-                            payload_json = row["payload_json"] if "payload_json" in row.keys() else None
-                            payload = json.loads(payload_json) if payload_json else {}
-                            role = payload.get("role", "?")
-                            seq = row["event_seq"] if "event_seq" in row.keys() else "?"
-                            print(f"[SSE] msg.create event: role={role}, seq={seq}")
-                        except Exception as e:
-                            print(f"[SSE] msg.create parse error: {e}")
-                print(f"[SSE] Batch size: {len(batch)} events: {event_types}")
                 # Batch all events from this poll into a single SSE message
                 # This reduces HTTP overhead significantly during fast streaming
                 if len(batch) == 1:

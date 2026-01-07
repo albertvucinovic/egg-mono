@@ -298,34 +298,40 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     isStreaming,
   } = useAppStore();
 
-  // Smart scroll: track if user has scrolled away from bottom
-  const userScrolledAwayRef = useRef(false);
-  const scrollTimeoutRef = useRef<number | null>(null);
+  // Stick-to-bottom scrolling: track if user intentionally scrolled away
+  const stickToBottomRef = useRef(true);
+  const rafIdRef = useRef<number | null>(null);
+  const isAutoScrollingRef = useRef(false);
 
-  // Check if near bottom (within 150px)
-  const isNearBottom = () => {
+  // Check if at bottom (within 50px tolerance)
+  const isAtBottom = () => {
     if (!scrollRef.current) return true;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    return scrollHeight - scrollTop - clientHeight < 150;
+    return scrollHeight - scrollTop - clientHeight < 50;
   };
 
-  // Handle user scroll - detect if they scrolled away or back to bottom
+  // Handle user scroll - only update stickToBottom when user scrolls, not during auto-scroll
   const handleScroll = () => {
-    if (!scrollRef.current) return;
-    userScrolledAwayRef.current = !isNearBottom();
+    if (isAutoScrollingRef.current) return; // Ignore scroll events during auto-scroll
+    stickToBottomRef.current = isAtBottom();
   };
 
-  // Throttled auto-scroll - respects user scroll position
-  const autoScroll = () => {
-    if (userScrolledAwayRef.current) return; // User scrolled away, don't auto-scroll
-    if (scrollTimeoutRef.current) return; // Already scheduled
+  // Scroll to bottom using requestAnimationFrame for smooth, reliable scrolling
+  const scrollToBottom = () => {
+    if (!stickToBottomRef.current) return;
+    if (rafIdRef.current !== null) return; // Already scheduled
 
-    scrollTimeoutRef.current = window.setTimeout(() => {
-      if (scrollRef.current && !userScrolledAwayRef.current) {
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      if (scrollRef.current && stickToBottomRef.current) {
+        isAutoScrollingRef.current = true;
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        // Reset flag after a short delay to allow scroll event to fire
+        requestAnimationFrame(() => {
+          isAutoScrollingRef.current = false;
+        });
       }
-      scrollTimeoutRef.current = null;
-    }, 50); // 50ms throttle for smoother scrolling
+    });
   };
 
   // Subscribe to streaming buffer updates - bypasses React entirely
@@ -344,8 +350,8 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       }
       lastContentIndexRef.current = chunks.length;
 
-      // Throttled auto-scroll
-      autoScroll();
+      // Scroll to bottom if we were already there
+      scrollToBottom();
     };
 
     const handleReasoningUpdate = () => {
@@ -361,6 +367,9 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
         streamingReasoningRef.current.appendChild(document.createTextNode(chunks[i]));
       }
       lastReasoningIndexRef.current = chunks.length;
+
+      // Scroll to bottom if we were already there
+      scrollToBottom();
     };
 
     const unsubContent = streamingBuffer.subscribeContent(handleContentUpdate);
@@ -369,8 +378,8 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     return () => {
       unsubContent();
       unsubReasoning();
-      if (scrollTimeoutRef.current) {
-        clearTimeout(scrollTimeoutRef.current);
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
       }
     };
   }, []);
@@ -395,16 +404,20 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     enabled: !!currentThreadId,
   });
 
-  // Sync fetched messages to store (but don't overwrite optimistic updates)
+  // Sync fetched messages to store and scroll to bottom if sticking
   useEffect(() => {
     if (data) {
       setMessages(data);
+      // Scroll to bottom after messages update if we're sticking to bottom
+      requestAnimationFrame(() => {
+        scrollToBottom();
+      });
     }
   }, [data, setMessages]);
 
   // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
-    userScrolledAwayRef.current = false;
+    stickToBottomRef.current = true;
     requestAnimationFrame(() => {
       if (scrollRef.current) {
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -412,10 +425,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     });
   }, [currentThreadId]);
 
-  // Reset scroll state when streaming starts
+  // Reset scroll state when streaming starts - stick to bottom
   useEffect(() => {
     if (isStreaming) {
-      userScrolledAwayRef.current = false;
+      stickToBottomRef.current = true;
     }
   }, [isStreaming]);
 
