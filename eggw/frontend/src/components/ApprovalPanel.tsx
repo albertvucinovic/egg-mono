@@ -32,15 +32,33 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
       approved: boolean;
       outputDecision?: string;
     }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision),
+    // Optimistic update - remove from list immediately
+    onMutate: async ({ toolCallId }) => {
+      // Cancel any outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ["toolCalls", currentThreadId] });
+
+      // Snapshot current value
+      const previousToolCalls = queryClient.getQueryData(["toolCalls", currentThreadId]);
+
+      // Optimistically remove the tool call from the list
+      queryClient.setQueryData(["toolCalls", currentThreadId], (old: ToolCall[] | undefined) =>
+        old?.filter((tc) => tc.id !== toolCallId) ?? []
+      );
+
+      return { previousToolCalls };
+    },
     onSuccess: () => {
+      // Invalidate to get fresh data from server
       queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
-      // Also invalidate messages since tool will execute and produce output
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
-      // State changes after approval (running, waiting_user, etc.)
       queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Tool approval updated", "success");
     },
-    onError: () => {
+    onError: (_err, _vars, context) => {
+      // Restore previous state on error
+      if (context?.previousToolCalls) {
+        queryClient.setQueryData(["toolCalls", currentThreadId], context.previousToolCalls);
+      }
       addSystemLog("Failed to approve tool", "error");
     },
   });
