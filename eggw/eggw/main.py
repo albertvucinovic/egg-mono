@@ -2310,8 +2310,9 @@ async def health():
     """Health check endpoint."""
     return {
         "status": "ok",
+        "db_connected": db is not None,
         "db_initialized": db is not None,
-        "scheduler_running": scheduler is not None,
+        "schedulers_active": len(active_schedulers),
         "models_loaded": len(models_config) > 0,
     }
 
