@@ -27,6 +27,7 @@ from eggthreads import (
     ThreadsDB,
     SubtreeScheduler,
     EventWatcher,
+    SnapshotBuilder,
     create_root_thread,
     create_child_thread,
     append_message,
@@ -469,63 +470,85 @@ async def get_thread_children(thread_id: str):
 
 @app.get("/api/threads/{thread_id}/messages", response_model=List[MessageContent])
 async def get_messages(thread_id: str):
-    """Get messages for a thread from snapshot."""
+    """Get messages for a thread by building fresh snapshot from events.
+
+    This ensures we see all messages including those written by other processes
+    (e.g., TUI) that haven't been persisted to snapshot_json yet.
+    """
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    t = db.get_thread(thread_id)
+    # Use fresh connection to ensure we see latest writes from other processes
+    from eggthreads import ThreadsDB
+    fresh_db = ThreadsDB(db.path)
+    t = fresh_db.get_thread(thread_id)
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    messages = []
+    # Build fresh snapshot from ALL events (not cached snapshot_json)
+    # This ensures we see user messages added by TUI that haven't triggered
+    # a snapshot rebuild yet
+    cur = fresh_db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (thread_id,)
+    )
+    events = cur.fetchall()
+
+    builder = SnapshotBuilder()
+    snap = builder.build(events)
+
+    # Get per-message token stats from cached snapshot (if available)
+    # Token stats are only computed after LLM responses, so we can use cached values
+    token_stats = {}
+    per_message_tokens = {}
     if t.snapshot_json:
         try:
-            snap = json.loads(t.snapshot_json)
-            # Get per-message token stats if available
-            token_stats = snap.get("token_stats", {})
+            cached_snap = json.loads(t.snapshot_json)
+            token_stats = cached_snap.get("token_stats", {})
             per_message_tokens = token_stats.get("per_message", {}) if isinstance(token_stats, dict) else {}
-
-            for msg in snap.get("messages", []):
-                msg_id = msg.get("id", "")
-
-                # Get per-message token count
-                pm_info = per_message_tokens.get(msg_id, {}) if msg_id else {}
-                total_tokens = None
-                if pm_info:
-                    content_tok = int(pm_info.get("content_tokens", 0) or 0)
-                    reasoning_tok = int(pm_info.get("reasoning_tokens", 0) or 0)
-                    tool_calls_tok = int(pm_info.get("tool_calls_tokens", 0) or 0)
-                    total_tokens = pm_info.get("total_tokens") or (content_tok + reasoning_tok + tool_calls_tok)
-                    if total_tokens:
-                        total_tokens = int(total_tokens)
-
-                # Parse timestamp
-                ts_raw = msg.get("ts")
-                timestamp = None
-                if ts_raw:
-                    try:
-                        # Try ISO format with microseconds
-                        timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                    except Exception:
-                        try:
-                            # Try without timezone
-                            timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", ""))
-                        except Exception:
-                            pass
-
-                messages.append(MessageContent(
-                    id=msg_id,
-                    role=msg.get("role", ""),
-                    content=msg.get("content"),
-                    reasoning=msg.get("reasoning"),
-                    tool_calls=msg.get("tool_calls"),
-                    tool_call_id=msg.get("tool_call_id"),
-                    model_key=msg.get("model_key"),
-                    timestamp=timestamp,
-                    tokens=total_tokens,
-                ))
-        except json.JSONDecodeError:
+        except:
             pass
+
+    print(f"[API] GET /messages for {thread_id}: {len(snap.get('messages', []))} messages (fresh from events)")
+
+    messages = []
+    for msg in snap.get("messages", []):
+        msg_id = msg.get("id", "")
+
+        # Get per-message token count from cached stats
+        pm_info = per_message_tokens.get(msg_id, {}) if msg_id else {}
+        total_tokens = None
+        if pm_info:
+            content_tok = int(pm_info.get("content_tokens", 0) or 0)
+            reasoning_tok = int(pm_info.get("reasoning_tokens", 0) or 0)
+            tool_calls_tok = int(pm_info.get("tool_calls_tokens", 0) or 0)
+            total_tokens = pm_info.get("total_tokens") or (content_tok + reasoning_tok + tool_calls_tok)
+            if total_tokens:
+                total_tokens = int(total_tokens)
+
+        # Parse timestamp
+        ts_raw = msg.get("ts")
+        timestamp = None
+        if ts_raw:
+            try:
+                timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except Exception:
+                try:
+                    timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", ""))
+                except Exception:
+                    pass
+
+        messages.append(MessageContent(
+            id=msg_id,
+            role=msg.get("role", ""),
+            content=msg.get("content"),
+            reasoning=msg.get("reasoning"),
+            tool_calls=msg.get("tool_calls"),
+            tool_call_id=msg.get("tool_call_id"),
+            model_key=msg.get("model_key"),
+            timestamp=timestamp,
+            tokens=total_tokens,
+        ))
 
     return messages
 
@@ -1887,7 +1910,7 @@ async def stream_events(thread_id: str):
         # the same data (including events from other processes like TUI).
         from eggthreads import ThreadsDB
         sse_db = ThreadsDB(db.path)
-        print(f"[SSE] Connected to {sse_db.path.absolute()} for thread {thread_id}")
+        print(f"[SSE] Connected to {sse_db.path.absolute()} for thread {thread_id}, starting after seq {current_max_seq}")
 
         # Use short poll interval and minimal backoff for responsive streaming
         # max_backoff=0.03 (30ms) prevents event accumulation during idle periods
@@ -1895,6 +1918,20 @@ async def stream_events(thread_id: str):
                                poll_sec=0.015, max_backoff=0.03)
         try:
             async for batch in watcher.aiter():
+                event_types = [row["type"] if "type" in row.keys() else "?" for row in batch]
+                # Log msg.create events with role for debugging cross-process issues
+                for row in batch:
+                    row_type = row["type"] if "type" in row.keys() else None
+                    if row_type == "msg.create":
+                        try:
+                            payload_json = row["payload_json"] if "payload_json" in row.keys() else None
+                            payload = json.loads(payload_json) if payload_json else {}
+                            role = payload.get("role", "?")
+                            seq = row["event_seq"] if "event_seq" in row.keys() else "?"
+                            print(f"[SSE] msg.create event: role={role}, seq={seq}")
+                        except Exception as e:
+                            print(f"[SSE] msg.create parse error: {e}")
+                print(f"[SSE] Batch size: {len(batch)} events: {event_types}")
                 # Batch all events from this poll into a single SSE message
                 # This reduces HTTP overhead significantly during fast streaming
                 if len(batch) == 1:

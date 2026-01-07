@@ -88,6 +88,7 @@ export function useSSE(threadId: string | null) {
     // Handle stream.close - streaming finished
     es.addEventListener("stream.close", () => {
       try {
+        console.log("[SSE] stream.close received, invalidating messages");
         streamingBuffer.clear();
         setStreamingToolCalls({});
         setIsStreaming(false);
@@ -107,6 +108,7 @@ export function useSSE(threadId: string | null) {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const role = payload.role || "unknown";
+        console.log("[SSE] msg.create received:", role, data.event_seq);
         addSystemLog(`Message created: ${role}`, "info");
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
       } catch (err) {
