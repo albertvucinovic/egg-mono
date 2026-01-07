@@ -1912,6 +1912,10 @@ async def stream_events(thread_id: str):
                         "payload": payload,
                     }
 
+                    # Debug: log approval events
+                    if "approval" in event_type:
+                        print(f"[SSE] Emitting {event_type}: {event_data}")
+
                     yield {
                         "event": event_type,
                         "data": json.dumps(event_data),
@@ -1934,6 +1938,10 @@ async def stream_events(thread_id: str):
                             "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
                             "payload": payload,
                         }
+
+                        # Debug: log approval events
+                        if "approval" in event_type:
+                            print(f"[SSE] Emitting (batch) {event_type}: {event_data}")
 
                         yield {
                             "event": event_type,

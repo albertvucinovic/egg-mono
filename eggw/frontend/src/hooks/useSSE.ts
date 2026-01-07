@@ -41,6 +41,11 @@ export function useSSE(threadId: string | null) {
       setIsStreaming(false);
     };
 
+    // Debug: log all SSE events
+    es.onmessage = (event) => {
+      console.log("[SSE] generic message:", event.type, event.data?.slice(0, 200));
+    };
+
     // Handle stream.open - streaming started
     es.addEventListener("stream.open", () => {
       try {
@@ -145,8 +150,9 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool_call.approval
-    es.addEventListener("tool_call.approval", () => {
+    es.addEventListener("tool_call.approval", (event) => {
       try {
+        console.log("[SSE] tool_call.approval received:", event.data);
         addSystemLog("Tool approval processed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
