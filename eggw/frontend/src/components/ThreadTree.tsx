@@ -282,6 +282,7 @@ export function ThreadTree() {
           onClick={() => createMutation.mutate()}
           className="p-1 rounded"
           title="New thread"
+          data-testid="new-thread-btn"
         >
           <Plus className="w-4 h-4" />
         </button>

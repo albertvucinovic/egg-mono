@@ -480,6 +480,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
           className={`flex-1 rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[40px] ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
           rows={1}
+          data-testid="message-input"
         />
         {/* During streaming: show Run button for commands, Cancel button always */}
         {isStreaming && inputIsCommand && (

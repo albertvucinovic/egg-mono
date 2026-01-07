@@ -322,7 +322,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
   }
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-auto p-4">
+    <div ref={scrollRef} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
       {isLoading ? (
         <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
       ) : messages.length === 0 ? (
