@@ -67,12 +67,11 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     refetchInterval: 5000,
   });
 
-  // Fetch thread state
+  // Fetch thread state - updated via SSE events (no polling needed)
   const { data: threadState } = useQuery({
     queryKey: ["threadState", currentThreadId],
     queryFn: () => fetchThreadState(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 1000, // Poll frequently for state changes
   });
 
   // Auto-approval toggle mutation

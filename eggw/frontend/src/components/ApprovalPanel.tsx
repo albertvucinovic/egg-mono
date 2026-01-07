@@ -35,6 +35,8 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
       queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
       // Also invalidate messages since tool will execute and produce output
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
+      // State changes after approval (running, waiting_user, etc.)
+      queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Tool approval updated", "success");
     },
     onError: () => {

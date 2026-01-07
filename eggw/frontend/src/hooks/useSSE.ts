@@ -52,6 +52,8 @@ export function useSSE(threadId: string | null) {
         setStreamingReasoning("");
         setStreamingToolCalls({});
         setIsStreaming(true);
+        // State changed to running - invalidate threadState query
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
         addSystemLog("Streaming started", "info");
       } catch (err) {
         console.error("Failed to handle stream.open:", err);
@@ -100,9 +102,10 @@ export function useSSE(threadId: string | null) {
         setStreamingToolCalls({});
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
-        // Refresh messages and stats to get the final content
+        // Refresh messages, stats, and state to get the final content and new state
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
         queryClient.invalidateQueries({ queryKey: ["stats", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to handle stream.close:", err);
       }
@@ -132,6 +135,7 @@ export function useSSE(threadId: string | null) {
         const payload = data.payload || {};
         addSystemLog(`Tool call: ${payload.name || "unknown"}`, "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.create:", err);
       }
@@ -142,6 +146,7 @@ export function useSSE(threadId: string | null) {
       try {
         addSystemLog("Tool approval needed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.approval:", err);
       }
