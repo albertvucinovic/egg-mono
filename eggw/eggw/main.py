@@ -1805,6 +1805,9 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")
 
+    # Ensure scheduler is running to process the approved tool
+    ensure_scheduler_for(thread_id)
+
     return {"status": "ok"}
 
 
