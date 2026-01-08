@@ -1,8 +1,9 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Plus } from "lucide-react";
-import { fetchThreadChildren, openThread } from "@/lib/api";
+import { fetchThreadChildren } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
 interface ChildThread {
@@ -17,7 +18,8 @@ interface ChildrenPanelProps {
 }
 
 export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
-  const { currentThreadId, setCurrentThreadId, addSystemLog } = useAppStore();
+  const router = useRouter();
+  const { currentThreadId } = useAppStore();
 
   const { data: children = [], isLoading } = useQuery({
     queryKey: ["threadChildren", currentThreadId],
@@ -26,10 +28,7 @@ export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
   });
 
   const navigateToChild = (childId: string) => {
-    setCurrentThreadId(childId);
-    openThread(childId).then(() => {
-      addSystemLog(`Switched to child ${childId.slice(-8)}`, "info");
-    });
+    router.push(`/${childId}`);
   };
 
   if (!currentThreadId) {

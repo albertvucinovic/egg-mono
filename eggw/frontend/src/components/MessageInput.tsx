@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Send, Loader2, Terminal, StopCircle } from "lucide-react";
 import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, AutocompleteSuggestion } from "@/lib/api";
@@ -20,6 +21,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
   const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const router = useRouter();
   const queryClient = useQueryClient();
   const {
     currentThreadId,
@@ -30,7 +32,6 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     setStreamingToolCalls,
     addSystemLog,
     addMessage,
-    setCurrentThreadId,
     setTheme,
     togglePanel,
     toggleBorders,
@@ -126,15 +127,15 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
 
         // Handle specific command responses
         if (response.data?.child_id) {
-          // Spawned a child thread - refresh thread list and switch to it
+          // Spawned a child thread - refresh thread list but stay on parent
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
-          setCurrentThreadId(response.data.child_id);
+          // Don't navigate to child - stay on parent
         } else if (response.data?.thread_id) {
-          // Thread created/switched/duplicated - refresh and switch
+          // Thread created/switched/duplicated - refresh and navigate
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
-          setCurrentThreadId(response.data.thread_id);
+          router.push(`/${response.data.thread_id}`);
         } else if (response.data?.deleted_id) {
           // Thread deleted - refresh lists
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });

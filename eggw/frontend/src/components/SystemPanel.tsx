@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, ArrowUp, ArrowDown, GitBranch } from "lucide-react";
-import { fetchTokenStats, fetchThread, fetchThreadChildren, openThread, fetchThreadState } from "@/lib/api";
+import { fetchTokenStats, fetchThread, fetchThreadChildren, fetchThreadState } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -13,13 +14,12 @@ interface SystemPanelProps {
 
 export function SystemPanel({ showBorders = true }: SystemPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
   const queryClient = useQueryClient();
   const {
     currentThreadId,
-    setCurrentThreadId,
     systemLogs,
     clearSystemLogs,
-    addSystemLog,
   } = useAppStore();
 
   // Fetch current thread details
@@ -73,11 +73,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
 
   // Navigate to thread helper
   const navigateToThread = (threadId: string) => {
-    setCurrentThreadId(threadId);
-    openThread(threadId).then(() => {
-      addSystemLog(`Switched to thread ${threadId.slice(-8)}`, "info");
-    });
-    queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+    router.push(`/${threadId}`);
   };
 
   // Auto-scroll to bottom

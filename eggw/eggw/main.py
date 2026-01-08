@@ -572,7 +572,7 @@ async def send_message(thread_id: str, request: SendMessageRequest):
 
 @app.post("/api/threads/{thread_id}/open")
 async def open_thread(thread_id: str):
-    """Open a thread for viewing. Stops any running scheduler to prevent auto-streaming."""
+    """Open a thread for viewing. Ensures scheduler for this thread's root is running."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
@@ -580,19 +580,18 @@ async def open_thread(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    # Stop all active schedulers when switching threads.
-    # This prevents auto-streaming when navigating to a thread with pending work.
-    # Scheduler will only restart when user explicitly sends a message,
-    # approves a tool, or runs a shell command.
-    for root_id in list(active_schedulers.keys()):
-        stop_scheduler(root_id)
-
+    # Ensure scheduler is running for this thread's root (don't stop other schedulers)
+    # This allows multiple tabs to view different thread trees simultaneously
     root_id = get_thread_root_id(thread_id)
+    scheduler_running = root_id in active_schedulers
+    if not scheduler_running:
+        start_scheduler(root_id)
+
     return {
         "status": "ok",
         "thread_id": thread_id,
         "root_id": root_id,
-        "scheduler_running": False,  # Always false now since we stopped them
+        "scheduler_running": True,
     }
 
 

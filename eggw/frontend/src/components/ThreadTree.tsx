@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight,
@@ -19,7 +20,6 @@ import {
   createThread,
   deleteThread,
   duplicateThread,
-  openThread,
   renameThread,
 } from "@/lib/api";
 import { useAppStore, Thread } from "@/lib/store";
@@ -35,7 +35,8 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(thread.name || "");
   const inputRef = useRef<HTMLInputElement>(null);
-  const { currentThreadId, setCurrentThreadId, addSystemLog } = useAppStore();
+  const router = useRouter();
+  const { currentThreadId, addSystemLog } = useAppStore();
   const queryClient = useQueryClient();
 
   const { data: children } = useQuery({
@@ -129,13 +130,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
           borderColor: isSelected ? "var(--accent)" : undefined,
         }}
         onClick={() => {
-          setCurrentThreadId(thread.id);
-          // Start scheduler for this thread
-          openThread(thread.id).then(() => {
-            addSystemLog(`Opened thread ${thread.id.slice(-8)}`, "info");
-          }).catch(() => {
-            addSystemLog(`Failed to open thread`, "error");
-          });
+          router.push(`/${thread.id}`);
         }}
       >
         {thread.has_children ? (
@@ -248,6 +243,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
 }
 
 export function ThreadTree() {
+  const router = useRouter();
   const queryClient = useQueryClient();
   const { addSystemLog, setThreads } = useAppStore();
 
@@ -260,6 +256,7 @@ export function ThreadTree() {
     mutationFn: () => createThread({}),
     onSuccess: (newThread) => {
       queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+      router.push(`/${newThread.id}`);
       addSystemLog(`Created thread ${newThread.id.slice(-8)}`, "success");
     },
     onError: () => {
