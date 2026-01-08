@@ -88,6 +88,8 @@ fi
 
 # Start backend
 echo "Starting backend on port $BACKEND_PORT..."
+# Get api keys
+source .env
 cd "$SCRIPT_DIR/backend"
 uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
 BACKEND_PID=$!
