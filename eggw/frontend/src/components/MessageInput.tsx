@@ -140,10 +140,15 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
           // Thread deleted - refresh lists
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
-        } else if (response.data?.model_key && !showInChat) {
-          // Model changed - refresh threads (if not showing in chat)
+        }
+
+        // Model changed - always refresh settings so dropdown updates
+        if (response.data?.model_key) {
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
-        } else if (response.data?.tool_call_id) {
+          queryClient.invalidateQueries({ queryKey: ["threadSettings", currentThreadId] });
+        }
+
+        if (response.data?.tool_call_id) {
           // Shell command - refresh messages and tools
           queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
           queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
