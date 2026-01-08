@@ -413,14 +413,17 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       setMessages(data);
       // Scroll to bottom after DOM update if we were at bottom before
       if (wasAtBottom) {
+        // Double RAF: first waits for React render, second waits for paint
         requestAnimationFrame(() => {
-          if (scrollRef.current) {
-            isAutoScrollingRef.current = true;
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            requestAnimationFrame(() => {
-              isAutoScrollingRef.current = false;
-            });
-          }
+          requestAnimationFrame(() => {
+            if (scrollRef.current) {
+              isAutoScrollingRef.current = true;
+              scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+              requestAnimationFrame(() => {
+                isAutoScrollingRef.current = false;
+              });
+            }
+          });
         });
       }
     }
@@ -436,12 +439,40 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     });
   }, [currentThreadId]);
 
-  // Reset scroll state when streaming starts - stick to bottom
+  // Scroll to bottom when streaming starts (assistant header appears)
   useEffect(() => {
     if (isStreaming) {
       stickToBottomRef.current = true;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (scrollRef.current) {
+            isAutoScrollingRef.current = true;
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            requestAnimationFrame(() => {
+              isAutoScrollingRef.current = false;
+            });
+          }
+        });
+      });
     }
   }, [isStreaming]);
+
+  // Scroll to bottom when new streaming tool calls appear (tool headers)
+  useEffect(() => {
+    if (Object.keys(streamingToolCalls).length > 0 && stickToBottomRef.current) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (scrollRef.current) {
+            isAutoScrollingRef.current = true;
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            requestAnimationFrame(() => {
+              isAutoScrollingRef.current = false;
+            });
+          }
+        });
+      });
+    }
+  }, [streamingToolCalls]);
 
   // Scroll to bottom when UI-only messages are added (e.g., /cost, /help)
   useEffect(() => {
@@ -552,7 +583,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
                               $ {script}
                             </pre>
                           ) : (
-                            <pre className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                            <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
                               {tc.arguments || "..."}
                             </pre>
                           )}
