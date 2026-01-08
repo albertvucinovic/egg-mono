@@ -197,8 +197,8 @@ export const useAppStore = create<AppState>((set) => ({
   isStreaming: false,
   setIsStreaming: (streaming) => set({ isStreaming: streaming }),
 
-  // Panel visibility
-  panelVisibility: { chat: true, children: true, system: true },
+  // Panel visibility (sidebar hidden by default to maximize screen space)
+  panelVisibility: { chat: true, children: true, system: false },
   togglePanel: (panel) =>
     set((state) => ({
       panelVisibility: {
