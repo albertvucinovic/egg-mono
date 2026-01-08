@@ -435,7 +435,7 @@ async def duplicate_thread_endpoint(thread_id: str, name: Optional[str] = None):
     if not db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    new_id = duplicate_thread(db, thread_id, new_name=name)
+    new_id = duplicate_thread(db, thread_id, name=name)
     t = db.get_thread(new_id)
     return ThreadInfo(
         id=t.thread_id,
@@ -1051,7 +1051,7 @@ async def _cmd_delete_thread(current_thread_id: str, selector: str) -> CommandRe
 
 async def _cmd_duplicate_thread(thread_id: str, name: str) -> CommandResponse:
     """Handle /duplicateThread command."""
-    new_id = duplicate_thread(db, thread_id, new_name=name if name else None)
+    new_id = duplicate_thread(db, thread_id, name=name if name else None)
     return CommandResponse(
         success=True,
         message=f"Duplicated to: {new_id[-8:]}",
