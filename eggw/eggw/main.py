@@ -1895,6 +1895,11 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
     states = build_tool_call_states(db, thread_id)
     tc = states.get(request.tool_call_id)
 
+    print(f"[approve_tool] thread={thread_id[-8:]}, tool_call_id={request.tool_call_id!r}, "
+          f"output_decision={request.output_decision!r}, approved={request.approved}")
+    print(f"[approve_tool] states keys: {list(states.keys())}")
+    print(f"[approve_tool] found tc: {tc is not None}, state: {tc.state if tc else 'N/A'}")
+
     if not tc:
         raise HTTPException(status_code=404, detail="Tool call not found")
 
@@ -1941,8 +1946,12 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
         char_count = len(full_output)
 
         # Emit tool_call.output_approval event
+        event_id = os.urandom(10).hex()
+        print(f"[approve_tool] Emitting tool_call.output_approval: event_id={event_id}, "
+              f"tc_id={request.tool_call_id!r}, decision={output_decision!r}, "
+              f"preview_len={len(preview)}, full_output_len={char_count}")
         db.append_event(
-            event_id=os.urandom(10).hex(),
+            event_id=event_id,
             thread_id=thread_id,
             type_='tool_call.output_approval',
             msg_id=None,
@@ -1956,6 +1965,7 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
                 'char_count': char_count,
             },
         )
+        print(f"[approve_tool] Event emitted successfully")
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")
 
