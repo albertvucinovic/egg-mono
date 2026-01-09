@@ -295,6 +295,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     messages,
     setMessages,
     streamingToolCalls,
+    streamingModelKey,
     isStreaming,
     scrollTrigger,
   } = useAppStore();
@@ -519,6 +520,9 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
             >
               <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
                 <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>Assistant</span>
+                {streamingModelKey && (
+                  <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
+                )}
                 <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
               </div>
 

@@ -83,6 +83,8 @@ interface AppState {
   // UI state
   isStreaming: boolean;
   setIsStreaming: (streaming: boolean) => void;
+  streamingModelKey: string | null;
+  setStreamingModelKey: (key: string | null) => void;
 
   // Panel visibility
   panelVisibility: { chat: boolean; children: boolean; system: boolean };
@@ -115,6 +117,7 @@ export const useAppStore = create<AppState>((set) => ({
     streamingReasoning: "",
     streamingReasoningChunks: [],
     streamingToolCalls: {},
+    streamingModelKey: null,
     isStreaming: false,
   }),
 
@@ -196,6 +199,8 @@ export const useAppStore = create<AppState>((set) => ({
   // UI state
   isStreaming: false,
   setIsStreaming: (streaming) => set({ isStreaming: streaming }),
+  streamingModelKey: null,
+  setStreamingModelKey: (key) => set({ streamingModelKey: key }),
 
   // Panel visibility (sidebar hidden by default to maximize screen space)
   panelVisibility: { chat: true, children: true, system: false },
