@@ -377,6 +377,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     const unsubContent = streamingBuffer.subscribeContent(handleContentUpdate);
     const unsubReasoning = streamingBuffer.subscribeReasoning(handleReasoningUpdate);
 
+    // Render any existing buffer content (catches up when joining mid-stream)
+    handleContentUpdate();
+    handleReasoningUpdate();
+
     return () => {
       unsubContent();
       unsubReasoning();
