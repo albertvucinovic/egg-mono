@@ -73,9 +73,9 @@ if [ -f "$VENV_PATH" ]; then
     source "$VENV_PATH"
 else
     echo "No venv found, using system Python"
-    # Verify uvicorn is available
-    if ! command -v uvicorn &> /dev/null; then
-        echo "Error: uvicorn not found. Install it with: pip install uvicorn"
+    # Verify hypercorn is available
+    if ! command -v hypercorn &> /dev/null; then
+        echo "Error: hypercorn not found. Install it with: pip install hypercorn h2"
         exit 1
     fi
 fi
@@ -87,11 +87,11 @@ if [ ! -d "$CALLER_CWD/.egg" ]; then
 fi
 
 # Start backend
-echo "Starting backend on port $BACKEND_PORT..."
+echo "Starting backend on port $BACKEND_PORT (HTTP/2)..."
 # Get api keys
 source .env
 cd "$SCRIPT_DIR/backend"
-uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
+hypercorn main:app --bind 0.0.0.0:$BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
 BACKEND_PID=$!
 
 # Wait a moment for backend to start

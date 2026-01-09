@@ -15,8 +15,10 @@ Web interface for managing AI conversation threads using eggthreads backend.
 ```bash
 cd backend
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+hypercorn main:app --bind 0.0.0.0:8000
 ```
+
+Note: We use hypercorn with HTTP/2 support to allow multiple browser tabs to view the same thread simultaneously (HTTP/1.1 has a ~6 connection limit per origin).
 
 ### Frontend
 
