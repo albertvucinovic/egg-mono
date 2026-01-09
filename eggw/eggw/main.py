@@ -1966,11 +1966,29 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
             },
         )
         print(f"[approve_tool] Event emitted successfully")
+
+        # Verify the state transition happened
+        states_after = build_tool_call_states(db, thread_id)
+        tc_after = states_after.get(request.tool_call_id)
+        if tc_after:
+            print(f"[approve_tool] After event: state={tc_after.state}, "
+                  f"output_decision={tc_after.output_decision!r}, "
+                  f"has_payload={tc_after.last_output_approval_payload is not None}")
+        else:
+            print(f"[approve_tool] After event: tool call not found in states!")
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")
 
     # Ensure scheduler is running to process the approved tool
+    root_id = get_thread_root_id(thread_id)
+    scheduler_running = root_id in active_schedulers
+    print(f"[approve_tool] Scheduler for root {root_id[-8:]}: running={scheduler_running}")
     ensure_scheduler_for(thread_id)
+
+    # Check if thread is runnable
+    from eggthreads.api import is_thread_runnable
+    runnable = is_thread_runnable(db, thread_id)
+    print(f"[approve_tool] Thread runnable: {runnable}")
 
     return {"status": "ok"}
 
