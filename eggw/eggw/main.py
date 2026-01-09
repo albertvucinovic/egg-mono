@@ -641,6 +641,37 @@ async def interrupt_thread_endpoint(thread_id: str):
     # Interrupt the thread
     result = interrupt_thread(db, thread_id, reason="user")
 
+    # Auto-approve output for any interrupted tool calls so they get published
+    # and don't block further interaction. The runner will add an "interrupted" note.
+    # We need a brief delay to let the interrupt propagate and tool calls reach TC4.
+    await asyncio.sleep(0.1)
+
+    states = build_tool_call_states(db, thread_id)
+    for tc in states.values():
+        if tc.state == "TC4" and tc.finished_reason == "interrupted":
+            # Emit output approval with 'whole' decision - runner handles interrupted specially
+            full_output = tc.finished_output or ""
+            if not isinstance(full_output, str):
+                full_output = str(full_output)
+            line_count = len(full_output.splitlines()) if full_output else 0
+            char_count = len(full_output)
+
+            db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=thread_id,
+                type_='tool_call.output_approval',
+                msg_id=None,
+                invoke_id=None,
+                payload={
+                    'tool_call_id': tc.tool_call_id,
+                    'decision': 'whole',
+                    'reason': 'Auto-approved after interrupt',
+                    'preview': full_output,
+                    'line_count': line_count,
+                    'char_count': char_count,
+                },
+            )
+
     return {
         "status": "interrupted",
         "thread_id": thread_id,
@@ -1895,11 +1926,6 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
     states = build_tool_call_states(db, thread_id)
     tc = states.get(request.tool_call_id)
 
-    print(f"[approve_tool] thread={thread_id[-8:]}, tool_call_id={request.tool_call_id!r}, "
-          f"output_decision={request.output_decision!r}, approved={request.approved}")
-    print(f"[approve_tool] states keys: {list(states.keys())}")
-    print(f"[approve_tool] found tc: {tc is not None}, state: {tc.state if tc else 'N/A'}")
-
     if not tc:
         raise HTTPException(status_code=404, detail="Tool call not found")
 
@@ -1946,12 +1972,8 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
         char_count = len(full_output)
 
         # Emit tool_call.output_approval event
-        event_id = os.urandom(10).hex()
-        print(f"[approve_tool] Emitting tool_call.output_approval: event_id={event_id}, "
-              f"tc_id={request.tool_call_id!r}, decision={output_decision!r}, "
-              f"preview_len={len(preview)}, full_output_len={char_count}")
         db.append_event(
-            event_id=event_id,
+            event_id=os.urandom(10).hex(),
             thread_id=thread_id,
             type_='tool_call.output_approval',
             msg_id=None,
@@ -1965,49 +1987,11 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
                 'char_count': char_count,
             },
         )
-        print(f"[approve_tool] Event emitted successfully")
-
-        # Verify the state transition happened
-        states_after = build_tool_call_states(db, thread_id)
-        tc_after = states_after.get(request.tool_call_id)
-        if tc_after:
-            print(f"[approve_tool] After event: state={tc_after.state}, "
-                  f"output_decision={tc_after.output_decision!r}, "
-                  f"has_payload={tc_after.last_output_approval_payload is not None}")
-        else:
-            print(f"[approve_tool] After event: tool call not found in states!")
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")
 
     # Ensure scheduler is running to process the approved tool
-    root_id = get_thread_root_id(thread_id)
-    scheduler_entry = active_schedulers.get(root_id)
-    if scheduler_entry:
-        task = scheduler_entry.get("task")
-        task_status = "done" if task.done() else "running"
-        if task.done():
-            try:
-                exc = task.exception()
-                task_status = f"done with exception: {exc}"
-            except:
-                task_status = "done (cancelled or no exception)"
-        print(f"[approve_tool] Scheduler for root {root_id[-8:]}: task_status={task_status}")
-    else:
-        print(f"[approve_tool] Scheduler for root {root_id[-8:]}: not in active_schedulers")
     ensure_scheduler_for(thread_id)
-
-    # Check if thread is runnable
-    from eggthreads.api import is_thread_runnable
-    runnable = is_thread_runnable(db, thread_id)
-    print(f"[approve_tool] Thread runnable: {runnable}")
-
-    # Also check discover_runner_actionable to see what action is expected
-    from eggthreads.tool_state import discover_runner_actionable
-    ra = discover_runner_actionable(db, thread_id)
-    if ra:
-        print(f"[approve_tool] Runner actionable: kind={ra.kind}, tool_calls={[tc.tool_call_id for tc in (ra.tool_calls or [])]}")
-    else:
-        print(f"[approve_tool] Runner actionable: None")
 
     return {"status": "ok"}
 
