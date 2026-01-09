@@ -86,6 +86,10 @@ if [ ! -d "$CALLER_CWD/.egg" ]; then
     mkdir -p "$CALLER_CWD/.egg"
 fi
 
+# Install/update backend dependencies
+echo "Checking backend dependencies..."
+pip install -q -r "$SCRIPT_DIR/backend/requirements.txt"
+
 # Start backend
 echo "Starting backend on port $BACKEND_PORT (HTTP/2)..."
 # Get api keys
