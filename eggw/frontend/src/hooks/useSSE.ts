@@ -211,5 +211,24 @@ export function useSSE(threadId: string | null) {
     };
   }, [connect]);
 
+  // Disconnect SSE when tab is hidden to free up connection pool for other tabs
+  // Browsers limit HTTP/1.1 connections (~6 per origin), and SSE holds one open
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Tab hidden - disconnect to free connection
+        disconnect();
+      } else {
+        // Tab visible - reconnect
+        connect();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [connect, disconnect]);
+
   return { connect, disconnect };
 }
