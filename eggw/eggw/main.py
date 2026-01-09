@@ -468,26 +468,17 @@ async def get_thread_children(thread_id: str):
 
 # --- Message endpoints ---
 
-@app.get("/api/threads/{thread_id}/messages", response_model=List[MessageContent])
-async def get_messages(thread_id: str):
-    """Get messages for a thread by building fresh snapshot from events.
-
-    This ensures we see all messages including those written by other processes
-    (e.g., TUI) that haven't been persisted to snapshot_json yet.
-    """
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not initialized")
+def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
+    """Synchronous helper to fetch messages - runs in thread pool to avoid blocking event loop."""
+    from eggthreads import ThreadsDB
 
     # Use fresh connection to ensure we see latest writes from other processes
-    from eggthreads import ThreadsDB
-    fresh_db = ThreadsDB(db.path)
+    fresh_db = ThreadsDB(db_path)
     t = fresh_db.get_thread(thread_id)
     if not t:
-        raise HTTPException(status_code=404, detail="Thread not found")
+        return None  # Signal thread not found
 
     # Build fresh snapshot from ALL events (not cached snapshot_json)
-    # This ensures we see user messages added by TUI that haven't triggered
-    # a snapshot rebuild yet
     cur = fresh_db.conn.execute(
         "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
         (thread_id,)
@@ -498,7 +489,6 @@ async def get_messages(thread_id: str):
     snap = builder.build(events)
 
     # Get per-message token stats from cached snapshot (if available)
-    # Token stats are only computed after LLM responses, so we can use cached values
     token_stats = {}
     per_message_tokens = {}
     if t.snapshot_json:
@@ -547,6 +537,29 @@ async def get_messages(thread_id: str):
             timestamp=timestamp,
             tokens=total_tokens,
         ))
+
+    return messages
+
+
+@app.get("/api/threads/{thread_id}/messages", response_model=List[MessageContent])
+async def get_messages(thread_id: str):
+    """Get messages for a thread by building fresh snapshot from events.
+
+    This ensures we see all messages including those written by other processes
+    (e.g., TUI) that haven't been persisted to snapshot_json yet.
+
+    Runs database operations in thread pool to avoid blocking the async event loop,
+    allowing multiple tabs to fetch messages simultaneously.
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    # Run database-heavy work in thread pool to avoid blocking event loop
+    loop = asyncio.get_event_loop()
+    messages = await loop.run_in_executor(None, _get_messages_sync, db.path, thread_id)
+
+    if messages is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
 
     return messages
 

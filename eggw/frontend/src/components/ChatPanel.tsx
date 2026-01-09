@@ -400,10 +400,12 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     }
   }, [isStreaming]);
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["messages", currentThreadId],
     queryFn: () => fetchMessages(currentThreadId!),
     enabled: !!currentThreadId,
+    retry: 3,
+    retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 5000),
   });
 
   // Sync fetched messages to store and scroll to bottom if we were at bottom
@@ -502,6 +504,17 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
       {isLoading ? (
         <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
+      ) : isError ? (
+        <div className="text-center space-y-2">
+          <div style={{ color: "var(--error, #ef4444)" }}>Failed to load messages</div>
+          <button
+            onClick={() => refetch()}
+            className="px-3 py-1 rounded text-sm"
+            style={{ background: "var(--accent)", color: "var(--background)" }}
+          >
+            Retry
+          </button>
+        </div>
       ) : messages.length === 0 ? (
         <div className="text-center" style={{ color: "var(--muted)" }}>
           No messages yet. Start a conversation!
