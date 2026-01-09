@@ -328,9 +328,22 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       if (scrollRef.current && stickToBottomRef.current) {
         isAutoScrollingRef.current = true;
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        // Reset flag after a short delay to allow scroll event to fire
+
+        // For fast streams, check if we're actually at bottom after scrolling
+        // If not (content grew during RAF), schedule another scroll
         requestAnimationFrame(() => {
-          isAutoScrollingRef.current = false;
+          if (scrollRef.current && stickToBottomRef.current) {
+            const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+            if (scrollHeight - scrollTop - clientHeight > 10) {
+              // Not at bottom - content grew, scroll again
+              scrollRef.current.scrollTop = scrollHeight;
+            }
+          }
+          // Reset flag after ensuring we're at bottom
+          // Use setTimeout to ensure scroll events have settled
+          setTimeout(() => {
+            isAutoScrollingRef.current = false;
+          }, 50);
         });
       }
     });
