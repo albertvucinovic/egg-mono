@@ -2061,6 +2061,9 @@ async def stream_events(thread_id: str):
         # Default to current max seq (don't replay history)
         current_max_seq = db.max_event_seq(thread_id)
 
+        print(f"[SSE] New connection for thread {thread_id[-8:]}, max_seq={current_max_seq}, "
+              f"stream_events={[(r['type'], r['event_seq']) for r in recent_stream_events] if recent_stream_events else []}")
+
         if recent_stream_events:
             last_event = recent_stream_events[0]
             last_type = last_event["type"] if "type" in last_event.keys() else last_event[0]
@@ -2070,7 +2073,9 @@ async def stream_events(thread_id: str):
                 # Stream is in progress - start from just before stream.open
                 # so we catch up with the current streaming session
                 current_max_seq = last_seq - 1
-    except Exception:
+                print(f"[SSE] Stream in progress, replaying from seq {current_max_seq}")
+    except Exception as e:
+        print(f"[SSE] Error checking stream state: {e}")
         current_max_seq = -1
 
     async def event_generator():
