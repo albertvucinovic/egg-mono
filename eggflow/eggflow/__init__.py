@@ -32,16 +32,17 @@ class Result:
     def unwrap(self):
         if self.error: raise Exception(self.error)
         return self.value
+    
+    @property
+    def artifacts(self) -> Dict[str, str]:
+        """Convenience accessor for extracted files."""
+        return self.metadata.get('artifacts', {})
 
 # --- 2. Task Specifications ---
 
 @dataclass
 class TaskSpec:
     def get_cache_key(self) -> str:
-        """
-        Default cache key generation based on the class name and 
-        serialized dictionary of fields.
-        """
         data = self.__dict__.copy()
         s = json.dumps(data, sort_keys=True, default=str)
         return hashlib.sha256(f"{self.__class__.__name__}:{s}".encode()).hexdigest()
@@ -51,39 +52,27 @@ class TaskSpec:
 
 @dataclass
 class CreateThread(TaskSpec):
-    """
-    Starts a brand new thread with an initial user prompt.
-    Returns the assistant's response.
-    """
     prompt: str
     model_key: Optional[str] = None
     system_prompt: Optional[str] = None
-    seed: int = 0 # Use to vary outputs for the same prompt
+    seed: int = 0
+    output_files: List[str] = field(default_factory=list) # Files to extract after run
 
-    async def run(self): pass # Handled by Executor
+    async def run(self): pass
 
 @dataclass
 class ContinueThread(TaskSpec):
-    """
-    Continues an existing thread by appending a message.
-    Returns the assistant's response.
-    """
     thread_id: str
     content: str
     role: str = "user"
+    output_files: List[str] = field(default_factory=list) # Files to extract after run
     
-    async def run(self): pass # Handled by Executor
+    async def run(self): pass
 
 @dataclass
 class ForkThread(TaskSpec):
-    """
-    Creates an independent copy of an existing thread (and its history).
-    Useful for branching strategies (Tree of Thoughts, etc.).
-    Returns the new thread_id.
-    """
     source_thread_id: str
-    
-    async def run(self): pass # Handled by Executor
+    async def run(self): pass
 
 # --- 3. Persistence Layer ---
 
@@ -133,14 +122,10 @@ class EggFlowExecutor:
     def __init__(self, store: JobStore, egg_db_path: str = "eggthreads.db"):
         self.store = store
         self.egg_db = egg_db.ThreadsDB(egg_db_path) if EGGTHREADS_AVAILABLE else None
-        # Ensure DB tables exist if we have the DB object
         if self.egg_db:
             with self.egg_db.conn: pass 
 
     async def run(self, spec: Union[TaskSpec, List[TaskSpec]]) -> Union[Result, List[Result]]:
-        """
-        Main entry point. Handles single specs or lists for parallel execution.
-        """
         if isinstance(spec, list):
             return await asyncio.gather(*(self._execute_task(s) for s in spec))
         return await self._execute_task(spec)
@@ -149,19 +134,12 @@ class EggFlowExecutor:
         key = spec.get_cache_key()
         row = self.store.get(key)
         
-        # 1. Cache Hit
         if row and row['status'] == "COMPLETED":
-            try:
-                return pickle.loads(row['result_blob'])
-            except Exception:
-                pass # Corrupt or unpickling error, rerun
+            try: return pickle.loads(row['result_blob'])
+            except Exception: pass
         
-        # 2. Resume / New
-        if not row: 
-            self.store.create(key, spec)
-        else:
-            # If it was running but process died, we treat as a resume/rerun
-            self.store.update(key, "RUNNING")
+        if not row: self.store.create(key, spec)
+        else: self.store.update(key, "RUNNING")
 
         try:
             if isinstance(spec, CreateThread):
@@ -178,26 +156,18 @@ class EggFlowExecutor:
             return err
 
     async def _handle_generic(self, spec: TaskSpec, key: str) -> Result:
-        # Standard generator driving logic for DAGs
         gen = spec.run()
         final_val = None
-        
         if inspect.isgenerator(gen):
             try:
-                # Prime
                 to_yield = next(gen)
                 while True:
-                    # Recursive execution of yielded task(s)
                     res = await self.run(to_yield)
-                    # Send result back into generator
                     to_yield = gen.send(res)
-            except StopIteration as e:
-                final_val = e.value
-        elif inspect.iscoroutine(gen):
-            final_val = await gen
-        else:
-            final_val = gen
-
+            except StopIteration as e: final_val = e.value
+        elif inspect.iscoroutine(gen): final_val = await gen
+        else: final_val = gen
+        
         res = Result(value=final_val)
         self.store.update(key, "COMPLETED", result=res)
         return res
@@ -205,16 +175,10 @@ class EggFlowExecutor:
     # --- EggThread Integration Logic ---
 
     async def _run_scheduler(self, tid):
-        """Runs the thread until it is idle (no running tools, no streaming text)."""
         if not EGGTHREADS_AVAILABLE: return
-        
-        # 1. Start the scheduler/runner
         scheduler = egg_runner.SubtreeScheduler(self.egg_db, tid, tools=create_default_tools())
         task = asyncio.create_task(scheduler.run_forever())
-        
-        # 2. Wait for the thread (and subtree) to settle
-        try:
-            await egg_api.wait_subtree_idle(self.egg_db, tid)
+        try: await egg_api.wait_subtree_idle(self.egg_db, tid)
         finally:
             task.cancel()
             try: await task
@@ -226,9 +190,24 @@ class EggFlowExecutor:
         msgs = snap.get("messages", [])
         return msgs[-1].get("content", "") if msgs else ""
 
+    async def _collect_outputs(self, tid: str, filenames: List[str]) -> Dict[str, str]:
+        """Extracts requested files from the thread's working directory."""
+        if not filenames: return {}
+        if not EGGTHREADS_AVAILABLE:
+            return {f: f"Mock content of {f}" for f in filenames}
+        
+        wd = egg_api.get_thread_working_directory(self.egg_db, tid)
+        outputs = {}
+        for fname in filenames:
+            fpath = wd / fname
+            if fpath.exists():
+                try: outputs[fname] = fpath.read_text(errors='replace')
+                except Exception as e: outputs[fname] = f"Error reading: {e}"
+        return outputs
+
     async def _handle_create_thread(self, spec: CreateThread, key: str, row) -> Result:
         if row and row['external_id']:
-            tid = row['external_id'] # Resume existing thread
+            tid = row['external_id']
         else:
             if not EGGTHREADS_AVAILABLE: tid = f"mock_thread_{key[:8]}"
             else:
@@ -238,38 +217,33 @@ class EggFlowExecutor:
 
         await self._run_scheduler(tid)
         content = await self._get_last_message(tid)
+        artifacts = await self._collect_outputs(tid, spec.output_files)
         
-        res = Result(value=content, metadata={"thread_id": tid})
+        res = Result(value=content, metadata={"thread_id": tid, "artifacts": artifacts})
         self.store.update(key, "COMPLETED", result=res)
         return res
 
     async def _handle_continue_thread(self, spec: ContinueThread, key: str) -> Result:
+        tid = spec.thread_id
         if not EGGTHREADS_AVAILABLE:
-            res = Result(value=f"Mock Reply to: {spec.content}", metadata={"thread_id": spec.thread_id})
+            artifacts = await self._collect_outputs(tid, spec.output_files)
+            res = Result(value=f"Mock Reply to: {spec.content}", metadata={"thread_id": tid, "artifacts": artifacts})
             self.store.update(key, "COMPLETED", result=res)
             return res
 
-        tid = spec.thread_id
-        
-        # Idempotency Check: 
-        # Has the message already been appended?
+        # Idempotency
         snap = json.loads(egg_api.create_snapshot(self.egg_db, tid))
         msgs = snap.get("messages", [])
         last_msg = msgs[-1] if msgs else None
         
-        # If the last message is NOT what we want to send, append it.
-        # Note: This is a simple check. Robust logic might check IDs or content more strictly.
-        is_already_appended = False
-        if last_msg and last_msg.get('role') == spec.role and last_msg.get('content') == spec.content:
-            is_already_appended = True
-            
-        if not is_already_appended:
+        if not (last_msg and last_msg.get('role') == spec.role and last_msg.get('content') == spec.content):
             egg_api.append_message(self.egg_db, tid, spec.role, spec.content)
         
         await self._run_scheduler(tid)
         content = await self._get_last_message(tid)
+        artifacts = await self._collect_outputs(tid, spec.output_files)
         
-        res = Result(value=content, metadata={"thread_id": tid})
+        res = Result(value=content, metadata={"thread_id": tid, "artifacts": artifacts})
         self.store.update(key, "COMPLETED", result=res)
         return res
 
@@ -280,10 +254,7 @@ class EggFlowExecutor:
             self.store.update(key, "COMPLETED", result=res)
             return res
 
-        # 1. Wait for source to be idle so we get a clean snapshot
         await egg_api.wait_subtree_idle(self.egg_db, spec.source_thread_id)
-        
-        # 2. Duplicate
         new_tid = egg_api.duplicate_thread(self.egg_db, spec.source_thread_id)
         
         res = Result(value=new_tid, metadata={"thread_id": new_tid})
