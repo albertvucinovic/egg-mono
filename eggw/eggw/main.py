@@ -107,6 +107,26 @@ def load_models_config() -> tuple[Dict[str, Any], Optional[str]]:
     return models_config, default_model
 
 
+def shorten_output_preview(text: str, max_lines: int = 200, max_chars: int = 8000) -> str:
+    """Return a shortened preview for very long tool outputs.
+
+    This keeps at most max_lines and max_chars of content and appends
+    an ellipsis notice when truncation occurs.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    lines = text.splitlines()
+    truncated = text
+    if len(lines) > max_lines:
+        truncated = "\n".join(lines[:max_lines])
+    if len(truncated) > max_chars:
+        truncated = truncated[:max_chars]
+    if truncated != text:
+        truncated = truncated.rstrip()
+        truncated += "\n\n...[output truncated for preview]..."
+    return truncated
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
@@ -1899,14 +1919,42 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
                 tool_call_id=request.tool_call_id,
             )
     elif tc.state == "TC4":
-        # Output approval - decision is the output handling: 'whole', 'partial', 'omit'
-        # For output approval, we use 'granted' with the output decision
+        # Output approval - emit tool_call.output_approval event directly
+        # (not tool_call.approval which is for execution approval)
         output_decision = request.output_decision or ("whole" if request.approved else "omit")
-        approve_tool_calls_for_thread(
-            db,
-            thread_id,
-            decision=output_decision,
-            tool_call_id=request.tool_call_id,
+
+        # Get the full output from the tool call state
+        full_output = tc.finished_output or ""
+        if not isinstance(full_output, str):
+            full_output = str(full_output)
+
+        # Compute preview based on decision
+        if output_decision == "whole":
+            preview = full_output
+        elif output_decision == "partial":
+            preview = shorten_output_preview(full_output)
+        else:  # omit
+            preview = "Output omitted."
+
+        # Compute stats for the payload
+        line_count = len(full_output.splitlines()) if full_output else 0
+        char_count = len(full_output)
+
+        # Emit tool_call.output_approval event
+        db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_='tool_call.output_approval',
+            msg_id=None,
+            invoke_id=None,
+            payload={
+                'tool_call_id': request.tool_call_id,
+                'decision': output_decision,
+                'reason': 'User decided in web UI',
+                'preview': preview,
+                'line_count': line_count,
+                'char_count': char_count,
+            },
         )
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")
