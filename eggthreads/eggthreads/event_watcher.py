@@ -23,14 +23,21 @@ class EventWatcher:
         self.poll_sec = poll_sec
         self.max_backoff = max_backoff
 
+    def _poll_events(self) -> List:
+        """Synchronous database poll - runs in thread pool to avoid blocking event loop."""
+        cur = self.db.conn.execute(
+            "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
+            (self.thread_id, self.after_seq)
+        )
+        return cur.fetchall()
+
     async def aiter(self) -> AsyncIterator[List]:
         idle = 0
+        loop = asyncio.get_event_loop()
         while True:
-            cur = self.db.conn.execute(
-                "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
-                (self.thread_id, self.after_seq)
-            )
-            rows = cur.fetchall()
+            # Run database query in thread pool to avoid blocking the event loop
+            # This allows other async operations (like HTTP requests) to proceed
+            rows = await loop.run_in_executor(None, self._poll_events)
             if rows:
                 self.after_seq = rows[-1]["event_seq"]
                 idle = 0
