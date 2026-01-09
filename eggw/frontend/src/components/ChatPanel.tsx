@@ -338,6 +338,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
 
   // Subscribe to streaming buffer updates - bypasses React entirely
   // This is O(1) per chunk with direct DOM manipulation
+  // Re-runs when isStreaming changes to catch up with buffered content when refs become available
   useEffect(() => {
     // Import here to avoid SSR issues
     const { streamingBuffer } = require("@/lib/streamingBuffer");
@@ -378,8 +379,27 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     const unsubReasoning = streamingBuffer.subscribeReasoning(handleReasoningUpdate);
 
     // Render any existing buffer content (catches up when joining mid-stream)
-    handleContentUpdate();
-    handleReasoningUpdate();
+    // When isStreaming changes to true, refs should be available after render
+    if (isStreaming) {
+      // Use setTimeout + double RAF to ensure refs are fully available
+      // setTimeout(0) is more reliable than RAF alone for background tabs
+      const timeoutId = setTimeout(() => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            handleContentUpdate();
+            handleReasoningUpdate();
+          });
+        });
+      }, 0);
+      return () => {
+        clearTimeout(timeoutId);
+        unsubContent();
+        unsubReasoning();
+        if (rafIdRef.current !== null) {
+          cancelAnimationFrame(rafIdRef.current);
+        }
+      };
+    }
 
     return () => {
       unsubContent();
@@ -388,12 +408,11 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
         cancelAnimationFrame(rafIdRef.current);
       }
     };
-  }, []);
+  }, [isStreaming]);
 
-  // Handle streaming state changes
+  // Reset DOM state when streaming stops
   useEffect(() => {
     if (!isStreaming) {
-      // Reset DOM when streaming stops
       lastContentIndexRef.current = 0;
       lastReasoningIndexRef.current = 0;
       if (streamingContentRef.current) {
@@ -402,35 +421,6 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       if (streamingReasoningRef.current) {
         streamingReasoningRef.current.textContent = '';
       }
-    } else {
-      // Catch up with buffer content when streaming starts (for mid-stream joins)
-      // Need a small delay to ensure refs are available after render
-      const timeoutId = setTimeout(() => {
-        const { streamingBuffer } = require("@/lib/streamingBuffer");
-
-        // Render existing content chunks
-        if (streamingContentRef.current && streamingBuffer.contentChunks.length > lastContentIndexRef.current) {
-          for (let i = lastContentIndexRef.current; i < streamingBuffer.contentChunks.length; i++) {
-            streamingContentRef.current.appendChild(document.createTextNode(streamingBuffer.contentChunks[i]));
-          }
-          lastContentIndexRef.current = streamingBuffer.contentChunks.length;
-        }
-
-        // Render existing reasoning chunks
-        if (streamingReasoningRef.current && streamingBuffer.reasoningChunks.length > lastReasoningIndexRef.current) {
-          // Show the reasoning container
-          if (streamingBuffer.reasoningChunks.length > 0 && lastReasoningIndexRef.current === 0) {
-            const container = document.getElementById('streaming-reasoning-container');
-            if (container) container.style.display = 'block';
-          }
-          for (let i = lastReasoningIndexRef.current; i < streamingBuffer.reasoningChunks.length; i++) {
-            streamingReasoningRef.current.appendChild(document.createTextNode(streamingBuffer.reasoningChunks[i]));
-          }
-          lastReasoningIndexRef.current = streamingBuffer.reasoningChunks.length;
-        }
-      }, 0);
-
-      return () => clearTimeout(timeoutId);
     }
   }, [isStreaming]);
 
