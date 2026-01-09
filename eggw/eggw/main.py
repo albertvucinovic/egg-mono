@@ -1981,14 +1981,33 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
 
     # Ensure scheduler is running to process the approved tool
     root_id = get_thread_root_id(thread_id)
-    scheduler_running = root_id in active_schedulers
-    print(f"[approve_tool] Scheduler for root {root_id[-8:]}: running={scheduler_running}")
+    scheduler_entry = active_schedulers.get(root_id)
+    if scheduler_entry:
+        task = scheduler_entry.get("task")
+        task_status = "done" if task.done() else "running"
+        if task.done():
+            try:
+                exc = task.exception()
+                task_status = f"done with exception: {exc}"
+            except:
+                task_status = "done (cancelled or no exception)"
+        print(f"[approve_tool] Scheduler for root {root_id[-8:]}: task_status={task_status}")
+    else:
+        print(f"[approve_tool] Scheduler for root {root_id[-8:]}: not in active_schedulers")
     ensure_scheduler_for(thread_id)
 
     # Check if thread is runnable
     from eggthreads.api import is_thread_runnable
     runnable = is_thread_runnable(db, thread_id)
     print(f"[approve_tool] Thread runnable: {runnable}")
+
+    # Also check discover_runner_actionable to see what action is expected
+    from eggthreads.tool_state import discover_runner_actionable
+    ra = discover_runner_actionable(db, thread_id)
+    if ra:
+        print(f"[approve_tool] Runner actionable: kind={ra.kind}, tool_calls={[tc.tool_call_id for tc in (ra.tool_calls or [])]}")
+    else:
+        print(f"[approve_tool] Runner actionable: None")
 
     return {"status": "ok"}
 
