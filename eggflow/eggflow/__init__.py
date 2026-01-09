@@ -9,10 +9,19 @@ from typing import Any, Dict, Optional, List, Union
 
 # --- Imports with Graceful Fallback ---
 try:
-    from eggthreads import db as egg_db
-    from eggthreads import api as egg_api
-    from eggthreads import runner as egg_runner
-    from eggthreads.tools import create_default_tools
+    from eggthreads import (
+        ThreadsDB,
+        SubtreeScheduler,
+        create_root_thread,
+        append_message,
+        create_snapshot,
+        wait_subtree_idle,
+        duplicate_thread,
+        get_thread_working_directory,
+        create_default_tools,
+        create_llm_client,
+        approve_tool_calls_for_thread,
+    )
     EGGTHREADS_AVAILABLE = True
 except ImportError:
     EGGTHREADS_AVAILABLE = False
@@ -121,9 +130,15 @@ class JobStore:
 class EggFlowExecutor:
     def __init__(self, store: JobStore, egg_db_path: str = "eggthreads.db"):
         self.store = store
-        self.egg_db = egg_db.ThreadsDB(egg_db_path) if EGGTHREADS_AVAILABLE else None
-        if self.egg_db:
-            with self.egg_db.conn: pass 
+        if EGGTHREADS_AVAILABLE:
+            self.egg_db = ThreadsDB(egg_db_path)
+            self.egg_db.init_schema()
+            self.llm_client = create_llm_client()
+            self.tools = create_default_tools()
+        else:
+            self.egg_db = None
+            self.llm_client = None
+            self.tools = None 
 
     async def run(self, spec: Union[TaskSpec, List[TaskSpec]]) -> Union[Result, List[Result]]:
         if isinstance(spec, list):
@@ -175,18 +190,28 @@ class EggFlowExecutor:
     # --- EggThread Integration Logic ---
 
     async def _run_scheduler(self, tid):
-        if not EGGTHREADS_AVAILABLE: return
-        scheduler = egg_runner.SubtreeScheduler(self.egg_db, tid, tools=create_default_tools())
+        if not EGGTHREADS_AVAILABLE:
+            return
+        approve_tool_calls_for_thread(self.egg_db, tid, decision='all-in-turn')
+        scheduler = SubtreeScheduler(
+            self.egg_db,
+            tid,
+            llm=self.llm_client,
+            tools=self.tools
+        )
         task = asyncio.create_task(scheduler.run_forever())
-        try: await egg_api.wait_subtree_idle(self.egg_db, tid)
+        try:
+            await wait_subtree_idle(self.egg_db, tid)
         finally:
             task.cancel()
-            try: await task
-            except asyncio.CancelledError: pass
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _get_last_message(self, tid):
         if not EGGTHREADS_AVAILABLE: return "Mock Response"
-        snap = json.loads(egg_api.create_snapshot(self.egg_db, tid))
+        snap = create_snapshot(self.egg_db, tid)
         msgs = snap.get("messages", [])
         return msgs[-1].get("content", "") if msgs else ""
 
@@ -196,7 +221,7 @@ class EggFlowExecutor:
         if not EGGTHREADS_AVAILABLE:
             return {f: f"Mock content of {f}" for f in filenames}
         
-        wd = egg_api.get_thread_working_directory(self.egg_db, tid)
+        wd = get_thread_working_directory(self.egg_db, tid)
         outputs = {}
         for fname in filenames:
             fpath = wd / fname
@@ -211,8 +236,9 @@ class EggFlowExecutor:
         else:
             if not EGGTHREADS_AVAILABLE: tid = f"mock_thread_{key[:8]}"
             else:
-                tid = egg_api.create_root_thread(self.egg_db, initial_model_key=spec.model_key)
-                egg_api.append_message(self.egg_db, tid, "user", spec.prompt)
+                tid = create_root_thread(self.egg_db, initial_model_key=spec.model_key)
+                append_message(self.egg_db, tid, "user", spec.prompt)
+                create_snapshot(self.egg_db, tid)
             self.store.update(key, "RUNNING", external_id=tid)
 
         await self._run_scheduler(tid)
@@ -232,12 +258,13 @@ class EggFlowExecutor:
             return res
 
         # Idempotency
-        snap = json.loads(egg_api.create_snapshot(self.egg_db, tid))
+        snap = create_snapshot(self.egg_db, tid)
         msgs = snap.get("messages", [])
         last_msg = msgs[-1] if msgs else None
-        
+
         if not (last_msg and last_msg.get('role') == spec.role and last_msg.get('content') == spec.content):
-            egg_api.append_message(self.egg_db, tid, spec.role, spec.content)
+            append_message(self.egg_db, tid, spec.role, spec.content)
+            create_snapshot(self.egg_db, tid)
         
         await self._run_scheduler(tid)
         content = await self._get_last_message(tid)
@@ -254,8 +281,8 @@ class EggFlowExecutor:
             self.store.update(key, "COMPLETED", result=res)
             return res
 
-        await egg_api.wait_subtree_idle(self.egg_db, spec.source_thread_id)
-        new_tid = egg_api.duplicate_thread(self.egg_db, spec.source_thread_id)
+        await wait_subtree_idle(self.egg_db, spec.source_thread_id)
+        new_tid = duplicate_thread(self.egg_db, spec.source_thread_id)
         
         res = Result(value=new_tid, metadata={"thread_id": new_tid})
         self.store.update(key, "COMPLETED", result=res)
