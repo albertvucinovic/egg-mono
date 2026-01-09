@@ -390,9 +390,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     };
   }, []);
 
-  // Reset DOM when streaming stops
+  // Handle streaming state changes
   useEffect(() => {
     if (!isStreaming) {
+      // Reset DOM when streaming stops
       lastContentIndexRef.current = 0;
       lastReasoningIndexRef.current = 0;
       if (streamingContentRef.current) {
@@ -401,6 +402,35 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
       if (streamingReasoningRef.current) {
         streamingReasoningRef.current.textContent = '';
       }
+    } else {
+      // Catch up with buffer content when streaming starts (for mid-stream joins)
+      // Need a small delay to ensure refs are available after render
+      const timeoutId = setTimeout(() => {
+        const { streamingBuffer } = require("@/lib/streamingBuffer");
+
+        // Render existing content chunks
+        if (streamingContentRef.current && streamingBuffer.contentChunks.length > lastContentIndexRef.current) {
+          for (let i = lastContentIndexRef.current; i < streamingBuffer.contentChunks.length; i++) {
+            streamingContentRef.current.appendChild(document.createTextNode(streamingBuffer.contentChunks[i]));
+          }
+          lastContentIndexRef.current = streamingBuffer.contentChunks.length;
+        }
+
+        // Render existing reasoning chunks
+        if (streamingReasoningRef.current && streamingBuffer.reasoningChunks.length > lastReasoningIndexRef.current) {
+          // Show the reasoning container
+          if (streamingBuffer.reasoningChunks.length > 0 && lastReasoningIndexRef.current === 0) {
+            const container = document.getElementById('streaming-reasoning-container');
+            if (container) container.style.display = 'block';
+          }
+          for (let i = lastReasoningIndexRef.current; i < streamingBuffer.reasoningChunks.length; i++) {
+            streamingReasoningRef.current.appendChild(document.createTextNode(streamingBuffer.reasoningChunks[i]));
+          }
+          lastReasoningIndexRef.current = streamingBuffer.reasoningChunks.length;
+        }
+      }, 0);
+
+      return () => clearTimeout(timeoutId);
     }
   }, [isStreaming]);
 
