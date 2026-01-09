@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, X, AlertTriangle } from "lucide-react";
+import { Check, X, AlertTriangle, CheckCheck, FileText } from "lucide-react";
 import { fetchToolCalls, approveTool } from "@/lib/api";
 import { useAppStore, ToolCall } from "@/lib/store";
 
@@ -26,11 +26,13 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
       toolCallId,
       approved,
       outputDecision,
+      decision,
     }: {
       toolCallId: string;
       approved: boolean;
       outputDecision?: string;
-    }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision),
+      decision?: string;
+    }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision, decision),
     // Optimistic update - remove from list immediately on click
     onMutate: async ({ toolCallId }) => {
       await queryClient.cancelQueries({ queryKey: ["toolCalls", currentThreadId] });
@@ -127,7 +129,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
             )}
 
             {/* Approval buttons */}
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               {tc.state === "TC1" ? (
                 <>
                   <button
@@ -136,6 +138,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
                     style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                    title="Approve this tool call (y)"
                   >
                     <Check className="w-4 h-4" /> Approve
                   </button>
@@ -145,8 +148,23 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
                     style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--user-msg-border))" }}
+                    title="Deny this tool call (n)"
                   >
                     <X className="w-4 h-4" /> Deny
+                  </button>
+                  <button
+                    onClick={() =>
+                      approveMutation.mutate({
+                        toolCallId: tc.id,
+                        approved: true,
+                        decision: "all-in-turn",
+                      })
+                    }
+                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
+                    style={{ borderColor: "var(--accent)", color: "var(--accent)" }}
+                    title="Approve all tool calls in this turn (a)"
+                  >
+                    <CheckCheck className="w-4 h-4" /> Approve All
                   </button>
                 </>
               ) : (
@@ -161,8 +179,23 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
                     style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                    title="Include full output (y)"
                   >
-                    <Check className="w-4 h-4" /> Include Output
+                    <Check className="w-4 h-4" /> Whole
+                  </button>
+                  <button
+                    onClick={() =>
+                      approveMutation.mutate({
+                        toolCallId: tc.id,
+                        approved: true,
+                        outputDecision: "partial",
+                      })
+                    }
+                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
+                    style={{ borderColor: "var(--reasoning-border)", color: "var(--reasoning-text, var(--reasoning-border))" }}
+                    title="Include shortened preview (n)"
+                  >
+                    <FileText className="w-4 h-4" /> Partial
                   </button>
                   <button
                     onClick={() =>
@@ -174,8 +207,9 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
                     style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--user-msg-border))" }}
+                    title="Omit output entirely (o)"
                   >
-                    <X className="w-4 h-4" /> Omit Output
+                    <X className="w-4 h-4" /> Omit
                   </button>
                 </>
               )}

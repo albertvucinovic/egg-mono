@@ -145,7 +145,8 @@ export async function approveTool(
   threadId: string,
   toolCallId: string,
   approved: boolean,
-  outputDecision?: string
+  outputDecision?: string,
+  decision?: string  // For special decisions like 'all-in-turn'
 ) {
   const res = await fetch(`${API_BASE}/api/threads/${threadId}/tools/approve`, {
     method: "POST",
@@ -154,6 +155,7 @@ export async function approveTool(
       tool_call_id: toolCallId,
       approved,
       output_decision: outputDecision,
+      decision,
     }),
   });
   if (!res.ok) throw new Error("Failed to approve tool");

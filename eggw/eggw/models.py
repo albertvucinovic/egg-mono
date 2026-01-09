@@ -75,6 +75,7 @@ class ApprovalRequest(BaseModel):
     tool_call_id: str
     approved: bool
     output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
+    decision: Optional[str] = None  # Special decisions like "all-in-turn"
 
 
 class ThreadTokenStats(BaseModel):

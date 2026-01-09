@@ -1879,14 +1879,25 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
         raise HTTPException(status_code=404, detail="Tool call not found")
 
     if tc.state == "TC1":
-        # Execution approval - use 'granted' or 'denied'
-        decision = "granted" if request.approved else "denied"
-        approve_tool_calls_for_thread(
-            db,
-            thread_id,
-            decision=decision,
-            tool_call_id=request.tool_call_id,
-        )
+        # Execution approval
+        # Check for special 'all-in-turn' decision first
+        if request.decision == "all-in-turn":
+            # Approve all tool calls in this turn
+            approve_tool_calls_for_thread(
+                db,
+                thread_id,
+                decision="all-in-turn",
+                reason="Approved all by user from web UI",
+            )
+        else:
+            # Normal approve/deny for single tool call
+            decision = "granted" if request.approved else "denied"
+            approve_tool_calls_for_thread(
+                db,
+                thread_id,
+                decision=decision,
+                tool_call_id=request.tool_call_id,
+            )
     elif tc.state == "TC4":
         # Output approval - decision is the output handling: 'whole', 'partial', 'omit'
         # For output approval, we use 'granted' with the output decision
