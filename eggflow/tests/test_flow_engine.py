@@ -1,29 +1,7 @@
-import pytest
 import asyncio
-import os
 import pickle
 from dataclasses import dataclass
-from eggflow import FlowExecutor, TaskStore, Task, Result, CreateThread, ContinueThread, ForkThread, Config, ThreadResult
-
-def async_test(coro):
-    def wrapper(*args, **kwargs):
-        return asyncio.run(coro(*args, **kwargs))
-    return wrapper
-
-@pytest.fixture
-def store(tmp_path):
-    db_file = tmp_path / "test_flow.db"
-    return TaskStore(str(db_file))
-
-@pytest.fixture
-def executor(store):
-    return FlowExecutor(store)
-
-@pytest.fixture(autouse=True)
-def mock_mode():
-    Config.MOCK_MODE = True
-    yield
-    Config.MOCK_MODE = True
+from eggflow import Task, Result, CreateThread, ContinueThread, ForkThread, ThreadResult
 
 @dataclass
 class SimpleEcho(Task):
@@ -44,14 +22,14 @@ def test_caching(executor, store):
         task = SimpleEcho("CacheMe")
         res1 = await executor.run(task)
         assert res1.value == "Echo: CacheMe"
-        
+
         key = task.get_cache_key()
         store.conn.execute(
-            "UPDATE tasks SET result_blob=? WHERE cache_key=?", 
+            "UPDATE tasks SET result_blob=? WHERE cache_key=?",
             (pickle.dumps(Result(value="Hacked")), key)
         )
         store.conn.commit()
-        
+
         res2 = await executor.run(task)
         assert res2.value == "Hacked"
     asyncio.run(run())
@@ -78,7 +56,7 @@ def test_retry_logic(executor):
         wf = RetryWorkflow()
         res = await executor.run(wf)
         assert res.value == "Success"
-        
+
         cur = executor.store.conn.execute("SELECT result_blob FROM tasks")
         errors = 0
         successes = 0
@@ -86,8 +64,8 @@ def test_retry_logic(executor):
             r = pickle.loads(row[0])
             if r.error: errors += 1
             else: successes += 1
-        assert errors == 2 
-        assert successes == 2 
+        assert errors == 2
+        assert successes == 2
     asyncio.run(run())
 
 def test_mock_create_thread(executor):
@@ -103,10 +81,10 @@ class ForkFlow(Task):
     def run(self):
         root_res = yield CreateThread("Root")
         root_data = root_res.value
-        
+
         fork_id_res = yield ForkThread(root_data.thread_id)
         fork_id = fork_id_res.value
-        
+
         cont_res = yield ContinueThread(thread_id=fork_id, content="Child")
         return cont_res.value
 
