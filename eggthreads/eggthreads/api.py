@@ -225,6 +225,22 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
     # clean conversation copy without RA1 boundary markers or skip flags.
     import json as _json
 
+    # First, collect msg_ids that have been marked as skipped via msg.edit events
+    # (skipped_on_continue is stored in msg.edit, not msg.create)
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+        (source_thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        edit_msg_id = row[0]
+        try:
+            edit_payload = _json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            edit_payload = {}
+        if edit_payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(edit_msg_id)
+
     cur = db.conn.execute(
         "SELECT type, msg_id, invoke_id, chunk_seq, payload_json FROM events WHERE thread_id=? ORDER BY event_seq ASC",
         (source_thread_id,),
@@ -234,13 +250,13 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
         # Only copy message and tool_call events for a clean duplicate
         if not (ev_type == 'msg.create' or ev_type.startswith('tool_call.')):
             continue
+        # Don't copy messages marked as skipped in the source
+        if ev_type == 'msg.create' and msg_id in skipped_msg_ids:
+            continue
         try:
             payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
         except Exception:
             payload = {}
-        # Don't copy messages marked as skipped in the source
-        if ev_type == 'msg.create' and payload.get('skipped_on_continue'):
-            continue
         db.append_event(
             event_id=_ulid_like(),
             thread_id=new_tid,
@@ -304,6 +320,23 @@ def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: s
     # Only copy msg.create and tool_call.* events to get a clean conversation.
     # Skip streaming events, control events, and edit events to avoid
     # carrying over RA1 boundary markers or skip flags from the source.
+
+    # First, collect msg_ids that have been marked as skipped via msg.edit events
+    # (skipped_on_continue is stored in msg.edit, not msg.create)
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+        (source_thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        edit_msg_id = row[0]
+        try:
+            edit_payload = _json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            edit_payload = {}
+        if edit_payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(edit_msg_id)
+
     cur = db.conn.execute(
         "SELECT type, msg_id, invoke_id, chunk_seq, payload_json FROM events "
         "WHERE thread_id=? AND event_seq <= ? ORDER BY event_seq ASC",
@@ -314,13 +347,13 @@ def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: s
         # Only copy message and tool_call events for a clean duplicate
         if not (ev_type == 'msg.create' or ev_type.startswith('tool_call.')):
             continue
+        # Don't copy messages marked as skipped in the source
+        if ev_type == 'msg.create' and msg_id in skipped_msg_ids:
+            continue
         try:
             payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
         except Exception:
             payload = {}
-        # Don't copy messages marked as skipped in the source
-        if ev_type == 'msg.create' and payload.get('skipped_on_continue'):
-            continue
         db.append_event(
             event_id=_ulid_like(),
             thread_id=new_tid,
