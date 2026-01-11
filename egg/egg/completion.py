@@ -346,6 +346,75 @@ class EggCompleter(Completer):
                     yield Completion(tid2, start_position=-len(prefix), display=disp, display_meta=meta)
             return
 
+        # 8) /continue: suggest message IDs from current thread
+        if text.startswith('/continue '):
+            prefix = text[len('/continue '):]
+            # Handle msg_id= named argument
+            search_term = prefix
+            if 'msg_id=' in prefix:
+                m = re.search(r'msg_id=(\S*)$', prefix)
+                if m:
+                    search_term = m.group(1)
+            pref_l = search_term.lower()
+            if tid:
+                try:
+                    th = self.db.get_thread(tid)
+                    if th and th.snapshot_json:
+                        import json as _json
+                        snap = _json.loads(th.snapshot_json)
+                        msgs = snap.get('messages', []) or []
+                        for msg in reversed(msgs):  # Most recent first
+                            msg_id = msg.get('msg_id', '')
+                            if not msg_id:
+                                continue
+                            role = msg.get('role', 'unknown')
+                            content = msg.get('content', '') or ''
+                            content_preview = content[:40].replace('\n', ' ')
+                            hay = f"{msg_id} {role} {content}".lower()
+                            if pref_l and pref_l not in hay:
+                                continue
+                            disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
+                            yield Completion(msg_id, start_position=-len(search_term), display=disp)
+                except Exception:
+                    pass
+            return
+
+        # 9) /duplicateThread: suggest message IDs when in msg_id position
+        if text.startswith('/duplicateThread '):
+            prefix = text[len('/duplicateThread '):]
+            # Handle msg_id= named argument
+            search_term = prefix.split()[-1] if prefix.split() else ''
+            if 'msg_id=' in prefix:
+                m = re.search(r'msg_id=(\S*)$', prefix)
+                if m:
+                    search_term = m.group(1)
+            pref_l = search_term.lower()
+            # Only suggest messages if we're past the first arg (name)
+            parts = prefix.split()
+            if len(parts) >= 1 or 'msg_id=' in prefix:
+                if tid:
+                    try:
+                        th = self.db.get_thread(tid)
+                        if th and th.snapshot_json:
+                            import json as _json
+                            snap = _json.loads(th.snapshot_json)
+                            msgs = snap.get('messages', []) or []
+                            for msg in msgs:  # Chronological order for checkpoint selection
+                                msg_id = msg.get('msg_id', '')
+                                if not msg_id:
+                                    continue
+                                role = msg.get('role', 'unknown')
+                                content = msg.get('content', '') or ''
+                                content_preview = content[:40].replace('\n', ' ')
+                                hay = f"{msg_id} {role} {content}".lower()
+                                if pref_l and pref_l not in hay:
+                                    continue
+                                disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
+                                yield Completion(msg_id, start_position=-len(search_term), display=disp)
+                    except Exception:
+                        pass
+            return
+
         # (handled above)
 
         # 8) Generic filename completion for the last token when not a recognized command
@@ -489,9 +558,10 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         if sp == -1:
             # Complete command name
             cmds = [
-                '/help', '/model', '/updateAllModels', 
+                '/help', '/model', '/updateAllModels',
                 '/spawnChildThread', '/spawnAutoApprovedChildThread', '/waitForThreads', '/parentThread',
                 '/listChildren', '/threads', '/thread', '/deleteThread', '/newThread', '/duplicateThread',
+                '/continue', '/rename',
                 '/schedulers', '/enterMode', '/toggleAutoApproval',
                 '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus',
                 '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
@@ -663,6 +733,109 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 cont = [o for o in opts if atok in o and o not in pref]
                 opts = pref + cont
             return _mk_items(opts, arg_tok)
+
+        # /continue: suggest message IDs from current thread
+        if cmd == '/continue':
+            # Handle named argument: extract value after msg_id=
+            search_term = arg_tok
+            replace_len = len(arg_tok) if arg_tok else 0
+            if 'msg_id=' in sub:
+                m = re.search(r'msg_id=(\S*)$', sub)
+                if m:
+                    search_term = m.group(1)
+                    replace_len = len(search_term)
+
+            try:
+                tid = get_current_thread()
+            except Exception:
+                tid = None
+            if tid:
+                try:
+                    th = db.get_thread(tid)
+                    if th and th.snapshot_json:
+                        import json as _json
+                        snap = _json.loads(th.snapshot_json)
+                        msgs = snap.get('messages', []) or []
+                        out_items: List[Dict[str, str]] = []
+                        search_lower = (search_term or '').lower()
+                        # Reverse order: most recent first for /continue
+                        for msg in reversed(msgs):
+                            msg_id = msg.get('msg_id', '')
+                            if not msg_id:
+                                continue
+                            role = msg.get('role', 'unknown')
+                            content = msg.get('content', '') or ''
+                            content_preview = content[:40].replace('\n', ' ')
+                            if len(content) > 40:
+                                content_preview += '...'
+                            hay = f"{msg_id} {role} {content}".lower()
+                            if search_lower and search_lower not in hay:
+                                continue
+                            disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
+                            it: Dict[str, str] = {"display": disp, "insert": msg_id}
+                            if replace_len:
+                                it["replace"] = str(replace_len)
+                            out_items.append(it)
+                            if len(out_items) >= 30:
+                                break
+                        return out_items
+                except Exception:
+                    pass
+            return []
+
+        # /duplicateThread: suggest message IDs when in msg_id position
+        if cmd == '/duplicateThread':
+            # Handle named argument: extract value after msg_id=
+            search_term = arg_tok
+            replace_len = len(arg_tok) if arg_tok else 0
+            if 'msg_id=' in sub:
+                m = re.search(r'msg_id=(\S*)$', sub)
+                if m:
+                    search_term = m.group(1)
+                    replace_len = len(search_term)
+
+            # Check if we're in msg_id position (second positional or after msg_id=)
+            parts = sub.split()
+            in_msg_id_position = len(parts) >= 1 or 'msg_id=' in sub
+
+            if in_msg_id_position:
+                try:
+                    tid = get_current_thread()
+                except Exception:
+                    tid = None
+                if tid:
+                    try:
+                        th = db.get_thread(tid)
+                        if th and th.snapshot_json:
+                            import json as _json
+                            snap = _json.loads(th.snapshot_json)
+                            msgs = snap.get('messages', []) or []
+                            out_items: List[Dict[str, str]] = []
+                            search_lower = (search_term or '').lower()
+                            # Forward order for /duplicateThread (picking checkpoint)
+                            for msg in msgs:
+                                msg_id = msg.get('msg_id', '')
+                                if not msg_id:
+                                    continue
+                                role = msg.get('role', 'unknown')
+                                content = msg.get('content', '') or ''
+                                content_preview = content[:40].replace('\n', ' ')
+                                if len(content) > 40:
+                                    content_preview += '...'
+                                hay = f"{msg_id} {role} {content}".lower()
+                                if search_lower and search_lower not in hay:
+                                    continue
+                                disp = f"[{msg_id[-8:]}] <{role}> {content_preview}"
+                                it: Dict[str, str] = {"display": disp, "insert": msg_id}
+                                if replace_len:
+                                    it["replace"] = str(replace_len)
+                                out_items.append(it)
+                                if len(out_items) >= 30:
+                                    break
+                            return out_items
+                    except Exception:
+                        pass
+            return []
 
         # Other commands: no specific suggestions
         return []
