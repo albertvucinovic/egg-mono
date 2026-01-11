@@ -119,6 +119,34 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
         if payload.get('skipped_on_continue'):
             skipped_msg_ids.add(msg_id)
 
+    # Find the continue boundary: if there's a control.interrupt with purpose='continue',
+    # we should ignore tool_call.* events that occurred BETWEEN the continue_from message
+    # and the control.interrupt. Events AFTER the control.interrupt are new and should be processed.
+    continue_boundary_seq: Optional[int] = None
+    continue_interrupt_seq: Optional[int] = None
+    cur_interrupt = db.conn.execute(
+        "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND type='control.interrupt' ORDER BY event_seq DESC LIMIT 1",
+        (thread_id,),
+    )
+    interrupt_row = cur_interrupt.fetchone()
+    if interrupt_row:
+        try:
+            interrupt_payload = json.loads(interrupt_row[1]) if isinstance(interrupt_row[1], str) else (interrupt_row[1] or {})
+        except Exception:
+            interrupt_payload = {}
+        if interrupt_payload.get('purpose') == 'continue':
+            continue_interrupt_seq = int(interrupt_row[0])
+            continue_from_msg_id = interrupt_payload.get('continue_from_msg_id')
+            if continue_from_msg_id:
+                # Find the event_seq for the continue_from message
+                cur_msg = db.conn.execute(
+                    "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' AND msg_id=?",
+                    (thread_id, continue_from_msg_id),
+                )
+                msg_row = cur_msg.fetchone()
+                if msg_row:
+                    continue_boundary_seq = int(msg_row[0])
+
     # First pass: find messages that declare tool_calls
     for ev in _iter_events(db, thread_id):
         if ev.get("type") != "msg.create":
@@ -175,6 +203,30 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 user_seqs.append(int(ev["event_seq"]))
             except Exception:
                 continue
+
+    # Helper to check if a tool_call.* event should be skipped due to continue boundary
+    def _should_skip_tc_event(ev: Dict[str, Any], tcid: Optional[str]) -> bool:
+        """Skip tool_call.* events that occurred BETWEEN continue_from message and control.interrupt.
+
+        Events AFTER the control.interrupt are new approvals/executions and should be processed.
+        """
+        if continue_boundary_seq is None or continue_interrupt_seq is None:
+            return False
+        try:
+            ev_seq = int(ev.get("event_seq"))
+        except Exception:
+            return False
+        # Only skip events BETWEEN continue boundary and interrupt (exclusive on both ends)
+        # Events before or at continue_boundary: valid (from before the assistant message)
+        # Events after continue_interrupt: new events, should be processed
+        if ev_seq <= continue_boundary_seq or ev_seq > continue_interrupt_seq:
+            return False
+        # Event is in the "skipped" range - check if tool call is from continue point
+        if tcid and tcid in states:
+            tc = states[tcid]
+            if tc.parent_event_seq >= continue_boundary_seq:
+                return True
+        return False
 
     # Second pass: fold tool_call.* events and tool messages into states,
     # and record global auto-approval intervals.
@@ -239,16 +291,16 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                     tc.approval_decision = "granted"
             else:
                 tcid = payload.get("tool_call_id")
-                if tcid in states:
+                if tcid in states and not _should_skip_tc_event(ev, tcid):
                     if isinstance(decision, str):
                         states[tcid].approval_decision = decision
         elif ev_type == "tool_call.execution_started":
             tcid = payload.get("tool_call_id")
-            if tcid in states:
+            if tcid in states and not _should_skip_tc_event(ev, tcid):
                 states[tcid].execution_started = True
         elif ev_type == "tool_call.finished":
             tcid = payload.get("tool_call_id")
-            if tcid in states:
+            if tcid in states and not _should_skip_tc_event(ev, tcid):
                 reason = payload.get("reason")
                 if isinstance(reason, str):
                     states[tcid].finished_reason = reason
@@ -257,7 +309,7 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                     states[tcid].finished_output = str(out)
         elif ev_type == "tool_call.output_approval":
             tcid = payload.get("tool_call_id")
-            if tcid in states:
+            if tcid in states and not _should_skip_tc_event(ev, tcid):
                 decision = payload.get("decision")
                 if isinstance(decision, str):
                     states[tcid].output_decision = decision
@@ -271,7 +323,12 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 role = None
             if role == "tool":
                 tcid = payload.get("tool_call_id")
-                if tcid in states:
+                msg_id = ev.get("msg_id")
+                # Skip tool results that are marked as skipped_on_continue
+                if msg_id and msg_id in skipped_msg_ids:
+                    continue
+                # Also skip if this is after continue boundary and belongs to a continued tool call
+                if tcid in states and not _should_skip_tc_event(ev, tcid):
                     states[tcid].published = True
 
     # Finalize global intervals: if auto-approval was still active at the
