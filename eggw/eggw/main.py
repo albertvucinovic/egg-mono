@@ -42,10 +42,16 @@ from eggthreads import (
     current_thread_model,
     set_thread_model,
     duplicate_thread,
+    duplicate_thread_up_to,
     approve_tool_calls_for_thread,
     total_token_stats,
     execute_bash_command,
     interrupt_thread,
+    # Continue thread functions
+    continue_thread,
+    is_thread_continuable,
+    ContinueResult,
+    parse_args,
     # Sandbox functions
     get_thread_sandbox_status,
     get_thread_sandbox_config,
@@ -728,6 +734,8 @@ async def execute_command(thread_id: str, request: CommandRequest):
             return await _cmd_delete_thread(thread_id, command_arg)
         elif command_name == "duplicateThread":
             return await _cmd_duplicate_thread(thread_id, command_arg)
+        elif command_name == "continue":
+            return await _cmd_continue(thread_id, command_arg)
         elif command_name == "rename":
             return await _cmd_rename(thread_id, command_arg)
         elif command_name == "cost":
@@ -1113,14 +1121,109 @@ async def _cmd_delete_thread(current_thread_id: str, selector: str) -> CommandRe
     )
 
 
-async def _cmd_duplicate_thread(thread_id: str, name: str) -> CommandResponse:
-    """Handle /duplicateThread command."""
-    new_id = duplicate_thread(db, thread_id, name=name if name else None)
+async def _cmd_duplicate_thread(thread_id: str, command_arg: str) -> CommandResponse:
+    """Handle /duplicateThread command.
+
+    Usage:
+        /duplicateThread                           - duplicate with default name
+        /duplicateThread <name>                    - duplicate with custom name
+        /duplicateThread <name> <msg_id>           - duplicate up to msg_id
+        /duplicateThread name=<name> msg_id=<id>   - named arguments
+        /duplicateThread <threadId> <name> <msg_id> - duplicate another thread
+    """
+    args = parse_args(command_arg)
+
+    # Parse arguments - support multiple formats
+    source_thread_id = thread_id
+    name = None
+    up_to_msg_id = None
+
+    # Check for named arguments first
+    if args.named:
+        name = args.named.get('name')
+        up_to_msg_id = args.named.get('msg_id')
+        if 'thread_id' in args.named or 'threadId' in args.named:
+            source_thread_id = args.named.get('thread_id') or args.named.get('threadId')
+
+    # Parse positional arguments
+    if args.positional:
+        if len(args.positional) == 1:
+            name = args.positional[0]
+        elif len(args.positional) == 2:
+            name = args.positional[0]
+            up_to_msg_id = args.positional[1]
+        elif len(args.positional) >= 3:
+            source_thread_id = args.positional[0]
+            name = args.positional[1]
+            up_to_msg_id = args.positional[2]
+
+    try:
+        if up_to_msg_id:
+            new_id = duplicate_thread_up_to(db, source_thread_id, up_to_msg_id, name=name)
+        else:
+            new_id = duplicate_thread(db, source_thread_id, name=name)
+    except ValueError as e:
+        return CommandResponse(success=False, message=str(e))
+
     return CommandResponse(
         success=True,
         message=f"Duplicated to: {new_id[-8:]}",
-        data={"thread_id": new_id, "source_id": thread_id},
+        data={"thread_id": new_id, "source_id": source_thread_id},
     )
+
+
+async def _cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
+    """Handle /continue command.
+
+    Usage:
+        /continue                    - auto-detect continue point
+        /continue <msg_id>           - continue from specific message
+        /continue wait=30            - delay 30s before applying continue (e.g., for API rate limits)
+        /continue msg_id=<id> wait=<sec>  - named arguments
+    """
+    args = parse_args(command_arg)
+
+    # Extract arguments
+    msg_id = args.named.get('msg_id') or args.positional_or(0)
+    delay_sec = args.get_float('wait')
+
+    # Check if thread is continuable
+    if not is_thread_continuable(db, thread_id):
+        return CommandResponse(
+            success=False,
+            message="Thread cannot be continued (may be running or waiting for input)"
+        )
+
+    # If delay requested, schedule the continue for later
+    if delay_sec is not None and delay_sec > 0:
+        async def delayed_continue():
+            await asyncio.sleep(delay_sec)
+            continue_thread(db, thread_id, msg_id=msg_id)
+
+        asyncio.create_task(delayed_continue())
+        return CommandResponse(
+            success=True,
+            message=f"Continue scheduled in {delay_sec}s" + (f" from message {msg_id[-8:]}" if msg_id else ""),
+            data={
+                "delay_sec": delay_sec,
+                "msg_id": msg_id,
+            }
+        )
+
+    # Execute continue immediately
+    result = continue_thread(db, thread_id, msg_id=msg_id)
+
+    if result.success:
+        return CommandResponse(
+            success=True,
+            message=result.message,
+            data={
+                "continue_from": result.continue_from_msg_id,
+                "skipped_count": len(result.skipped_msg_ids),
+            }
+        )
+    else:
+        return CommandResponse(success=False, message=result.message)
 
 
 async def _cmd_rename(thread_id: str, new_name: str) -> CommandResponse:
@@ -2277,7 +2380,7 @@ async def get_autocomplete(
                 '/help', '/model', '/updateAllModels',
                 '/spawn', '/spawnAutoApprovedChildThread', '/newThread',
                 '/threads', '/thread', '/parentThread', '/listChildren',
-                '/deleteThread', '/duplicateThread', '/rename', '/waitForThreads',
+                '/deleteThread', '/duplicateThread', '/rename', '/waitForThreads', '/continue',
                 '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus',
                 '/disableTool', '/enableTool', '/toolsSecrets',
                 '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
@@ -2503,6 +2606,46 @@ async def get_autocomplete(
                             "insert": mode,
                             "replace": len(arg_tok),
                         })
+
+            elif cmd == '/continue':
+                # Message ID suggestions from current thread
+                # Show messages in reverse order (most recent first) so user can pick continue point
+                arg_lower = arg_tok.lower()
+                if thread_id:
+                    t = db.get_thread(thread_id)
+                    if t and t.snapshot_json:
+                        try:
+                            import json
+                            snap = json.loads(t.snapshot_json)
+                            msgs = snap.get('messages', []) or []
+                            # Reverse order: most recent messages first
+                            for msg in reversed(msgs):
+                                msg_id = msg.get('msg_id', '')
+                                if not msg_id:
+                                    continue
+                                role = msg.get('role', 'unknown')
+                                content = msg.get('content', '') or ''
+                                # Truncate content for display
+                                content_preview = content[:40].replace('\n', ' ')
+                                if len(content) > 40:
+                                    content_preview += '...'
+
+                                # Build searchable string
+                                hay = f"{msg_id} {role} {content}".lower()
+                                if arg_lower and arg_lower not in hay:
+                                    continue
+
+                                # Build display: [msg_id_short] <role> content_preview
+                                display = f"[{msg_id[-8:]}] <{role}> {content_preview}"
+                                suggestions.append({
+                                    "display": display,
+                                    "insert": msg_id,
+                                    "replace": len(arg_tok),
+                                })
+                                if len(suggestions) >= 30:
+                                    break
+                        except Exception:
+                            pass
 
     # Shell command completion ($ prefix)
     elif prefix.startswith('$'):

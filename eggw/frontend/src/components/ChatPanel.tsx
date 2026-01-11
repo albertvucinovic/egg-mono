@@ -112,8 +112,15 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
           </span>
         )}
         {message.id && message.id.length >= 8 && !message.id.startsWith('temp-') && (
-          <span className="font-mono" style={{ color: "var(--muted)" }}>
-            {message.id.slice(-8)}
+          <span
+            className="font-mono cursor-pointer hover:underline"
+            style={{ color: "var(--muted)" }}
+            title={`Click to copy: ${message.id}`}
+            onClick={() => {
+              navigator.clipboard.writeText(message.id);
+            }}
+          >
+            [{message.id.slice(-8)}]
           </span>
         )}
         {message.tool_call_id && (
