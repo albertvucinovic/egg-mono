@@ -51,6 +51,8 @@ from eggthreads import (
     continue_thread,
     is_thread_continuable,
     ContinueResult,
+    diagnose_thread,
+    ThreadDiagnosis,
     parse_args,
     # Sandbox functions
     get_thread_sandbox_status,
@@ -1227,15 +1229,23 @@ async def _cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
         msg = result.message
         if was_interrupted:
             msg = f"Interrupted streaming. {msg}"
+        response_data = {
+            "continue_from": result.continue_from_msg_id,
+            "skipped_count": len(result.skipped_msg_ids),
+            "was_interrupted": was_interrupted,
+            "reload": True,  # Signal frontend to refresh messages
+        }
+        # Include diagnosis details if available
+        if result.diagnosis:
+            response_data["diagnosis"] = {
+                "is_healthy": result.diagnosis.is_healthy,
+                "issues": result.diagnosis.issues,
+                "details": result.diagnosis.details,
+            }
         return CommandResponse(
             success=True,
             message=msg,
-            data={
-                "continue_from": result.continue_from_msg_id,
-                "skipped_count": len(result.skipped_msg_ids),
-                "was_interrupted": was_interrupted,
-                "reload": True,  # Signal frontend to refresh messages
-            }
+            data=response_data
         )
     else:
         return CommandResponse(success=False, message=result.message)
