@@ -15,6 +15,11 @@ from eggthreads import (
     delete_thread,
     get_parent,
     list_threads,
+    duplicate_thread,
+    duplicate_thread_up_to,
+    continue_thread,
+    is_thread_continuable,
+    parse_args,
 )
 
 from utils import MODELS_PATH, get_subtree as _get_subtree
@@ -304,31 +309,106 @@ class ThreadCommandsMixin:
             self.log_system(f'Error deleting thread: {e}')
 
     def cmd_duplicateThread(self, arg: str) -> None:
-        """Handle /duplicateThread command - duplicate current thread."""
-        # Duplicate the current thread as a new root thread, acting
-        # as a "checkpoint" copy of the entire conversation up to
-        # this point. The new thread has the same history (events
-        # and snapshot) but no open stream and no parent/children
-        # links. This is useful for branching or backups.
+        """Handle /duplicateThread command - duplicate current thread.
+
+        Usage:
+            /duplicateThread                           - duplicate with default name
+            /duplicateThread <name>                    - duplicate with custom name
+            /duplicateThread <name> <msg_id>           - duplicate up to msg_id
+            /duplicateThread name=<name> msg_id=<id>   - named arguments
+            /duplicateThread <threadId> <name> <msg_id> - duplicate another thread
+        """
+        args = parse_args(arg or '')
+
+        # Parse arguments - support multiple formats
+        source_thread_id = self.current_thread
+        name = None
+        up_to_msg_id = None
+
+        # Check for named arguments first
+        if args.named:
+            name = args.named.get('name')
+            up_to_msg_id = args.named.get('msg_id')
+            if 'thread_id' in args.named or 'threadId' in args.named:
+                source_thread_id = args.named.get('thread_id') or args.named.get('threadId')
+
+        # Parse positional arguments
+        if args.positional:
+            if len(args.positional) == 1:
+                name = args.positional[0]
+            elif len(args.positional) == 2:
+                name = args.positional[0]
+                up_to_msg_id = args.positional[1]
+            elif len(args.positional) >= 3:
+                source_thread_id = args.positional[0]
+                name = args.positional[1]
+                up_to_msg_id = args.positional[2]
+
         try:
-            from eggthreads import duplicate_thread  # type: ignore
-        except Exception as e:
-            self.log_system(f'/duplicate_thread not available: eggthreads import failed: {e}')
+            if up_to_msg_id:
+                new_tid = duplicate_thread_up_to(self.db, source_thread_id, up_to_msg_id, name=name)
+            else:
+                new_tid = duplicate_thread(self.db, source_thread_id, name=name)
+        except ValueError as e:
+            self.log_system(f'/duplicateThread error: {e}')
             return
-        label = (arg or '').strip() or None
-        try:
-            new_tid = duplicate_thread(self.db, self.current_thread, name=label)
         except Exception as e:
             self.log_system(f'/duplicateThread error: {e}')
             return
+
         # Ensure a scheduler is running for the duplicate so it can
         # be continued independently if desired.
         self.ensure_scheduler_for(new_tid)
-        self.log_system(f"Duplicated current thread to new root: {new_tid[-8:]}")
+        self.log_system(f"Duplicated thread to new root: {new_tid[-8:]}")
         # Switch to the duplicate so the user can inspect/continue it.
         self.current_thread = new_tid
         asyncio.get_running_loop().create_task(self.start_watching_current())
         self.print_static_view_current(heading=f"Switched to duplicated thread: {self.current_thread}")
+
+    def cmd_continue(self, arg: str) -> None:
+        """Handle /continue command - continue thread from a specific point.
+
+        Usage:
+            /continue                    - auto-detect continue point
+            /continue <msg_id>           - continue from specific message
+            /continue wait=30            - delay 30s before applying continue (e.g., for API rate limits)
+            /continue msg_id=<id> wait=<sec>  - named arguments
+        """
+        args = parse_args(arg or '')
+
+        # Extract arguments
+        msg_id = args.named.get('msg_id') or args.positional_or(0)
+        delay_sec = args.get_float('wait')
+
+        # Check if thread is continuable
+        if not is_thread_continuable(self.db, self.current_thread):
+            self.log_system("Thread cannot be continued (may be running or waiting for input)")
+            return
+
+        # If delay requested, schedule the continue for later
+        if delay_sec is not None and delay_sec > 0:
+            async def delayed_continue():
+                await asyncio.sleep(delay_sec)
+                result = continue_thread(self.db, self.current_thread, msg_id=msg_id)
+                if result.success:
+                    self.log_system(f"After {delay_sec}s delay: {result.message}")
+                    self.print_static_view_current(heading=f"Continued thread: {self.current_thread}")
+                else:
+                    self.log_system(f"/continue error: {result.message}")
+
+            asyncio.get_running_loop().create_task(delayed_continue())
+            self.log_system(f"Continue scheduled in {delay_sec}s" + (f" from message {msg_id[-8:]}" if msg_id else ""))
+            return
+
+        # Execute continue immediately
+        result = continue_thread(self.db, self.current_thread, msg_id=msg_id)
+
+        if result.success:
+            self.log_system(result.message)
+            # Refresh the display
+            self.print_static_view_current(heading=f"Continued thread: {self.current_thread}")
+        else:
+            self.log_system(f"/continue error: {result.message}")
 
     # ---- Thread selector helpers ----
     def select_threads_by_selector(self, selector: str) -> List[str]:
