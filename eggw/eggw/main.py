@@ -527,7 +527,7 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
 
     messages = []
     for msg in snap.get("messages", []):
-        msg_id = msg.get("id", "")
+        msg_id = msg.get("msg_id", "")
 
         # Get per-message token count from cached stats
         pm_info = per_message_tokens.get(msg_id, {}) if msg_id else {}
@@ -1168,7 +1168,7 @@ async def _cmd_duplicate_thread(thread_id: str, command_arg: str) -> CommandResp
     return CommandResponse(
         success=True,
         message=f"Duplicated to: {new_id[-8:]}",
-        data={"thread_id": new_id, "source_id": source_thread_id},
+        data={"thread_id": new_id, "source_id": source_thread_id, "reload": True},
     )
 
 
@@ -1187,11 +1187,21 @@ async def _cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
     msg_id = args.named.get('msg_id') or args.positional_or(0)
     delay_sec = args.get_float('wait')
 
-    # Check if thread is continuable
+    # Auto-interrupt if thread is streaming
+    root_id = get_thread_root_id(thread_id) if thread_id else None
+    was_interrupted = False
+    if root_id and root_id in active_schedulers:
+        # Thread is streaming - interrupt first
+        interrupt_thread(db, thread_id, reason="continue")
+        was_interrupted = True
+        # Brief delay to let interrupt propagate
+        await asyncio.sleep(0.1)
+
+    # Check if thread is continuable (should be now after interrupt)
     if not is_thread_continuable(db, thread_id):
         return CommandResponse(
             success=False,
-            message="Thread cannot be continued (may be running or waiting for input)"
+            message="Thread cannot be continued (may be waiting for input)"
         )
 
     # If delay requested, schedule the continue for later
@@ -1214,12 +1224,17 @@ async def _cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
     result = continue_thread(db, thread_id, msg_id=msg_id)
 
     if result.success:
+        msg = result.message
+        if was_interrupted:
+            msg = f"Interrupted streaming. {msg}"
         return CommandResponse(
             success=True,
-            message=result.message,
+            message=msg,
             data={
                 "continue_from": result.continue_from_msg_id,
                 "skipped_count": len(result.skipped_msg_ids),
+                "was_interrupted": was_interrupted,
+                "reload": True,  # Signal frontend to refresh messages
             }
         )
     else:
@@ -2610,7 +2625,18 @@ async def get_autocomplete(
             elif cmd == '/continue':
                 # Message ID suggestions from current thread
                 # Show messages in reverse order (most recent first) so user can pick continue point
-                arg_lower = arg_tok.lower()
+
+                # Handle named argument: extract value after msg_id=
+                search_term = arg_tok
+                replace_len = len(arg_tok)
+                if 'msg_id=' in arg:
+                    match = re.search(r'msg_id=(\S*)$', arg)
+                    if match:
+                        search_term = match.group(1)
+                        replace_len = len(search_term)
+
+                search_lower = search_term.lower()
+
                 if thread_id:
                     t = db.get_thread(thread_id)
                     if t and t.snapshot_json:
@@ -2632,7 +2658,7 @@ async def get_autocomplete(
 
                                 # Build searchable string
                                 hay = f"{msg_id} {role} {content}".lower()
-                                if arg_lower and arg_lower not in hay:
+                                if search_lower and search_lower not in hay:
                                     continue
 
                                 # Build display: [msg_id_short] <role> content_preview
@@ -2640,7 +2666,61 @@ async def get_autocomplete(
                                 suggestions.append({
                                     "display": display,
                                     "insert": msg_id,
-                                    "replace": len(arg_tok),
+                                    "replace": replace_len,
+                                })
+                                if len(suggestions) >= 30:
+                                    break
+                        except Exception:
+                            pass
+
+            elif cmd == '/duplicateThread':
+                # Message ID suggestions for /duplicateThread
+                # Format: /duplicateThread [name] [msg_id] or /duplicateThread name=<n> msg_id=<id>
+                # Suggest message IDs when it looks like we're typing the msg_id argument
+
+                # Handle named argument: extract value after msg_id=
+                search_term = arg_tok
+                replace_len = len(arg_tok)
+                if 'msg_id=' in arg:
+                    # Find the value after msg_id=
+                    match = re.search(r'msg_id=(\S*)$', arg)
+                    if match:
+                        search_term = match.group(1)
+                        replace_len = len(search_term)
+
+                search_lower = search_term.lower()
+
+                # Check if we're likely in msg_id position (second positional or after msg_id=)
+                parts = arg.split()
+                in_msg_id_position = len(parts) >= 1 or 'msg_id=' in arg
+
+                if in_msg_id_position and thread_id:
+                    t = db.get_thread(thread_id)
+                    if t and t.snapshot_json:
+                        try:
+                            import json
+                            snap = json.loads(t.snapshot_json)
+                            msgs = snap.get('messages', []) or []
+                            # Show messages in order (oldest first for duplicate - picking a checkpoint)
+                            for msg in msgs:
+                                msg_id = msg.get('msg_id', '')
+                                if not msg_id:
+                                    continue
+                                role = msg.get('role', 'unknown')
+                                content = msg.get('content', '') or ''
+                                content_preview = content[:40].replace('\n', ' ')
+                                if len(content) > 40:
+                                    content_preview += '...'
+
+                                hay = f"{msg_id} {role} {content}".lower()
+                                if search_lower and search_lower not in hay:
+                                    continue
+
+                                display = f"[{msg_id[-8:]}] <{role}> {content_preview}"
+                                suggestions.append({
+                                    "display": display,
+                                    "insert": msg_id,
+                                    "replace": replace_len,
                                 })
                                 if len(suggestions) >= 30:
                                     break

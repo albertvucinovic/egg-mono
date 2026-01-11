@@ -148,6 +148,12 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
           queryClient.invalidateQueries({ queryKey: ["threadSettings", currentThreadId] });
         }
 
+        if (response.data?.reload) {
+          // Command requests a full refresh (e.g., /continue)
+          queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+        }
+
         if (response.data?.tool_call_id) {
           // Shell command - refresh messages and tools
           queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
@@ -264,11 +270,12 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
       tokenStart = Math.max(0, contentEnd - replaceCount);
 
       // Extend backwards to include any additional characters typed after suggestions fetch
-      while (tokenStart > 0 && !/\s/.test(input[tokenStart - 1])) {
+      // But stop at '=' to preserve named argument prefixes like "msg_id="
+      while (tokenStart > 0 && !/[\s=]/.test(input[tokenStart - 1])) {
         tokenStart--;
       }
 
-      // For commands, include the / if present
+      // For commands, include the / if present (but not after =)
       if (tokenStart > 0 && input[tokenStart - 1] === '/') {
         tokenStart--;
       }

@@ -184,6 +184,23 @@ export function useSSE(threadId: string | null) {
       }
     });
 
+    // Handle control.interrupt events (e.g., from delayed /continue)
+    es.addEventListener("control.interrupt", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const purpose = payload.purpose || "";
+        if (purpose === "continue") {
+          addSystemLog("Continue applied - refreshing", "info");
+          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+          queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+          queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
+        }
+      } catch (err) {
+        console.error("Failed to parse control.interrupt:", err);
+      }
+    });
+
     return es;
   }, [
     threadId,
