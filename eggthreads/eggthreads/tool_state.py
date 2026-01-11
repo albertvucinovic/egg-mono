@@ -419,9 +419,30 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
             old_inv = payload.get("old_invoke_id")
             purpose = payload.get('purpose')
 
-            # If the interrupt is explicitly for an LLM step or a continue,
-            # always treat it as a boundary.
-            if purpose in ('llm', 'continue'):
+            # If the interrupt is explicitly for an LLM step, treat it as a boundary.
+            if purpose == 'llm':
+                try:
+                    last_close = int(ev.get("event_seq"))
+                except Exception:
+                    continue
+                continue
+
+            # For continue interrupts, set boundary to BEFORE the continue point
+            # so the continue_from message becomes visible to RA1 detection.
+            if purpose == 'continue':
+                continue_from_msg_id = payload.get('continue_from_msg_id')
+                if continue_from_msg_id:
+                    # Look up the event_seq for the continue_from message
+                    msg_cur = db.conn.execute(
+                        "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' AND msg_id=?",
+                        (thread_id, continue_from_msg_id),
+                    )
+                    msg_row = msg_cur.fetchone()
+                    if msg_row:
+                        # Set boundary to one BEFORE the continue point
+                        last_close = int(msg_row[0]) - 1
+                        continue
+                # Fallback: use interrupt seq if msg not found
                 try:
                     last_close = int(ev.get("event_seq"))
                 except Exception:

@@ -220,10 +220,9 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
         depth=0,
     )
 
-    # Replay all events from the source thread into the new thread with
-    # fresh event_ids. We keep msg_id/invoke_id/chunk_seq so that the
-    # duplicate's internal state (e.g. tool call history, stream
-    # boundaries) mirrors the original.
+    # Replay msg.create and tool_call.* events from the source thread.
+    # Skip streaming events, control events, and edit events to get a
+    # clean conversation copy without RA1 boundary markers or skip flags.
     import json as _json
 
     cur = db.conn.execute(
@@ -232,17 +231,16 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
     )
     rows = cur.fetchall()
     for ev_type, msg_id, invoke_id, chunk_seq, pj in rows:
-        # Skip low-level streaming events; snapshots and runner logic
-        # derive their state from msg.create and tool_call.* events.
-        # Copying stream.open/delta/close as-is would also risk
-        # violating the UNIQUE(invoke_id, chunk_seq) constraint on
-        # stream.delta rows.
-        if ev_type in ('stream.open', 'stream.delta', 'stream.close'):
+        # Only copy message and tool_call events for a clean duplicate
+        if not (ev_type == 'msg.create' or ev_type.startswith('tool_call.')):
             continue
         try:
             payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
         except Exception:
             payload = {}
+        # Don't copy messages marked as skipped in the source
+        if ev_type == 'msg.create' and payload.get('skipped_on_continue'):
+            continue
         db.append_event(
             event_id=_ulid_like(),
             thread_id=new_tid,
@@ -302,6 +300,10 @@ def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: s
     )
 
     import json as _json
+
+    # Only copy msg.create and tool_call.* events to get a clean conversation.
+    # Skip streaming events, control events, and edit events to avoid
+    # carrying over RA1 boundary markers or skip flags from the source.
     cur = db.conn.execute(
         "SELECT type, msg_id, invoke_id, chunk_seq, payload_json FROM events "
         "WHERE thread_id=? AND event_seq <= ? ORDER BY event_seq ASC",
@@ -309,12 +311,16 @@ def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: s
     )
     rows = cur.fetchall()
     for ev_type, msg_id, invoke_id, chunk_seq, pj in rows:
-        if ev_type in ('stream.open', 'stream.delta', 'stream.close'):
+        # Only copy message and tool_call events for a clean duplicate
+        if not (ev_type == 'msg.create' or ev_type.startswith('tool_call.')):
             continue
         try:
             payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
         except Exception:
             payload = {}
+        # Don't copy messages marked as skipped in the source
+        if ev_type == 'msg.create' and payload.get('skipped_on_continue'):
+            continue
         db.append_event(
             event_id=_ulid_like(),
             thread_id=new_tid,
