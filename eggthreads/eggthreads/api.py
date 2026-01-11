@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from .db import ThreadsDB, ThreadRow
 from .snapshot import SnapshotBuilder
@@ -256,6 +257,385 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
     # consistent cached view of messages.
     create_snapshot(db, new_tid)
     return new_tid
+
+
+def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: str, name: Optional[str] = None) -> str:
+    """Duplicate a thread's event log up to a specific message.
+
+    Like duplicate_thread, but only copies events up to and including the
+    message with the given msg_id. This is useful for creating a checkpoint
+    at a specific point in the conversation.
+
+    Args:
+        db: ThreadsDB instance
+        source_thread_id: Thread to duplicate
+        up_to_msg_id: Message ID to stop at (inclusive)
+        name: Optional name for the new thread
+
+    Returns:
+        The new thread's ID
+    """
+    src = db.get_thread(source_thread_id)
+    if not src:
+        raise ValueError(f"Source thread not found: {source_thread_id}")
+
+    # Find the event_seq of the target message
+    cur = db.conn.execute(
+        "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? ORDER BY event_seq ASC LIMIT 1",
+        (source_thread_id, up_to_msg_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Message not found: {up_to_msg_id}")
+    up_to_seq = row[0]
+
+    base_name = src.name or src.short_recap or "Thread"
+    new_name = name or f"{base_name} [copy]"
+
+    new_tid = _ulid_like()
+    db.create_thread(
+        thread_id=new_tid,
+        name=new_name,
+        parent_id=None,
+        initial_model_key=src.initial_model_key,
+        depth=0,
+    )
+
+    import json as _json
+    cur = db.conn.execute(
+        "SELECT type, msg_id, invoke_id, chunk_seq, payload_json FROM events "
+        "WHERE thread_id=? AND event_seq <= ? ORDER BY event_seq ASC",
+        (source_thread_id, up_to_seq),
+    )
+    rows = cur.fetchall()
+    for ev_type, msg_id, invoke_id, chunk_seq, pj in rows:
+        if ev_type in ('stream.open', 'stream.delta', 'stream.close'):
+            continue
+        try:
+            payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except Exception:
+            payload = {}
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=new_tid,
+            type_=ev_type,
+            payload=payload,
+            msg_id=msg_id,
+            invoke_id=invoke_id,
+            chunk_seq=chunk_seq,
+        )
+
+    create_snapshot(db, new_tid)
+    return new_tid
+
+
+# --------- Continue Thread API ------------------------------------------------
+
+@dataclass
+class ContinueResult:
+    """Result of continue_thread operation."""
+    success: bool
+    continue_from_msg_id: Optional[str]
+    skipped_msg_ids: List[str]
+    message: str
+
+
+def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Optional[int]:
+    """Get the event_seq for a message ID."""
+    cur = db.conn.execute(
+        "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? AND type='msg.create' ORDER BY event_seq ASC LIMIT 1",
+        (thread_id, msg_id),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
+    """Auto-detect the best msg_id to continue from.
+
+    Searches backward through the thread to find an appropriate point to resume.
+    The algorithm prioritizes finding a stable state:
+
+    1. After the last published tool result (TC6 state) - safest point
+    2. After the last complete assistant message (with no pending tool calls)
+    3. After the last user message that doesn't have keep_user_turn
+
+    Returns:
+        The msg_id to continue from, or None if the thread should continue
+        from the very beginning (no messages to skip).
+    """
+    from .tool_state import build_tool_call_states
+
+    # Get all messages in reverse order
+    cur = db.conn.execute(
+        "SELECT msg_id, payload_json, event_seq FROM events "
+        "WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC",
+        (thread_id,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return None
+
+    # Build tool call states to understand pending work
+    tc_states = build_tool_call_states(db, thread_id)
+
+    # Find messages with unpublished tool calls
+    unpublished_tc_msg_ids = set()
+    for tc in tc_states.values():
+        if not tc.published:
+            unpublished_tc_msg_ids.add(tc.parent_msg_id)
+
+    # Iterate backward to find a good continue point
+    for msg_id, pj, event_seq in rows:
+        try:
+            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except Exception:
+            payload = {}
+
+        role = payload.get('role')
+        no_api = payload.get('no_api')
+        keep_user_turn = payload.get('keep_user_turn')
+        skipped = payload.get('skipped_on_continue')
+
+        # Skip already-skipped messages
+        if skipped:
+            continue
+
+        # Skip no_api messages (they don't participate in RA1)
+        if no_api:
+            continue
+
+        # Check if this message has unpublished tool calls - skip it
+        if msg_id in unpublished_tc_msg_ids:
+            continue
+
+        # A tool message (TC6) is a safe continue point
+        if role == 'tool':
+            return msg_id
+
+        # An assistant message without pending tool calls is a good point
+        if role == 'assistant':
+            tool_calls = payload.get('tool_calls', [])
+            if not tool_calls:
+                # No tool calls - safe point
+                return msg_id
+            # Has tool calls - check if all are published
+            all_published = True
+            for tc in tool_calls:
+                tc_id = tc.get('id')
+                if tc_id and tc_id in tc_states:
+                    if not tc_states[tc_id].published:
+                        all_published = False
+                        break
+            if all_published:
+                return msg_id
+            # Some tool calls not published - keep looking
+
+        # A user message without keep_user_turn is a continue point
+        if role == 'user' and not keep_user_turn:
+            tool_calls = payload.get('tool_calls', [])
+            if not tool_calls:
+                return msg_id
+            # User message with tool_calls - check if all published
+            all_published = True
+            for tc in tool_calls:
+                tc_id = tc.get('id')
+                if tc_id and tc_id in tc_states:
+                    if not tc_states[tc_id].published:
+                        all_published = False
+                        break
+            if all_published:
+                return msg_id
+
+    # No good continue point found - return None (start from beginning)
+    return None
+
+
+def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
+    """Check if a thread can be continued.
+
+    A thread is continuable if:
+    - It exists
+    - It is not currently running (no active open_streams lease)
+    - There are messages after the last RA1 boundary that can be skipped
+
+    Note: A thread in 'waiting_user' state is technically continuable,
+    but /continue would effectively be a no-op.
+    """
+    th = db.get_thread(thread_id)
+    if not th:
+        return False
+
+    # Check if there's an active lease
+    try:
+        row = db.current_open(thread_id)
+        if row:
+            return False  # Thread is running
+    except Exception:
+        pass
+
+    return True
+
+
+def continue_thread(
+    db: ThreadsDB,
+    thread_id: str,
+    msg_id: Optional[str] = None,
+) -> ContinueResult:
+    """Continue a thread from a specific point or auto-detected continue point.
+
+    This function marks messages after the continue point with `skipped_on_continue=True`
+    via msg.edit events. The RA1 detection will ignore these messages, allowing the
+    thread to be re-run from the continue point.
+
+    Args:
+        db: ThreadsDB instance
+        thread_id: Thread to continue
+        msg_id: Optional message ID to continue from. If None, auto-detect.
+
+    Returns:
+        ContinueResult with details of the operation
+    """
+    th = db.get_thread(thread_id)
+    if not th:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message=f"Thread not found: {thread_id}"
+        )
+
+    # Check if thread is running
+    try:
+        row = db.current_open(thread_id)
+        if row:
+            return ContinueResult(
+                success=False,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message="Thread is currently running. Interrupt it first."
+            )
+    except Exception:
+        pass
+
+    # Determine the continue point
+    if msg_id is None:
+        msg_id = find_continue_point(db, thread_id)
+        if msg_id is None:
+            return ContinueResult(
+                success=True,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message="No messages to skip. Thread can continue from current state."
+            )
+
+    # Get the event_seq for the continue point
+    continue_seq = _get_event_seq_for_msg_id(db, thread_id, msg_id)
+    if continue_seq is None:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message=f"Message not found: {msg_id}"
+        )
+
+    # Find all messages after the continue point
+    cur = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events "
+        "WHERE thread_id=? AND type='msg.create' AND event_seq > ? ORDER BY event_seq ASC",
+        (thread_id, continue_seq),
+    )
+    rows = cur.fetchall()
+
+    skipped_msg_ids = []
+    continue_event_id = _ulid_like()  # Shared ID to link all edits
+
+    for row_msg_id, pj in rows:
+        if row_msg_id is None:
+            continue
+        try:
+            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except Exception:
+            payload = {}
+
+        # Skip already-skipped messages
+        if payload.get('skipped_on_continue'):
+            continue
+
+        # Mark this message as skipped
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_='msg.edit',
+            payload={
+                'skipped_on_continue': True,
+                'continue_event_id': continue_event_id,
+            },
+            msg_id=row_msg_id,
+        )
+        skipped_msg_ids.append(row_msg_id)
+
+    # Also add a control.interrupt event to advance the RA1 boundary
+    # This ensures the runner doesn't try to continue from the old state
+    db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_='control.interrupt',
+        payload={
+            'reason': 'continue_thread',
+            'old_invoke_id': None,
+            'new_invoke_id': _ulid_like(),
+            'purpose': 'continue',
+            'continue_from_msg_id': msg_id,
+            'skipped_count': len(skipped_msg_ids),
+        },
+    )
+
+    # Rebuild snapshot to reflect the skipped messages
+    create_snapshot(db, thread_id)
+
+    return ContinueResult(
+        success=True,
+        continue_from_msg_id=msg_id,
+        skipped_msg_ids=skipped_msg_ids,
+        message=f"Continued from message {msg_id[-8:] if msg_id else 'start'}, skipped {len(skipped_msg_ids)} messages."
+    )
+
+
+async def continue_thread_async(
+    db: ThreadsDB,
+    thread_id: str,
+    msg_id: Optional[str] = None,
+    delay_sec: Optional[float] = None,
+) -> ContinueResult:
+    """Async version of continue_thread with optional delay.
+
+    If delay_sec is specified, waits for the specified time before applying
+    the continue operation. This is useful for API rate limit scenarios where
+    you want to retry after a delay.
+
+    Args:
+        db: ThreadsDB instance
+        thread_id: Thread to continue
+        msg_id: Optional message ID to continue from
+        delay_sec: Optional delay in seconds before applying the continue.
+                   The thread will be picked up by the runner after this delay.
+
+    Returns:
+        ContinueResult with details of the operation
+    """
+    import asyncio
+
+    # If delay requested, wait before applying the continue
+    if delay_sec is not None and delay_sec > 0:
+        await asyncio.sleep(delay_sec)
+
+    # Now apply the continue
+    result = continue_thread(db, thread_id, msg_id)
+    if result.success and delay_sec is not None and delay_sec > 0:
+        result.message = f"After {delay_sec}s delay: {result.message}"
+
+    return result
 
 
 def append_message(db: ThreadsDB, thread_id: str, role: str, content: str, extra: Optional[Dict[str, Any]] = None) -> str:

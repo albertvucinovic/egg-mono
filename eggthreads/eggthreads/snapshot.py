@@ -26,19 +26,49 @@ class SnapshotBuilder:
 
         Streaming is represented live via EventWatcher; snapshots should
         reflect only completed messages.
+
+        Note: This function respects the skipped_on_continue flag: messages
+        that have been marked as skipped (via a msg.edit event) are not
+        included in the snapshot.
         """
-        messages: List[Dict[str, Any]] = []
+        # Convert to list so we can scan twice (for msg.edit and msg.create)
+        events_list = list(events)
+
+        # First, collect msg_ids that have been marked as skipped
+        skipped_msg_ids: set = set()
 
         def _get(row, key):
             if isinstance(row, dict):
                 return row.get(key)
             return row[key]
 
-        for e in events:
+        for e in events_list:
+            t = _get(e, "type")
+            if t != "msg.edit":
+                continue
+            pj = _get(e, "payload_json")
+            try:
+                payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+            except Exception:
+                payload = {}
+            if payload.get('skipped_on_continue'):
+                msg_id = _get(e, "msg_id")
+                if msg_id:
+                    skipped_msg_ids.add(msg_id)
+
+        messages: List[Dict[str, Any]] = []
+
+        for e in events_list:
             # Support both sqlite3.Row and plain dict; attribute access by key
             t = _get(e, "type")
             if t != "msg.create":
                 continue
+
+            msg_id = _get(e, "msg_id")
+            # Skip messages that have been marked as skipped_on_continue
+            if msg_id and msg_id in skipped_msg_ids:
+                continue
+
             pj = _get(e, "payload_json")
             try:
                 payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
@@ -53,7 +83,7 @@ class SnapshotBuilder:
             # requests for advanced models.
             role = payload.get("role")
             msg: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {}
-            msg["msg_id"] = _get(e, "msg_id")
+            msg["msg_id"] = msg_id
             msg["role"] = role
             # Preserve the original event timestamp if available so UIs
             # can display when a message was created.

@@ -91,6 +91,9 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
     This is intentionally stateless and computed on demand; threads are
     typically small enough that this is acceptable, and it avoids schema
     changes.
+
+    Note: This function respects the skipped_on_continue flag: tool calls
+    from messages that have been marked as skipped are not included.
     """
     states: Dict[str, ToolCallState] = {}
 
@@ -101,12 +104,32 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
     global_intervals: list[tuple[int, Optional[int]]] = []
     current_global_start: Optional[int] = None
 
+    # First, collect msg_ids that have been marked as skipped
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        msg_id = row[0]
+        try:
+            payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            payload = {}
+        if payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(msg_id)
+
     # First pass: find messages that declare tool_calls
     for ev in _iter_events(db, thread_id):
         if ev.get("type") != "msg.create":
             continue
         ev_seq = int(ev["event_seq"])
         msg_id = ev.get("msg_id") or ""
+
+        # Skip messages that have been marked as skipped_on_continue
+        if msg_id and msg_id in skipped_msg_ids:
+            continue
+
         try:
             payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
         except Exception:
@@ -314,6 +337,9 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
     user/tool messages that appear *after* the last LLM turn finishes or
     is explicitly interrupted by the user, but we do not want
     tool-execution streams to reset that boundary.
+
+    Note: This function also respects the skipped_on_continue flag when
+    finding the last assistant message as a fallback boundary.
     """
     last_close = -1
     llm_invokes: set[str] = set()
@@ -324,6 +350,21 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
     # message as the effective RA1 boundary so that RA1 does not
     # re-trigger on already-answered user messages.
     last_assistant_seq = -1
+
+    # First, collect msg_ids that have been marked as skipped
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        msg_id = row[0]
+        try:
+            payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            payload = {}
+        if payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(msg_id)
 
     # Single pass over events in order: mark invoke_ids that have LLM
     # deltas, then record the last stream.close/control.interrupt for any
@@ -378,9 +419,9 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
             old_inv = payload.get("old_invoke_id")
             purpose = payload.get('purpose')
 
-            # If the interrupt is explicitly for an LLM step, always
-            # treat it as a boundary.
-            if purpose == 'llm':
+            # If the interrupt is explicitly for an LLM step or a continue,
+            # always treat it as a boundary.
+            if purpose in ('llm', 'continue'):
                 try:
                     last_close = int(ev.get("event_seq"))
                 except Exception:
@@ -404,7 +445,10 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
                 payload = {}
             role = payload.get("role")
             no_api = bool(payload.get("no_api"))
-            if role == "assistant" and not no_api:
+            msg_id = ev.get("msg_id")
+            # Skip messages that have been marked as skipped_on_continue
+            skipped = msg_id and msg_id in skipped_msg_ids
+            if role == "assistant" and not no_api and not skipped:
                 try:
                     last_assistant_seq = int(ev.get("event_seq"))
                 except Exception:
@@ -420,12 +464,38 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
 
 
 def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Iterable[Dict[str, Any]]:
+    """Iterate over msg.create events after a given event_seq.
+
+    This function respects the skipped_on_continue flag: messages that have
+    been marked as skipped (via a msg.edit event) are not yielded. This allows
+    continue_thread to effectively "reset" the conversation to an earlier point.
+    """
+    # First, collect msg_ids that have been marked as skipped
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        msg_id = row[0]
+        try:
+            payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            payload = {}
+        if payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(msg_id)
+
     cur = db.conn.execute(
         "SELECT * FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
         (thread_id, after_seq),
     )
     for row in cur.fetchall():
-        yield dict(row)
+        ev = dict(row)
+        msg_id = ev.get("msg_id")
+        # Skip messages that have been marked as skipped_on_continue
+        if msg_id and msg_id in skipped_msg_ids:
+            continue
+        yield ev
 
 
 _RA_CACHE: Dict[Tuple[str, int], Optional[RunnerActionable]] = {}

@@ -24,6 +24,7 @@ from .api import (
     current_thread_model,
     current_thread_model_info,
     duplicate_thread,
+    duplicate_thread_up_to,
     get_thread_working_directory,
     set_thread_working_directory,
     collect_subtree,
@@ -39,8 +40,14 @@ from .api import (
     wait_for_user_command_result,
     wait_for_user_command_result_async,
     execute_bash_command_async,
-    duplicate_thread
+    # Continue thread API
+    ContinueResult,
+    continue_thread,
+    continue_thread_async,
+    find_continue_point,
+    is_thread_continuable,
 )  # type: ignore
+from .arg_parser import parse_args, ParsedArgs  # type: ignore
 from .tool_state import (
     list_tool_calls_for_thread,
     list_tool_calls_for_message,
@@ -89,7 +96,7 @@ __all__ = [
     'ThreadsDB', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
     'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable',
     'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'current_open_invoke',
-    'current_thread_model', 'current_thread_model_info', 'duplicate_thread',
+    'current_thread_model', 'current_thread_model_info', 'duplicate_thread', 'duplicate_thread_up_to',
     'collect_subtree', 'list_active_threads', 'wait_subtree_idle',
     'word_count_from_snapshot', 'word_count_from_events',
     'set_subtree_working_directory',
@@ -97,6 +104,10 @@ __all__ = [
     'execute_bash_command', 'execute_bash_command_hidden', 'get_user_command_result', 'wait_for_user_command_result',
     'wait_for_user_command_result_async',
     'execute_bash_command_async',
+    # Continue thread API
+    'ContinueResult', 'continue_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
+    # Argument parser
+    'parse_args', 'ParsedArgs',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
     'discover_runner_actionable',
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',
