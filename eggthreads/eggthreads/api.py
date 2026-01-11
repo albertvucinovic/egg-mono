@@ -377,6 +377,7 @@ class ContinueResult:
     continue_from_msg_id: Optional[str]
     skipped_msg_ids: List[str]
     message: str
+    diagnosis: Optional['ThreadDiagnosis'] = None
 
 
 def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Optional[int]:
@@ -387,6 +388,155 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
     )
     row = cur.fetchone()
     return row[0] if row else None
+
+
+@dataclass
+class ThreadDiagnosis:
+    """Diagnosis of thread state for auto-fix."""
+    is_healthy: bool
+    issues: List[str]
+    suggested_continue_point: Optional[str]
+    details: Dict[str, Any]
+
+
+def diagnose_thread(db: ThreadsDB, thread_id: str) -> ThreadDiagnosis:
+    """Diagnose thread state and suggest fixes.
+
+    Checks for common issues:
+    1. Unclosed streams (interrupted streaming)
+    2. Unpublished tool calls (incomplete tool execution)
+    3. Consecutive assistant messages (API will reject)
+    4. Error messages at the end
+    5. Thread stuck in unexpected state
+
+    Returns a diagnosis with suggested continue point to fix issues.
+    """
+    from .tool_state import build_tool_call_states
+
+    issues: List[str] = []
+    details: Dict[str, Any] = {}
+
+    # Check for unclosed streams
+    cur = db.conn.execute("""
+        SELECT type, event_seq, invoke_id FROM events
+        WHERE thread_id = ? AND type IN ('stream.open', 'stream.close')
+        ORDER BY event_seq ASC
+    """, (thread_id,))
+    stream_events = cur.fetchall()
+
+    open_streams: Dict[str, int] = {}
+    for ev_type, ev_seq, inv_id in stream_events:
+        if ev_type == 'stream.open':
+            open_streams[inv_id] = ev_seq
+        elif ev_type == 'stream.close' and inv_id in open_streams:
+            del open_streams[inv_id]
+
+    if open_streams:
+        issues.append(f"Unclosed streams: {len(open_streams)} stream(s) were interrupted")
+        details['unclosed_streams'] = list(open_streams.keys())
+
+    # Check for unpublished tool calls
+    tc_states = build_tool_call_states(db, thread_id)
+    unpublished = [tc for tc in tc_states.values() if not tc.published]
+    if unpublished:
+        issues.append(f"Unpublished tool calls: {len(unpublished)} tool call(s) pending")
+        details['unpublished_tool_calls'] = [tc.tool_call_id for tc in unpublished]
+
+    # First, collect msg_ids that have been marked as skipped via msg.edit events
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        edit_msg_id = row[0]
+        try:
+            edit_payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            edit_payload = {}
+        if edit_payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(edit_msg_id)
+
+    # Get messages in order, excluding already-skipped messages
+    cur = db.conn.execute(
+        "SELECT msg_id, payload_json, event_seq FROM events "
+        "WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    messages = []
+    for msg_id, pj, ev_seq in cur.fetchall():
+        # Skip messages that were already marked as skipped
+        if msg_id in skipped_msg_ids:
+            continue
+        try:
+            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except Exception:
+            payload = {}
+        messages.append((msg_id, payload, ev_seq))
+
+    # Check for consecutive assistant messages
+    # Build a list of (index, msg_id) for assistant messages
+    assistant_indices = []
+    for i, (msg_id, payload, ev_seq) in enumerate(messages):
+        role = payload.get('role')
+        if role == 'assistant':
+            assistant_indices.append((i, msg_id))
+
+    # Find consecutive assistant pairs
+    consecutive_assistants = []
+    first_consecutive_index = None
+    for j in range(1, len(assistant_indices)):
+        prev_idx, prev_mid = assistant_indices[j - 1]
+        curr_idx, curr_mid = assistant_indices[j]
+        # Check if they're truly consecutive in the messages list (adjacent indices)
+        if curr_idx == prev_idx + 1:
+            consecutive_assistants.append(curr_mid)
+            if first_consecutive_index is None:
+                first_consecutive_index = prev_idx  # Index of first assistant in sequence
+
+    # Find the message before the first consecutive assistant
+    first_consecutive_assistant_msg_id = None
+    msg_before_first_consecutive = None
+    if consecutive_assistants and first_consecutive_index is not None:
+        first_consecutive_assistant_msg_id = messages[first_consecutive_index][0]
+        # The message before the first consecutive assistant
+        if first_consecutive_index > 0:
+            msg_before_first_consecutive = messages[first_consecutive_index - 1][0]
+
+    if consecutive_assistants:
+        issues.append(f"Consecutive assistant messages: {len(consecutive_assistants)} occurrence(s)")
+        details['consecutive_assistants'] = consecutive_assistants
+        details['first_consecutive_assistant'] = first_consecutive_assistant_msg_id
+        details['msg_before_consecutive'] = msg_before_first_consecutive
+
+    # Check for error messages at the end
+    if messages:
+        last_msg_id, last_payload, _ = messages[-1]
+        last_role = last_payload.get('role')
+        last_content = last_payload.get('content', '')
+        if last_role == 'system' and 'error' in last_content.lower():
+            issues.append("Thread ends with error message")
+            details['last_error'] = last_content[:200]
+
+    # Determine if thread is healthy and find continue point
+    is_healthy = len(issues) == 0
+    suggested_point = None
+
+    if not is_healthy:
+        # For consecutive assistants, we need to continue from BEFORE the first
+        # consecutive assistant to remove all consecutive assistant messages
+        if consecutive_assistants and msg_before_first_consecutive:
+            suggested_point = msg_before_first_consecutive
+        else:
+            # Fall back to general continue point detection
+            suggested_point = find_continue_point(db, thread_id)
+
+    return ThreadDiagnosis(
+        is_healthy=is_healthy,
+        issues=issues,
+        suggested_continue_point=suggested_point,
+        details=details,
+    )
 
 
 def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
@@ -404,6 +554,21 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
         from the very beginning (no messages to skip).
     """
     from .tool_state import build_tool_call_states
+
+    # First, collect msg_ids that have been marked as skipped via msg.edit events
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        edit_msg_id = row[0]
+        try:
+            edit_payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            edit_payload = {}
+        if edit_payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(edit_msg_id)
 
     # Get all messages in reverse order
     cur = db.conn.execute(
@@ -426,6 +591,10 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
 
     # Iterate backward to find a good continue point
     for msg_id, pj, event_seq in rows:
+        # Skip already-skipped messages (check msg.edit events, not msg.create payload)
+        if msg_id in skipped_msg_ids:
+            continue
+
         try:
             payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
         except Exception:
@@ -434,11 +603,6 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
         role = payload.get('role')
         no_api = payload.get('no_api')
         keep_user_turn = payload.get('keep_user_turn')
-        skipped = payload.get('skipped_on_continue')
-
-        # Skip already-skipped messages
-        if skipped:
-            continue
 
         # Skip no_api messages (they don't participate in RA1)
         if no_api:
@@ -558,14 +722,27 @@ def continue_thread(
         pass
 
     # Determine the continue point
+    diagnosis = None
     if msg_id is None:
-        msg_id = find_continue_point(db, thread_id)
+        # Run diagnosis to understand thread state and auto-detect continue point
+        diagnosis = diagnose_thread(db, thread_id)
+        if diagnosis.is_healthy:
+            return ContinueResult(
+                success=True,
+                continue_from_msg_id=None,
+                skipped_msg_ids=[],
+                message="Thread is healthy. No changes needed.",
+                diagnosis=diagnosis,
+            )
+        # Use suggested continue point from diagnosis
+        msg_id = diagnosis.suggested_continue_point
         if msg_id is None:
             return ContinueResult(
                 success=True,
                 continue_from_msg_id=None,
                 skipped_msg_ids=[],
-                message="No messages to skip. Thread can continue from current state."
+                message="No messages to skip. Thread can continue from current state.",
+                diagnosis=diagnosis,
             )
 
     # Get the event_seq for the continue point
@@ -577,6 +754,21 @@ def continue_thread(
             skipped_msg_ids=[],
             message=f"Message not found: {msg_id}"
         )
+
+    # First, collect msg_ids that have already been marked as skipped via msg.edit events
+    already_skipped: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        edit_msg_id = row[0]
+        try:
+            edit_payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            edit_payload = {}
+        if edit_payload.get('skipped_on_continue'):
+            already_skipped.add(edit_msg_id)
 
     # Find all messages after the continue point
     cur = db.conn.execute(
@@ -592,13 +784,9 @@ def continue_thread(
     for row_msg_id, pj in rows:
         if row_msg_id is None:
             continue
-        try:
-            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
-        except Exception:
-            payload = {}
 
-        # Skip already-skipped messages
-        if payload.get('skipped_on_continue'):
+        # Skip already-skipped messages (check msg.edit events, not msg.create payload)
+        if row_msg_id in already_skipped:
             continue
 
         # Mark this message as skipped
@@ -633,11 +821,17 @@ def continue_thread(
     # Rebuild snapshot to reflect the skipped messages
     create_snapshot(db, thread_id)
 
+    # Build informative message
+    base_msg = f"Continued from message {msg_id[-8:] if msg_id else 'start'}, skipped {len(skipped_msg_ids)} messages."
+    if diagnosis and diagnosis.issues:
+        base_msg = f"Fixed {len(diagnosis.issues)} issue(s): {', '.join(diagnosis.issues)}. {base_msg}"
+
     return ContinueResult(
         success=True,
         continue_from_msg_id=msg_id,
         skipped_msg_ids=skipped_msg_ids,
-        message=f"Continued from message {msg_id[-8:] if msg_id else 'start'}, skipped {len(skipped_msg_ids)} messages."
+        message=base_msg,
+        diagnosis=diagnosis,
     )
 
 

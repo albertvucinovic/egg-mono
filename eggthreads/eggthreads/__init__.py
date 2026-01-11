@@ -46,6 +46,9 @@ from .api import (
     continue_thread_async,
     find_continue_point,
     is_thread_continuable,
+    # Thread diagnosis
+    ThreadDiagnosis,
+    diagnose_thread,
 )  # type: ignore
 from .arg_parser import parse_args, ParsedArgs  # type: ignore
 from .tool_state import (
@@ -106,6 +109,8 @@ __all__ = [
     'execute_bash_command_async',
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
+    # Thread diagnosis
+    'ThreadDiagnosis', 'diagnose_thread',
     # Argument parser
     'parse_args', 'ParsedArgs',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
