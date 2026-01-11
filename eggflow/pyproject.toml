@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eggflow"
+version = "0.1.0"
+description = "Task-based flow execution engine with caching and async support"
+requires-python = ">=3.10"
+authors = [{ name = "Entropy Gradient" }]
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+eggthreads = [
+  "eggthreads",
+]
+dev = [
+  "pytest>=7",
+  "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools]
+packages = ["eggflow"]
+package-dir = {"eggflow" = "."}
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
