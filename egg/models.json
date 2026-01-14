@@ -398,7 +398,19 @@
     },
     "mistral": {
       "api_base": "https://api.mistral.ai/v1/chat/completions",
-      "api_key_env": "MISTRAL_API_KEY"
+      "api_key_env": "MISTRAL_API_KEY",
+      "models": {
+        "Devstral 2": {
+          "model_name": "devstral-2512",
+          "max_tokens": 256000,
+          "normalize_tool_call_ids": "mistral9",
+          "cost": {
+            "input_tokens": 0,
+            "cached_input": 0,
+            "output_tokens": 0
+          }
+        }
+      }
     }
   },
   "default_model": "openai 120b Local"
