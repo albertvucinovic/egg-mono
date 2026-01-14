@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from eggflow import Task, Result, taskmethod
+from eggflow import Task, Result, taskmethod, as_task
 
 # Counter to track executions
 execution_count = 0
@@ -326,3 +326,220 @@ def test_taskmethod_execute_cached_false(executor):
         assert execution_count == 2  # Both ran
 
     asyncio.run(run())
+
+# --- as_task tests ---
+
+class ExternalService:
+    """Simulates an external class we can't modify."""
+
+    def __init__(self, model: str):
+        self.model = model
+        self.call_count = 0
+
+    async def generate(self, prompt: str):
+        global execution_count
+        execution_count += 1
+        self.call_count += 1
+        return f"[{self.model}] {prompt}"
+
+    def compute(self, x: int):
+        global execution_count
+        execution_count += 1
+        return x * 2
+
+def test_as_task_basic(executor):
+    """as_task wraps an existing method as a Task."""
+    global execution_count
+    execution_count = 0
+
+    service = ExternalService("gpt-4")
+
+    async def run():
+        res = await executor.run(as_task(service.generate, "hello"))
+        assert res.is_success
+        assert res.value == "[gpt-4] hello"
+        assert execution_count == 1
+
+    asyncio.run(run())
+
+def test_as_task_caching(executor):
+    """as_task caches based on args."""
+    global execution_count
+    execution_count = 0
+
+    service = ExternalService("gpt-4")
+
+    async def run():
+        # First call
+        res1 = await executor.run(as_task(service.generate, "hello"))
+        assert res1.value == "[gpt-4] hello"
+        assert execution_count == 1
+
+        # Same args - cache hit
+        res2 = await executor.run(as_task(service.generate, "hello"))
+        assert res2.value == "[gpt-4] hello"
+        assert execution_count == 1  # Cached!
+
+        # Different args - cache miss
+        res3 = await executor.run(as_task(service.generate, "world"))
+        assert res3.value == "[gpt-4] world"
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+def test_as_task_with_cache_attrs(executor):
+    """as_task with cache_attrs includes instance state in key."""
+    global execution_count
+    execution_count = 0
+
+    service_gpt = ExternalService("gpt-4")
+    service_claude = ExternalService("claude")
+
+    async def run():
+        # Call with gpt-4
+        res1 = await executor.run(as_task(service_gpt.generate, "hello", cache_attrs=('model',)))
+        assert res1.value == "[gpt-4] hello"
+        assert execution_count == 1
+
+        # Same prompt, different model - cache miss
+        res2 = await executor.run(as_task(service_claude.generate, "hello", cache_attrs=('model',)))
+        assert res2.value == "[claude] hello"
+        assert execution_count == 2
+
+        # Same model and prompt - cache hit
+        res3 = await executor.run(as_task(service_gpt.generate, "hello", cache_attrs=('model',)))
+        assert res3.value == "[gpt-4] hello"
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+def test_as_task_in_flow(executor):
+    """as_task works inside a flow with yields."""
+    global execution_count
+    execution_count = 0
+
+    service = ExternalService("gpt-4")
+
+    @dataclass
+    class FlowWithAsTask(Task):
+        def run(self):
+            res1 = yield as_task(service.generate, "step 1", cache_attrs=('model',))
+            res2 = yield as_task(service.generate, "step 2", cache_attrs=('model',))
+            res3 = yield as_task(service.generate, "step 1", cache_attrs=('model',))  # cached
+            return [res1.value, res2.value, res3.value]
+
+    async def run():
+        flow = FlowWithAsTask()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert res.value == ["[gpt-4] step 1", "[gpt-4] step 2", "[gpt-4] step 1"]
+        assert execution_count == 2  # Third was cached
+
+    asyncio.run(run())
+
+def test_as_task_with_execute(executor):
+    """as_task works with .execute()."""
+    global execution_count
+    execution_count = 0
+
+    service = ExternalService("gpt-4")
+
+    @dataclass
+    class FlowWithAsTaskExecute(Task):
+        async def run(self):
+            res1 = await as_task(service.generate, "hello", cache_attrs=('model',)).execute()
+            res2 = await as_task(service.generate, "hello", cache_attrs=('model',)).execute()
+            return [res1.value, res2.value]
+
+    async def run():
+        flow = FlowWithAsTaskExecute()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert res.value == ["[gpt-4] hello", "[gpt-4] hello"]
+        assert execution_count == 1  # Second was cached
+
+    asyncio.run(run())
+
+def test_as_task_sync_method(executor):
+    """as_task works with sync methods."""
+    global execution_count
+    execution_count = 0
+
+    service = ExternalService("gpt-4")
+
+    async def run():
+        res = await executor.run(as_task(service.compute, 5))
+        assert res.value == 10
+        assert execution_count == 1
+
+        # Cache hit
+        res2 = await executor.run(as_task(service.compute, 5))
+        assert res2.value == 10
+        assert execution_count == 1
+
+    asyncio.run(run())
+
+def test_as_task_with_kwargs(executor):
+    """as_task handles keyword arguments."""
+    global execution_count
+    execution_count = 0
+
+    class KwargsExternalService:
+        async def process(self, data: str, prefix: str = ""):
+            global execution_count
+            execution_count += 1
+            return f"{prefix}{data}"
+
+    service = KwargsExternalService()
+
+    async def run():
+        res1 = await executor.run(as_task(service.process, "hello"))
+        assert res1.value == "hello"
+        assert execution_count == 1
+
+        # Different kwarg - cache miss
+        res2 = await executor.run(as_task(service.process, "hello", prefix=">>> "))
+        assert res2.value == ">>> hello"
+        assert execution_count == 2
+
+        # Same - cache hit
+        res3 = await executor.run(as_task(service.process, "hello", prefix=">>> "))
+        assert res3.value == ">>> hello"
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+def test_as_task_with_nocache(executor):
+    """as_task works with nocache wrapper."""
+    global execution_count
+    execution_count = 0
+
+    from eggflow import nocache
+
+    service = ExternalService("gpt-4")
+
+    async def run():
+        # First call - cached
+        res1 = await executor.run(as_task(service.generate, "hello"))
+        assert execution_count == 1
+
+        # With nocache - runs again
+        res2 = await executor.run(nocache(as_task(service.generate, "hello")))
+        assert execution_count == 2
+
+        # Without nocache - cached
+        res3 = await executor.run(as_task(service.generate, "hello"))
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+def test_as_task_error_on_unbound(executor):
+    """as_task raises TypeError for unbound functions."""
+    def standalone_func(x):
+        return x
+
+    try:
+        as_task(standalone_func, 5)
+        assert False, "Should have raised TypeError"
+    except TypeError as e:
+        assert "bound method" in str(e)

@@ -132,6 +132,56 @@ def taskmethod(*cache_attrs: str) -> Callable:
     return wrapper
   return decorator
 
+def as_task(method: Callable, *args, cache_attrs: Tuple[str, ...] = (), **kwargs) -> MethodTask:
+  """Wrap any bound method call as a Task without modifying the class.
+
+  This allows converting existing methods to Tasks at the call site,
+  without needing to decorate the class.
+
+  Usage:
+      # With an existing class you can't modify:
+      class ExternalService:
+          def __init__(self, model: str):
+              self.model = model
+
+          async def generate(self, prompt: str):
+              return f"[{self.model}] {prompt}"
+
+      service = ExternalService("gpt-4")
+
+      # Wrap at call site:
+      result = yield as_task(service.generate, "hello", cache_attrs=('model',))
+
+      # No cache_attrs = cache key based only on args:
+      result = yield as_task(service.generate, "hello")
+
+      # Works with execute() too:
+      result = await as_task(service.generate, "hello", cache_attrs=('model',)).execute()
+
+  Args:
+      method: A bound method (e.g., service.generate)
+      *args: Arguments to pass to the method
+      cache_attrs: Tuple of instance attribute names to include in cache key
+      **kwargs: Keyword arguments to pass to the method
+
+  Returns:
+      A MethodTask that can be yielded or executed
+  """
+  if not hasattr(method, '__self__'):
+    raise TypeError("as_task requires a bound method (e.g., instance.method), got unbound function")
+
+  instance = method.__self__
+  # Get the underlying function from the bound method
+  func = method.__func__
+
+  return MethodTask(
+    instance=instance,
+    method=func,
+    cache_attrs=cache_attrs,
+    args=args,
+    kwargs=kwargs,
+  )
+
 @dataclass
 class Result:
   value: Any = None
