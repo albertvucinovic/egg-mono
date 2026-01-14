@@ -22,6 +22,7 @@ from .tool_state import (
     build_tool_call_states,
 )
 from .tools_config import get_thread_tools_config
+from .tool_call_id import normalize_tool_call_id
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -555,7 +556,7 @@ class ThreadRunner:
         # user messages never carry "tool_calls" fields and that tool
         # exposure honours any per-thread tools configuration (e.g.
         # thread-wide tool disable, per-tool blacklists).
-        base_messages = self._sanitize_messages_for_api(base_messages)
+        base_messages = self._sanitize_messages_for_api(base_messages, model_key=current_model)
 
         # Apply per-thread tools configuration: this governs which tools
         # the LLM is allowed to see in this thread. User-initiated tools
@@ -783,7 +784,35 @@ class ThreadRunner:
                     pass
 
 
-    def _sanitize_messages_for_api(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _get_tool_call_id_normalization_strategy(self, model_key: Optional[str]) -> Optional[str]:
+        """Get tool_call_id normalization strategy from provider/model config.
+
+        Looks for ``normalize_tool_call_ids`` field first in model config,
+        then in provider config. Returns the strategy name (e.g., "mistral9")
+        or None if not configured.
+        """
+        if not model_key or self.llm is None:
+            return None
+        try:
+            from eggllm import LLMClient as _LLMClient  # type: ignore
+            if not isinstance(self.llm, _LLMClient):
+                return None
+            # Check model-level config first
+            mc = self.llm.registry.get_model_config(model_key)
+            if mc.get('normalize_tool_call_ids'):
+                return str(mc['normalize_tool_call_ids'])
+            # Fall back to provider-level config
+            provider = mc.get('provider')
+            if provider:
+                pc = self.llm.registry.provider_config(provider)
+                if pc.get('normalize_tool_call_ids'):
+                    return str(pc['normalize_tool_call_ids'])
+        except Exception:
+            pass
+        return None
+
+
+    def _sanitize_messages_for_api(self, messages: List[Dict[str, Any]], model_key: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return a sanitized copy of messages for provider API.
 
         Responsibilities that belong specifically to eggthreads (and not
@@ -811,6 +840,9 @@ class ThreadRunner:
             allow_raw = bool(getattr(tools_cfg, 'allow_raw_tool_output', False))
         except Exception:
             allow_raw = False
+
+        # Get tool_call_id normalization strategy for this provider (e.g., "mistral9")
+        normalize_strategy = self._get_tool_call_id_normalization_strategy(model_key)
 
         out: List[Dict[str, Any]] = []
         for m in messages:
@@ -889,6 +921,17 @@ class ThreadRunner:
                     extra_keys = [k for k in m2.keys() if k not in ignore]
                     if not extra_keys:
                         continue
+
+            # Normalize tool_call_id values if provider requires specific format
+            if normalize_strategy:
+                # Normalize tool_call_id in tool messages
+                if role == "tool" and m2.get("tool_call_id"):
+                    m2["tool_call_id"] = normalize_tool_call_id(m2["tool_call_id"], normalize_strategy)
+                # Normalize tool_calls[].id in assistant messages
+                if role == "assistant" and m2.get("tool_calls"):
+                    for tc in m2["tool_calls"]:
+                        if isinstance(tc, dict) and tc.get("id"):
+                            tc["id"] = normalize_tool_call_id(tc["id"], normalize_strategy)
 
             out.append(m2)
 
