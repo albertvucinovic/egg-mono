@@ -922,16 +922,28 @@ class ThreadRunner:
                     if not extra_keys:
                         continue
 
-            # Normalize tool_call_id values if provider requires specific format
+            # Normalize tool_call_id values if provider requires specific format.
+            # IMPORTANT: We must deep-copy tool_calls to avoid mutating the original
+            # message dicts, which could affect state tracking in build_tool_call_states.
             if normalize_strategy:
                 # Normalize tool_call_id in tool messages
                 if role == "tool" and m2.get("tool_call_id"):
                     m2["tool_call_id"] = normalize_tool_call_id(m2["tool_call_id"], normalize_strategy)
-                # Normalize tool_calls[].id in assistant messages
+                # Normalize tool_calls[].id in assistant messages (deep copy to avoid mutation)
                 if role == "assistant" and m2.get("tool_calls"):
+                    normalized_tcs = []
                     for tc in m2["tool_calls"]:
-                        if isinstance(tc, dict) and tc.get("id"):
-                            tc["id"] = normalize_tool_call_id(tc["id"], normalize_strategy)
+                        if not isinstance(tc, dict):
+                            normalized_tcs.append(tc)
+                            continue
+                        # Deep copy the tool call dict and its nested function dict
+                        tc_copy = dict(tc)
+                        if isinstance(tc_copy.get("function"), dict):
+                            tc_copy["function"] = dict(tc_copy["function"])
+                        if tc_copy.get("id"):
+                            tc_copy["id"] = normalize_tool_call_id(tc_copy["id"], normalize_strategy)
+                        normalized_tcs.append(tc_copy)
+                    m2["tool_calls"] = normalized_tcs
 
             out.append(m2)
 
