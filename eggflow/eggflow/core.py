@@ -26,25 +26,45 @@ class Task:
   async def run(self) -> Any:
     raise NotImplementedError
 
-  async def execute(self, cached: bool = True) -> 'Result':
+  async def execute(self, cached: bool = True, unwrap: bool = False) -> Union['Result', Any]:
     """Execute this task through the current executor.
 
     Args:
         cached: If False, skip caching for this execution (default True).
+        unwrap: If True, return value directly and raise TaskError on failure (default False).
+
+    Returns:
+        Result if unwrap=False, or the unwrapped value if unwrap=True.
+
+    Raises:
+        TaskError: If unwrap=True and the result has an error.
     """
     executor = _current_executor.get(None)
     if executor:
       if cached:
-        return await executor.run(self)
+        result = await executor.run(self)
       else:
-        return await executor.run(nocache(self))
-    # No executor in context - run directly without caching
-    gen = self.run()
-    if inspect.iscoroutine(gen):
-      val = await gen
+        result = await executor.run(nocache(self))
     else:
-      val = gen
-    return Result(value=val)
+      # No executor in context - run directly without caching
+      gen = self.run()
+      if inspect.iscoroutine(gen):
+        val = await gen
+      else:
+        val = gen
+      result = Result(value=val)
+
+    if unwrap:
+      if result.error:
+        raise TaskError(result.error, result)
+      return result.value
+    return result
+
+class TaskError(Exception):
+  """Raised when unwrapping a failed Result."""
+  def __init__(self, message: str, result: 'Result'):
+    super().__init__(message)
+    self.result = result
 
 class NoCache:
   """Wrapper to mark a task as uncacheable for this execution."""
@@ -60,6 +80,25 @@ def nocache(task: Task) -> NoCache:
       result = yield nocache(MyTask("foo"))
   """
   return NoCache(task)
+
+class Unwrap:
+  """Wrapper to unwrap Result and raise on error."""
+  __slots__ = ('task',)
+
+  def __init__(self, task: Task):
+    self.task = task
+
+def unwrap(task: Task) -> Unwrap:
+  """Wrap a task to return unwrapped value and raise TaskError on failure.
+
+  Usage:
+      # Returns value directly, raises TaskError if result has error
+      value = yield unwrap(MyTask("foo"))
+
+      # Can combine with nocache
+      value = yield unwrap(nocache(MyTask("foo")))
+  """
+  return Unwrap(task)
 
 class MethodTask(Task):
   """Task that wraps a method call with configurable cache key."""
@@ -89,6 +128,33 @@ class MethodTask(Task):
       return await result
     elif inspect.isgenerator(result):
       # Handle generator-based tasks
+      return result
+    return result
+
+class FuncTask(Task):
+  """Task that wraps a function call with configurable cache key."""
+
+  def __init__(self, func: Callable, args: tuple, kwargs: dict,
+               cache_key: Optional[Tuple[Any, ...]] = None):
+    self.func = func
+    self.args = args
+    self.kwargs = kwargs
+    # If cache_key not specified, use all args and kwargs values
+    self._cache_key = cache_key if cache_key is not None else args + tuple(kwargs.values())
+
+  def get_cache_key(self) -> str:
+    data = {
+      'func': f"{self.func.__module__}.{self.func.__qualname__}",
+      'cache_key': self._cache_key,
+    }
+    s = json.dumps(data, sort_keys=True, default=str)
+    return hashlib.sha256(s.encode()).hexdigest()
+
+  async def run(self) -> Any:
+    result = self.func(*self.args, **self.kwargs)
+    if inspect.iscoroutine(result):
+      return await result
+    elif inspect.isgenerator(result):
       return result
     return result
 
@@ -132,14 +198,16 @@ def taskmethod(*cache_attrs: str) -> Callable:
     return wrapper
   return decorator
 
-def as_task(method: Callable, *args, cache_attrs: Tuple[str, ...] = (), **kwargs) -> MethodTask:
-  """Wrap any bound method call as a Task without modifying the class.
+def as_task(func_or_method: Callable, *args,
+            cache_attrs: Tuple[str, ...] = (),
+            cache_key: Optional[Tuple[Any, ...]] = None,
+            **kwargs) -> Task:
+  """Wrap a method or function call as a Task without modifying the class/module.
 
-  This allows converting existing methods to Tasks at the call site,
-  without needing to decorate the class.
+  This allows converting existing methods or functions to Tasks at the call site.
+  Automatically detects whether the callable is a bound method or plain function.
 
-  Usage:
-      # With an existing class you can't modify:
+  Usage with methods:
       class ExternalService:
           def __init__(self, model: str):
               self.model = model
@@ -149,38 +217,49 @@ def as_task(method: Callable, *args, cache_attrs: Tuple[str, ...] = (), **kwargs
 
       service = ExternalService("gpt-4")
 
-      # Wrap at call site:
+      # Wrap method - use cache_attrs for instance attributes:
       result = yield as_task(service.generate, "hello", cache_attrs=('model',))
 
-      # No cache_attrs = cache key based only on args:
-      result = yield as_task(service.generate, "hello")
+  Usage with functions:
+      async def fetch_data(url: str, timeout: int):
+          ...
 
-      # Works with execute() too:
-      result = await as_task(service.generate, "hello", cache_attrs=('model',)).execute()
+      # Wrap function - use cache_key to specify which args matter:
+      result = yield as_task(fetch_data, url, timeout, cache_key=(url,))
+
+      # Default: all args used for cache key
+      result = yield as_task(fetch_data, url, timeout)
 
   Args:
-      method: A bound method (e.g., service.generate)
-      *args: Arguments to pass to the method
-      cache_attrs: Tuple of instance attribute names to include in cache key
-      **kwargs: Keyword arguments to pass to the method
+      func_or_method: A bound method or function
+      *args: Arguments to pass
+      cache_attrs: (methods only) Instance attribute names to include in cache key
+      cache_key: (functions only) Explicit tuple of values for cache key.
+                 If not specified, all args are used.
+      **kwargs: Keyword arguments to pass
 
   Returns:
-      A MethodTask that can be yielded or executed
+      A Task (MethodTask or FuncTask) that can be yielded or executed
   """
-  if not hasattr(method, '__self__'):
-    raise TypeError("as_task requires a bound method (e.g., instance.method), got unbound function")
-
-  instance = method.__self__
-  # Get the underlying function from the bound method
-  func = method.__func__
-
-  return MethodTask(
-    instance=instance,
-    method=func,
-    cache_attrs=cache_attrs,
-    args=args,
-    kwargs=kwargs,
-  )
+  # Check if it's a bound method
+  if hasattr(func_or_method, '__self__'):
+    instance = func_or_method.__self__
+    func = func_or_method.__func__
+    return MethodTask(
+      instance=instance,
+      method=func,
+      cache_attrs=cache_attrs,
+      args=args,
+      kwargs=kwargs,
+    )
+  else:
+    # Plain function
+    return FuncTask(
+      func=func_or_method,
+      args=args,
+      kwargs=kwargs,
+      cache_key=cache_key,
+    )
 
 @dataclass
 class Result:
@@ -250,9 +329,16 @@ class FlowExecutor:
     finally:
       _current_executor.reset(token)
 
-  async def _run_internal(self, flow: Union[Task, List[Task], Coroutine, NoCache]) -> Union[Result, List[Result]]:
+  async def _run_internal(self, flow: Union[Task, List[Task], Coroutine, NoCache, Unwrap]) -> Union[Result, List[Result], Any]:
+    if isinstance(flow, Unwrap):
+      # Unwrap wrapper - execute inner task and return value or raise
+      inner = flow.task
+      result = await self._run_internal(inner)
+      if result.error:
+        raise TaskError(result.error, result)
+      return result.value
     if isinstance(flow, NoCache):
-      # Unwrap and execute without caching
+      # NoCache wrapper - execute without caching
       try:
         return await self._handle_task_uncached(flow.task)
       except Exception as e:
@@ -268,8 +354,15 @@ class FlowExecutor:
       return await asyncio.gather(*(self._run_item(item) for item in flow))
     return await self._execute_task(flow)
 
-  async def _run_item(self, item: Union[Task, Coroutine, NoCache]) -> Result:
-    """Handle Task, coroutine, or NoCache wrapper in a list."""
+  async def _run_item(self, item: Union[Task, Coroutine, NoCache, Unwrap]) -> Union[Result, Any]:
+    """Handle Task, coroutine, NoCache, or Unwrap wrapper in a list."""
+    if isinstance(item, Unwrap):
+      # Unwrap wrapper - execute inner and return value or raise
+      inner = item.task
+      result = await self._run_item(inner)
+      if isinstance(result, Result) and result.error:
+        raise TaskError(result.error, result)
+      return result.value if isinstance(result, Result) else result
     if isinstance(item, NoCache):
       try:
         return await self._handle_task_uncached(item.task)
@@ -317,8 +410,12 @@ class FlowExecutor:
       try:
         yielded = next(gen)
         while True:
-          res = await self.run(yielded)
-          yielded = gen.send(res)
+          try:
+            res = await self.run(yielded)
+            yielded = gen.send(res)
+          except TaskError as e:
+            # Throw the error into the generator so it can be caught
+            yielded = gen.throw(type(e), e, e.__traceback__)
       except StopIteration as e: final_val = e.value
     elif inspect.iscoroutine(gen): final_val = await gen
     else: final_val = gen
@@ -335,8 +432,12 @@ class FlowExecutor:
       try:
         yielded = next(gen)
         while True:
-          res = await self.run(yielded)
-          yielded = gen.send(res)
+          try:
+            res = await self.run(yielded)
+            yielded = gen.send(res)
+          except TaskError as e:
+            # Throw the error into the generator so it can be caught
+            yielded = gen.throw(type(e), e, e.__traceback__)
       except StopIteration as e: final_val = e.value
     elif inspect.iscoroutine(gen): final_val = await gen
     else: final_val = gen

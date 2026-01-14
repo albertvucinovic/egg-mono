@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from eggflow import Task, Result, taskmethod, as_task
+from eggflow import Task, Result, taskmethod, as_task, unwrap, TaskError
 
 # Counter to track executions
 execution_count = 0
@@ -534,12 +534,301 @@ def test_as_task_with_nocache(executor):
     asyncio.run(run())
 
 def test_as_task_error_on_unbound(executor):
-    """as_task raises TypeError for unbound functions."""
-    def standalone_func(x):
-        return x
+    """as_task now supports unbound functions too."""
+    global execution_count
+    execution_count = 0
 
-    try:
-        as_task(standalone_func, 5)
-        assert False, "Should have raised TypeError"
-    except TypeError as e:
-        assert "bound method" in str(e)
+    def standalone_func(x):
+        global execution_count
+        execution_count += 1
+        return x * 2
+
+    async def run():
+        # as_task now works with plain functions
+        res = await executor.run(as_task(standalone_func, 5))
+        assert res.value == 10
+        assert execution_count == 1
+
+    asyncio.run(run())
+
+# --- as_task with functions tests ---
+
+async def async_compute(x: int, y: int):
+    global execution_count
+    execution_count += 1
+    return x + y
+
+def sync_compute(x: int, y: int):
+    global execution_count
+    execution_count += 1
+    return x * y
+
+def test_as_task_function_basic(executor):
+    """as_task works with plain functions."""
+    global execution_count
+    execution_count = 0
+
+    async def run():
+        res = await executor.run(as_task(async_compute, 3, 4))
+        assert res.value == 7
+        assert execution_count == 1
+
+    asyncio.run(run())
+
+def test_as_task_function_caching(executor):
+    """as_task caches function calls by args."""
+    global execution_count
+    execution_count = 0
+
+    async def run():
+        res1 = await executor.run(as_task(async_compute, 3, 4))
+        assert res1.value == 7
+        assert execution_count == 1
+
+        # Same args - cache hit
+        res2 = await executor.run(as_task(async_compute, 3, 4))
+        assert res2.value == 7
+        assert execution_count == 1
+
+        # Different args - cache miss
+        res3 = await executor.run(as_task(async_compute, 5, 6))
+        assert res3.value == 11
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+def test_as_task_function_cache_key(executor):
+    """as_task with cache_key uses only specified values."""
+    global execution_count
+    execution_count = 0
+
+    async def run():
+        # Cache by first arg only
+        res1 = await executor.run(as_task(async_compute, 3, 4, cache_key=(3,)))
+        assert res1.value == 7
+        assert execution_count == 1
+
+        # Different second arg, same cache_key - cache hit!
+        res2 = await executor.run(as_task(async_compute, 3, 100, cache_key=(3,)))
+        assert res2.value == 7  # Cached result from first call
+        assert execution_count == 1
+
+        # Different first arg - cache miss
+        res3 = await executor.run(as_task(async_compute, 5, 4, cache_key=(5,)))
+        assert res3.value == 9
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+def test_as_task_function_sync(executor):
+    """as_task works with sync functions."""
+    global execution_count
+    execution_count = 0
+
+    async def run():
+        res = await executor.run(as_task(sync_compute, 3, 4))
+        assert res.value == 12
+        assert execution_count == 1
+
+    asyncio.run(run())
+
+def test_as_task_function_in_flow(executor):
+    """as_task with functions works inside flows."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class FlowWithFuncTask(Task):
+        def run(self):
+            res1 = yield as_task(async_compute, 1, 2)
+            res2 = yield as_task(async_compute, 3, 4)
+            res3 = yield as_task(async_compute, 1, 2)  # cached
+            return [res1.value, res2.value, res3.value]
+
+    async def run():
+        flow = FlowWithFuncTask()
+        res = await executor.run(flow)
+        assert res.value == [3, 7, 3]
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+# --- unwrap tests ---
+
+def test_unwrap_success(executor):
+    """unwrap returns value directly on success."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class SuccessTask(Task):
+        async def run(self):
+            global execution_count
+            execution_count += 1
+            return "success_value"
+
+    @dataclass
+    class FlowWithUnwrap(Task):
+        def run(self):
+            # unwrap returns value directly, not Result
+            value = yield unwrap(SuccessTask())
+            return f"got: {value}"
+
+    async def run():
+        flow = FlowWithUnwrap()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert res.value == "got: success_value"
+
+    asyncio.run(run())
+
+def test_unwrap_failure_raises(executor):
+    """unwrap raises TaskError that can be caught inside the flow."""
+    @dataclass
+    class FailingTask(Task):
+        async def run(self):
+            raise ValueError("task failed")
+
+    @dataclass
+    class FlowWithUnwrapFailure(Task):
+        def run(self):
+            try:
+                value = yield unwrap(FailingTask())
+                return f"got: {value}"
+            except TaskError as e:
+                return f"caught error: {e.result.error}"
+
+    async def run():
+        flow = FlowWithUnwrapFailure()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert res.value == "caught error: task failed"
+
+    asyncio.run(run())
+
+def test_unwrap_with_nocache(executor):
+    """unwrap works with nocache."""
+    global execution_count
+    execution_count = 0
+
+    from eggflow import nocache
+
+    @dataclass
+    class CountingTask(Task):
+        name: str
+        async def run(self):
+            global execution_count
+            execution_count += 1
+            return f"value_{self.name}"
+
+    @dataclass
+    class FlowWithUnwrapNocache(Task):
+        def run(self):
+            # unwrap(nocache(...)) - skip cache and unwrap
+            v1 = yield unwrap(CountingTask("a"))
+            v2 = yield unwrap(nocache(CountingTask("a")))  # runs again
+            return [v1, v2]
+
+    async def run():
+        flow = FlowWithUnwrapNocache()
+        res = await executor.run(flow)
+        assert res.value == ["value_a", "value_a"]
+        assert execution_count == 2  # Second ran again due to nocache
+
+    asyncio.run(run())
+
+def test_unwrap_in_parallel_list(executor):
+    """unwrap works in parallel lists."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class ValueTask(Task):
+        val: int
+        async def run(self):
+            global execution_count
+            execution_count += 1
+            return self.val * 2
+
+    @dataclass
+    class FlowParallelUnwrap(Task):
+        def run(self):
+            # Mix of unwrapped and wrapped results
+            results = yield [unwrap(ValueTask(1)), unwrap(ValueTask(2)), ValueTask(3)]
+            # First two are values, third is Result
+            return results
+
+    async def run():
+        flow = FlowParallelUnwrap()
+        res = await executor.run(flow)
+        assert res.value[0] == 2  # unwrapped value
+        assert res.value[1] == 4  # unwrapped value
+        assert res.value[2].value == 6  # Result object
+
+    asyncio.run(run())
+
+def test_execute_unwrap_success(executor):
+    """execute(unwrap=True) returns value directly."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class SimpleTask(Task):
+        async def run(self):
+            global execution_count
+            execution_count += 1
+            return "direct_value"
+
+    @dataclass
+    class FlowWithExecuteUnwrap(Task):
+        async def run(self):
+            value = await SimpleTask().execute(unwrap=True)
+            return f"got: {value}"
+
+    async def run():
+        flow = FlowWithExecuteUnwrap()
+        res = await executor.run(flow)
+        assert res.value == "got: direct_value"
+
+    asyncio.run(run())
+
+def test_execute_unwrap_failure(executor):
+    """execute(unwrap=True) raises TaskError on failure."""
+    @dataclass
+    class FailTask(Task):
+        async def run(self):
+            raise ValueError("execute failed")
+
+    @dataclass
+    class FlowWithExecuteUnwrapFail(Task):
+        async def run(self):
+            try:
+                await FailTask().execute(unwrap=True)
+                return "should not reach"
+            except TaskError as e:
+                return f"caught: {e.result.error}"
+
+    async def run():
+        flow = FlowWithExecuteUnwrapFail()
+        res = await executor.run(flow)
+        assert res.value == "caught: execute failed"
+
+    asyncio.run(run())
+
+def test_as_task_function_with_unwrap(executor):
+    """as_task function works with unwrap."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class FlowFuncUnwrap(Task):
+        def run(self):
+            value = yield unwrap(as_task(async_compute, 10, 20))
+            return f"sum is {value}"
+
+    async def run():
+        flow = FlowFuncUnwrap()
+        res = await executor.run(flow)
+        assert res.value == "sum is 30"
+
+    asyncio.run(run())
