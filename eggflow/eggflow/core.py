@@ -44,7 +44,6 @@ class TaskStore:
     self.conn.execute("""
       create table if not exists tasks (
         cache_key text primary key,
-        task_blob blob,
         status text,
         result_blob blob,
         updated_at timestamp default current_timestamp
@@ -57,8 +56,8 @@ class TaskStore:
 
   def create(self, key, task):
     try:
-      self.conn.execute("insert into tasks (cache_key, task_blob, status) values (?, ?, ?)",
-                        (key, pickle.dumps(task), "PENDING"))
+      self.conn.execute("insert into tasks (cache_key, status) values (?, ?)",
+                        (key, "PENDING"))
       self.conn.commit()
     except Exception as e:
       logger.error(str(e))
