@@ -5,13 +5,18 @@ import hashlib
 import pickle
 import sqlite3
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, ClassVar, Coroutine, Dict, Optional, List, Union
+
+_current_executor: ContextVar['FlowExecutor'] = ContextVar('executor')
 
 logger = logging.getLogger("flow")
 
 @dataclass
 class Task:
+  cacheable: ClassVar[bool] = True
+
   def get_cache_key(self) -> str:
     data = self.__dict__.copy()
     s = json.dumps(data, sort_keys=True, default=str)
@@ -19,6 +24,19 @@ class Task:
 
   async def run(self) -> Any:
     raise NotImplementedError
+
+  async def execute(self) -> 'Result':
+    """Execute this task through the current executor (cached if cacheable)."""
+    executor = _current_executor.get(None)
+    if executor:
+      return await executor.run(self)
+    # No executor in context - run directly without caching
+    gen = self.run()
+    if inspect.iscoroutine(gen):
+      val = await gen
+    else:
+      val = gen
+    return Result(value=val)
 
 @dataclass
 class Result:
@@ -80,12 +98,44 @@ class FlowExecutor:
   def __init__(self, store: TaskStore):
     self.store = store
 
-  async def run(self, flow: Union[Task, List[Task]]) -> Union[Result, List[Result]]:
+  async def run(self, flow: Union[Task, List[Task], Coroutine]) -> Union[Result, List[Result]]:
+    # Set this executor as current in context
+    token = _current_executor.set(self)
+    try:
+      return await self._run_internal(flow)
+    finally:
+      _current_executor.reset(token)
+
+  async def _run_internal(self, flow: Union[Task, List[Task], Coroutine]) -> Union[Result, List[Result]]:
+    if inspect.iscoroutine(flow):
+      # Raw coroutine - execute without caching
+      try:
+        value = await flow
+        return Result(value=value)
+      except Exception as e:
+        return Result(error=str(e))
     if isinstance(flow, list):
-      return await asyncio.gather(*(self._execute_task(t) for t in flow))
+      return await asyncio.gather(*(self._run_item(item) for item in flow))
     return await self._execute_task(flow)
 
+  async def _run_item(self, item: Union[Task, Coroutine]) -> Result:
+    """Handle either Task or coroutine in a list."""
+    if inspect.iscoroutine(item):
+      try:
+        value = await item
+        return Result(value=value)
+      except Exception as e:
+        return Result(error=str(e))
+    return await self._execute_task(item)
+
   async def _execute_task(self, task: Task) -> Result:
+    # Check if task should skip caching
+    if not getattr(task, 'cacheable', True):
+      try:
+        return await self._handle_task_uncached(task)
+      except Exception as e:
+        return Result(error=str(e))
+
     key = task.get_cache_key()
     row = self.store.get(key)
 
@@ -121,3 +171,18 @@ class FlowExecutor:
     res = Result(value = final_val)
     self.store.update(key, "COMPLETED", result=res)
     return res
+
+  async def _handle_task_uncached(self, task: Task) -> Result:
+    """Execute task without caching."""
+    gen = task.run()
+    final_val = None
+    if inspect.isgenerator(gen):
+      try:
+        yielded = next(gen)
+        while True:
+          res = await self.run(yielded)
+          yielded = gen.send(res)
+      except StopIteration as e: final_val = e.value
+    elif inspect.iscoroutine(gen): final_val = await gen
+    else: final_val = gen
+    return Result(value=final_val)
