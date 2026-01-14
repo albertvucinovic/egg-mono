@@ -25,11 +25,18 @@ class Task:
   async def run(self) -> Any:
     raise NotImplementedError
 
-  async def execute(self) -> 'Result':
-    """Execute this task through the current executor (cached if cacheable)."""
+  async def execute(self, cached: bool = True) -> 'Result':
+    """Execute this task through the current executor.
+
+    Args:
+        cached: If False, skip caching for this execution (default True).
+    """
     executor = _current_executor.get(None)
     if executor:
-      return await executor.run(self)
+      if cached:
+        return await executor.run(self)
+      else:
+        return await executor.run(nocache(self))
     # No executor in context - run directly without caching
     gen = self.run()
     if inspect.iscoroutine(gen):
@@ -37,6 +44,21 @@ class Task:
     else:
       val = gen
     return Result(value=val)
+
+class NoCache:
+  """Wrapper to mark a task as uncacheable for this execution."""
+  __slots__ = ('task',)
+
+  def __init__(self, task: Task):
+    self.task = task
+
+def nocache(task: Task) -> NoCache:
+  """Wrap a task to skip caching for this execution.
+
+  Usage:
+      result = yield nocache(MyTask("foo"))
+  """
+  return NoCache(task)
 
 @dataclass
 class Result:
@@ -106,7 +128,13 @@ class FlowExecutor:
     finally:
       _current_executor.reset(token)
 
-  async def _run_internal(self, flow: Union[Task, List[Task], Coroutine]) -> Union[Result, List[Result]]:
+  async def _run_internal(self, flow: Union[Task, List[Task], Coroutine, NoCache]) -> Union[Result, List[Result]]:
+    if isinstance(flow, NoCache):
+      # Unwrap and execute without caching
+      try:
+        return await self._handle_task_uncached(flow.task)
+      except Exception as e:
+        return Result(error=str(e))
     if inspect.iscoroutine(flow):
       # Raw coroutine - execute without caching
       try:
@@ -118,8 +146,13 @@ class FlowExecutor:
       return await asyncio.gather(*(self._run_item(item) for item in flow))
     return await self._execute_task(flow)
 
-  async def _run_item(self, item: Union[Task, Coroutine]) -> Result:
-    """Handle either Task or coroutine in a list."""
+  async def _run_item(self, item: Union[Task, Coroutine, NoCache]) -> Result:
+    """Handle Task, coroutine, or NoCache wrapper in a list."""
+    if isinstance(item, NoCache):
+      try:
+        return await self._handle_task_uncached(item.task)
+      except Exception as e:
+        return Result(error=str(e))
     if inspect.iscoroutine(item):
       try:
         value = await item

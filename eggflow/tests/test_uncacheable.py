@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from typing import ClassVar
-from eggflow import Task, Result
+from eggflow import Task, Result, nocache
 
 # Counter to track executions
 execution_count = 0
@@ -185,5 +185,117 @@ def test_uncacheable_subtasks_of_uncacheable_parent(executor):
         res2 = await executor.run(flow)
         assert res2.value == "Executed child"
         assert execution_count == 1  # Child didn't run again
+
+    asyncio.run(run())
+
+def test_nocache_wrapper(executor, store):
+    """Test nocache() wrapper skips caching per-instance."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class FlowWithNocache(Task):
+        def run(self):
+            # First call cached
+            res1 = yield CountingTask("cached")
+            # Second call with nocache - skips cache
+            res2 = yield nocache(CountingTask("uncached"))
+            return f"{res1.value}, {res2.value}"
+
+    async def run():
+        flow = FlowWithNocache()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert res.value == "Executed cached, Executed uncached"
+        assert execution_count == 2
+
+        # Verify first task was cached
+        key = CountingTask("cached").get_cache_key()
+        row = store.get(key)
+        assert row is not None
+
+        # Verify nocache'd task was NOT cached
+        key2 = CountingTask("uncached").get_cache_key()
+        row2 = store.get(key2)
+        assert row2 is None
+
+    asyncio.run(run())
+
+def test_nocache_same_task_twice(executor):
+    """Same task: first cached, then nocache'd runs again."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class FlowSameTaskTwice(Task):
+        def run(self):
+            # First call - cached
+            res1 = yield CountingTask("same")
+            # Second call with nocache - runs again
+            res2 = yield nocache(CountingTask("same"))
+            return (res1.value, res2.value)
+
+    async def run():
+        flow = FlowSameTaskTwice()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert res.value == ("Executed same", "Executed same")
+        assert execution_count == 2  # Both ran
+
+    asyncio.run(run())
+
+def test_nocache_in_parallel_list(executor):
+    """Test nocache in a parallel list."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class ParallelWithNocache(Task):
+        def run(self):
+            results = yield [
+                CountingTask("a"),
+                nocache(CountingTask("b")),
+            ]
+            return [r.value for r in results]
+
+    async def run():
+        flow = ParallelWithNocache()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert "Executed a" in res.value
+        assert "Executed b" in res.value
+        assert execution_count == 2
+
+    asyncio.run(run())
+
+def test_execute_with_cached_false(executor):
+    """Test task.execute(cached=False) skips cache."""
+    global execution_count
+    execution_count = 0
+
+    async def helper():
+        return await CountingTask("via_execute").execute(cached=False)
+
+    @dataclass
+    class FlowUsingExecuteUncached(Task):
+        async def run(self):
+            res = await helper()
+            return res.value
+
+    async def run():
+        global execution_count
+        flow = FlowUsingExecuteUncached()
+        res = await executor.run(flow)
+        assert res.is_success
+        assert res.value == "Executed via_execute"
+        assert execution_count == 1
+
+        # Test execute(cached=False) directly - should run each time
+        execution_count = 0
+        res2 = await CountingTask("direct").execute(cached=False)
+        assert res2.value == "Executed direct"
+        res3 = await CountingTask("direct").execute(cached=False)
+        assert res3.value == "Executed direct"
+        assert execution_count == 2  # Both ran
 
     asyncio.run(run())
