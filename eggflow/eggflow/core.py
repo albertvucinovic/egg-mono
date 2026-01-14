@@ -7,7 +7,8 @@ import sqlite3
 import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Coroutine, Dict, Optional, List, Union
+from functools import wraps
+from typing import Any, Callable, ClassVar, Coroutine, Dict, Optional, List, Tuple, Union
 
 _current_executor: ContextVar['FlowExecutor'] = ContextVar('executor')
 
@@ -59,6 +60,77 @@ def nocache(task: Task) -> NoCache:
       result = yield nocache(MyTask("foo"))
   """
   return NoCache(task)
+
+class MethodTask(Task):
+  """Task that wraps a method call with configurable cache key."""
+
+  def __init__(self, instance: Any, method: Callable, cache_attrs: Tuple[str, ...],
+               args: tuple, kwargs: dict):
+    self.instance = instance
+    self.method = method
+    self.cache_attrs = cache_attrs
+    self.args = args
+    self.kwargs = kwargs
+
+  def get_cache_key(self) -> str:
+    # Build cache key from method name, instance attrs, and args
+    data = {
+      'method': f"{self.method.__module__}.{self.method.__qualname__}",
+      'instance_state': {attr: getattr(self.instance, attr) for attr in self.cache_attrs},
+      'args': self.args,
+      'kwargs': self.kwargs,
+    }
+    s = json.dumps(data, sort_keys=True, default=str)
+    return hashlib.sha256(s.encode()).hexdigest()
+
+  async def run(self) -> Any:
+    result = self.method(self.instance, *self.args, **self.kwargs)
+    if inspect.iscoroutine(result):
+      return await result
+    elif inspect.isgenerator(result):
+      # Handle generator-based tasks
+      return result
+    return result
+
+def taskmethod(*cache_attrs: str) -> Callable:
+  """Decorator to convert a method into a Task factory.
+
+  The decorated method returns a MethodTask when called, which can be
+  yielded in a flow. The cache key is built from:
+  1. The method's qualified name
+  2. Specified instance attributes
+  3. Method arguments
+
+  Usage:
+      class MyService:
+          def __init__(self, model: str):
+              self.model = model
+              self.debug = False  # Not included in cache
+
+          @taskmethod('model')  # Only 'model' affects cache key
+          async def generate(self, prompt: str):
+              return f"generated with {self.model}: {prompt}"
+
+      # In a flow:
+      service = MyService("gpt-4")
+      result = yield service.generate("hello")  # Returns MethodTask
+
+  Args:
+      cache_attrs: Names of instance attributes to include in cache key.
+                   Use @taskmethod() for no instance state (just args).
+  """
+  def decorator(method: Callable) -> Callable:
+    @wraps(method)
+    def wrapper(self, *args, **kwargs) -> MethodTask:
+      return MethodTask(
+        instance=self,
+        method=method,
+        cache_attrs=cache_attrs,
+        args=args,
+        kwargs=kwargs,
+      )
+    return wrapper
+  return decorator
 
 @dataclass
 class Result:
