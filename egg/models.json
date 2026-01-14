@@ -399,11 +399,11 @@
     "mistral": {
       "api_base": "https://api.mistral.ai/v1/chat/completions",
       "api_key_env": "MISTRAL_API_KEY",
+      "normalize_tool_call_ids": "mistral9",
       "models": {
         "Devstral 2": {
           "model_name": "devstral-2512",
           "max_tokens": 256000,
-          "normalize_tool_call_ids": "mistral9",
           "cost": {
             "input_tokens": 0,
             "cached_input": 0,
