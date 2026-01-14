@@ -17,11 +17,13 @@ class BestOfN(Task):
             ) for i in range(self.n)
         ]
 
+        # List yields return values directly
         results = yield tasks
 
         candidates = []
         for i, res in enumerate(results):
-            val = res.value.content
+            # res is ThreadResult directly
+            val = res.content
             candidates.append(f"Option {i}:\n{val}\n")
 
         judge_prompt = (
@@ -30,12 +32,13 @@ class BestOfN(Task):
             "\n---\nSelect the best option. Return ONLY the index (e.g. 'Option 1')."
         )
 
+        # yield returns value directly
         selection_res = yield CreateThread(
             prompt=judge_prompt,
             model_key=self.grader_model
         )
 
-        selection = selection_res.value.content
+        selection = selection_res.content
 
         best_idx = 0
         for i in range(self.n):
@@ -43,12 +46,12 @@ class BestOfN(Task):
                 best_idx = i
                 break
 
-        return results[best_idx].value.content
+        return results[best_idx].content
 
 def test_best_of_n(executor):
     async def run():
         task = BestOfN(prompt="Explain the theory of relativity in one sentence.", n=3)
-        res = await executor.run(task)
-        assert res.is_success
-        assert res.value is not None
+        # executor.run now returns value directly
+        value = await executor.run(task)
+        assert value is not None
     asyncio.run(run())

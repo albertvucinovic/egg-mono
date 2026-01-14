@@ -5,6 +5,7 @@ import hashlib
 import pickle
 import sqlite3
 import asyncio
+import warnings
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
@@ -26,25 +27,31 @@ class Task:
   async def run(self) -> Any:
     raise NotImplementedError
 
-  async def execute(self, cached: bool = True, unwrap: bool = False) -> Union['Result', Any]:
+  async def execute(self, cached: bool = True, raw: bool = False) -> Union['Result', Any]:
     """Execute this task through the current executor.
 
     Args:
         cached: If False, skip caching for this execution (default True).
-        unwrap: If True, return value directly and raise TaskError on failure (default False).
+        raw: If True, return Result object instead of unwrapped value (default False).
 
     Returns:
-        Result if unwrap=False, or the unwrapped value if unwrap=True.
+        Value directly by default, or Result if raw=True.
 
     Raises:
-        TaskError: If unwrap=True and the result has an error.
+        TaskError: If raw=False and the result has an error.
     """
     executor = _current_executor.get(None)
     if executor:
       if cached:
-        result = await executor.run(self)
+        if raw:
+          result = await executor.run(wrapped(self))
+        else:
+          return await executor.run(self)  # Returns value, raises on error
       else:
-        result = await executor.run(nocache(self))
+        if raw:
+          result = await executor.run(wrapped(nocache(self)))
+        else:
+          return await executor.run(nocache(self))  # Returns value, raises on error
     else:
       # No executor in context - run directly without caching
       gen = self.run()
@@ -53,11 +60,9 @@ class Task:
       else:
         val = gen
       result = Result(value=val)
+      if not raw:
+        return val
 
-    if unwrap:
-      if result.error:
-        raise TaskError(result.error, result)
-      return result.value
     return result
 
 class TaskError(Exception):
@@ -82,29 +87,77 @@ def nocache(task: Task) -> NoCache:
   return NoCache(task)
 
 class Unwrap:
-  """Wrapper to unwrap Result and raise on error."""
+  """Wrapper to unwrap Result and raise on error.
+
+  DEPRECATED: Values are now returned by default. Use wrapped() to get Result.
+  """
   __slots__ = ('task',)
 
   def __init__(self, task: Task):
+    warnings.warn(
+      "Unwrap is deprecated. Values are now returned by default. "
+      "Use wrapped() to get Result objects.",
+      DeprecationWarning,
+      stacklevel=2
+    )
     self.task = task
 
 def unwrap(task: Task) -> Unwrap:
   """Wrap a task to return unwrapped value and raise TaskError on failure.
 
-  Usage:
-      # Returns value directly, raises TaskError if result has error
-      value = yield unwrap(MyTask("foo"))
-
-      # Can combine with nocache
-      value = yield unwrap(nocache(MyTask("foo")))
+  DEPRECATED: Values are now returned by default. This function is a no-op.
   """
+  warnings.warn(
+    "unwrap() is deprecated. Values are now returned by default. "
+    "Use wrapped() to get Result objects.",
+    DeprecationWarning,
+    stacklevel=2
+  )
   return Unwrap(task)
 
+class Wrapped:
+  """Wrapper to get Result object instead of unwrapped value.
+
+  By default, yielding a task returns the value directly and raises TaskError on failure.
+  Use wrapped() when you need access to the Result object (for error checking, metadata, etc).
+  """
+  __slots__ = ('task',)
+
+  def __init__(self, task: Task):
+    self.task = task
+
+def wrapped(task: Task) -> Wrapped:
+  """Wrap a task to return Result object instead of unwrapped value.
+
+  By default, yielding a task returns the value directly and raises TaskError on failure.
+  Use this when you need access to the Result object.
+
+  Usage:
+      # Get Result object (won't raise on error)
+      result = yield wrapped(MyTask("foo"))
+      if result.is_success:
+          print(result.value)
+      else:
+          print(result.error)
+
+      # Can combine with nocache
+      result = yield wrapped(nocache(MyTask("foo")))
+  """
+  return Wrapped(task)
+
 class MethodTask(Task):
-  """Task that wraps a method call with configurable cache key."""
+  """Task that wraps a method call with configurable cache key.
+
+  DEPRECATED: Use as_task() with explicit cache_key instead.
+  """
 
   def __init__(self, instance: Any, method: Callable, cache_attrs: Tuple[str, ...],
                args: tuple, kwargs: dict):
+    warnings.warn(
+      "MethodTask is deprecated. Use as_task() with explicit cache_key instead.",
+      DeprecationWarning,
+      stacklevel=2
+    )
     self.instance = instance
     self.method = method
     self.cache_attrs = cache_attrs
@@ -161,30 +214,23 @@ class FuncTask(Task):
 def taskmethod(*cache_attrs: str) -> Callable:
   """Decorator to convert a method into a Task factory.
 
-  The decorated method returns a MethodTask when called, which can be
-  yielded in a flow. The cache key is built from:
-  1. The method's qualified name
-  2. Specified instance attributes
-  3. Method arguments
+  DEPRECATED: Use as_task() with explicit cache_key instead.
 
-  Usage:
-      class MyService:
-          def __init__(self, model: str):
-              self.model = model
-              self.debug = False  # Not included in cache
+  Example migration:
+      # Old:
+      @taskmethod('model')
+      async def generate(self, prompt): ...
+      result = yield service.generate("hello")
 
-          @taskmethod('model')  # Only 'model' affects cache key
-          async def generate(self, prompt: str):
-              return f"generated with {self.model}: {prompt}"
-
-      # In a flow:
-      service = MyService("gpt-4")
-      result = yield service.generate("hello")  # Returns MethodTask
-
-  Args:
-      cache_attrs: Names of instance attributes to include in cache key.
-                   Use @taskmethod() for no instance state (just args).
+      # New:
+      async def generate(self, prompt): ...
+      value = yield as_task(service.generate, "hello", cache_key=(service.model, "hello"))
   """
+  warnings.warn(
+    "taskmethod() is deprecated. Use as_task() with explicit cache_key instead.",
+    DeprecationWarning,
+    stacklevel=2
+  )
   def decorator(method: Callable) -> Callable:
     @wraps(method)
     def wrapper(self, *args, **kwargs) -> MethodTask:
@@ -199,13 +245,12 @@ def taskmethod(*cache_attrs: str) -> Callable:
   return decorator
 
 def as_task(func_or_method: Callable, *args,
-            cache_attrs: Tuple[str, ...] = (),
             cache_key: Optional[Tuple[Any, ...]] = None,
             **kwargs) -> Task:
   """Wrap a method or function call as a Task without modifying the class/module.
 
   This allows converting existing methods or functions to Tasks at the call site.
-  Automatically detects whether the callable is a bound method or plain function.
+  Works with both bound methods and plain functions using the same pattern.
 
   Usage with methods:
       class ExternalService:
@@ -217,49 +262,36 @@ def as_task(func_or_method: Callable, *args,
 
       service = ExternalService("gpt-4")
 
-      # Wrap method - use cache_attrs for instance attributes:
-      result = yield as_task(service.generate, "hello", cache_attrs=('model',))
+      # Wrap method - include instance attributes in cache_key:
+      value = yield as_task(service.generate, "hello", cache_key=(service.model, "hello"))
 
   Usage with functions:
       async def fetch_data(url: str, timeout: int):
           ...
 
       # Wrap function - use cache_key to specify which args matter:
-      result = yield as_task(fetch_data, url, timeout, cache_key=(url,))
+      value = yield as_task(fetch_data, url, timeout, cache_key=(url,))
 
       # Default: all args used for cache key
-      result = yield as_task(fetch_data, url, timeout)
+      value = yield as_task(fetch_data, url, timeout)
 
   Args:
       func_or_method: A bound method or function
       *args: Arguments to pass
-      cache_attrs: (methods only) Instance attribute names to include in cache key
-      cache_key: (functions only) Explicit tuple of values for cache key.
+      cache_key: Explicit tuple of values for cache key.
                  If not specified, all args are used.
       **kwargs: Keyword arguments to pass
 
   Returns:
-      A Task (MethodTask or FuncTask) that can be yielded or executed
+      A FuncTask that can be yielded or executed. Returns value directly by default.
   """
-  # Check if it's a bound method
-  if hasattr(func_or_method, '__self__'):
-    instance = func_or_method.__self__
-    func = func_or_method.__func__
-    return MethodTask(
-      instance=instance,
-      method=func,
-      cache_attrs=cache_attrs,
-      args=args,
-      kwargs=kwargs,
-    )
-  else:
-    # Plain function
-    return FuncTask(
-      func=func_or_method,
-      args=args,
-      kwargs=kwargs,
-      cache_key=cache_key,
-    )
+  # Always use FuncTask - works for both functions and bound methods
+  return FuncTask(
+    func=func_or_method,
+    args=args,
+    kwargs=kwargs,
+    cache_key=cache_key,
+  )
 
 @dataclass
 class Result:
@@ -329,52 +361,113 @@ class FlowExecutor:
     finally:
       _current_executor.reset(token)
 
-  async def _run_internal(self, flow: Union[Task, List[Task], Coroutine, NoCache, Unwrap]) -> Union[Result, List[Result], Any]:
-    if isinstance(flow, Unwrap):
-      # Unwrap wrapper - execute inner task and return value or raise
+  async def _run_internal(self, flow: Union[Task, List[Task], Coroutine, NoCache, Unwrap, Wrapped]) -> Union[Result, List[Result], Any]:
+    # Handle Wrapped - return Result object instead of unwrapped value
+    if isinstance(flow, Wrapped):
       inner = flow.task
-      result = await self._run_internal(inner)
-      if result.error:
-        raise TaskError(result.error, result)
-      return result.value
+      # Recursively handle the inner task but return Result
+      if isinstance(inner, NoCache):
+        try:
+          return await self._handle_task_uncached(inner.task)
+        except Exception as e:
+          return Result(error=str(e))
+      elif isinstance(inner, Task):
+        return await self._execute_task(inner)
+      else:
+        # Handle wrapped coroutine
+        try:
+          value = await inner
+          return Result(value=value)
+        except Exception as e:
+          return Result(error=str(e))
+
+    # Handle Unwrap (DEPRECATED - now same as default behavior)
+    if isinstance(flow, Unwrap):
+      inner = flow.task
+      # Just unwrap and process normally (values are default now)
+      return await self._run_internal(inner)
+
     if isinstance(flow, NoCache):
-      # NoCache wrapper - execute without caching
+      # NoCache wrapper - execute without caching, return value
       try:
-        return await self._handle_task_uncached(flow.task)
+        result = await self._handle_task_uncached(flow.task)
+        if result.error:
+          raise TaskError(result.error, result)
+        return result.value
+      except TaskError:
+        raise
       except Exception as e:
-        return Result(error=str(e))
+        raise TaskError(str(e), Result(error=str(e)))
+
     if inspect.iscoroutine(flow):
-      # Raw coroutine - execute without caching
+      # Raw coroutine - execute without caching, return value
       try:
         value = await flow
-        return Result(value=value)
+        return value
       except Exception as e:
-        return Result(error=str(e))
+        raise TaskError(str(e), Result(error=str(e)))
+
     if isinstance(flow, list):
       return await asyncio.gather(*(self._run_item(item) for item in flow))
-    return await self._execute_task(flow)
 
-  async def _run_item(self, item: Union[Task, Coroutine, NoCache, Unwrap]) -> Union[Result, Any]:
-    """Handle Task, coroutine, NoCache, or Unwrap wrapper in a list."""
-    if isinstance(item, Unwrap):
-      # Unwrap wrapper - execute inner and return value or raise
+    # Regular task - execute and return value (raise on error)
+    result = await self._execute_task(flow)
+    if result.error:
+      raise TaskError(result.error, result)
+    return result.value
+
+  async def _run_item(self, item: Union[Task, Coroutine, NoCache, Unwrap, Wrapped]) -> Union[Result, Any]:
+    """Handle Task, coroutine, NoCache, Unwrap, or Wrapped wrapper in a list.
+
+    By default returns unwrapped values and raises TaskError on failure.
+    Use wrapped() to get Result objects.
+    """
+    # Handle Wrapped - return Result object
+    if isinstance(item, Wrapped):
       inner = item.task
-      result = await self._run_item(inner)
-      if isinstance(result, Result) and result.error:
-        raise TaskError(result.error, result)
-      return result.value if isinstance(result, Result) else result
+      if isinstance(inner, NoCache):
+        try:
+          return await self._handle_task_uncached(inner.task)
+        except Exception as e:
+          return Result(error=str(e))
+      elif isinstance(inner, Task):
+        return await self._execute_task(inner)
+      else:
+        # Wrapped coroutine
+        try:
+          value = await inner
+          return Result(value=value)
+        except Exception as e:
+          return Result(error=str(e))
+
+    # Handle Unwrap (DEPRECATED - now same as default)
+    if isinstance(item, Unwrap):
+      inner = item.task
+      return await self._run_item(inner)
+
     if isinstance(item, NoCache):
       try:
-        return await self._handle_task_uncached(item.task)
+        result = await self._handle_task_uncached(item.task)
+        if result.error:
+          raise TaskError(result.error, result)
+        return result.value
+      except TaskError:
+        raise
       except Exception as e:
-        return Result(error=str(e))
+        raise TaskError(str(e), Result(error=str(e)))
+
     if inspect.iscoroutine(item):
       try:
         value = await item
-        return Result(value=value)
+        return value
       except Exception as e:
-        return Result(error=str(e))
-    return await self._execute_task(item)
+        raise TaskError(str(e), Result(error=str(e)))
+
+    # Regular task - return value, raise on error
+    result = await self._execute_task(item)
+    if result.error:
+      raise TaskError(result.error, result)
+    return result.value
 
   async def _execute_task(self, task: Task) -> Result:
     # Check if task should skip caching

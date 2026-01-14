@@ -11,17 +11,18 @@ class EvaluateCandidate(Task):
     expected_answer_keyword: str
 
     def run(self):
+        # yield now returns value directly
         test_fork = yield ForkThread(self.candidate_thread_id)
 
-        answer_res = yield ContinueThread(test_fork.value, self.benchmark_question)
+        answer_res = yield ContinueThread(test_fork, self.benchmark_question)
 
-        val = answer_res.value.content
+        val = answer_res.content
         score = 0
         if "mock" in val.lower():
             if self.expected_answer_keyword.lower() in val.lower():
                 score = 10
             else:
-                h = int(hashlib.md5(test_fork.value.encode()).hexdigest(), 16)
+                h = int(hashlib.md5(test_fork.encode()).hexdigest(), 16)
                 score = h % 10
         else:
             score = 10 if self.expected_answer_keyword.lower() in val.lower() else 0
@@ -35,8 +36,8 @@ class MutateCandidate(Task):
     feedback: str
 
     def run(self):
-        child_id_res = yield ForkThread(self.parent_thread_id)
-        child_id = child_id_res.value
+        # yield now returns value directly
+        child_id = yield ForkThread(self.parent_thread_id)
 
         mutation_prompt = (
             f"REFLECTION: Your previous performance scored {self.feedback}.\n"
@@ -48,10 +49,10 @@ class MutateCandidate(Task):
 
         new_candidate = yield CreateThread(
             prompt="I am ready.",
-            system_prompt=new_prompt_res.value.content
+            system_prompt=new_prompt_res.content
         )
 
-        return new_candidate.value.thread_id
+        return new_candidate.thread_id
 
 @dataclass
 class GEPA(Task):
@@ -60,11 +61,13 @@ class GEPA(Task):
     population_size: int = 4
 
     def run(self):
+        # yield now returns value directly (ThreadResult)
         root_res = yield CreateThread(prompt="I am ready.", system_prompt=self.initial_prompt)
         population = []
-        fork_specs = [ForkThread(root_res.value.thread_id) for _ in range(self.population_size)]
+        fork_specs = [ForkThread(root_res.thread_id) for _ in range(self.population_size)]
+        # List yields return values directly
         fork_ress = yield fork_specs
-        population = [r.value for r in fork_ress]
+        population = fork_ress  # Already values
 
         benchmark = [
             ("What is 2+2?", "4"),
@@ -76,7 +79,8 @@ class GEPA(Task):
             for tid in population:
                 test_tasks = [EvaluateCandidate(tid, q, a) for q, a in benchmark]
                 results = yield test_tasks
-                total_score = sum(r.value for r in results)
+                # results are values now
+                total_score = sum(results)
                 scores.append((total_score, tid))
 
             scores.sort(key=lambda x: x[0], reverse=True)
@@ -94,11 +98,12 @@ class GEPA(Task):
                     for _ in range(needed)
                 ]
                 children = yield mutations
-                new_population.extend([c.value for c in children])
+                # children are values now
+                new_population.extend(children)
 
             while len(new_population) < self.population_size:
                 m = yield MutateCandidate(top_half[0][1], "Padding")
-                new_population.append(m.value)
+                new_population.append(m)
 
             population = new_population
 
@@ -107,7 +112,7 @@ class GEPA(Task):
 def test_gepa(executor):
     async def run():
         algo = GEPA(initial_prompt="You are a helpful assistant.", generations=2, population_size=4)
-        res = await executor.run(algo)
-        assert res.is_success
-        assert res.value is not None
+        # executor.run now returns value directly
+        value = await executor.run(algo)
+        assert value is not None
     asyncio.run(run())

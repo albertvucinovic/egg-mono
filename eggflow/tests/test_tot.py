@@ -10,16 +10,17 @@ class TreeOfThoughts(Task):
     branch_factor: int = 3
 
     def run(self):
+        # yield now returns value directly (ThreadResult)
         root = yield CreateThread(
             prompt=f"Let's solve this step by step. Problem: {self.problem}",
             model_key="gpt-4o"
         )
-        current_best_id = root.value.thread_id
+        current_best_id = root.thread_id
 
         for step in range(self.depth):
             fork_specs = [ForkThread(current_best_id) for _ in range(self.branch_factor)]
-            fork_results = yield fork_specs
-            fork_ids = [r.value for r in fork_results]
+            # List yields return values directly
+            fork_ids = yield fork_specs
 
             expand_specs = [
                 ContinueThread(tid, "Generate the next logical step. Be concise.")
@@ -29,7 +30,8 @@ class TreeOfThoughts(Task):
 
             scores = []
             for i, res in enumerate(expand_results):
-                content = res.value.content
+                # res is ThreadResult directly
+                content = res.content
                 tid = fork_ids[i]
 
                 grader_res = yield CreateThread(
@@ -38,7 +40,7 @@ class TreeOfThoughts(Task):
                 )
 
                 try:
-                    score = int(''.join(filter(str.isdigit, grader_res.value.content))) % 11
+                    score = int(''.join(filter(str.isdigit, grader_res.content))) % 11
                 except:
                     score = 0
 
@@ -53,12 +55,12 @@ class TreeOfThoughts(Task):
             current_best_id = best_tid
 
         final = yield ContinueThread(current_best_id, "Summarize the final solution.")
-        return final.value.content
+        return final.content
 
 def test_tree_of_thoughts(executor):
     async def run():
         tot = TreeOfThoughts("How do I build a dyson sphere?", depth=2, branch_factor=2)
-        res = await executor.run(tot)
-        assert res.is_success
-        assert res.value is not None
+        # executor.run now returns value directly
+        value = await executor.run(tot)
+        assert value is not None
     asyncio.run(run())

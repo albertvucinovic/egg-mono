@@ -1,7 +1,7 @@
 import asyncio
 import pickle
 from dataclasses import dataclass
-from eggflow import Task, Result
+from eggflow import Task, Result, TaskError, wrapped
 
 @dataclass
 class CriticalTask(Task):
@@ -13,9 +13,8 @@ class CriticalTask(Task):
 def test_corruption_handling(executor, store):
     async def run():
         task_a = CriticalTask(name="A")
-        res = await executor.run(task_a)
-        assert res.is_success
-        assert res.value == "Secret Data for A"
+        value = await executor.run(task_a)
+        assert value == "Secret Data for A"
 
         key = task_a.get_cache_key()
         store.conn.execute(
@@ -24,7 +23,8 @@ def test_corruption_handling(executor, store):
         )
         store.conn.commit()
 
-        res = await executor.run(task_a)
+        # Use wrapped() to get Result with error info
+        res = await executor.run(wrapped(task_a))
         assert not res.is_success
         assert "corrupt" in res.metadata or "error" in str(res.error).lower()
     asyncio.run(run())

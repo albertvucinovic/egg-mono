@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 from dataclasses import dataclass
-from eggflow import Task, CreateThread
+from eggflow import Task, CreateThread, wrapped
 
 @dataclass
 class AnalyzeLocalFile(Task):
@@ -25,11 +25,12 @@ class AnalyzeLocalFile(Task):
             "Write a summary to 'summary.txt' and return 'Done'."
         )
 
-        res = yield CreateThread(
+        # Use wrapped() to get Result with metadata
+        res = yield wrapped(CreateThread(
             prompt=prompt,
             model_key="gpt-4o",
             output_files=["summary.txt"]
-        )
+        ))
 
         artifacts = res.metadata.get('artifacts', {})
         return artifacts.get("summary.txt", "No summary generated.")
@@ -46,8 +47,9 @@ def test_file_analysis(executor, tmp_path):
         data_file.write_text("System OK. CPU 10%. Memory 20%.")
 
         task1 = AnalyzeLocalFile(str(data_file), compute_hash(str(data_file)))
-        res1 = await executor.run(task1)
-        assert res1.is_success
+        # executor.run now returns value directly
+        value = await executor.run(task1)
+        assert value is not None
     asyncio.run(run())
 
 def test_file_caching(executor, tmp_path):
@@ -57,12 +59,12 @@ def test_file_caching(executor, tmp_path):
 
         file_hash = compute_hash(str(data_file))
         task1 = AnalyzeLocalFile(str(data_file), file_hash)
-        res1 = await executor.run(task1)
+        value1 = await executor.run(task1)
 
         task2 = AnalyzeLocalFile(str(data_file), file_hash)
-        res2 = await executor.run(task2)
+        value2 = await executor.run(task2)
 
-        assert res1.value == res2.value
+        assert value1 == value2
     asyncio.run(run())
 
 def test_file_change_invalidates_cache(executor, tmp_path):
@@ -71,12 +73,12 @@ def test_file_change_invalidates_cache(executor, tmp_path):
         data_file.write_text("System OK. CPU 10%. Memory 20%.")
 
         task1 = AnalyzeLocalFile(str(data_file), compute_hash(str(data_file)))
-        res1 = await executor.run(task1)
+        value1 = await executor.run(task1)
 
         data_file.write_text("System FAILURE. CPU 99%.")
 
         task2 = AnalyzeLocalFile(str(data_file), compute_hash(str(data_file)))
-        res2 = await executor.run(task2)
+        value2 = await executor.run(task2)
 
         assert task1.get_cache_key() != task2.get_cache_key()
     asyncio.run(run())

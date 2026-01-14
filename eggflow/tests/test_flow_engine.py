@@ -1,7 +1,7 @@
 import asyncio
 import pickle
 from dataclasses import dataclass
-from eggflow import Task, Result, CreateThread, ContinueThread, ForkThread, ThreadResult
+from eggflow import Task, Result, CreateThread, ContinueThread, ForkThread, ThreadResult, wrapped, TaskError
 
 @dataclass
 class SimpleEcho(Task):
@@ -12,16 +12,16 @@ class SimpleEcho(Task):
 def test_simple_execution(executor):
     async def run():
         task = SimpleEcho("Hello")
-        res = await executor.run(task)
-        assert res.is_success
-        assert res.value == "Echo: Hello"
+        # executor.run now returns value directly
+        value = await executor.run(task)
+        assert value == "Echo: Hello"
     asyncio.run(run())
 
 def test_caching(executor, store):
     async def run():
         task = SimpleEcho("CacheMe")
-        res1 = await executor.run(task)
-        assert res1.value == "Echo: CacheMe"
+        value1 = await executor.run(task)
+        assert value1 == "Echo: CacheMe"
 
         key = task.get_cache_key()
         store.conn.execute(
@@ -30,8 +30,8 @@ def test_caching(executor, store):
         )
         store.conn.commit()
 
-        res2 = await executor.run(task)
-        assert res2.value == "Hacked"
+        value2 = await executor.run(task)
+        assert value2 == "Hacked"
     asyncio.run(run())
 
 @dataclass
@@ -46,7 +46,8 @@ class FlakyTask(Task):
 class RetryWorkflow(Task):
     def run(self):
         for i in range(3):
-            res = yield FlakyTask(attempt=i)
+            # Use wrapped() to get Result for checking success
+            res = yield wrapped(FlakyTask(attempt=i))
             if res.is_success:
                 return res.value
         return "Failed"
@@ -54,8 +55,8 @@ class RetryWorkflow(Task):
 def test_retry_logic(executor):
     async def run():
         wf = RetryWorkflow()
-        res = await executor.run(wf)
-        assert res.value == "Success"
+        value = await executor.run(wf)
+        assert value == "Success"
 
         cur = executor.store.conn.execute("SELECT result_blob FROM tasks")
         errors = 0
@@ -71,27 +72,26 @@ def test_retry_logic(executor):
 def test_mock_create_thread(executor):
     async def run():
         t = CreateThread(prompt="Hello Egg")
-        res = await executor.run(t)
-        assert isinstance(res.value, ThreadResult)
-        assert "Mock Reply" in res.value.content
+        value = await executor.run(t)
+        assert isinstance(value, ThreadResult)
+        assert "Mock Reply" in value.content
     asyncio.run(run())
 
 @dataclass
 class ForkFlow(Task):
     def run(self):
-        root_res = yield CreateThread("Root")
-        root_data = root_res.value
+        # yield now returns value directly
+        root_data = yield CreateThread("Root")
 
-        fork_id_res = yield ForkThread(root_data.thread_id)
-        fork_id = fork_id_res.value
+        fork_id = yield ForkThread(root_data.thread_id)
 
-        cont_res = yield ContinueThread(thread_id=fork_id, content="Child")
-        return cont_res.value
+        cont_result = yield ContinueThread(thread_id=fork_id, content="Child")
+        return cont_result
 
 def test_mock_fork_thread(executor):
     async def run():
-        res = await executor.run(ForkFlow())
-        assert isinstance(res.value, ThreadResult)
-        assert "fork" in res.value.thread_id
-        assert "Mock Reply" in res.value.content
+        value = await executor.run(ForkFlow())
+        assert isinstance(value, ThreadResult)
+        assert "fork" in value.thread_id
+        assert "Mock Reply" in value.content
     asyncio.run(run())

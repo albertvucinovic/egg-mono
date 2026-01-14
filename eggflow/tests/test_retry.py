@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from eggflow import Task
+from eggflow import Task, wrapped
 
 @dataclass
 class UnreliableTask(Task):
@@ -20,7 +20,8 @@ class RobustJob(Task):
     def run(self):
         for i in range(self.max_retries):
             task = UnreliableTask(name=self.target_name, attempt=i)
-            res = yield task
+            # Use wrapped() to get Result for checking success
+            res = yield wrapped(task)
 
             if res.is_success:
                 return res.value
@@ -30,7 +31,7 @@ class RobustJob(Task):
 def test_retry_workflow(executor):
     async def run():
         job = RobustJob("MyCriticalData")
-        res = await executor.run(job)
-        assert res.is_success
-        assert res.value == "Success on attempt 2"
+        # executor.run now returns value directly
+        value = await executor.run(job)
+        assert value == "Success on attempt 2"
     asyncio.run(run())

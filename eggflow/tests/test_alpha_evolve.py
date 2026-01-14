@@ -20,19 +20,19 @@ class AlphaEvolve(Task):
     max_depth: int = 4
 
     def run(self):
+        # yield now returns value directly (ThreadResult)
         root = yield CreateThread(
             prompt=f"Write a Python script for: {self.problem_description}",
             model_key="gpt-4o"
         )
 
-        beam = [root.value.thread_id]
+        beam = [root.thread_id]
 
         for depth in range(self.max_depth):
             candidates = []
 
             for i, tid in enumerate(beam):
-                exec_result = yield ExecuteCode(tid, depth)
-                output = exec_result.value
+                output = yield ExecuteCode(tid, depth)
 
                 if "Error" not in output:
                     return tid
@@ -41,14 +41,14 @@ class AlphaEvolve(Task):
 
                 fix_specs = [
                     ContinueThread(
-                        f.value,
+                        f,
                         f"Execution failed with: {output}\nFix the code. Strategy {k+1}."
                     )
                     for k, f in enumerate(fork_ids)
                 ]
                 yield fix_specs
 
-                candidates.extend([f.value for f in fork_ids])
+                candidates.extend(fork_ids)
 
             beam = candidates[:self.beam_width]
 
@@ -57,7 +57,7 @@ class AlphaEvolve(Task):
 def test_alpha_evolve(executor):
     async def run():
         algo = AlphaEvolve("Calculate Fibonacci sequence", beam_width=2, max_depth=5)
-        res = await executor.run(algo)
-        assert res.is_success
-        assert res.value is not None
+        # executor.run now returns value directly
+        value = await executor.run(algo)
+        assert value is not None
     asyncio.run(run())

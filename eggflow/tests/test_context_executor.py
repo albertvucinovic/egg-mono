@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from typing import ClassVar
-from eggflow import Task, Result
+from eggflow import Task, Result, TaskError
 
 # Counter to track executions
 execution_count = 0
@@ -27,13 +27,12 @@ class UncacheableCountingTask(Task):
 
 async def helper_function():
     """A regular async function that uses Task.execute()."""
-    result = await CountingTask("from_helper").execute()
-    return result.value
+    # execute() now returns value directly
+    return await CountingTask("from_helper").execute()
 
 async def deeply_nested():
     """Deeply nested function that uses execute()."""
-    result = await CountingTask("deep").execute()
-    return result.value
+    return await CountingTask("deep").execute()
 
 async def nested_helper():
     """Calls another function that uses execute()."""
@@ -51,15 +50,15 @@ def test_execute_with_context(executor, store):
 
     async def run():
         flow = FlowUsingExecute()
-        res1 = await executor.run(flow)
-        assert res1.is_success
-        assert res1.value == "Executed from_helper"
+        # executor.run now returns value directly
+        value1 = await executor.run(flow)
+        assert value1 == "Executed from_helper"
         assert execution_count == 1
 
         # Run flow again - the inner CountingTask should be cached
-        res2 = await executor.run(flow)
+        value2 = await executor.run(flow)
         # Flow itself is cached, so it doesn't run again at all
-        assert res2.value == "Executed from_helper"
+        assert value2 == "Executed from_helper"
 
     asyncio.run(run())
 
@@ -75,9 +74,8 @@ def test_execute_nested_function_calls(executor):
 
     async def run():
         flow = FlowWithNesting()
-        res = await executor.run(flow)
-        assert res.is_success
-        assert res.value == "Executed deep"
+        value = await executor.run(flow)
+        assert value == "Executed deep"
         assert execution_count == 1
 
         # Verify the task was cached
@@ -96,14 +94,14 @@ def test_execute_without_context():
 
     async def run():
         task = CountingTask("no_context")
-        res1 = await task.execute()
-        assert res1.is_success
-        assert res1.value == "Executed no_context"
+        # execute() returns value directly
+        value1 = await task.execute()
+        assert value1 == "Executed no_context"
         assert execution_count == 1
 
         # Run again - no caching without executor
-        res2 = await task.execute()
-        assert res2.value == "Executed no_context"
+        value2 = await task.execute()
+        assert value2 == "Executed no_context"
         assert execution_count == 2
 
     asyncio.run(run())
@@ -122,14 +120,14 @@ def test_mixed_yield_and_execute(executor):
     @dataclass
     class OuterFlow(Task):
         def run(self):
-            res = yield InnerTask()
-            return res.value
+            # yield now returns value directly
+            value = yield InnerTask()
+            return value
 
     async def run():
         flow = OuterFlow()
-        res = await executor.run(flow)
-        assert res.is_success
-        assert res.value == "Executed from_helper"
+        value = await executor.run(flow)
+        assert value == "Executed from_helper"
         # Both InnerTask and CountingTask should have run once
         assert execution_count == 1
 
@@ -150,14 +148,13 @@ def test_uncacheable_with_execute(executor):
     @dataclass
     class FlowWithUncacheableExecute(Task):
         async def run(self):
-            res = await UncacheableCountingTask("via_execute").execute()
-            return res.value
+            # execute() returns value directly
+            return await UncacheableCountingTask("via_execute").execute()
 
     async def run():
         flow = FlowWithUncacheableExecute()
-        res1 = await executor.run(flow)
-        assert res1.is_success
-        assert res1.value == "Uncached via_execute"
+        value = await executor.run(flow)
+        assert value == "Uncached via_execute"
         assert execution_count == 1
 
         # The uncacheable task should not be in the store
@@ -191,12 +188,13 @@ def test_parallel_execute_calls(executor):
     execution_count = 0
 
     async def parallel_helper():
+        # execute() returns values directly
         results = await asyncio.gather(
             CountingTask("a").execute(),
             CountingTask("b").execute(),
             CountingTask("c").execute()
         )
-        return [r.value for r in results]
+        return results
 
     @dataclass
     class ParallelFlow(Task):
@@ -205,16 +203,35 @@ def test_parallel_execute_calls(executor):
 
     async def run():
         flow = ParallelFlow()
-        res = await executor.run(flow)
-        assert res.is_success
-        assert "Executed a" in res.value
-        assert "Executed b" in res.value
-        assert "Executed c" in res.value
+        value = await executor.run(flow)
+        assert "Executed a" in value
+        assert "Executed b" in value
+        assert "Executed c" in value
         assert execution_count == 3
 
         # All three tasks should be cached
         for name in ["a", "b", "c"]:
             row = executor.store.get(CountingTask(name).get_cache_key())
             assert row is not None
+
+    asyncio.run(run())
+
+def test_execute_with_raw_returns_result(executor):
+    """execute(raw=True) returns Result object."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class FlowUsingRawExecute(Task):
+        async def run(self):
+            result = await CountingTask("raw").execute(raw=True)
+            assert isinstance(result, Result)
+            assert result.is_success
+            return result.value
+
+    async def run():
+        flow = FlowUsingRawExecute()
+        value = await executor.run(flow)
+        assert value == "Executed raw"
 
     asyncio.run(run())
