@@ -1,372 +1,9 @@
 import asyncio
-import warnings
 from dataclasses import dataclass
-from eggflow import Task, Result, taskmethod, as_task, unwrap, TaskError, wrapped
+from eggflow import Task, Result, as_task, TaskError, wrapped
 
 # Counter to track executions
 execution_count = 0
-
-# Note: @taskmethod is deprecated but tests still verify backwards compatibility
-class SimpleService:
-    """Service with no instance state in cache key."""
-
-    @taskmethod()
-    async def process(self, data: str):
-        global execution_count
-        execution_count += 1
-        return f"processed: {data}"
-
-class ModelService:
-    """Service with model as part of cache key."""
-
-    def __init__(self, model: str):
-        self.model = model
-        self.debug = False  # Not in cache key
-
-    @taskmethod('model')
-    async def generate(self, prompt: str):
-        global execution_count
-        execution_count += 1
-        return f"[{self.model}] {prompt}"
-
-class MultiAttrService:
-    """Service with multiple attrs in cache key."""
-
-    def __init__(self, model: str, temperature: float):
-        self.model = model
-        self.temperature = temperature
-        self.logger = None  # Not in cache key
-
-    @taskmethod('model', 'temperature')
-    async def complete(self, prompt: str):
-        global execution_count
-        execution_count += 1
-        return f"[{self.model}@{self.temperature}] {prompt}"
-
-def test_taskmethod_basic(executor):
-    """Basic taskmethod with no instance attrs."""
-    global execution_count
-    execution_count = 0
-
-    @dataclass
-    class Flow(Task):
-        def run(self):
-            service = SimpleService()
-            # yield now returns value directly
-            value = yield service.process("hello")
-            return value
-
-    async def run():
-        flow = Flow()
-        # executor.run now returns value directly
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
-        assert value == "processed: hello"
-        assert execution_count == 1
-
-    asyncio.run(run())
-
-def test_taskmethod_caching(executor):
-    """Same args = cache hit."""
-    global execution_count
-    execution_count = 0
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service = SimpleService()
-
-    async def run():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            # First call
-            value1 = await executor.run(service.process("hello"))
-            assert value1 == "processed: hello"
-            assert execution_count == 1
-
-            # Second call - same args, should be cached
-            value2 = await executor.run(service.process("hello"))
-            assert value2 == "processed: hello"
-            assert execution_count == 1  # No new execution
-
-            # Different args - cache miss
-            value3 = await executor.run(service.process("world"))
-            assert value3 == "processed: world"
-            assert execution_count == 2
-
-    asyncio.run(run())
-
-def test_taskmethod_instance_attr(executor):
-    """Instance attr affects cache key."""
-    global execution_count
-    execution_count = 0
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service_gpt = ModelService("gpt-4")
-        service_claude = ModelService("claude")
-
-    async def run():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            # Call with gpt-4
-            value1 = await executor.run(service_gpt.generate("hello"))
-            assert value1 == "[gpt-4] hello"
-            assert execution_count == 1
-
-            # Same prompt, different model - cache miss
-            value2 = await executor.run(service_claude.generate("hello"))
-            assert value2 == "[claude] hello"
-            assert execution_count == 2
-
-            # Same model and prompt - cache hit
-            value3 = await executor.run(service_gpt.generate("hello"))
-            assert value3 == "[gpt-4] hello"
-            assert execution_count == 2  # No new execution
-
-    asyncio.run(run())
-
-def test_taskmethod_non_cache_attr_ignored(executor):
-    """Attrs not in cache_attrs don't affect cache key."""
-    global execution_count
-    execution_count = 0
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service1 = ModelService("gpt-4")
-        service1.debug = True
-
-        service2 = ModelService("gpt-4")
-        service2.debug = False
-
-    async def run():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value1 = await executor.run(service1.generate("hello"))
-            assert value1 == "[gpt-4] hello"
-            assert execution_count == 1
-
-            # Different debug value, but same model - cache hit
-            value2 = await executor.run(service2.generate("hello"))
-            assert value2 == "[gpt-4] hello"
-            assert execution_count == 1  # Cached!
-
-    asyncio.run(run())
-
-def test_taskmethod_multiple_attrs(executor):
-    """Multiple instance attrs in cache key."""
-    global execution_count
-    execution_count = 0
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service1 = MultiAttrService("gpt-4", 0.7)
-        service2 = MultiAttrService("gpt-4", 0.9)
-        service3 = MultiAttrService("claude", 0.7)
-
-    async def run():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value1 = await executor.run(service1.complete("hello"))
-            assert value1 == "[gpt-4@0.7] hello"
-            assert execution_count == 1
-
-            # Same model, different temperature - cache miss
-            value2 = await executor.run(service2.complete("hello"))
-            assert value2 == "[gpt-4@0.9] hello"
-            assert execution_count == 2
-
-            # Different model, same temperature - cache miss
-            value3 = await executor.run(service3.complete("hello"))
-            assert value3 == "[claude@0.7] hello"
-            assert execution_count == 3
-
-            # Original params - cache hit
-            value4 = await executor.run(service1.complete("hello"))
-            assert value4 == "[gpt-4@0.7] hello"
-            assert execution_count == 3
-
-    asyncio.run(run())
-
-def test_taskmethod_in_flow(executor):
-    """Use taskmethod inside a flow with yields."""
-    global execution_count
-    execution_count = 0
-
-    @dataclass
-    class Pipeline(Task):
-        def run(self):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                service = ModelService("gpt-4")
-            # yield now returns value directly
-            val1 = yield service.generate("step 1")
-            val2 = yield service.generate("step 2")
-            val3 = yield service.generate("step 1")  # cached
-            return [val1, val2, val3]
-
-    async def run():
-        flow = Pipeline()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
-        assert value == ["[gpt-4] step 1", "[gpt-4] step 2", "[gpt-4] step 1"]
-        assert execution_count == 2  # Third was cached
-
-    asyncio.run(run())
-
-def test_taskmethod_with_nocache(executor):
-    """taskmethod works with nocache wrapper."""
-    global execution_count
-    execution_count = 0
-
-    from eggflow import nocache
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service = SimpleService()
-
-    async def run():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            # First call - cached
-            value1 = await executor.run(service.process("hello"))
-            assert execution_count == 1
-
-            # With nocache - runs again
-            value2 = await executor.run(nocache(service.process("hello")))
-            assert execution_count == 2
-
-            # Without nocache - cached
-            value3 = await executor.run(service.process("hello"))
-            assert execution_count == 2
-
-    asyncio.run(run())
-
-def test_taskmethod_with_kwargs(executor):
-    """taskmethod handles keyword arguments."""
-    global execution_count
-    execution_count = 0
-
-    class KwargsService:
-        @taskmethod()
-        async def process(self, data: str, prefix: str = ""):
-            global execution_count
-            execution_count += 1
-            return f"{prefix}{data}"
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service = KwargsService()
-
-    async def run():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value1 = await executor.run(service.process("hello"))
-            assert value1 == "hello"
-            assert execution_count == 1
-
-            # Different kwarg - cache miss
-            value2 = await executor.run(service.process("hello", prefix=">>> "))
-            assert value2 == ">>> hello"
-            assert execution_count == 2
-
-            # Same args and kwargs - cache hit
-            value3 = await executor.run(service.process("hello", prefix=">>> "))
-            assert value3 == ">>> hello"
-            assert execution_count == 2
-
-    asyncio.run(run())
-
-def test_taskmethod_sync_method(executor):
-    """taskmethod works with sync methods too."""
-    global execution_count
-    execution_count = 0
-
-    class SyncService:
-        @taskmethod()
-        def compute(self, x: int):
-            global execution_count
-            execution_count += 1
-            return x * 2
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service = SyncService()
-
-    async def run():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value1 = await executor.run(service.compute(5))
-            assert value1 == 10
-            assert execution_count == 1
-
-            # Cache hit
-            value2 = await executor.run(service.compute(5))
-            assert value2 == 10
-            assert execution_count == 1
-
-    asyncio.run(run())
-
-def test_taskmethod_with_execute(executor):
-    """taskmethod works with .execute() in a flow."""
-    global execution_count
-    execution_count = 0
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service = ModelService("gpt-4")
-
-    @dataclass
-    class FlowUsingExecute(Task):
-        async def run(self):
-            # execute() now returns value directly
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                val1 = await service.generate("hello").execute()
-                val2 = await service.generate("world").execute()
-                val3 = await service.generate("hello").execute()
-            return [val1, val2, val3]
-
-    async def run():
-        global execution_count
-        flow = FlowUsingExecute()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
-        assert value == ["[gpt-4] hello", "[gpt-4] world", "[gpt-4] hello"]
-        assert execution_count == 2  # Third was cached
-
-    asyncio.run(run())
-
-def test_taskmethod_execute_cached_false(executor):
-    """taskmethod with execute(cached=False) skips cache."""
-    global execution_count
-    execution_count = 0
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        service = SimpleService()
-
-    @dataclass
-    class FlowUsingExecuteUncached(Task):
-        async def run(self):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                val1 = await service.process("hello").execute()
-                val2 = await service.process("hello").execute(cached=False)
-            return [val1, val2]
-
-    async def run():
-        global execution_count
-        flow = FlowUsingExecuteUncached()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
-        assert value == ["processed: hello", "processed: hello"]
-        assert execution_count == 2  # Both ran
-
-    asyncio.run(run())
 
 # --- as_task tests ---
 
@@ -396,7 +33,6 @@ def test_as_task_basic(executor):
     service = ExternalService("gpt-4")
 
     async def run():
-        # executor.run returns value directly
         value = await executor.run(as_task(service.generate, "hello"))
         assert value == "[gpt-4] hello"
         assert execution_count == 1
@@ -411,7 +47,6 @@ def test_as_task_caching(executor):
     service = ExternalService("gpt-4")
 
     async def run():
-        # First call
         value1 = await executor.run(as_task(service.generate, "hello"))
         assert value1 == "[gpt-4] hello"
         assert execution_count == 1
@@ -419,7 +54,7 @@ def test_as_task_caching(executor):
         # Same args - cache hit
         value2 = await executor.run(as_task(service.generate, "hello"))
         assert value2 == "[gpt-4] hello"
-        assert execution_count == 1  # Cached!
+        assert execution_count == 1
 
         # Different args - cache miss
         value3 = await executor.run(as_task(service.generate, "world"))
@@ -428,7 +63,7 @@ def test_as_task_caching(executor):
 
     asyncio.run(run())
 
-def test_as_task_with_cache_attrs(executor):
+def test_as_task_with_cache_key(executor):
     """as_task with cache_key includes instance state in key."""
     global execution_count
     execution_count = 0
@@ -464,7 +99,6 @@ def test_as_task_in_flow(executor):
     @dataclass
     class FlowWithAsTask(Task):
         def run(self):
-            # yield returns value directly
             val1 = yield as_task(service.generate, "step 1", cache_key=(service.model, "step 1"))
             val2 = yield as_task(service.generate, "step 2", cache_key=(service.model, "step 2"))
             val3 = yield as_task(service.generate, "step 1", cache_key=(service.model, "step 1"))  # cached
@@ -474,7 +108,7 @@ def test_as_task_in_flow(executor):
         flow = FlowWithAsTask()
         value = await executor.run(flow)
         assert value == ["[gpt-4] step 1", "[gpt-4] step 2", "[gpt-4] step 1"]
-        assert execution_count == 2  # Third was cached
+        assert execution_count == 2
 
     asyncio.run(run())
 
@@ -488,7 +122,6 @@ def test_as_task_with_execute(executor):
     @dataclass
     class FlowWithAsTaskExecute(Task):
         async def run(self):
-            # execute() returns value directly
             val1 = await as_task(service.generate, "hello", cache_key=(service.model, "hello")).execute()
             val2 = await as_task(service.generate, "hello", cache_key=(service.model, "hello")).execute()
             return [val1, val2]
@@ -497,7 +130,7 @@ def test_as_task_with_execute(executor):
         flow = FlowWithAsTaskExecute()
         value = await executor.run(flow)
         assert value == ["[gpt-4] hello", "[gpt-4] hello"]
-        assert execution_count == 1  # Second was cached
+        assert execution_count == 1
 
     asyncio.run(run())
 
@@ -560,7 +193,6 @@ def test_as_task_with_nocache(executor):
     service = ExternalService("gpt-4")
 
     async def run():
-        # First call - cached
         value1 = await executor.run(as_task(service.generate, "hello"))
         assert execution_count == 1
 
@@ -574,8 +206,8 @@ def test_as_task_with_nocache(executor):
 
     asyncio.run(run())
 
-def test_as_task_error_on_unbound(executor):
-    """as_task now supports unbound functions too."""
+def test_as_task_plain_function(executor):
+    """as_task works with plain functions."""
     global execution_count
     execution_count = 0
 
@@ -585,7 +217,6 @@ def test_as_task_error_on_unbound(executor):
         return x * 2
 
     async def run():
-        # as_task now works with plain functions
         value = await executor.run(as_task(standalone_func, 5))
         assert value == 10
         assert execution_count == 1
@@ -681,7 +312,6 @@ def test_as_task_function_in_flow(executor):
     @dataclass
     class FlowWithFuncTask(Task):
         def run(self):
-            # yield returns value directly
             val1 = yield as_task(async_compute, 1, 2)
             val2 = yield as_task(async_compute, 3, 4)
             val3 = yield as_task(async_compute, 1, 2)  # cached
@@ -695,157 +325,32 @@ def test_as_task_function_in_flow(executor):
 
     asyncio.run(run())
 
-# --- unwrap tests (deprecated but still functional) ---
+# --- Error handling tests ---
 
-def test_unwrap_success(executor):
-    """unwrap returns value directly on success (now default behavior)."""
-    global execution_count
-    execution_count = 0
-
-    @dataclass
-    class SuccessTask(Task):
-        async def run(self):
-            global execution_count
-            execution_count += 1
-            return "success_value"
-
-    @dataclass
-    class FlowWithUnwrap(Task):
-        def run(self):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                # unwrap still works but is deprecated
-                value = yield unwrap(SuccessTask())
-            return f"got: {value}"
-
-    async def run():
-        flow = FlowWithUnwrap()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
-        assert value == "got: success_value"
-
-    asyncio.run(run())
-
-def test_unwrap_failure_raises(executor):
-    """unwrap raises TaskError that can be caught inside the flow."""
+def test_task_error_raised(executor):
+    """TaskError is raised on failure by default."""
     @dataclass
     class FailingTask(Task):
         async def run(self):
             raise ValueError("task failed")
 
     @dataclass
-    class FlowWithUnwrapFailure(Task):
+    class FlowCatchingError(Task):
         def run(self):
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", DeprecationWarning)
-                    value = yield unwrap(FailingTask())
+                value = yield FailingTask()
                 return f"got: {value}"
             except TaskError as e:
                 return f"caught error: {e.result.error}"
 
     async def run():
-        flow = FlowWithUnwrapFailure()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
+        flow = FlowCatchingError()
+        value = await executor.run(flow)
         assert value == "caught error: task failed"
 
     asyncio.run(run())
 
-def test_unwrap_with_nocache(executor):
-    """unwrap works with nocache."""
-    global execution_count
-    execution_count = 0
-
-    from eggflow import nocache
-
-    @dataclass
-    class CountingTask(Task):
-        name: str
-        async def run(self):
-            global execution_count
-            execution_count += 1
-            return f"value_{self.name}"
-
-    @dataclass
-    class FlowWithUnwrapNocache(Task):
-        def run(self):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                v1 = yield unwrap(CountingTask("a"))
-                v2 = yield unwrap(nocache(CountingTask("a")))  # runs again
-            return [v1, v2]
-
-    async def run():
-        flow = FlowWithUnwrapNocache()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
-        assert value == ["value_a", "value_a"]
-        assert execution_count == 2  # Second ran again due to nocache
-
-    asyncio.run(run())
-
-def test_unwrap_in_parallel_list(executor):
-    """unwrap works in parallel lists - but now default returns values."""
-    global execution_count
-    execution_count = 0
-
-    @dataclass
-    class ValueTask(Task):
-        val: int
-        async def run(self):
-            global execution_count
-            execution_count += 1
-            return self.val * 2
-
-    @dataclass
-    class FlowParallelUnwrap(Task):
-        def run(self):
-            # Now by default all return values
-            # Use wrapped() to get Result
-            results = yield [ValueTask(1), ValueTask(2), wrapped(ValueTask(3))]
-            return results
-
-    async def run():
-        flow = FlowParallelUnwrap()
-        value = await executor.run(flow)
-        assert value[0] == 2  # value
-        assert value[1] == 4  # value
-        assert isinstance(value[2], Result)  # Result object
-        assert value[2].value == 6
-
-    asyncio.run(run())
-
-def test_execute_unwrap_success(executor):
-    """execute() returns value directly by default (unwrap parameter deprecated)."""
-    global execution_count
-    execution_count = 0
-
-    @dataclass
-    class SimpleTask(Task):
-        async def run(self):
-            global execution_count
-            execution_count += 1
-            return "direct_value"
-
-    @dataclass
-    class FlowWithExecuteUnwrap(Task):
-        async def run(self):
-            # execute() now returns value by default
-            value = await SimpleTask().execute()
-            return f"got: {value}"
-
-    async def run():
-        flow = FlowWithExecuteUnwrap()
-        value = await executor.run(flow)
-        assert value == "got: direct_value"
-
-    asyncio.run(run())
-
-def test_execute_unwrap_failure(executor):
+def test_execute_raises_on_error(executor):
     """execute() raises TaskError on failure by default."""
     @dataclass
     class FailTask(Task):
@@ -853,7 +358,7 @@ def test_execute_unwrap_failure(executor):
             raise ValueError("execute failed")
 
     @dataclass
-    class FlowWithExecuteUnwrapFail(Task):
+    class FlowWithExecuteFail(Task):
         async def run(self):
             try:
                 await FailTask().execute()
@@ -862,35 +367,13 @@ def test_execute_unwrap_failure(executor):
                 return f"caught: {e.result.error}"
 
     async def run():
-        flow = FlowWithExecuteUnwrapFail()
+        flow = FlowWithExecuteFail()
         value = await executor.run(flow)
         assert value == "caught: execute failed"
 
     asyncio.run(run())
 
-def test_as_task_function_with_unwrap(executor):
-    """as_task function works with unwrap (deprecated)."""
-    global execution_count
-    execution_count = 0
-
-    @dataclass
-    class FlowFuncUnwrap(Task):
-        def run(self):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                value = yield unwrap(as_task(async_compute, 10, 20))
-            return f"sum is {value}"
-
-    async def run():
-        flow = FlowFuncUnwrap()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            value = await executor.run(flow)
-        assert value == "sum is 30"
-
-    asyncio.run(run())
-
-# --- New wrapped() tests ---
+# --- wrapped() tests ---
 
 def test_wrapped_returns_result(executor):
     """wrapped() returns Result object instead of value."""
@@ -938,5 +421,35 @@ def test_wrapped_error_returns_result(executor):
         flow = FlowWithWrappedError()
         value = await executor.run(flow)
         assert value == "task failed"
+
+    asyncio.run(run())
+
+def test_wrapped_in_parallel_list(executor):
+    """wrapped() works in parallel lists."""
+    global execution_count
+    execution_count = 0
+
+    @dataclass
+    class ValueTask(Task):
+        val: int
+        async def run(self):
+            global execution_count
+            execution_count += 1
+            return self.val * 2
+
+    @dataclass
+    class FlowParallel(Task):
+        def run(self):
+            # Mix values and wrapped results
+            results = yield [ValueTask(1), ValueTask(2), wrapped(ValueTask(3))]
+            return results
+
+    async def run():
+        flow = FlowParallel()
+        value = await executor.run(flow)
+        assert value[0] == 2  # value
+        assert value[1] == 4  # value
+        assert isinstance(value[2], Result)  # Result object
+        assert value[2].value == 6
 
     asyncio.run(run())
