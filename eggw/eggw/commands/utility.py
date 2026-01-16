@@ -16,6 +16,19 @@ from models import CommandResponse
 import core
 from core import ensure_scheduler_for
 
+# Available themes (text-colored variants first, then background variants)
+THEMES = [
+    # Text-colored themes (uniform background, colored text)
+    "dark", "cyberpunk", "forest", "ocean", "sunset", "mono", "midnight",
+    "disney", "fruit", "vegetables", "coffee", "matrix", "light", "light-mono",
+    "colorful", "colorful-light",
+    # Background variants (colored backgrounds)
+    "dark-background", "cyberpunk-background", "forest-background", "ocean-background",
+    "sunset-background", "mono-background", "midnight-background", "disney-background",
+    "fruit-background", "vegetables-background", "coffee-background", "matrix-background",
+    "light-background", "light-mono-background", "colorful-light-background",
+]
+
 
 def get_auto_approval_status(thread_id: str) -> bool:
     """Check if auto-approval is currently active for a thread.
@@ -283,38 +296,55 @@ Shell:
     )
 
 
-# Display-related commands (stubs for web UI)
+# Display-related commands (frontend-only, backend returns action signals)
 def cmd_toggle_panel(panel_name: str) -> CommandResponse:
-    """Handle /togglePanel command (no-op in web UI)."""
+    """Handle /togglePanel command - toggle panel visibility (frontend-only)."""
+    name = panel_name.strip().lower()
+    valid_panels = ["chat", "children", "system"]
+    if name not in valid_panels:
+        return CommandResponse(
+            success=True,
+            message=f"Usage: /togglePanel <{'/'.join(valid_panels)}>",
+        )
+
     return CommandResponse(
         success=True,
-        message=f"Panel toggle not applicable in web UI: {panel_name}",
-        data={"panel": panel_name},
+        message=f"Toggle panel: {name}",
+        data={"panel": name, "action": "toggle"},
     )
 
 
 def cmd_paste() -> CommandResponse:
-    """Handle /paste command (no-op in web UI)."""
+    """Handle /paste command - paste from clipboard (frontend-only)."""
     return CommandResponse(
         success=True,
-        message="Paste from clipboard not applicable in web UI",
+        message="Use Ctrl+V or Cmd+V to paste from clipboard",
+        data={"action": "paste"},
     )
 
 
 def cmd_enter_mode(mode: str) -> CommandResponse:
-    """Handle /enterMode command (no-op in web UI)."""
+    """Handle /enterMode command - set Enter key behavior (frontend-only)."""
+    mode = mode.strip().lower()
+    if mode not in ("send", "newline"):
+        return CommandResponse(
+            success=True,
+            message="Usage: /enterMode <send|newline>\n  send = Enter sends message (Shift+Enter for newline)\n  newline = Enter inserts newline (Ctrl+Enter to send)",
+        )
+
     return CommandResponse(
         success=True,
-        message=f"Mode switching not applicable in web UI: {mode}",
-        data={"mode": mode},
+        message=f"Enter mode set to: {mode}",
+        data={"enter_mode": mode},
     )
 
 
 def cmd_toggle_borders() -> CommandResponse:
-    """Handle /toggleBorders command (no-op in web UI)."""
+    """Handle /toggleBorders command - toggle panel borders (frontend-only)."""
     return CommandResponse(
         success=True,
-        message="Border toggle not applicable in web UI",
+        message="Panel borders toggled",
+        data={"action": "toggle_borders"},
     )
 
 
@@ -327,9 +357,23 @@ def cmd_quit() -> CommandResponse:
 
 
 def cmd_theme(theme_name: str) -> CommandResponse:
-    """Handle /theme command (no-op in web UI)."""
+    """Handle /theme command - change color scheme."""
+    if not theme_name:
+        return CommandResponse(
+            success=True,
+            message=f"Available themes: {', '.join(THEMES)}\nUse /theme <name> to switch",
+            data={"themes": THEMES, "action": "list_themes"},
+        )
+
+    theme = theme_name.lower().strip()
+    if theme not in THEMES:
+        return CommandResponse(
+            success=False,
+            message=f"Unknown theme: {theme}. Available: {', '.join(THEMES)}",
+        )
+
     return CommandResponse(
         success=True,
-        message=f"Theme switching not applicable in web UI: {theme_name}",
-        data={"theme": theme_name},
+        message=f"Theme changed to: {theme}",
+        data={"theme": theme, "action": "set_theme"},
     )

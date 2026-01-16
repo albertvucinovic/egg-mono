@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "eggthreads"))
 sys.path.insert(0, str(PROJECT_ROOT / "eggllm"))
 
 from fastapi.testclient import TestClient
+from core import state as core_state
 
 
 # Fixture to create a test database and app instance
@@ -46,9 +47,9 @@ def app(test_db_path, monkeypatch):
         del sys.modules["main"]
     import main
 
-    # Reset global state
-    main.db = None
-    main.active_schedulers = {}
+    # Reset global state in core.state (routes use core.db which delegates to core.state.db)
+    core_state.db = None
+    core_state.active_schedulers = {}
 
     # Initialize database with check_same_thread=False for testing
     from eggthreads import ThreadsDB
@@ -58,10 +59,10 @@ def app(test_db_path, monkeypatch):
     conn.execute("PRAGMA foreign_keys=ON;")
 
     # Create ThreadsDB and replace its connection
-    main.db = ThreadsDB.__new__(ThreadsDB)
-    main.db.path = Path(test_db_path)
-    main.db.conn = conn
-    main.db.init_schema()
+    core_state.db = ThreadsDB.__new__(ThreadsDB)
+    core_state.db.path = Path(test_db_path)
+    core_state.db.conn = conn
+    core_state.db.init_schema()
 
     return main.app
 
@@ -185,7 +186,6 @@ class TestToolCalls:
 
     def test_tool_approval_flow(self, client, test_db_path):
         """Test the full tool approval flow."""
-        import main
         from eggthreads import ThreadsDB, append_message
 
         # Create thread
@@ -211,7 +211,7 @@ class TestToolCalls:
         }
 
         # Append the assistant message with tool call directly to DB
-        main.db.append_event(
+        core_state.db.append_event(
             event_id=os.urandom(10).hex(),
             thread_id=thread_id,
             type_="msg.create",
