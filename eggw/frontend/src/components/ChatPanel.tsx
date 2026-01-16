@@ -495,9 +495,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
           if (scrollRef.current) {
             isAutoScrollingRef.current = true;
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            requestAnimationFrame(() => {
+            // Use 50ms timeout (matching scrollToBottom) to allow scroll events to settle
+            setTimeout(() => {
               isAutoScrollingRef.current = false;
-            });
+            }, 50);
           }
         });
       });
@@ -512,9 +513,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
           if (scrollRef.current) {
             isAutoScrollingRef.current = true;
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            requestAnimationFrame(() => {
+            // Use 50ms timeout (matching scrollToBottom) to allow scroll events to settle
+            setTimeout(() => {
               isAutoScrollingRef.current = false;
-            });
+            }, 50);
           }
         });
       });
@@ -528,9 +530,10 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
         if (scrollRef.current) {
           isAutoScrollingRef.current = true;
           scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-          requestAnimationFrame(() => {
+          // Use 50ms timeout (matching scrollToBottom) to allow scroll events to settle
+          setTimeout(() => {
             isAutoScrollingRef.current = false;
-          });
+          }, 50);
         }
       });
     }
