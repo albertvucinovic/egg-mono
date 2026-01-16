@@ -1,16 +1,35 @@
 """Tool management commands for eggw backend."""
 from __future__ import annotations
 
+import json
+from typing import Dict, List, Any
+
 from eggthreads import (
     build_tool_call_states,
     disable_tool_for_thread,
     enable_tool_for_thread,
     set_thread_allow_raw_tool_output,
     get_thread_tools_config,
+    create_default_tools,
 )
 
 from models import CommandResponse
 import core
+
+
+def get_available_tools() -> Dict[str, Dict[str, Any]]:
+    """Get all available tools with their specs.
+
+    Returns a dict mapping tool name to {"spec": ..., "local_only": bool}
+    """
+    registry = create_default_tools()
+    tools = {}
+    for name, entry in registry._tools.items():
+        tools[name] = {
+            "spec": entry["spec"],
+            "local_only": entry.get("local_only", False),
+        }
+    return tools
 
 
 async def cmd_tools_on(thread_id: str) -> CommandResponse:
@@ -34,32 +53,64 @@ async def cmd_tools_off(thread_id: str) -> CommandResponse:
 
 
 async def cmd_tools_status(thread_id: str) -> CommandResponse:
-    """Handle /toolsStatus command."""
+    """Handle /toolsStatus command - show tools configuration and available tools."""
     try:
         cfg = get_thread_tools_config(core.db, thread_id)
-        status = "enabled" if cfg.llm_tools_enabled else "disabled"
-        disabled = sorted(cfg.disabled_tools) if cfg.disabled_tools else []
-        disabled_str = ", ".join(disabled) if disabled else "(none)"
+        available_tools = get_available_tools()
+
+        # Build status message
+        lines = []
+
+        # Overall tools status
+        tools_status = "ENABLED" if cfg.llm_tools_enabled else "DISABLED"
+        lines.append(f"Tools for LLM: {tools_status}")
+
+        # Secrets mode
+        secrets_mode = "raw (secrets visible)" if cfg.allow_raw_tool_output else "masked"
+        lines.append(f"Tool output secrets: {secrets_mode}")
+
+        lines.append("")
+        lines.append("Available tools:")
+
+        # List all tools with their status
+        disabled_set = {n.lower() for n in cfg.disabled_tools}
+        tool_statuses = []
+        for name, info in sorted(available_tools.items()):
+            is_disabled = name.lower() in disabled_set
+            is_local_only = info.get("local_only", False)
+
+            status_parts = []
+            if is_disabled:
+                status_parts.append("DISABLED")
+            else:
+                status_parts.append("enabled")
+            if is_local_only:
+                status_parts.append("local-only")
+
+            status_str = ", ".join(status_parts)
+            lines.append(f"  {name}: {status_str}")
+            tool_statuses.append({
+                "name": name,
+                "enabled": not is_disabled,
+                "local_only": is_local_only,
+            })
+
+        lines.append("")
+        lines.append("Use /disableTool <name> or /enableTool <name> to control individual tools")
+        lines.append("Use /toolInfo <name> to see tool description")
+
         return CommandResponse(
             success=True,
-            message=f"Tools: {status}\nDisabled: {disabled_str}",
-            data={"enabled": cfg.llm_tools_enabled, "disabled": disabled},
+            message="\n".join(lines),
+            data={
+                "llm_tools_enabled": cfg.llm_tools_enabled,
+                "allow_raw_tool_output": cfg.allow_raw_tool_output,
+                "disabled_tools": sorted(cfg.disabled_tools),
+                "tools": tool_statuses,
+            },
         )
     except Exception as e:
-        # Fallback to just listing tool calls
-        states = build_tool_call_states(core.db, thread_id)
-        if not states:
-            return CommandResponse(success=True, message="No tool calls in this thread")
-
-        lines = []
-        for tc_id, tc in states.items():
-            lines.append(f"  {tc.name} [{tc.state}] - {tc_id[-8:]}")
-
-        return CommandResponse(
-            success=True,
-            message=f"Tool calls ({len(states)}):\n" + "\n".join(lines),
-            data={"count": len(states)},
-        )
+        return CommandResponse(success=False, message=f"/toolsStatus error: {e}")
 
 
 async def cmd_disable_tool(thread_id: str, tool_name: str) -> CommandResponse:
@@ -131,3 +182,59 @@ async def cmd_tools_secrets(thread_id: str, mode: str) -> CommandResponse:
             success=False,
             message="Usage: /toolsSecrets <on|off>",
         )
+
+
+async def cmd_tool_info(thread_id: str, tool_name: str) -> CommandResponse:
+    """Handle /toolInfo command - show tool description in JSON format."""
+    tool_name = tool_name.strip()
+    if not tool_name:
+        return CommandResponse(
+            success=False,
+            message="Usage: /toolInfo <tool_name>",
+        )
+
+    try:
+        available_tools = get_available_tools()
+
+        # Try exact match first, then case-insensitive
+        tool_info = available_tools.get(tool_name)
+        if not tool_info:
+            # Try case-insensitive match
+            for name, info in available_tools.items():
+                if name.lower() == tool_name.lower():
+                    tool_info = info
+                    tool_name = name  # Use the canonical name
+                    break
+
+        if not tool_info:
+            available_names = sorted(available_tools.keys())
+            return CommandResponse(
+                success=False,
+                message=f"Tool '{tool_name}' not found.\nAvailable tools: {', '.join(available_names)}",
+            )
+
+        spec = tool_info["spec"]
+        local_only = tool_info.get("local_only", False)
+
+        # Format as JSON for display
+        formatted_spec = json.dumps(spec, indent=2)
+
+        lines = [
+            f"Tool: {tool_name}",
+            f"Local-only: {local_only}",
+            "",
+            "Spec (sent to LLM):",
+            formatted_spec,
+        ]
+
+        return CommandResponse(
+            success=True,
+            message="\n".join(lines),
+            data={
+                "name": tool_name,
+                "spec": spec,
+                "local_only": local_only,
+            },
+        )
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/toolInfo error: {e}")

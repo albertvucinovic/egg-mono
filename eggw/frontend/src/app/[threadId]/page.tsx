@@ -318,7 +318,7 @@ export default function ThreadPage() {
               <p>/model, /updateAllModels, /spawn, /spawnAutoApprovedChildThread</p>
               <p>/newThread, /threads, /thread, /rename, /waitForThreads</p>
               <p>/parentThread, /listChildren, /deleteThread, /duplicateThread</p>
-              <p>/toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus</p>
+              <p>/toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus, /toolInfo</p>
               <p>/disableTool, /enableTool, /toolsSecrets</p>
               <p>/toggleSandboxing, /setSandboxConfiguration, /getSandboxingConfig</p>
               <p>/togglePanel, /toggleBorders, /enterMode, /cost, /quit</p>

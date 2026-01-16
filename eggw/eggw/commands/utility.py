@@ -269,7 +269,8 @@ Model:
 Tools:
   /toolsOn                       - Enable all tools
   /toolsOff                      - Disable all tools
-  /toolsStatus                   - Show tools status
+  /toolsStatus                   - Show tools status and available tools
+  /toolInfo <name>               - Show tool description (JSON spec)
   /disableTool <name>            - Disable specific tool
   /enableTool <name>             - Enable specific tool
   /toolsSecrets <on|off>         - Toggle raw output

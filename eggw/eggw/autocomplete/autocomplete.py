@@ -5,13 +5,22 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter
 
-from eggthreads import list_threads
+from eggthreads import list_threads, create_default_tools
 
 import core
+
+
+def get_tool_names() -> List[str]:
+    """Get list of available tool names from the registry."""
+    try:
+        registry = create_default_tools()
+        return sorted(registry._tools.keys())
+    except Exception:
+        return []
 
 # Available themes (text-colored variants first, then background variants)
 THEMES = [
@@ -68,7 +77,7 @@ async def get_autocomplete(
                 '/spawn', '/spawnAutoApprovedChildThread', '/newThread',
                 '/threads', '/thread', '/parentThread', '/listChildren',
                 '/deleteThread', '/duplicateThread', '/rename', '/waitForThreads', '/continue',
-                '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus',
+                '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus', '/toolInfo',
                 '/disableTool', '/enableTool', '/toolsSecrets',
                 '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
                 '/togglePanel', '/toggleBorders', '/theme',
@@ -220,9 +229,9 @@ async def get_autocomplete(
                             "replace": len(arg_tok),
                         })
 
-            elif cmd in ('/disableTool', '/enableTool'):
-                # Tool name suggestions
-                tool_names = ['bash', 'computer', 'text_editor', 'mcp']
+            elif cmd in ('/disableTool', '/enableTool', '/toolInfo'):
+                # Tool name suggestions from actual registry
+                tool_names = get_tool_names()
                 arg_lower = arg_tok.lower()
                 for name in tool_names:
                     if not arg_lower or arg_lower in name.lower():

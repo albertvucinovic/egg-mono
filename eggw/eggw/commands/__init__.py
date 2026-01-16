@@ -20,6 +20,7 @@ from .tools import (
     cmd_disable_tool,
     cmd_enable_tool,
     cmd_tools_secrets,
+    cmd_tool_info,
 )
 from .sandbox import (
     cmd_toggle_sandboxing,
@@ -67,6 +68,7 @@ __all__ = [
     "cmd_disable_tool",
     "cmd_enable_tool",
     "cmd_tools_secrets",
+    "cmd_tool_info",
     # Sandbox commands
     "cmd_toggle_sandboxing",
     "cmd_set_sandbox_configuration",
@@ -159,6 +161,8 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_disable_tool(thread_id, command_arg)
         elif command_name == "enableTool":
             return await cmd_enable_tool(thread_id, command_arg)
+        elif command_name == "toolInfo":
+            return await cmd_tool_info(thread_id, command_arg)
         elif command_name == "spawnAutoApprovedChildThread":
             return await cmd_spawn_auto_approved(thread_id, command_arg)
         # P2 Commands

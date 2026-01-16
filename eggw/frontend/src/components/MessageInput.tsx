@@ -86,7 +86,8 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
   // Commands that should show output in chat (info/status commands)
   const commandsWithChatOutput = [
     '/help', '/threads', '/listChildren', '/cost', '/toolsStatus',
-    '/schedulers', '/model', '/parentThread', '/theme'
+    '/schedulers', '/model', '/parentThread', '/theme', '/toolInfo',
+    '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsSecrets'
   ];
 
   // Command mutation
