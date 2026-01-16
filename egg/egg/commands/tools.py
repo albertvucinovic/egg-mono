@@ -9,7 +9,23 @@ from eggthreads import (
     approve_tool_calls_for_thread,
     append_message,
     create_snapshot,
+    create_default_tools,
 )
+
+
+def get_available_tools() -> Dict[str, Dict[str, Any]]:
+    """Get all available tools with their specs.
+
+    Returns a dict mapping tool name to {"spec": ..., "local_only": bool}
+    """
+    registry = create_default_tools()
+    tools = {}
+    for name, entry in registry._tools.items():
+        tools[name] = {
+            "spec": entry["spec"],
+            "local_only": entry.get("local_only", False),
+        }
+    return tools
 
 
 class ToolCommandsMixin:
@@ -138,25 +154,104 @@ class ToolCommandsMixin:
             self.log_system(f'/enabletool error: {e}')
 
     def cmd_toolsStatus(self, arg: str) -> None:
-        """Handle /toolsStatus command - report tools configuration."""
-        # Report effective tools configuration for the current
-        # thread: whether LLM tools are enabled and which tools are
-        # currently disabled.
+        """Handle /toolsStatus command - report tools configuration and available tools."""
         try:
             from eggthreads import get_thread_tools_config  # type: ignore
             cfg = get_thread_tools_config(self.db, self.current_thread)
         except Exception as e:
             self.log_system(f'/toolStatus error: {e}')
             return
-        status = 'enabled' if cfg.llm_tools_enabled else 'disabled'
-        disabled = sorted(cfg.disabled_tools) if cfg.disabled_tools else []
-        secrets_mode = 'raw' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked'
+
+        available_tools = get_available_tools()
+
+        # Build status message
+        lines = []
+
+        # Overall tools status
+        tools_status = "ENABLED" if cfg.llm_tools_enabled else "DISABLED"
+        lines.append(f"Tools for LLM: {tools_status}")
+
+        # Secrets mode
+        secrets_mode = 'raw (secrets visible)' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked'
+        lines.append(f"Tool output secrets: {secrets_mode}")
+
+        lines.append("")
+        lines.append("Available tools:")
+
+        # List all tools with their status
+        disabled_set = {n.lower() for n in cfg.disabled_tools}
+        for name, info in sorted(available_tools.items()):
+            is_disabled = name.lower() in disabled_set
+            is_local_only = info.get("local_only", False)
+
+            status_parts = []
+            if is_disabled:
+                status_parts.append("DISABLED")
+            else:
+                status_parts.append("enabled")
+            if is_local_only:
+                status_parts.append("local-only")
+
+            status_str = ", ".join(status_parts)
+            lines.append(f"  {name}: {status_str}")
+
+        lines.append("")
+        lines.append("Use /disableTool <name> or /enableTool <name> to control individual tools")
+        lines.append("Use /toolInfo <name> to see tool description")
+
+        text = "\n".join(lines)
+        # Display in static view like /help and /threads
+        try:
+            self.log_system('Tools status (see console for full).')
+            self.console_print_block('Tools Status', text, border_style='blue')
+        except Exception:
+            self.log_system(text)
+
+    def cmd_toolInfo(self, arg: str) -> None:
+        """Handle /toolInfo command - show tool description in JSON format."""
+        tool_name = (arg or '').strip()
+        if not tool_name:
+            self.log_system('Usage: /toolInfo <tool_name>')
+            return
+
+        available_tools = get_available_tools()
+
+        # Try exact match first, then case-insensitive
+        tool_info = available_tools.get(tool_name)
+        if not tool_info:
+            # Try case-insensitive match
+            for name, info in available_tools.items():
+                if name.lower() == tool_name.lower():
+                    tool_info = info
+                    tool_name = name  # Use the canonical name
+                    break
+
+        if not tool_info:
+            available_names = sorted(available_tools.keys())
+            self.log_system(f"Tool '{tool_name}' not found.\nAvailable tools: {', '.join(available_names)}")
+            return
+
+        spec = tool_info["spec"]
+        local_only = tool_info.get("local_only", False)
+
+        # Format as JSON for display
+        formatted_spec = json.dumps(spec, indent=2)
+
         lines = [
-            f"Tools for this thread: {status}",
-            "Disabled tools: " + (", ".join(disabled) if disabled else "(none)"),
-            f"Tool output secrets mode: {secrets_mode}",
+            f"Tool: {tool_name}",
+            f"Local-only: {local_only}",
+            "",
+            "Spec (sent to LLM):",
+            formatted_spec,
         ]
-        self.log_system("\n".join(lines))
+
+        text = "\n".join(lines)
+        # Display in static view like /help and /threads
+        try:
+            self.log_system(f'Tool info: {tool_name} (see console for full).')
+            self.console_print_block(f'Tool: {tool_name}', text, border_style='blue')
+        except Exception:
+            self.log_system(text)
 
     def cmd_schedulers(self, arg: str) -> None:
         """Handle /schedulers command - list active schedulers."""

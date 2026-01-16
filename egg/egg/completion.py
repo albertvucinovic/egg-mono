@@ -563,7 +563,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/listChildren', '/threads', '/thread', '/deleteThread', '/newThread', '/duplicateThread',
                 '/continue', '/rename',
                 '/schedulers', '/enterMode', '/toggleAutoApproval',
-                '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus',
+                '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus', '/toolInfo',
                 '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
                 '/setSandboxConfiguration',
                 '/getSandboxingConfig',
@@ -688,10 +688,10 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         if cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
             return _mk_items(_fs_suggestions(arg_tok), arg_tok)
 
-        # /disabletool and /enabletool: suggest known tool names from
+        # /disabletool, /enabletool, /toolInfo: suggest known tool names from
         # the default ToolRegistry. We keep this best-effort and
         # local-only; if anything fails we simply return no suggestions.
-        if cmd in ('/disableTool', '/enableTool'):
+        if cmd in ('/disableTool', '/enableTool', '/toolInfo'):
             try:
                 from eggthreads.tools import create_default_tools  # type: ignore
                 reg = create_default_tools()
