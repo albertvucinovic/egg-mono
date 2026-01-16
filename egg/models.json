@@ -141,6 +141,7 @@
     "local": {
       "api_base": "http://localhost:10000/v1/chat/completions",
       "api_key_env": "LOCAL_API_KEY",
+      "normalize_tool_call_ids": "mistral9",
       "parameters": {
         "cache_prompt": true
       },
