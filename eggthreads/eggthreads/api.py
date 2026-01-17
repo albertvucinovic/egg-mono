@@ -142,6 +142,22 @@ def _ulid_like() -> str:
 
 def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_key: Optional[str] = None,
                        models_path: str = "models.json") -> str:
+    """Create a new root thread (top-level conversation).
+
+    A root thread has no parent and serves as the entry point for a
+    conversation tree. Child threads can be branched from it using
+    ``create_child_thread()``.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        name: Optional human-readable name for the thread.
+        initial_model_key: Model key to use for this thread. If None,
+            defaults to the ``default_model`` from models.json.
+        models_path: Path to models.json configuration file.
+
+    Returns:
+        The new thread's unique ID (ULID format).
+    """
     tid = _ulid_like()
 
     # If no initial_model_key is provided, default to the default_model from models.json
@@ -159,6 +175,23 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
 
 def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None,
                         models_path: str = "models.json") -> str:
+    """Create a child thread branching from a parent thread.
+
+    Child threads inherit the parent's model configuration by default
+    and are tracked in the parent-child relationship for subtree
+    operations.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        parent_id: ID of the parent thread to branch from.
+        name: Optional human-readable name for the thread.
+        initial_model_key: Model key to use for this thread. If None,
+            inherits from the parent thread's current model.
+        models_path: Path to models.json configuration file.
+
+    Returns:
+        The new child thread's unique ID (ULID format).
+    """
     parent = db.get_thread(parent_id)
     depth = (parent.depth + 1) if parent else 1
     tid = _ulid_like()
@@ -894,16 +927,50 @@ def append_message(db: ThreadsDB, thread_id: str, role: str, content: str, extra
 
 
 def edit_message(db: ThreadsDB, thread_id: str, msg_id: str, new_content: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    """Edit an existing message's content.
+
+    Appends a ``msg.edit`` event that updates the message content.
+    The original message is preserved in the event log for audit purposes.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        thread_id: ID of the thread containing the message.
+        msg_id: ID of the message to edit.
+        new_content: New content to replace the existing content.
+        extra: Optional additional payload fields for the edit event.
+    """
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.edit', payload={"content": new_content, **(extra or {})}, msg_id=msg_id)
 
 
 def delete_message(db: ThreadsDB, thread_id: str, msg_id: str) -> None:
-    # Event-driven delete; snapshot builder may interpret to drop the message
+    """Mark a message as deleted.
+
+    Appends a ``msg.delete`` event. The snapshot builder interprets
+    this to exclude the message from the reconstructed conversation.
+    The original message remains in the event log for audit purposes.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        thread_id: ID of the thread containing the message.
+        msg_id: ID of the message to delete.
+    """
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.delete', payload={"reason": "user"}, msg_id=msg_id)
 
 
 def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
-    # Build from all events; you can optimize by reading from last snapshot seq later
+    """Rebuild and persist the thread snapshot from events.
+
+    Processes all events for the thread and constructs a snapshot
+    representing the current conversation state. The snapshot is
+    stored in the threads table for fast access.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        thread_id: ID of the thread to snapshot.
+
+    Returns:
+        The snapshot JSON string.
+    """
     cur = db.conn.execute("SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC", (thread_id,))
     evs = cur.fetchall()
     builder = SnapshotBuilder()
@@ -939,6 +1006,14 @@ def is_thread_runnable(db: ThreadsDB, thread_id: str) -> bool:
 
 # --------- Query helpers (expose common SQL as API) -------------------------
 def list_threads(db: ThreadsDB) -> list[ThreadRow]:
+    """List all threads in the database.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+
+    Returns:
+        List of ThreadRow objects for all threads.
+    """
     try:
         cur = db.conn.execute("SELECT * FROM threads")
         rows = [ThreadRow(**dict(r)) for r in cur.fetchall()]
@@ -948,6 +1023,17 @@ def list_threads(db: ThreadsDB) -> list[ThreadRow]:
 
 
 def list_root_threads(db: ThreadsDB) -> list[str]:
+    """List all root threads (threads with no parent).
+
+    Root threads are top-level conversations that were created with
+    ``create_root_thread()`` and are not children of any other thread.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+
+    Returns:
+        List of thread IDs for all root threads.
+    """
     try:
         cur = db.conn.execute("SELECT thread_id FROM threads WHERE thread_id NOT IN (SELECT child_id FROM children)")
         return [r[0] for r in cur.fetchall()]
@@ -956,6 +1042,16 @@ def list_root_threads(db: ThreadsDB) -> list[str]:
 
 
 def get_parent(db: ThreadsDB, child_id: str) -> Optional[str]:
+    """Get the parent thread ID for a child thread.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        child_id: ID of the child thread.
+
+    Returns:
+        Parent thread ID, or None if the thread is a root thread
+        or doesn't exist.
+    """
     try:
         row = db.conn.execute('SELECT parent_id FROM children WHERE child_id=?', (child_id,)).fetchone()
         return row[0] if row and row[0] else None
@@ -976,6 +1072,18 @@ def list_children_with_meta(db: ThreadsDB, parent_id: str) -> list[tuple[str, st
 
 
 def list_children_ids(db: ThreadsDB, parent_id: str) -> list[str]:
+    """List all direct child thread IDs for a parent thread.
+
+    Only returns immediate children, not grandchildren or deeper
+    descendants. Use ``collect_subtree()`` to get all descendants.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        parent_id: ID of the parent thread.
+
+    Returns:
+        List of child thread IDs.
+    """
     try:
         cur = db.conn.execute("SELECT child_id FROM children WHERE parent_id=?", (parent_id,))
         return [r[0] for r in cur.fetchall()]
@@ -1066,11 +1174,33 @@ def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Opt
 
 
 def pause_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:
+    """Pause a thread to prevent further execution.
+
+    Sets the thread status to 'paused' and emits a ``control.pause``
+    event. The runner will not process paused threads until they
+    are resumed with ``resume_thread()``.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        thread_id: ID of the thread to pause.
+        reason: Human-readable reason for pausing (default: 'user').
+    """
     db.conn.execute("UPDATE threads SET status='paused' WHERE thread_id=?", (thread_id,))
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='control.pause', payload={"reason": reason})
 
 
 def resume_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:
+    """Resume a paused thread to allow execution.
+
+    Sets the thread status to 'active' and emits a ``control.resume``
+    event. The runner will resume processing the thread if there is
+    actionable work pending.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        thread_id: ID of the thread to resume.
+        reason: Human-readable reason for resuming (default: 'user').
+    """
     db.conn.execute("UPDATE threads SET status='active' WHERE thread_id=?", (thread_id,))
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='control.resume', payload={"reason": reason})
 
@@ -1172,6 +1302,19 @@ def current_thread_model_info(db: ThreadsDB, thread_id: str) -> Optional[Dict[st
         pass
     return None
 def get_thread_working_directory(db: ThreadsDB, thread_id: str) -> Path:
+    """Get the effective working directory for a thread.
+
+    Resolves the working directory by checking ``thread.config`` events
+    for this thread and its ancestors. If no explicit configuration
+    exists, returns the current process working directory.
+
+    Args:
+        db: ThreadsDB instance for database operations.
+        thread_id: ID of the thread.
+
+    Returns:
+        Resolved Path to the thread's working directory.
+    """
     from pathlib import Path
     import json
     tid = thread_id

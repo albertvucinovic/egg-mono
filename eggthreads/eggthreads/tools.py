@@ -85,6 +85,21 @@ class ToolRegistry:
 
 # Default tools similar to chat.sh
 def create_default_tools() -> ToolRegistry:
+    """Create a ToolRegistry with the default set of tools.
+
+    Returns a registry pre-populated with common tools:
+    - bash: Execute shell commands
+    - python: Execute Python scripts
+    - javascript: Browser JavaScript execution (placeholder)
+    - spawn_agent: Create child threads for delegation
+    - spawn_agent_auto: Create auto-approved child threads
+    - replace_between: File text replacement
+    - search_tavily: Web search via Tavily API
+    - wait: Synchronize on child thread completion
+
+    Returns:
+        ToolRegistry with default tools registered.
+    """
     import asyncio, subprocess, sys, os, json as _json, time as _time
     from io import StringIO
     from pathlib import Path
