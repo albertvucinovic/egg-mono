@@ -1,4 +1,28 @@
-# eggthreads package
+"""eggthreads - Tree-structured conversation threads with event sourcing.
+
+eggthreads provides infrastructure for managing AI conversations as a tree
+of threads, where each thread maintains its own message history and can
+spawn child threads for parallel exploration or task delegation.
+
+Key features:
+- **Thread management**: Create root and child threads, branch conversations
+- **Event sourcing**: All state changes recorded as immutable events
+- **Tool call workflow**: TC1-TC6 state machine with approval gates
+- **Runner actionables**: RA1 (LLM turns), RA2 (tool execution), RA3 (user commands)
+- **Sandbox execution**: Isolated command execution with configurable policies
+
+Quick start::
+
+    from eggthreads import ThreadsDB, create_root_thread, append_message
+
+    db = ThreadsDB()
+    db.init_schema()
+
+    thread_id = create_root_thread(db, name="My Chat")
+    append_message(db, thread_id, role="user", content="Hello!")
+
+See API.md for comprehensive documentation.
+"""
 from .db import ThreadsDB  # type: ignore
 from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig  # type: ignore
 from .snapshot import SnapshotBuilder  # type: ignore
