@@ -58,14 +58,17 @@ Key event types:
 
 Tool calls follow a state machine:
 
-1. **TC1**: Tool call requested by assistant
-2. **TC2**: Tool call acknowledged
-3. **TC3**: Approval requested (if required)
-4. **TC4**: Approved/denied
-5. **TC5**: Execution started
-6. **TC6**: Result published
+1. **TC1**: Tool call requested, waiting for approval
+2. **TC2.1**: Approved (ready to execute)
+3. **TC2.2**: Denied (will not execute)
+4. **TC3**: Executing
+5. **TC4**: Finished, waiting for output approval
+6. **TC5**: Output decision made, waiting for publish
+7. **TC6**: Published (final tool message exists)
 
-Use `build_tool_call_states()` to inspect current tool call states.
+The output approval step (TC4 → TC5) allows review of tool results before
+they're shown to the LLM. Use `build_tool_call_states()` to inspect current
+tool call states.
 
 ### Runner Actionable States
 
