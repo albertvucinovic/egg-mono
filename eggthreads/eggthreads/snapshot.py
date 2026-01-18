@@ -31,6 +31,9 @@ class SnapshotBuilder:
         that have been marked as skipped (via a msg.edit event) are not
         included in the snapshot.
         """
+        import logging
+        logger = logging.getLogger("SnapshotBuilder")
+
         # Convert to list so we can scan twice (for msg.edit and msg.create)
         events_list = list(events)
 
@@ -53,8 +56,11 @@ class SnapshotBuilder:
                 payload = {}
             if payload.get('skipped_on_continue'):
                 msg_id = _get(e, "msg_id")
+                logger.info(f"Found msg.edit with skipped_on_continue, msg_id={msg_id!r}")
                 if msg_id:
                     skipped_msg_ids.add(msg_id)
+
+        logger.info(f"skipped_msg_ids = {skipped_msg_ids}")
 
         messages: List[Dict[str, Any]] = []
 
@@ -65,8 +71,10 @@ class SnapshotBuilder:
                 continue
 
             msg_id = _get(e, "msg_id")
+            logger.info(f"Processing msg.create with msg_id={msg_id!r}, in skipped={msg_id in skipped_msg_ids if msg_id else 'N/A'}")
             # Skip messages that have been marked as skipped_on_continue
             if msg_id and msg_id in skipped_msg_ids:
+                logger.info(f"  -> SKIPPING this message")
                 continue
 
             pj = _get(e, "payload_json")
