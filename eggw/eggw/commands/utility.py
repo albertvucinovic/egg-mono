@@ -387,21 +387,45 @@ async def cmd_setContextLimit(thread_id: str, arg: str = "") -> CommandResponse:
     """Handle /setContextLimit command - set max context tokens for thread."""
     arg = (arg or '').strip()
 
+    def fmt_tok(n: int) -> str:
+        if n < 1000:
+            return str(n)
+        return f"{n/1000:.1f}k"
+
     if not arg:
-        # Show current limit
-        current = get_context_limit(core.db, thread_id)
-        if current:
-            return CommandResponse(
-                success=True,
-                message=f"Current context limit: {current:,} tokens",
-                data={"context_limit": current}
-            )
+        # Show current limit and context usage
+        current_limit = get_context_limit(core.db, thread_id)
+        stats = total_token_stats(core.db, thread_id)
+        current_tokens = stats.get('context_tokens', 0)
+
+        lines = [
+            f"Thread {thread_id[-8:]} context limit:",
+            "",
+            f"  current_tokens:  {current_tokens:,} ({fmt_tok(current_tokens)})",
+        ]
+
+        if current_limit:
+            pct = (current_tokens / current_limit * 100) if current_limit > 0 else 0
+            remaining = max(0, current_limit - current_tokens)
+            lines.extend([
+                f"  context_limit:   {current_limit:,} ({fmt_tok(current_limit)})",
+                f"  usage:           {pct:.1f}%",
+                f"  remaining:       {remaining:,} ({fmt_tok(remaining)})",
+            ])
         else:
-            return CommandResponse(
-                success=True,
-                message="No context limit set (unlimited)",
-                data={"context_limit": None}
-            )
+            lines.append(f"  context_limit:   (unlimited)")
+
+        lines.extend(["", "Usage: /setContextLimit <max_tokens>"])
+
+        return CommandResponse(
+            success=True,
+            message="\n".join(lines),
+            data={
+                "context_limit": current_limit,
+                "current_tokens": current_tokens,
+                "usage_percent": (current_tokens / current_limit * 100) if current_limit else None,
+            }
+        )
 
     # Parse and set limit
     try:
@@ -413,10 +437,28 @@ async def cmd_setContextLimit(thread_id: str, arg: str = "") -> CommandResponse:
             )
 
         set_context_limit(core.db, thread_id, limit, reason="ui /setContextLimit")
+
+        # Show updated status
+        stats = total_token_stats(core.db, thread_id)
+        current_tokens = stats.get('context_tokens', 0)
+        pct = (current_tokens / limit * 100) if limit > 0 else 0
+
+        lines = [
+            f"Thread {thread_id[-8:]} context limit updated:",
+            "",
+            f"  current_tokens:  {current_tokens:,} ({fmt_tok(current_tokens)})",
+            f"  context_limit:   {limit:,} ({fmt_tok(limit)})",
+            f"  usage:           {pct:.1f}%",
+        ]
+
         return CommandResponse(
             success=True,
-            message=f"Context limit set to {limit:,} tokens",
-            data={"context_limit": limit}
+            message="\n".join(lines),
+            data={
+                "context_limit": limit,
+                "current_tokens": current_tokens,
+                "usage_percent": pct,
+            }
         )
     except ValueError:
         return CommandResponse(

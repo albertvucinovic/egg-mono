@@ -87,7 +87,8 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
   const commandsWithChatOutput = [
     '/help', '/threads', '/listChildren', '/cost', '/toolsStatus',
     '/schedulers', '/model', '/parentThread', '/theme', '/toolInfo',
-    '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsSecrets'
+    '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsSecrets',
+    '/setContextLimit'
   ];
 
   // Command mutation
