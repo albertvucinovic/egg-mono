@@ -21,6 +21,7 @@ eggthreads = [
 dev = [
   "pytest>=7",
   "pytest-asyncio>=0.21",
+  "pdoc3",
 ]
 
 [tool.setuptools]

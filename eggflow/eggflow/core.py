@@ -23,11 +23,32 @@ class Task:
   cacheable: ClassVar[bool] = True
 
   def get_cache_key(self) -> str:
+    """Generate a unique cache key for this task.
+
+    The default implementation hashes the task's class name and all
+    instance attributes. Override this method to customize cache key
+    generation for specific task types.
+
+    Returns:
+        A SHA-256 hex digest uniquely identifying this task configuration.
+    """
     data = self.__dict__.copy()
     s = json.dumps(data, sort_keys=True, default=str)
     return hashlib.sha256(f"{self.__class__.__name__}:{s}".encode()).hexdigest()
 
   async def run(self) -> Any:
+    """Execute the task logic. Must be implemented by subclasses.
+
+    This method can be:
+    - An async function returning a value
+    - A generator yielding subtasks for composition
+
+    Returns:
+        The task result value.
+
+    Raises:
+        NotImplementedError: If not overridden by subclass.
+    """
     raise NotImplementedError
 
   async def execute(self, cached: bool = True, raw: bool = False) -> Union['Result', Any]:
@@ -120,10 +141,21 @@ def wrapped(task: Task) -> Wrapped:
   return Wrapped(task)
 
 class FuncTask(Task):
-  """Task that wraps a function or method call with configurable cache key."""
+  """Task that wraps a function or method call with configurable cache key.
+
+  Created via as_task() to convert existing functions/methods into cacheable tasks.
+  """
 
   def __init__(self, func: Callable, args: tuple, kwargs: dict,
                cache_key: Optional[Tuple[Any, ...]] = None):
+    """Initialize a FuncTask.
+
+    Args:
+        func: The function or method to wrap.
+        args: Positional arguments to pass to the function.
+        kwargs: Keyword arguments to pass to the function.
+        cache_key: Explicit cache key tuple. If None, uses args + kwargs values.
+    """
     self.func = func
     self.args = args
     self.kwargs = kwargs
@@ -131,6 +163,7 @@ class FuncTask(Task):
     self._cache_key = cache_key if cache_key is not None else args + tuple(kwargs.values())
 
   def get_cache_key(self) -> str:
+    """Generate cache key from function name and cache_key tuple."""
     data = {
       'func': f"{self.func.__module__}.{self.func.__qualname__}",
       'cache_key': self._cache_key,
@@ -139,6 +172,7 @@ class FuncTask(Task):
     return hashlib.sha256(s.encode()).hexdigest()
 
   async def run(self) -> Any:
+    """Execute the wrapped function with stored arguments."""
     result = self.func(*self.args, **self.kwargs)
     if inspect.iscoroutine(result):
       return await result
@@ -181,29 +215,46 @@ def as_task(func_or_method: Callable, *args,
 
 @dataclass
 class Result:
-  """Result of a task execution, containing value or error."""
+  """Result of a task execution, containing value or error.
+
+  Attributes:
+      value: The return value if task succeeded, None otherwise.
+      metadata: Additional data like artifacts, timing info, etc.
+      error: Error message if task failed, None if successful.
+  """
   value: Any = None
   metadata: Dict[str, Any] = field(default_factory=dict)
   error: Optional[str] = None
 
   @property
   def is_success(self) -> bool:
+    """Check if the task completed successfully (no error)."""
     return self.error is None
 
   @property
   def artifacts(self) -> Dict[str, str]:
-    """Convenience accessor for extracted files."""
+    """Convenience accessor for extracted files from metadata."""
     return self.metadata.get('artifacts', {})
 
 class TaskStore:
-  """SQLite-based storage for task results."""
+  """SQLite-based storage for task results and caching.
+
+  Stores task results by cache key with status tracking (PENDING, RUNNING,
+  COMPLETED, FAILED). Results are serialized using pickle.
+  """
 
   def __init__(self, db_path: str = "flow.db"):
+    """Initialize the task store.
+
+    Args:
+        db_path: Path to SQLite database file. Created if doesn't exist.
+    """
     self.conn = sqlite3.connect(db_path, check_same_thread=False)
     self.conn.row_factory = sqlite3.Row
     self._init_db()
 
   def _init_db(self):
+    """Create the tasks table if it doesn't exist."""
     self.conn.execute("""
       create table if not exists tasks (
         cache_key text primary key,
@@ -214,10 +265,24 @@ class TaskStore:
     """)
     self.conn.commit()
 
-  def get(self, key):
+  def get(self, key: str) -> Optional[sqlite3.Row]:
+    """Retrieve a task record by cache key.
+
+    Args:
+        key: The cache key to look up.
+
+    Returns:
+        Row with cache_key, status, result_blob, updated_at, or None if not found.
+    """
     return self.conn.execute("select * from tasks where cache_key=?", (key,)).fetchone()
 
-  def create(self, key, task):
+  def create(self, key: str, task: Task) -> None:
+    """Create a new task record with PENDING status.
+
+    Args:
+        key: The cache key for this task.
+        task: The task object (used for logging/debugging).
+    """
     try:
       self.conn.execute("insert into tasks (cache_key, status) values (?, ?)",
                         (key, "PENDING"))
@@ -226,7 +291,14 @@ class TaskStore:
       logger.error(str(e))
       raise e
 
-  def update(self, key, status, result=None):
+  def update(self, key: str, status: str, result: Optional[Result] = None) -> None:
+    """Update a task's status and optionally its result.
+
+    Args:
+        key: The cache key to update.
+        status: New status (PENDING, RUNNING, COMPLETED, FAILED).
+        result: Optional Result object to store (pickled).
+    """
     try:
       if result:
         self.conn.execute("update tasks set status=?, result_blob=?, updated_at=current_timestamp where cache_key=?",
@@ -240,9 +312,21 @@ class TaskStore:
       raise e
 
 class FlowExecutor:
-  """Executes tasks with caching support."""
+  """Executes tasks with automatic caching and composition support.
+
+  The executor handles:
+  - Running tasks and caching results by cache key
+  - Generator-based task composition (yield subtasks)
+  - Parallel execution of task lists
+  - Error propagation and wrapped result handling
+  """
 
   def __init__(self, store: TaskStore):
+    """Initialize the executor with a task store.
+
+    Args:
+        store: TaskStore instance for caching results.
+    """
     self.store = store
 
   async def run(self, flow: Union[Task, List[Task], Coroutine]) -> Union[Result, List[Result]]:
