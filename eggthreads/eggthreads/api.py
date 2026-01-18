@@ -692,7 +692,7 @@ def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
 
     A thread is continuable if:
     - It exists
-    - It is not currently running (no active open_streams lease)
+    - It is not currently running (no active, non-expired open_streams lease)
     - There are messages after the last RA1 boundary that can be skipped
 
     Note: A thread in 'waiting_user' state is technically continuable,
@@ -702,11 +702,16 @@ def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
     if not th:
         return False
 
-    # Check if there's an active lease
+    # Check if there's an active lease (not expired)
     try:
         row = db.current_open(thread_id)
         if row:
-            return False  # Thread is running
+            from datetime import datetime
+            lease_until = row['lease_until']
+            now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+            if lease_until and lease_until > now_iso:
+                return False  # Thread is running (lease still valid)
+            # Lease has expired - thread not actually running
     except Exception:
         pass
 
@@ -741,16 +746,22 @@ def continue_thread(
             message=f"Thread not found: {thread_id}"
         )
 
-    # Check if thread is running
+    # Check if thread is running (has an active, non-expired lease)
     try:
         row = db.current_open(thread_id)
         if row:
-            return ContinueResult(
-                success=False,
-                continue_from_msg_id=None,
-                skipped_msg_ids=[],
-                message="Thread is currently running. Interrupt it first."
-            )
+            from datetime import datetime
+            lease_until = row['lease_until']
+            now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+            # Only block if the lease hasn't expired yet
+            if lease_until and lease_until > now_iso:
+                return ContinueResult(
+                    success=False,
+                    continue_from_msg_id=None,
+                    skipped_msg_ids=[],
+                    message="Thread is currently running. Interrupt it first."
+                )
+            # Lease has expired - thread is not actually running, proceed with continue
     except Exception:
         pass
 
@@ -1396,14 +1407,21 @@ def collect_subtree(db: ThreadsDB, root_id: str) -> list[str]:
 
 def list_active_threads(db: ThreadsDB, subtree: list[str]) -> list[str]:
     """Return list of thread_ids that are currently running or runnable."""
+    from datetime import datetime
     active: list[str] = []
     for tid in subtree:
-        row_open = None
+        is_running = False
         try:
             row_open = db.current_open(tid)
+            if row_open:
+                # Only consider thread running if lease hasn't expired
+                lease_until = row_open['lease_until']
+                now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                if lease_until and lease_until > now_iso:
+                    is_running = True
         except Exception:
-            row_open = None
-        if row_open is not None or is_thread_runnable(db, tid):
+            pass
+        if is_running or is_thread_runnable(db, tid):
             active.append(tid)
     return active
 

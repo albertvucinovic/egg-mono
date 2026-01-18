@@ -119,20 +119,7 @@ class ThreadsDB:
     # Open streams (per-thread lease) ----------------------------------
     def try_open_stream(self, thread_id: str, invoke_id: str, lease_until_iso: str,
                         owner: Optional[str] = None, purpose: Optional[str] = None) -> bool:
-        # insert if no active or expired; else update if same invoke_id
-        cur = self.conn.execute(
-            """
-            INSERT INTO open_streams(thread_id, invoke_id, lease_until, owner, purpose, heartbeat_at)
-            SELECT ?,?,?,?, ?, datetime('now')
-            WHERE NOT EXISTS (
-              SELECT 1 FROM open_streams WHERE thread_id=? AND lease_until>datetime('now')
-            )
-            """,
-            (thread_id, invoke_id, lease_until_iso, owner, purpose, thread_id)
-        )
-        if cur.rowcount == 1:
-            return True
-        # Try takeover if expired
+        # First, try to takeover an expired lease (most common case after crash recovery)
         cur = self.conn.execute(
             """
             UPDATE open_streams
@@ -141,7 +128,30 @@ class ThreadsDB:
             """,
             (invoke_id, lease_until_iso, owner, purpose, thread_id)
         )
-        return cur.rowcount == 1
+        if cur.rowcount == 1:
+            return True
+
+        # No expired lease to takeover, check if there's an active lease
+        cur = self.conn.execute(
+            "SELECT 1 FROM open_streams WHERE thread_id=? AND lease_until>datetime('now')",
+            (thread_id,)
+        )
+        if cur.fetchone():
+            return False  # Active lease held by another process
+
+        # No row exists at all, insert a new one
+        try:
+            cur = self.conn.execute(
+                """
+                INSERT INTO open_streams(thread_id, invoke_id, lease_until, owner, purpose, heartbeat_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (thread_id, invoke_id, lease_until_iso, owner, purpose)
+            )
+            return cur.rowcount == 1
+        except Exception:
+            # Race condition: another process inserted between our check and insert
+            return False
 
     def heartbeat(self, thread_id: str, invoke_id: str, lease_until_iso: str) -> bool:
         cur = self.conn.execute(

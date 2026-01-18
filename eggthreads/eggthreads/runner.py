@@ -2004,9 +2004,8 @@ class SubtreeScheduler:
                     try:
                         await runner.run_once()
                     except Exception:
-                        # Swallow to keep loop alive; production code
-                        # would log this event.
-                        pass
+                        # Clear cache to force re-check on next iteration
+                        last_checked_seq.pop(tid, None)
             finally:
                 # Remove from running set when done
                 running_threads.discard(tid)
