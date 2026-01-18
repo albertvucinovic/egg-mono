@@ -167,8 +167,37 @@ class ThreadRunner:
                 payload=payload,
             )
 
+        # Get context limit for this thread (with ancestor inheritance)
+        context_limit: Optional[int] = None
+        try:
+            from .api import get_context_limit
+            context_limit = get_context_limit(self.db, self.thread_id)
+        except Exception:
+            context_limit = None
+
         try:
             if ra.kind == 'RA1_llm':
+                # Check context limit before making LLM call
+                if context_limit:
+                    try:
+                        from .token_count import total_token_stats
+                        stats = total_token_stats(self.db, self.thread_id)
+                        current_tokens = stats.get('context_tokens', 0)
+                        if current_tokens >= context_limit:
+                            # Emit error instead of calling API
+                            error_msg = f"Context limit exceeded: {current_tokens} tokens >= {context_limit} limit"
+                            _append_delta({'reason': error_msg, 'model_key': current_model})
+                            self.db.append_event(
+                                event_id=os.urandom(10).hex(),
+                                thread_id=self.thread_id,
+                                type_='msg.create',
+                                msg_id=os.urandom(10).hex(),
+                                payload={'role': 'system', 'content': f'LLM/runner error: {error_msg}'},
+                            )
+                            raise Exception(error_msg)  # Skip to finally block
+                    except ImportError:
+                        pass  # If token_count unavailable, proceed with call (fail-open)
+
                 # ---------------- RA1: LLM call ----------------
                 await self._run_ra1_llm(invoke_id, current_model)
 

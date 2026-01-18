@@ -66,6 +66,9 @@ from .api import (
     wait_for_user_command_result,
     wait_for_user_command_result_async,
     execute_bash_command_async,
+    # Context limit API
+    set_context_limit,
+    get_context_limit,
     # Continue thread API
     ContinueResult,
     continue_thread,
@@ -133,6 +136,8 @@ __all__ = [
     'execute_bash_command', 'execute_bash_command_hidden', 'get_user_command_result', 'wait_for_user_command_result',
     'wait_for_user_command_result_async',
     'execute_bash_command_async',
+    # Context limit API
+    'set_context_limit', 'get_context_limit',
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
     # Thread diagnosis

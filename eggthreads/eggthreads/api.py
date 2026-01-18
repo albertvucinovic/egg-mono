@@ -1565,6 +1565,68 @@ def word_count_from_events(db: ThreadsDB, thread_id: str) -> int:
     return base + extra
 
 
+def set_context_limit(db: ThreadsDB, thread_id: str, max_tokens: int, reason: str = "user") -> None:
+    """Set the maximum context token limit for a thread.
+
+    Appends a ``thread.context_limit`` event. The runner checks this limit
+    before each LLM API call and emits an error if exceeded.
+
+    Args:
+        db: ThreadsDB instance.
+        thread_id: ID of the thread to configure.
+        max_tokens: Maximum context tokens allowed (0 or negative disables limit).
+        reason: Human-readable reason for the change.
+    """
+    import os
+    db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_='thread.context_limit',
+        payload={
+            'max_tokens': int(max_tokens),
+            'reason': reason,
+        }
+    )
+
+
+def get_context_limit(db: ThreadsDB, thread_id: str) -> Optional[int]:
+    """Get the effective context limit for a thread.
+
+    Resolves by checking ``thread.context_limit`` events for this thread
+    and ancestors (inheritance). Returns None if no limit is configured.
+
+    Args:
+        db: ThreadsDB instance.
+        thread_id: ID of the thread.
+
+    Returns:
+        Maximum tokens allowed, or None if not configured.
+    """
+    tid = thread_id
+    seen: set = set()
+    while tid and tid not in seen:
+        seen.add(tid)
+        try:
+            row = db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type='thread.context_limit' ORDER BY event_seq DESC LIMIT 1",
+                (tid,),
+            ).fetchone()
+            if row:
+                payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+                max_tokens = payload.get('max_tokens')
+                if isinstance(max_tokens, int) and max_tokens > 0:
+                    return max_tokens
+        except Exception:
+            pass
+        # Walk up to parent for inheritance
+        try:
+            p_row = db.conn.execute("SELECT parent_id FROM children WHERE child_id=?", (tid,)).fetchone()
+            tid = p_row[0] if p_row else None
+        except Exception:
+            tid = None
+    return None
+
+
 def approve_tool_calls_for_thread(db, thread_id, decision='all-in-turn', reason=None, tool_call_id=None):
     """Approve tool calls for a thread with a given decision.
 
