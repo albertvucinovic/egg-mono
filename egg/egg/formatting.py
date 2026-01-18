@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Set
 
-from eggthreads import list_children_with_meta, list_root_threads, list_threads
+from eggthreads import list_children_with_meta, list_root_threads, list_threads, get_thread_status, get_thread_statuses_bulk
 
 from utils import snapshot_messages
 
@@ -17,26 +17,26 @@ class FormattingMixin:
         from rich.markup import escape as rich_escape
 
         th = self.db.get_thread(tid)
-        status = th.status if th else 'unknown'
+        # Use real-time status from get_thread_status (checks lease expiration properly)
+        status = get_thread_status(self.db, tid)
         # Escape user content to prevent Rich markup interference
         recap = rich_escape((th.short_recap if th and th.short_recap else 'No recap').strip())
         mk = rich_escape(self.current_model_for_thread(tid) or 'default')
-        try:
-            streaming = self.db.current_open(tid) is not None
-        except Exception:
-            streaming = False
         label = rich_escape(th.name if th and th.name else '')
         id_short = tid[-8:]
-        sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
+
+        # Status-based flags
+        sflag = '[bold yellow]STREAMING[/bold yellow] ' if status == 'streaming' else ''
         cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == self.current_thread else ''
         sched_tag = '[bold cyan][SCHED][/bold cyan] ' if self.is_thread_scheduled(tid) else ''
+
         # Color status
-        if status == 'active':
+        if status == 'streaming':
+            status_tag = f"[bold yellow]{status}[/]"
+        elif status == 'runnable':
             status_tag = f"[bold green]{status}[/]"
-        elif status == 'paused':
-            status_tag = f"[bold red]{status}[/]"
         else:
-            status_tag = f"[bold]{status}[/]"
+            status_tag = f"[dim]{status}[/]"
         return (
             f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap} "
             f"[dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
@@ -80,14 +80,9 @@ class FormattingMixin:
             if t.thread_id not in model_map and t.initial_model_key:
                 model_map[t.thread_id] = t.initial_model_key
 
-        # Get streaming threads (threads with open streams)
-        streaming_set: Set[str] = set()
-        try:
-            cur = self.db.conn.execute("SELECT thread_id FROM event_streams WHERE done = 0")
-            for row in cur.fetchall():
-                streaming_set.add(row[0])
-        except Exception:
-            pass
+        # Compute real-time status for all threads in one batch (efficient)
+        all_tids = [t.thread_id for t in all_threads]
+        status_map = get_thread_statuses_bulk(self.db, all_tids)
 
         # Get scheduled threads from self
         scheduled_set: Set[str] = set()
@@ -106,24 +101,24 @@ class FormattingMixin:
             if not th:
                 return f"[dim]{tid[-8:]}[/dim] (not found)"
 
-            status = th.status or 'unknown'
+            status = status_map.get(tid, 'idle')
             # Escape user content to prevent Rich markup interference
             recap = rich_escape((th.short_recap or 'No recap').strip())
             mk = rich_escape(model_map.get(tid, 'default'))
-            streaming = tid in streaming_set
             label = rich_escape(th.name or '')
             id_short = tid[-8:]
 
-            sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
+            sflag = '[bold yellow]STREAMING[/bold yellow] ' if status == 'streaming' else ''
             cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid == current_thread else ''
             sched_tag = '[bold cyan][SCHED][/bold cyan] ' if tid in scheduled_set else ''
 
-            if status == 'active':
+            # Color status based on real-time state
+            if status == 'streaming':
+                status_tag = f"[bold yellow]{status}[/]"
+            elif status == 'runnable':
                 status_tag = f"[bold green]{status}[/]"
-            elif status == 'paused':
-                status_tag = f"[bold red]{status}[/]"
             else:
-                status_tag = f"[bold]{status}[/]"
+                status_tag = f"[dim]{status}[/]"
 
             return (
                 f"{cur_tag}{sched_tag}{sflag}[dim]{id_short}[/dim] {status_tag} - {recap} "
