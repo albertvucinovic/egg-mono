@@ -116,12 +116,15 @@ class PICTask(Task):
         Raises:
             PICRecoveryError: If the thread is unhealthy and recovery fails
         """
-        if not EGGTHREADS_INSTALLED or Config.MOCK_MODE:
+        if not EGGTHREADS_INSTALLED:
             return
 
         diagnosis = egg_api.diagnose_thread(db, thread_id)
 
         if not diagnosis.is_healthy:
+            # Use continue_thread to recover the thread state.
+            # continue_thread handles expired leases (from heartbeat timeout) automatically,
+            # so we don't need to call interrupt_thread first.
             result = egg_api.continue_thread(
                 db,
                 thread_id,
