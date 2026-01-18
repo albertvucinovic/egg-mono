@@ -470,16 +470,21 @@ class FlowExecutor:
 
     # Call recover() before re-running a FAILED task
     if row and row['status'] == "FAILED":
+      logger.info(f"Task {task.__class__.__name__} was FAILED, attempting recovery...")
       should_retry = True  # Default: retry
       try:
         recover_method = getattr(task, 'recover', None)
         if recover_method and callable(recover_method):
+          logger.info(f"Calling recover() on {task.__class__.__name__}")
           result = recover_method()
           if inspect.iscoroutine(result):
             result = await result
+          logger.info(f"recover() returned: {result}")
           # recover() returns bool: True=retry, False=stay FAILED
           if result is False:
             should_retry = False
+        else:
+          logger.info(f"No recover() method found on {task.__class__.__name__}")
       except Exception as e:
         # Log recovery failure but continue with re-execution
         logger.warning(f"Task recovery failed: {e}")
