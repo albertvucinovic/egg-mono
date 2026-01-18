@@ -1015,6 +1015,81 @@ def is_thread_runnable(db: ThreadsDB, thread_id: str) -> bool:
     return discover_runner_actionable_cached(db, thread_id) is not None
 
 
+def get_thread_status(db: ThreadsDB, thread_id: str) -> str:
+    """Return the real-time status of a thread.
+
+    Status values:
+    - "streaming": Thread has an active (non-expired) lease in open_streams
+    - "runnable": Thread has pending work (RA1/RA2/RA3) but is not streaming
+    - "idle": Thread has no active lease and no pending work
+
+    This function properly checks lease expiration, unlike the static
+    'status' column in the threads table which can become stale after crashes.
+    """
+    from datetime import datetime
+
+    # Check for active (non-expired) lease
+    try:
+        row_open = db.current_open(thread_id)
+        if row_open:
+            lease_until = row_open.get('lease_until')
+            if lease_until:
+                now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                if lease_until > now_iso:
+                    return "streaming"
+    except Exception:
+        pass
+
+    # Check for pending work
+    if is_thread_runnable(db, thread_id):
+        return "runnable"
+
+    return "idle"
+
+
+def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str]) -> dict[str, str]:
+    """Return real-time status for multiple threads efficiently.
+
+    Uses batch queries where possible:
+    1. Single query to find all streaming threads (active leases)
+    2. Checks runnability for remaining threads (uses internal cache)
+
+    Status values: "streaming", "runnable", "idle"
+    """
+    from datetime import datetime
+    from .tool_state import discover_runner_actionable_cached
+
+    result: dict[str, str] = {tid: "idle" for tid in thread_ids}
+
+    # Batch query: find all threads with active (non-expired) leases
+    streaming_set: set[str] = set()
+    try:
+        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+        cur = db.conn.execute(
+            "SELECT thread_id FROM open_streams WHERE lease_until > ?",
+            (now_iso,)
+        )
+        for row in cur.fetchall():
+            tid = row[0]
+            if tid in result:
+                streaming_set.add(tid)
+                result[tid] = "streaming"
+    except Exception:
+        pass
+
+    # Check runnability for non-streaming threads
+    # discover_runner_actionable_cached has internal caching per thread
+    for tid in thread_ids:
+        if tid not in streaming_set:
+            try:
+                if discover_runner_actionable_cached(db, tid) is not None:
+                    result[tid] = "runnable"
+            except Exception:
+                pass
+
+    return result
+
+
 # --------- Query helpers (expose common SQL as API) -------------------------
 def list_threads(db: ThreadsDB) -> list[ThreadRow]:
     """List all threads in the database.

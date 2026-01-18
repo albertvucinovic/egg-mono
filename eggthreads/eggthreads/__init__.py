@@ -34,6 +34,8 @@ from .api import (
     delete_message,
     delete_thread,
     is_thread_runnable,
+    get_thread_status,
+    get_thread_statuses_bulk,
     list_threads,
     list_root_threads,
     get_parent,
@@ -121,7 +123,7 @@ from .llm import create_llm_client
 
 __all__ = [
     'ThreadsDB', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
-    'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable',
+    'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable', 'get_thread_status', 'get_thread_statuses_bulk',
     'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'current_open_invoke',
     'current_thread_model', 'current_thread_model_info', 'duplicate_thread', 'duplicate_thread_up_to',
     'collect_subtree', 'list_active_threads', 'wait_subtree_idle',
