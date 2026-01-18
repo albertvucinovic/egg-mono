@@ -10,6 +10,8 @@ from eggthreads import (
     total_token_stats,
     execute_bash_command,
     list_threads,
+    set_context_limit,
+    get_context_limit,
 )
 
 from models import CommandResponse
@@ -285,6 +287,7 @@ Utility:
   /toggleAutoApproval            - Toggle auto-approve tools
   /schedulers                    - Show active schedulers
   /waitForThreads <ids...>       - Wait for threads to complete
+  /setContextLimit [limit]       - Set or show max context tokens
   /help                          - Show this help
 
 Shell:
@@ -378,3 +381,45 @@ def cmd_theme(theme_name: str) -> CommandResponse:
         message=f"Theme changed to: {theme}",
         data={"theme": theme, "action": "set_theme"},
     )
+
+
+async def cmd_setContextLimit(thread_id: str, arg: str = "") -> CommandResponse:
+    """Handle /setContextLimit command - set max context tokens for thread."""
+    arg = (arg or '').strip()
+
+    if not arg:
+        # Show current limit
+        current = get_context_limit(core.db, thread_id)
+        if current:
+            return CommandResponse(
+                success=True,
+                message=f"Current context limit: {current:,} tokens",
+                data={"context_limit": current}
+            )
+        else:
+            return CommandResponse(
+                success=True,
+                message="No context limit set (unlimited)",
+                data={"context_limit": None}
+            )
+
+    # Parse and set limit
+    try:
+        limit = int(arg)
+        if limit <= 0:
+            return CommandResponse(
+                success=False,
+                message="Context limit must be a positive integer"
+            )
+
+        set_context_limit(core.db, thread_id, limit, reason="ui /setContextLimit")
+        return CommandResponse(
+            success=True,
+            message=f"Context limit set to {limit:,} tokens",
+            data={"context_limit": limit}
+        )
+    except ValueError:
+        return CommandResponse(
+            success=False,
+            message=f"Invalid number: {arg}. Usage: /setContextLimit <max_tokens>"
+        )

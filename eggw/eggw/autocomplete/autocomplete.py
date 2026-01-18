@@ -80,6 +80,7 @@ async def get_autocomplete(
                 '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus', '/toolInfo',
                 '/disableTool', '/enableTool', '/toolsSecrets',
                 '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
+                '/setContextLimit',
                 '/togglePanel', '/toggleBorders', '/theme',
                 '/cost', '/schedulers', '/enterMode', '/paste', '/quit',
             ]
