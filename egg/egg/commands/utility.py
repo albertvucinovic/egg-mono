@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from utils import COMMANDS_TEXT, read_clipboard
+from eggthreads import set_context_limit, get_context_limit
 
 
 class UtilityCommandsMixin:
@@ -180,3 +181,29 @@ class UtilityCommandsMixin:
         block = "\n".join(lines + cost_lines)
         self.log_system('Token usage / cost for current thread (see console for full details).')
         self.console_print_block('Cost', block, border_style='green')
+
+    def cmd_setContextLimit(self, arg: str) -> None:
+        """Handle /setContextLimit command - set max context tokens for this thread."""
+        arg = (arg or '').strip()
+
+        if not arg:
+            # Show current limit
+            current = get_context_limit(self.db, self.current_thread)
+            if current:
+                self.log_system(f"Current context limit: {current:,} tokens")
+            else:
+                self.log_system("No context limit set (unlimited)")
+            return
+
+        # Parse and set limit
+        try:
+            limit = int(arg)
+            if limit <= 0:
+                self.log_system("Context limit must be a positive integer")
+                return
+
+            set_context_limit(self.db, self.current_thread, limit, reason="ui /setContextLimit")
+            self.log_system(f"Context limit set to {limit:,} tokens")
+        except ValueError:
+            self.log_system(f"Invalid number: {arg}")
+            self.log_system("Usage: /setContextLimit <max_tokens>")

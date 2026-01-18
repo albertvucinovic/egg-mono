@@ -36,6 +36,7 @@ Commands:
     /redraw
   Other:
     /enterMode <send|newline>, /cost, /paste, /quit
+    /setContextLimit [limit]
     /help
 """
 

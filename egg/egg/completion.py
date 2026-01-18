@@ -567,6 +567,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
                 '/setSandboxConfiguration',
                 '/getSandboxingConfig',
+                '/setContextLimit',
                 '/togglePanel',
                 '/toggleBorders',
                 '/redraw',
