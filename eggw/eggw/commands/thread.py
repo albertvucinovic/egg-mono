@@ -20,6 +20,7 @@ from eggthreads import (
     is_thread_continuable,
     interrupt_thread,
     parse_args,
+    get_thread_statuses_bulk,
 )
 
 from models import CommandResponse
@@ -178,6 +179,10 @@ async def cmd_list_threads() -> CommandResponse:
         if t.thread_id not in model_map and t.initial_model_key:
             model_map[t.thread_id] = t.initial_model_key
 
+    # Pre-compute real-time status for all threads in one batch (efficient)
+    all_tids = [t.thread_id for t in all_threads]
+    status_map = get_thread_statuses_bulk(core.db, all_tids)
+
     def format_thread(tid: str, indent: int = 0, max_depth: int = 50) -> list[str]:
         """Format a thread and its children recursively."""
         if indent > max_depth:
@@ -193,8 +198,9 @@ async def cmd_list_threads() -> CommandResponse:
         name_part = f" ({t.name})" if t.name else ""
         model = model_map.get(tid, "")
         model_part = f" [{model}]" if model else ""
-        state = t.status if t.status != "waiting_user" else ""
-        state_part = f" <{state}>" if state else ""
+        # Use real-time status instead of stale database status
+        state = status_map.get(tid, "idle")
+        state_part = f" <{state}>" if state != "idle" else ""
 
         lines.append(f"{prefix}{tid[-8:]}{name_part}{model_part}{state_part}")
 
