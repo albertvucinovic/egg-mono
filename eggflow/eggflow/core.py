@@ -51,6 +51,24 @@ class Task:
     """
     raise NotImplementedError
 
+  async def recover(self) -> bool:
+    """Called before re-running a FAILED task. Returns whether to retry.
+
+    This method is called when eggflow is about to re-execute a task that
+    previously failed. Use it to:
+    - Clean up partial/corrupted state from the failed run
+    - Reset external resources to a known-good state
+    - Decide whether retry makes sense
+
+    Returns:
+        True: Retry the task (state has been fixed, retry should succeed)
+        False: Don't retry (failure is permanent, or retry limit reached)
+
+    The default implementation returns True (always retry).
+    Override in subclasses that need state cleanup or retry control.
+    """
+    return True
+
   async def execute(self, cached: bool = True, raw: bool = False) -> Union['Result', Any]:
     """Execute this task through the current executor.
 
@@ -449,6 +467,29 @@ class FlowExecutor:
         return pickle.loads(row['result_blob'])
       except Exception as e:
         return Result(error=f"Completed Task but the result not unpickeling, error: {str(e)}", metadata={"corrupt": True})
+
+    # Call recover() before re-running a FAILED task
+    if row and row['status'] == "FAILED":
+      should_retry = True  # Default: retry
+      try:
+        recover_method = getattr(task, 'recover', None)
+        if recover_method and callable(recover_method):
+          result = recover_method()
+          if inspect.iscoroutine(result):
+            result = await result
+          # recover() returns bool: True=retry, False=stay FAILED
+          if result is False:
+            should_retry = False
+      except Exception as e:
+        # Log recovery failure but continue with re-execution
+        logger.warning(f"Task recovery failed: {e}")
+
+      if not should_retry:
+        # Task decided not to retry - return the cached FAILED result
+        try:
+          return pickle.loads(row['result_blob'])
+        except Exception:
+          return Result(error="Task recovery returned False, not retrying")
 
     if not row:
       self.store.create(key, task)
