@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from utils import COMMANDS_TEXT, read_clipboard
+from eggthreads import set_context_limit, get_context_limit
 
 
 class UtilityCommandsMixin:
@@ -180,3 +181,68 @@ class UtilityCommandsMixin:
         block = "\n".join(lines + cost_lines)
         self.log_system('Token usage / cost for current thread (see console for full details).')
         self.console_print_block('Cost', block, border_style='green')
+
+    def cmd_setContextLimit(self, arg: str) -> None:
+        """Handle /setContextLimit command - set max context tokens for this thread."""
+        from eggthreads import total_token_stats
+
+        arg = (arg or '').strip()
+
+        def _fmt_tok(n: int) -> str:
+            if n < 1000:
+                return str(n)
+            return f"{n/1000:.1f}k"
+
+        if not arg:
+            # Show current limit and context usage
+            current_limit = get_context_limit(self.db, self.current_thread)
+            stats = total_token_stats(self.db, self.current_thread)
+            current_tokens = stats.get('context_tokens', 0)
+
+            lines: List[str] = []
+            lines.append(f"Thread {self.current_thread[-8:]} context limit:")
+            lines.append("")
+            lines.append(f"  current_tokens:  {current_tokens:,} ({_fmt_tok(current_tokens)})")
+            if current_limit:
+                lines.append(f"  context_limit:   {current_limit:,} ({_fmt_tok(current_limit)})")
+                pct = (current_tokens / current_limit * 100) if current_limit > 0 else 0
+                remaining = max(0, current_limit - current_tokens)
+                lines.append(f"  usage:           {pct:.1f}%")
+                lines.append(f"  remaining:       {remaining:,} ({_fmt_tok(remaining)})")
+            else:
+                lines.append(f"  context_limit:   (unlimited)")
+            lines.append("")
+            lines.append("Usage: /setContextLimit <max_tokens>")
+
+            block = "\n".join(lines)
+            self.log_system('Context limit info (see console).')
+            self.console_print_block('Context Limit', block, border_style='cyan')
+            return
+
+        # Parse and set limit
+        try:
+            limit = int(arg)
+            if limit <= 0:
+                self.log_system("Context limit must be a positive integer")
+                return
+
+            set_context_limit(self.db, self.current_thread, limit, reason="ui /setContextLimit")
+
+            # Show updated status
+            stats = total_token_stats(self.db, self.current_thread)
+            current_tokens = stats.get('context_tokens', 0)
+            pct = (current_tokens / limit * 100) if limit > 0 else 0
+
+            lines: List[str] = []
+            lines.append(f"Thread {self.current_thread[-8:]} context limit updated:")
+            lines.append("")
+            lines.append(f"  current_tokens:  {current_tokens:,} ({_fmt_tok(current_tokens)})")
+            lines.append(f"  context_limit:   {limit:,} ({_fmt_tok(limit)})")
+            lines.append(f"  usage:           {pct:.1f}%")
+
+            block = "\n".join(lines)
+            self.log_system(f'Context limit set to {limit:,} tokens.')
+            self.console_print_block('Context Limit', block, border_style='cyan')
+        except ValueError:
+            self.log_system(f"Invalid number: {arg}")
+            self.log_system("Usage: /setContextLimit <max_tokens>")
