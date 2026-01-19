@@ -568,6 +568,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/setSandboxConfiguration',
                 '/getSandboxingConfig',
                 '/setContextLimit',
+                '/setThreadPriority',
                 '/togglePanel',
                 '/toggleBorders',
                 '/redraw',

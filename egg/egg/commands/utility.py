@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from utils import COMMANDS_TEXT, read_clipboard
-from eggthreads import set_context_limit, get_context_limit
+from eggthreads import set_context_limit, get_context_limit, get_thread_scheduling, set_thread_scheduling, UNSET, parse_args
 
 
 class UtilityCommandsMixin:
@@ -246,3 +246,72 @@ class UtilityCommandsMixin:
         except ValueError:
             self.log_system(f"Invalid number: {arg}")
             self.log_system("Usage: /setContextLimit <max_tokens>")
+
+    def cmd_setThreadPriority(self, arg: str) -> None:
+        """Handle /setThreadPriority command - set scheduling settings for a thread.
+
+        Syntax: /setThreadPriority thread=<id> priority=<int> threshold=<seconds> apiTimeout=<seconds>
+        All parameters are optional. apiTimeout=0 or -1 means no timeout.
+        Use empty value (e.g., threshold=) or "unset" to reset to default.
+        """
+        args = parse_args(arg or '')
+        target_thread = args.get('thread', self.current_thread)
+
+        # Helper to parse value with "unset" support
+        def parse_with_unset(key, converter):
+            raw = args.get(key)
+            if raw is None:
+                return None  # Not specified -> keep current
+            if raw == '' or raw.lower() == 'unset':
+                return UNSET  # Explicitly unset
+            try:
+                return converter(raw)
+            except (ValueError, TypeError):
+                return None
+
+        new_priority = parse_with_unset('priority', int)
+        new_threshold = parse_with_unset('threshold', float)
+        new_api_timeout = parse_with_unset('apiTimeout', float)
+
+        # If no action params, show current values
+        if new_priority is None and new_threshold is None and new_api_timeout is None:
+            settings = get_thread_scheduling(self.db, target_thread)
+            threshold_str = f"{settings.threshold}s" if settings.threshold is not None else "default (global)"
+            api_timeout_str = "no timeout" if settings.api_timeout is not None and settings.api_timeout <= 0 else \
+                              f"{settings.api_timeout}s" if settings.api_timeout is not None else "default (600s)"
+
+            block = f"[bold]Thread Scheduling Settings[/bold]\n\n"
+            block += f"  Thread: [cyan]{target_thread[-8:]}[/cyan]\n"
+            block += f"  Priority: [cyan]{settings.priority}[/cyan]\n"
+            block += f"  Sticky threshold: [cyan]{threshold_str}[/cyan]\n"
+            block += f"  API timeout: [cyan]{api_timeout_str}[/cyan]\n\n"
+            block += f"  [dim]Usage: /setThreadPriority priority=<int> threshold=<seconds> apiTimeout=<seconds>[/dim]\n"
+            block += f"  [dim]Use empty value (e.g., threshold=) or 'unset' to reset to default[/dim]"
+            self.console_print_block('Thread Priority', block, border_style='cyan')
+            return
+
+        # Set values using single API call
+        set_thread_scheduling(
+            self.db, target_thread,
+            priority=new_priority,
+            threshold=new_threshold,
+            api_timeout=new_api_timeout,
+        )
+
+        # Build confirmation message
+        messages = []
+        if isinstance(new_priority, type(UNSET)):
+            messages.append("Priority reset to default (0)")
+        elif new_priority is not None:
+            messages.append(f"Priority set to {new_priority}")
+        if isinstance(new_threshold, type(UNSET)):
+            messages.append("Sticky threshold reset to default (global)")
+        elif new_threshold is not None:
+            messages.append(f"Sticky threshold set to {new_threshold}s")
+        if isinstance(new_api_timeout, type(UNSET)):
+            messages.append("API timeout reset to default (600s)")
+        elif new_api_timeout is not None:
+            timeout_str = f"{new_api_timeout}s" if new_api_timeout > 0 else "no timeout"
+            messages.append(f"API timeout set to {timeout_str}")
+
+        self.log_system(f"Thread {target_thread[-8:]}: {', '.join(messages)}")
