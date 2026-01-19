@@ -44,6 +44,9 @@ class RunnerConfig:
     sticky_idle_threshold_sec: float = 5.0  # idle time before losing reserved slot
     # Priority mode: "none" | "alphabetical" (tie-breaker for equal priorities)
     priority_mode: str = "none"
+    # API timeout: None = 600s default, 0 = no timeout, >0 = timeout in seconds
+    # Per-thread settings (via thread.scheduling events) override this
+    api_timeout_sec: Optional[float] = None
 
 
 class ThreadRunner:
@@ -626,9 +629,22 @@ class ThreadRunner:
             tools_spec_to_use = tools_spec
             tool_choice = 'auto'
 
+        # Determine API timeout: per-thread setting > config setting > default (600s)
+        # 0 or negative means no timeout
+        from .api import get_thread_scheduling
+        sched_settings = get_thread_scheduling(self.db, self.thread_id)
+        if sched_settings.api_timeout is not None:
+            api_timeout = sched_settings.api_timeout
+        elif self.cfg is not None and self.cfg.api_timeout_sec is not None:
+            api_timeout = self.cfg.api_timeout_sec
+        else:
+            api_timeout = 600  # Default 10 minutes
+        # Convert to int for aiohttp; 0 means no timeout
+        api_timeout_int = int(api_timeout) if api_timeout > 0 else 0
+
         interrupted = False
         try:
-            async for raw in self.llm.astream_chat(base_messages, tools=tools_spec_to_use, tool_choice=tool_choice):
+            async for raw in self.llm.astream_chat(base_messages, tools=tools_spec_to_use, tool_choice=tool_choice, timeout=api_timeout_int):
                 try:
                     if recorder is not None:
                         recorder.write(json.dumps(raw, ensure_ascii=False) + "\n")
