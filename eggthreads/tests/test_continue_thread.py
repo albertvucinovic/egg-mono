@@ -49,7 +49,7 @@ class TestLeaseExpiration:
         append_message(db, tid, "user", "Hello")
 
         # Simulate a stale lease (expired 1 minute ago)
-        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "stale-invoke", expired_time, "crashed-process", "llm"),
@@ -67,7 +67,7 @@ class TestLeaseExpiration:
         append_message(db, tid, "user", "Hello")
 
         # Simulate an active lease (expires in 1 minute)
-        active_time = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        active_time = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "active-invoke", active_time, "running-process", "llm"),
@@ -85,7 +85,7 @@ class TestLeaseExpiration:
         append_message(db, tid, "user", "Hello")
 
         # Add expired lease
-        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "stale-invoke", expired_time, "crashed-process", "llm"),
@@ -99,7 +99,7 @@ class TestLeaseExpiration:
         tid = create_root_thread(db, name="test")
 
         # Add expired lease
-        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "stale-invoke", expired_time, "crashed-process", "llm"),
