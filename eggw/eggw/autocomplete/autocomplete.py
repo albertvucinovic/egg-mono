@@ -284,16 +284,44 @@ async def get_autocomplete(
                         })
 
             elif cmd == '/setThreadPriority':
-                # Parameter name suggestions
-                params = ['priority=', 'threshold=', 'apiTimeout=', 'thread=']
-                arg_lower = arg_tok.lower()
-                for param in params:
-                    if not arg_lower or arg_lower in param.lower():
-                        suggestions.append({
-                            "display": param,
-                            "insert": param,
-                            "replace": len(arg_tok),
-                        })
+                # Check if we're completing after thread=
+                if 'thread=' in arg:
+                    match = re.search(r'thread=(\S*)$', arg)
+                    if match:
+                        # Complete thread ID after thread=
+                        search_term = match.group(1)
+                        search_lower = search_term.lower()
+                        threads = list_threads(core.db)
+                        try:
+                            threads.sort(key=lambda t: t.created_at or '', reverse=True)
+                        except:
+                            pass
+                        for t in threads[:50]:
+                            tid = t.thread_id
+                            name = t.name or ''
+                            recap = t.short_recap or ''
+                            hay = f"{tid} {name} {recap}".lower()
+                            if search_lower and search_lower not in hay:
+                                continue
+                            display = f"{tid[-8:]} - {recap[:30]}" if recap else tid[-8:]
+                            if name:
+                                display += f" ({name})"
+                            suggestions.append({
+                                "display": display,
+                                "insert": tid,
+                                "replace": len(search_term),
+                            })
+                else:
+                    # Suggest parameter names
+                    params = ['priority=', 'threshold=', 'apiTimeout=', 'thread=']
+                    arg_lower = arg_tok.lower()
+                    for param in params:
+                        if not arg_lower or arg_lower in param.lower():
+                            suggestions.append({
+                                "display": param,
+                                "insert": param,
+                                "replace": len(arg_tok),
+                            })
 
             elif cmd == '/continue':
                 # Message ID suggestions from current thread
