@@ -212,16 +212,18 @@ class ThreadRunner:
             # Surface provider/config/network or tool errors into the thread
             # and ensure RA1 boundaries advance even if the provider fails
             # before any streaming deltas are emitted.
+            # Ensure we always have a meaningful error message
+            error_msg = str(e) if str(e) else f"{type(e).__name__}: (no message)"
             try:
                 # Emit a synthetic stream.delta with a 'reason' field so
                 # _last_stream_close_seq() will treat this invoke_id as an
                 # LLM stream. This prevents the same user message from
                 # repeatedly triggering a failing RA1 turn.
-                _append_delta({'reason': f'LLM/runner error: {e}', 'model_key': current_model})
+                _append_delta({'reason': f'LLM/runner error: {error_msg}', 'model_key': current_model})
             except Exception:
                 pass
             try:
-                err_payload = {'role': 'system', 'content': f'LLM/runner error: {e}'}
+                err_payload = {'role': 'system', 'content': f'LLM/runner error: {error_msg}'}
                 if current_model:
                     err_payload['model_key'] = current_model
                 self.db.append_event(
@@ -231,7 +233,7 @@ class ThreadRunner:
                     msg_id=os.urandom(10).hex(),
                     payload=err_payload,
                 )
-                print(f"Runner error: {e}")
+                print(f"Runner error: {error_msg}")
             except Exception:
                 pass
         finally:
