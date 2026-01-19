@@ -12,6 +12,10 @@ from eggthreads import (
     list_threads,
     set_context_limit,
     get_context_limit,
+    get_thread_scheduling,
+    set_thread_scheduling,
+    UNSET,
+    parse_args,
 )
 
 from models import CommandResponse
@@ -465,3 +469,90 @@ async def cmd_setContextLimit(thread_id: str, arg: str = "") -> CommandResponse:
             success=False,
             message=f"Invalid number: {arg}. Usage: /setContextLimit <max_tokens>"
         )
+
+
+async def cmd_setThreadPriority(thread_id: str, arg: str = "") -> CommandResponse:
+    """Handle /setThreadPriority command - set scheduling settings.
+
+    Syntax: /setThreadPriority thread=<id> priority=<int> threshold=<seconds> apiTimeout=<seconds>
+    All parameters optional. apiTimeout=0 or -1 means no timeout.
+    Use empty value or "unset" to reset to default.
+    """
+    args = parse_args(arg or '')
+    target_thread = args.get('thread', thread_id)
+
+    def parse_with_unset(key, converter):
+        raw = args.get(key)
+        if raw is None:
+            return None
+        if raw == '' or raw.lower() == 'unset':
+            return UNSET
+        try:
+            return converter(raw)
+        except (ValueError, TypeError):
+            return None
+
+    new_priority = parse_with_unset('priority', int)
+    new_threshold = parse_with_unset('threshold', float)
+    new_api_timeout = parse_with_unset('apiTimeout', float)
+
+    # If no action params, show current values
+    if new_priority is None and new_threshold is None and new_api_timeout is None:
+        settings = get_thread_scheduling(core.db, target_thread)
+        threshold_str = f"{settings.threshold}s" if settings.threshold is not None else "default (global)"
+        api_timeout_str = "no timeout" if settings.api_timeout is not None and settings.api_timeout <= 0 else \
+                          f"{settings.api_timeout}s" if settings.api_timeout is not None else "default (600s)"
+
+        return CommandResponse(
+            success=True,
+            message=f"Thread Scheduling Settings\n\n"
+                    f"  Thread: {target_thread[-8:]}\n"
+                    f"  Priority: {settings.priority}\n"
+                    f"  Sticky threshold: {threshold_str}\n"
+                    f"  API timeout: {api_timeout_str}\n\n"
+                    f"  Usage: /setThreadPriority priority=<int> threshold=<seconds> apiTimeout=<seconds>\n"
+                    f"  Use empty value or 'unset' to reset to default",
+            data={
+                "thread_id": target_thread,
+                "priority": settings.priority,
+                "threshold": settings.threshold,
+                "apiTimeout": settings.api_timeout,
+            }
+        )
+
+    # Set values
+    set_thread_scheduling(
+        core.db, target_thread,
+        priority=new_priority,
+        threshold=new_threshold,
+        api_timeout=new_api_timeout,
+    )
+
+    # Build confirmation
+    messages = []
+    data = {"thread_id": target_thread}
+    if isinstance(new_priority, type(UNSET)):
+        messages.append("Priority reset to default (0)")
+        data["priority"] = 0
+    elif new_priority is not None:
+        messages.append(f"Priority set to {new_priority}")
+        data["priority"] = new_priority
+    if isinstance(new_threshold, type(UNSET)):
+        messages.append("Sticky threshold reset to default")
+        data["threshold"] = None
+    elif new_threshold is not None:
+        messages.append(f"Sticky threshold set to {new_threshold}s")
+        data["threshold"] = new_threshold
+    if isinstance(new_api_timeout, type(UNSET)):
+        messages.append("API timeout reset to default")
+        data["apiTimeout"] = None
+    elif new_api_timeout is not None:
+        timeout_str = f"{new_api_timeout}s" if new_api_timeout > 0 else "no timeout"
+        messages.append(f"API timeout set to {timeout_str}")
+        data["apiTimeout"] = new_api_timeout
+
+    return CommandResponse(
+        success=True,
+        message=f"Thread {target_thread[-8:]}: {', '.join(messages)}",
+        data=data
+    )

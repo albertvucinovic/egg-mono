@@ -42,6 +42,7 @@ from .utility import (
     cmd_theme,
     get_auto_approval_status,
     cmd_setContextLimit,
+    cmd_setThreadPriority,
 )
 
 from models import CommandResponse
@@ -89,6 +90,7 @@ __all__ = [
     "cmd_theme",
     "get_auto_approval_status",
     "cmd_setContextLimit",
+    "cmd_setThreadPriority",
     # Dispatcher
     "dispatch_command",
 ]
@@ -187,6 +189,8 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return cmd_quit()
         elif command_name == "setContextLimit":
             return await cmd_setContextLimit(thread_id, command_arg)
+        elif command_name == "setThreadPriority":
+            return await cmd_setThreadPriority(thread_id, command_arg)
         else:
             return CommandResponse(
                 success=False,

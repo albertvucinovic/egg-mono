@@ -80,7 +80,7 @@ async def get_autocomplete(
                 '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus', '/toolInfo',
                 '/disableTool', '/enableTool', '/toolsSecrets',
                 '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
-                '/setContextLimit',
+                '/setContextLimit', '/setThreadPriority',
                 '/togglePanel', '/toggleBorders', '/theme',
                 '/cost', '/schedulers', '/enterMode', '/paste', '/quit',
             ]
@@ -280,6 +280,18 @@ async def get_autocomplete(
                         suggestions.append({
                             "display": mode,
                             "insert": mode,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd == '/setThreadPriority':
+                # Parameter name suggestions
+                params = ['priority=', 'threshold=', 'apiTimeout=', 'thread=']
+                arg_lower = arg_tok.lower()
+                for param in params:
+                    if not arg_lower or arg_lower in param.lower():
+                        suggestions.append({
+                            "display": param,
+                            "insert": param,
                             "replace": len(arg_tok),
                         })
 
