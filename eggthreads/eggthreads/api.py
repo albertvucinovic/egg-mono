@@ -708,7 +708,7 @@ def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
         if row:
             from datetime import datetime
             lease_until = row['lease_until']
-            now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+            now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             if lease_until and lease_until > now_iso:
                 return False  # Thread is running (lease still valid)
             # Lease has expired - thread not actually running
@@ -752,7 +752,7 @@ def continue_thread(
         if row:
             from datetime import datetime
             lease_until = row['lease_until']
-            now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+            now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             # Only block if the lease hasn't expired yet
             if lease_until and lease_until > now_iso:
                 return ContinueResult(
@@ -1034,7 +1034,7 @@ def get_thread_status(db: ThreadsDB, thread_id: str) -> str:
         if row_open:
             lease_until = row_open.get('lease_until')
             if lease_until:
-                now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 if lease_until > now_iso:
                     return "streaming"
     except Exception:
@@ -1064,7 +1064,7 @@ def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str]) -> dict[str, 
     # Batch query: find all threads with active (non-expired) leases
     streaming_set: set[str] = set()
     try:
-        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         cur = db.conn.execute(
             "SELECT thread_id FROM open_streams WHERE lease_until > ?",
             (now_iso,)
@@ -1491,7 +1491,7 @@ def list_active_threads(db: ThreadsDB, subtree: list[str]) -> list[str]:
             if row_open:
                 # Only consider thread running if lease hasn't expired
                 lease_until = row_open['lease_until']
-                now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 if lease_until and lease_until > now_iso:
                     is_running = True
         except Exception:
