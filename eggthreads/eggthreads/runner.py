@@ -34,6 +34,21 @@ def _now_plus(ttl_sec: int) -> str:
     return (datetime.utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
 
 
+def _no_api_calls_mode(cfg: Optional['RunnerConfig'] = None) -> bool:
+    """Check if NO_API_CALLS mode is enabled (read-only viewing mode).
+
+    When enabled:
+    - RA1 (LLM API calls) are blocked
+    - RA2 (assistant tool calls) are blocked
+    - RA3 (user commands) are still allowed
+    """
+    if os.environ.get('NO_API_CALLS', '').lower() in ('1', 'true', 'yes'):
+        return True
+    if cfg and cfg.no_api_calls:
+        return True
+    return False
+
+
 @dataclass
 class RunnerConfig:
     lease_ttl_sec: int = 10
@@ -47,6 +62,8 @@ class RunnerConfig:
     # API timeout: None = 600s default, 0 = no timeout, >0 = timeout in seconds
     # Per-thread settings (via thread.scheduling events) override this
     api_timeout_sec: Optional[float] = None
+    # Read-only mode: block RA1/RA2, allow RA3 (overridden by NO_API_CALLS env var)
+    no_api_calls: bool = False
 
 
 class ThreadRunner:
@@ -88,6 +105,12 @@ class ThreadRunner:
         ra = discover_runner_actionable_cached(self.db, self.thread_id)
         if not ra:
             return False
+
+        # Block RA1 and RA2 in NO_API_CALLS mode (read-only viewing mode)
+        if _no_api_calls_mode(self.cfg):
+            if ra.kind in ('RA1_llm', 'RA2_tools_assistant'):
+                return False  # Skip silently - thread appears idle
+            # RA3_tools_user is allowed through
 
         # Acquire lease with fresh invoke_id
         invoke_id = os.urandom(10).hex()
@@ -2073,6 +2096,9 @@ class SubtreeScheduler:
 
     async def run_forever(self, poll_sec: float = 0.5):
         from .api import is_thread_runnable, get_thread_scheduling
+
+        if _no_api_calls_mode(self.cfg):
+            print("[NO_API_CALLS] Read-only mode: RA1/RA2 disabled, only user commands allowed")
 
         sem = asyncio.Semaphore(self.cfg.max_concurrent_threads)
 
