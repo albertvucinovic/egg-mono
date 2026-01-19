@@ -2160,6 +2160,9 @@ class SubtreeScheduler:
             # First pass: find runnable threads in priority order
             # We check all threads but only schedule up to available_slots
             runnable_candidates: List[str] = []
+            # Track max_seq for threads we check - only update last_checked_seq
+            # for threads that are NOT runnable (truly idle) or that we schedule
+            checked_seqs: Dict[str, int] = {}
 
             for tid in all_threads:
                 if tid in running_threads:
@@ -2176,12 +2179,14 @@ class SubtreeScheduler:
                     max_seq = -1
                 if max_seq == last_checked_seq.get(tid, -1):
                     continue
-                last_checked_seq[tid] = max_seq
+                checked_seqs[tid] = max_seq
 
                 # Skip threads with an active lease held by another process.
                 # This prevents unnecessary is_thread_runnable() calls and
                 # failed try_open_stream() attempts when TUI or another eggw
                 # instance is already running the thread.
+                # NOTE: We do NOT update watermark here - when lease expires,
+                # we want to re-check the thread.
                 try:
                     row = self.db.current_open(tid)
                     if row:
@@ -2194,6 +2199,10 @@ class SubtreeScheduler:
 
                 if is_thread_runnable(self.db, tid):
                     runnable_candidates.append(tid)
+                else:
+                    # Thread is NOT runnable - mark as checked so we skip it
+                    # until its events change
+                    last_checked_seq[tid] = checked_seqs[tid]
 
             # Second pass: schedule runnable threads up to available slots
             # (candidates are already in priority order from all_threads)
