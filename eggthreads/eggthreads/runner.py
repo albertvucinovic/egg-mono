@@ -2136,6 +2136,15 @@ class SubtreeScheduler:
             # Apply priority sorting
             all_threads = _sort_by_priority(all_threads, self.cfg.priority_mode, self.db)
 
+            # Calculate available slots for scheduling
+            # We only create tasks up to max_concurrent to respect priority order
+            # (the semaphore doesn't preserve priority when multiple tasks wait)
+            available_slots = self.cfg.max_concurrent_threads - len(running_threads)
+
+            # First pass: find runnable threads in priority order
+            # We check all threads but only schedule up to available_slots
+            runnable_candidates: List[str] = []
+
             for tid in all_threads:
                 if tid in running_threads:
                     continue
@@ -2168,20 +2177,29 @@ class SubtreeScheduler:
                     pass  # On error, proceed with normal check
 
                 if is_thread_runnable(self.db, tid):
-                    # Check if we can schedule this thread (sticky scheduling)
-                    if self.cfg.sticky_scheduling:
-                        is_reserved = tid in reserved_slots
-                        active_reserved = reserved_slots - running_threads
-                        used_slots = len(running_threads) + len(active_reserved)
+                    runnable_candidates.append(tid)
 
-                        if not is_reserved and used_slots >= self.cfg.max_concurrent_threads:
-                            continue  # No slots for non-reserved threads
+            # Second pass: schedule runnable threads up to available slots
+            # (candidates are already in priority order from all_threads)
+            for tid in runnable_candidates:
+                if available_slots <= 0:
+                    break
 
-                        reserved_slots.add(tid)
-                        last_run_end.pop(tid, None)  # Clear idle timer when scheduled
+                # Check if we can schedule this thread (sticky scheduling)
+                if self.cfg.sticky_scheduling:
+                    is_reserved = tid in reserved_slots
+                    active_reserved = reserved_slots - running_threads
+                    used_slots = len(running_threads) + len(active_reserved)
 
-                    running_threads.add(tid)
-                    asyncio.create_task(drive(tid))
+                    if not is_reserved and used_slots >= self.cfg.max_concurrent_threads:
+                        continue  # No slots for non-reserved threads
+
+                    reserved_slots.add(tid)
+                    last_run_end.pop(tid, None)  # Clear idle timer when scheduled
+
+                running_threads.add(tid)
+                asyncio.create_task(drive(tid))
+                available_slots -= 1
 
             await asyncio.sleep(poll_sec)
 
