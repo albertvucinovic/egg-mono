@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 try:
     from eggllm import LLMClient
@@ -38,6 +39,11 @@ class RunnerConfig:
     lease_ttl_sec: int = 10
     heartbeat_sec: float = 1.0
     max_concurrent_threads: int = 4
+    # Sticky scheduling options
+    sticky_scheduling: bool = False  # opt-in to slot reservation
+    sticky_idle_threshold_sec: float = 5.0  # idle time before losing reserved slot
+    # Priority mode: "none" | "alphabetical" (tie-breaker for equal priorities)
+    priority_mode: str = "none"
 
 
 class ThreadRunner:
@@ -1971,6 +1977,46 @@ class ThreadRunner:
         return cleaned
 
 
+def _is_thread_idle(db: ThreadsDB, thread_id: str) -> bool:
+    """Check if a thread is idle (waiting for user input/action).
+
+    Idle = NOT runnable AND no open stream
+    NOT idle = runnable OR has open stream (waiting for API)
+    """
+    from .api import is_thread_runnable
+
+    # Not idle if runnable
+    if is_thread_runnable(db, thread_id):
+        return False
+
+    # Not idle if waiting for API response (has open stream)
+    row = db.conn.execute(
+        "SELECT 1 FROM open_streams WHERE thread_id = ? LIMIT 1",
+        (thread_id,)
+    ).fetchone()
+    if row:
+        return False
+
+    return True
+
+
+def _sort_by_priority(threads: List[str], mode: str, db: ThreadsDB) -> List[str]:
+    """Sort threads by priority (desc), with mode as tie-breaker for equal priorities."""
+    from .api import get_thread_scheduling
+
+    # Get priority for each thread (default 0)
+    threads_with_priority = [(tid, get_thread_scheduling(db, tid).priority) for tid in threads]
+
+    if mode == "alphabetical":
+        # Sort by priority descending, then by thread_id ascending for ties
+        threads_with_priority.sort(key=lambda x: (-x[1], x[0]))
+    else:
+        # "none": Sort by priority descending, preserve original order for ties (stable sort)
+        threads_with_priority.sort(key=lambda x: -x[1])
+
+    return [tid for tid, _ in threads_with_priority]
+
+
 class SubtreeScheduler:
     """Async orchestrator: watches a root thread and runs runnable threads within its subtree, up to concurrency limit."""
 
@@ -2010,15 +2056,21 @@ class SubtreeScheduler:
         return out
 
     async def run_forever(self, poll_sec: float = 0.5):
+        from .api import is_thread_runnable, get_thread_scheduling
+
         sem = asyncio.Semaphore(self.cfg.max_concurrent_threads)
 
         # Track currently running threads to avoid creating duplicate tasks
-        running_threads = set()
+        running_threads: Set[str] = set()
 
         # Cheap per-thread event watermark to short-circuit expensive
         # runnable checks when a thread's event log has not changed
         # since the last iteration.
         last_checked_seq: Dict[str, int] = {}
+
+        # Sticky scheduling state
+        last_run_end: Dict[str, float] = {}  # thread_id -> monotonic time when last run ended
+        reserved_slots: Set[str] = set()     # threads with reserved slots (recently ran, within threshold)
 
         async def drive(tid: str):
             try:
@@ -2040,11 +2092,51 @@ class SubtreeScheduler:
             finally:
                 # Remove from running set when done
                 running_threads.discard(tid)
-
-        from .api import is_thread_runnable
+                # Reserve slot (actual idle check happens in scheduling loop)
+                if self.cfg.sticky_scheduling:
+                    reserved_slots.add(tid)
 
         while True:
-            for tid in self._collect_subtree(self.root):
+            all_threads = self._collect_subtree(self.root)
+
+            # Update idle tracking and expire reservations (sticky scheduling)
+            if self.cfg.sticky_scheduling:
+                now = time.monotonic()
+
+                # For each reserved thread, check if it's truly idle
+                for tid in list(reserved_slots):
+                    if tid in running_threads:
+                        # Running threads are not idle - clear any idle timer
+                        last_run_end.pop(tid, None)
+                        continue
+
+                    if not _is_thread_idle(self.db, tid):
+                        # Thread is waiting for API/tool approval - not idle, clear timer
+                        last_run_end.pop(tid, None)
+                        continue
+
+                    # Thread is truly idle - start or continue idle timer
+                    if tid not in last_run_end:
+                        last_run_end[tid] = now  # Start idle timer
+
+                # Expire reservations for threads idle too long
+                expired: Set[str] = set()
+                for tid in reserved_slots:
+                    if tid not in last_run_end:
+                        continue  # Not idle yet
+                    # Use per-thread threshold if set, otherwise global default
+                    settings = get_thread_scheduling(self.db, tid)
+                    threshold = settings.threshold if settings.threshold is not None else self.cfg.sticky_idle_threshold_sec
+                    if (now - last_run_end[tid]) > threshold:
+                        expired.add(tid)
+                reserved_slots -= expired
+                for tid in expired:
+                    last_run_end.pop(tid, None)
+
+            # Apply priority sorting
+            all_threads = _sort_by_priority(all_threads, self.cfg.priority_mode, self.db)
+
+            for tid in all_threads:
                 if tid in running_threads:
                     continue
 
@@ -2076,6 +2168,18 @@ class SubtreeScheduler:
                     pass  # On error, proceed with normal check
 
                 if is_thread_runnable(self.db, tid):
+                    # Check if we can schedule this thread (sticky scheduling)
+                    if self.cfg.sticky_scheduling:
+                        is_reserved = tid in reserved_slots
+                        active_reserved = reserved_slots - running_threads
+                        used_slots = len(running_threads) + len(active_reserved)
+
+                        if not is_reserved and used_slots >= self.cfg.max_concurrent_threads:
+                            continue  # No slots for non-reserved threads
+
+                        reserved_slots.add(tid)
+                        last_run_end.pop(tid, None)  # Clear idle timer when scheduled
+
                     running_threads.add(tid)
                     asyncio.create_task(drive(tid))
 

@@ -1797,3 +1797,93 @@ def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_di
     """Apply working directory configuration to all threads in a subtree."""
     for tid in collect_subtree(db, root_thread_id):
         set_thread_working_directory(db, tid, working_dir, reason=reason)
+
+
+# --------- Thread Scheduling API ---------------------------------------------
+
+# Sentinel value for "unset" - to explicitly remove a previously set value
+class _UnsetType:
+    """Sentinel type for unsetting values."""
+    def __repr__(self) -> str:
+        return "UNSET"
+
+UNSET = _UnsetType()
+
+
+@dataclass
+class ThreadSchedulingSettings:
+    """Thread scheduling settings from thread.scheduling events."""
+    priority: int = 0
+    threshold: Optional[float] = None  # None = use global default
+    api_timeout: Optional[float] = None  # None = use default (600s)
+
+
+def get_thread_scheduling(db: ThreadsDB, thread_id: str) -> ThreadSchedulingSettings:
+    """Get scheduling settings for a thread (from latest thread.scheduling event).
+
+    Each event is self-contained - only fields present in the event are "set".
+    Missing fields use defaults.
+    """
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='thread.scheduling' "
+        "ORDER BY event_seq DESC LIMIT 1",
+        (thread_id,)
+    ).fetchone()
+    if row:
+        payload = json.loads(row["payload_json"]) if isinstance(row["payload_json"], str) else (row["payload_json"] or {})
+        return ThreadSchedulingSettings(
+            priority=payload.get("priority", 0),
+            threshold=payload.get("threshold"),  # None if not in event
+            api_timeout=payload.get("apiTimeout"),  # None if not in event
+        )
+    return ThreadSchedulingSettings()  # All defaults
+
+
+def set_thread_scheduling(
+    db: ThreadsDB,
+    thread_id: str,
+    priority=None,  # None = keep, UNSET = remove
+    threshold=None,
+    api_timeout=None,
+) -> None:
+    """Set thread scheduling settings. Creates a self-contained event.
+
+    - None: Keep current value (from previous event)
+    - UNSET: Explicitly remove/unset the field
+    - value: Set to the given value
+
+    The resulting event only contains explicitly set fields.
+    """
+    current = get_thread_scheduling(db, thread_id)
+    payload: Dict[str, Any] = {}
+
+    # Priority: always include (defaults to 0 if unset)
+    if isinstance(priority, _UnsetType):
+        pass  # Don't include in payload -> defaults to 0
+    elif priority is not None:
+        payload["priority"] = priority
+    elif current.priority != 0:  # Keep if non-default
+        payload["priority"] = current.priority
+
+    # Threshold: optional
+    if isinstance(threshold, _UnsetType):
+        pass  # Don't include -> uses global default
+    elif threshold is not None:
+        payload["threshold"] = threshold
+    elif current.threshold is not None:  # Keep if previously set
+        payload["threshold"] = current.threshold
+
+    # API timeout: optional
+    if isinstance(api_timeout, _UnsetType):
+        pass  # Don't include -> uses default 600s
+    elif api_timeout is not None:
+        payload["apiTimeout"] = api_timeout
+    elif current.api_timeout is not None:  # Keep if previously set
+        payload["apiTimeout"] = current.api_timeout
+
+    db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_='thread.scheduling',
+        payload=payload
+    )
