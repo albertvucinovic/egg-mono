@@ -1281,9 +1281,24 @@ class ThreadRunner:
         # Honour per-thread sandbox settings. This makes tool execution
         # reproducible across processes because the config is stored as
         # events in the thread.
+        # Generate a unique container name for Docker sandboxing so we can
+        # explicitly stop the container on interrupt (SIGTERM to docker run
+        # may not stop the container quickly enough).
+        container_name: Optional[str] = None
+        sandbox_provider: Optional[str] = None
         try:
             sb = get_thread_sandbox_config(self.db, self.thread_id)
-            argv = wrap_argv_for_sandbox_with_settings(base_argv, enabled=sb.enabled, settings=sb.settings, working_dir=cwd, provider=sb.provider)
+            sandbox_provider = sb.provider
+            if sb.enabled and sb.provider == "docker":
+                container_name = f"egg_{invoke_id}"
+            argv = wrap_argv_for_sandbox_with_settings(
+                base_argv,
+                enabled=sb.enabled,
+                settings=sb.settings,
+                working_dir=cwd,
+                provider=sb.provider,
+                container_name=container_name,
+            )
         except Exception:
             from .sandbox import wrap_argv_for_sandbox
             argv = wrap_argv_for_sandbox(base_argv)
@@ -1324,6 +1339,14 @@ class ThreadRunner:
                 # terminate the subprocess group.
                 if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                     interrupted_by_lease = True
+                    # First, explicitly stop Docker container if running in sandbox
+                    if container_name and sandbox_provider == "docker":
+                        try:
+                            from .sandbox import stop_docker_container
+                            stop_docker_container(container_name, timeout=2)
+                        except Exception:
+                            pass
+                    # Then kill the process group
                     try:
                         pgid = _os.getpgid(proc.pid)
                         _os.killpg(pgid, _signal.SIGTERM)

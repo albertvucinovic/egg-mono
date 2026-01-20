@@ -312,7 +312,7 @@ class DockerProvider:
         except Exception:
             return False
 
-    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
+    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None, container_name: Optional[str] = None) -> List[str]:
         if not self.is_available():
             # Normalize settings with provider-specific defaults
             settings = normalize_provider_settings("docker", settings)
@@ -329,7 +329,11 @@ class DockerProvider:
         extra_mounts = settings.get("extra_mounts", [])
         extra_args = settings.get("extra_args", [])
         # Build docker run command
-        cmd = ["docker", "run", "--rm", "--user", f"{os.getuid()}"]
+        # --init ensures signals are properly forwarded to the container's main process
+        cmd = ["docker", "run", "--rm", "--init", "--user", f"{os.getuid()}"]
+        # Add container name if provided (allows explicit stopping on interrupt)
+        if container_name:
+            cmd.extend(["--name", container_name])
         # Network
         if network:
             cmd.extend(["--network", network])
@@ -363,6 +367,38 @@ class DockerProvider:
         # The command to run inside container (argv)
         cmd.extend(argv)
         return cmd
+
+    def stop_container(self, container_name: str, timeout: int = 2) -> bool:
+        """Stop a running container by name.
+
+        Args:
+            container_name: Name of the container to stop
+            timeout: Seconds to wait before force-killing (default 2)
+
+        Returns:
+            True if container was stopped successfully, False otherwise
+        """
+        try:
+            import subprocess
+            # Use docker stop with a short timeout, then kill if needed
+            subprocess.run(
+                ["docker", "stop", "-t", str(timeout), container_name],
+                capture_output=True,
+                timeout=timeout + 5
+            )
+            return True
+        except Exception:
+            # If stop fails, try to kill
+            try:
+                import subprocess
+                subprocess.run(
+                    ["docker", "kill", container_name],
+                    capture_output=True,
+                    timeout=5
+                )
+                return True
+            except Exception:
+                return False
 
     def get_status(self) -> Dict[str, Any]:
         available = self.is_available()
@@ -785,6 +821,7 @@ def wrap_argv_for_sandbox_with_settings(
     settings: Dict[str, object],
     working_dir: Optional[str | Path] = None,
     provider: Optional[str] = None,
+    container_name: Optional[str] = None,
 ) -> List[str]:
     """Wrap an argv for sandbox execution with explicit settings.
 
@@ -792,6 +829,15 @@ def wrap_argv_for_sandbox_with_settings(
     "provider" key inside ``settings`` (default "docker").  If sandboxing is
     disabled or the requested provider is unavailable, the original argv
     is returned unchanged.
+
+    Args:
+        argv: Command arguments to wrap
+        enabled: Whether sandboxing is enabled
+        settings: Provider-specific settings
+        working_dir: Working directory for the command
+        provider: Provider name (default from settings or "docker")
+        container_name: Optional name for the container (Docker only).
+            Used for explicit stopping on interrupt.
     """
     if not enabled:
         return argv
@@ -807,15 +853,38 @@ def wrap_argv_for_sandbox_with_settings(
     settings = normalize_provider_settings(provider_name, settings)
         # Apply mandatory protections
     settings = apply_mandatory_protections(provider_name, settings, working_dir)
-    
+
     if provider_obj is None:
         # Unknown provider -> no sandbox
         return argv
     if not provider_obj.is_available():
         return argv
 
-    # Delegate to provider
+    # Delegate to provider (pass container_name for Docker)
+    if provider_name == "docker" and container_name:
+        return provider_obj.wrap_argv(argv, settings, working_dir, container_name=container_name)
     return provider_obj.wrap_argv(argv, settings, working_dir)
+
+
+def stop_docker_container(container_name: str, timeout: int = 2) -> bool:
+    """Stop a Docker container by name.
+
+    This is used to explicitly stop containers on interrupt, since killing
+    the docker run process may not immediately stop the container.
+
+    Args:
+        container_name: Name of the container to stop
+        timeout: Seconds to wait before force-killing (default 2)
+
+    Returns:
+        True if container was stopped successfully, False otherwise
+    """
+    docker_provider = _PROVIDERS.get("docker")
+    if docker_provider is None:
+        return False
+    return docker_provider.stop_container(container_name, timeout)
+
+
 def wrap_bash_argv_for_sandbox(argv: List[str], eff_path) -> List[str]:  # pragma: no cover
     """Backward-compatible wrapper.
 
