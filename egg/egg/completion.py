@@ -568,6 +568,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/setSandboxConfiguration',
                 '/getSandboxingConfig',
                 '/setContextLimit',
+                '/setThreadPriority',
                 '/togglePanel',
                 '/toggleBorders',
                 '/redraw',
@@ -734,6 +735,29 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 cont = [o for o in opts if atok in o and o not in pref]
                 opts = pref + cont
             return _mk_items(opts, arg_tok)
+
+        # /setThreadPriority: suggest parameter names and thread IDs
+        if cmd == '/setThreadPriority':
+            # Check if we're completing after thread=
+            if 'thread=' in sub:
+                m = re.search(r'thread=(\S*)$', sub)
+                if m:
+                    # Complete thread ID after thread=
+                    search_term = m.group(1)
+                    return _thread_arg_items(search_term)
+
+            # Otherwise suggest parameter names
+            params = ['priority=', 'threshold=', 'apiTimeout=', 'thread=']
+            atok = (arg_tok or '').lower()
+            out_items: List[Dict[str, str]] = []
+            for param in params:
+                if not atok or atok in param.lower():
+                    rep = len(arg_tok or '')
+                    it: Dict[str, str] = {"display": param, "insert": param}
+                    if rep:
+                        it["replace"] = str(rep)
+                    out_items.append(it)
+            return out_items
 
         # /continue: suggest message IDs from current thread
         if cmd == '/continue':
