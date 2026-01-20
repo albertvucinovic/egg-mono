@@ -1327,34 +1327,63 @@ class ThreadRunner:
         # True iff we lost the lease and explicitly interrupted via
         # heartbeat failure; used to tag tool_call.finished.reason.
         interrupted_by_lease = False
+        # True iff we timed out waiting for the command to complete.
+        timed_out = False
+
+        # Determine tool timeout: LLM-specified > config setting > global default (30s)
+        # 0 or negative means no timeout
+        llm_timeout = args_obj.get('timeout_sec')
+        if llm_timeout is not None:
+            try:
+                tool_timeout = float(llm_timeout)
+            except (ValueError, TypeError):
+                tool_timeout = None
+        elif self.cfg is not None and self.cfg.tool_timeout_sec is not None:
+            tool_timeout = self.cfg.tool_timeout_sec
+        else:
+            tool_timeout = _default_tool_timeout_sec
+        # Convert to seconds, None means no timeout
+        tool_timeout_sec = tool_timeout if tool_timeout and tool_timeout > 0 else None
+
+        import time as _time
+        start_time = _time.time()
+
+        def _kill_process_and_container():
+            """Helper to stop Docker container and kill process group."""
+            # First, explicitly stop Docker container if running in sandbox
+            if container_name and sandbox_provider == "docker":
+                try:
+                    from .sandbox import stop_docker_container
+                    stop_docker_container(container_name, timeout=2)
+                except Exception:
+                    pass
+            # Then kill the process group
+            try:
+                pgid = _os.getpgid(proc.pid)
+                _os.killpg(pgid, _signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
 
         async def _hb_watcher():
-            nonlocal interrupted_by_lease
+            nonlocal interrupted_by_lease, timed_out
             while True:
                 await _asyncio.sleep(self.cfg.heartbeat_sec)
                 # If bash has already completed naturally, stop watching.
                 if proc.returncode is not None:
                     return
+                # Check for timeout
+                if tool_timeout_sec and (_time.time() - start_time) >= tool_timeout_sec:
+                    timed_out = True
+                    _kill_process_and_container()
+                    return
                 # If we lose the lease (e.g. via interrupt_thread),
                 # terminate the subprocess group.
                 if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                     interrupted_by_lease = True
-                    # First, explicitly stop Docker container if running in sandbox
-                    if container_name and sandbox_provider == "docker":
-                        try:
-                            from .sandbox import stop_docker_container
-                            stop_docker_container(container_name, timeout=2)
-                        except Exception:
-                            pass
-                    # Then kill the process group
-                    try:
-                        pgid = _os.getpgid(proc.pid)
-                        _os.killpg(pgid, _signal.SIGTERM)
-                    except Exception:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
+                    _kill_process_and_container()
                     return
 
         # Concurrently read stdout/stderr so we can stream output as it
@@ -1437,13 +1466,26 @@ class ThreadRunner:
         out = ''.join(stdout_buf) + ''.join(stderr_buf)
         full_result = out.strip() or "--- The command executed successfully and produced no output ---"
 
+        # Prepend timeout message if timed out
+        if timed_out:
+            timeout_msg = f"--- TIMEOUT ---\nCommand timed out after {tool_timeout_sec} seconds.\n\n"
+            full_result = timeout_msg + full_result
+
         # NOTE: We intentionally do not mask secrets here. Tool output may
         # contain secrets and we allow them to be stored and shown in the
         # local UI; secrets are only masked when building the provider API
         # request in _sanitize_messages_for_api(). We do keep the control-
         # character sanitization above for terminal safety.
 
-        # Mark tool_call.finished with interrupted/success
+        # Determine reason for tool_call.finished
+        if timed_out:
+            finish_reason = 'timeout'
+        elif interrupted_by_lease:
+            finish_reason = 'interrupted'
+        else:
+            finish_reason = 'success'
+
+        # Mark tool_call.finished with reason
         self.db.append_event(
             event_id=_os.urandom(10).hex(),
             thread_id=self.thread_id,
@@ -1452,7 +1494,7 @@ class ThreadRunner:
             invoke_id=invoke_id,
             payload={
                 'tool_call_id': tc.tool_call_id,
-                'reason': 'interrupted' if interrupted_by_lease else 'success',
+                'reason': finish_reason,
                 'output': full_result,
             },
         )
