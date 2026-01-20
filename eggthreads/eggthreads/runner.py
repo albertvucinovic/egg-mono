@@ -49,6 +49,33 @@ def _no_api_calls_mode(cfg: Optional['RunnerConfig'] = None) -> bool:
     return False
 
 
+# Default tool execution timeout (seconds). 0 or negative means no timeout.
+_default_tool_timeout_sec: float = 30.0
+
+
+def set_default_tool_timeout(timeout_sec: float) -> None:
+    """Set the global default timeout for tool execution (bash, python, etc.).
+
+    This timeout is used when:
+    - RunnerConfig.tool_timeout_sec is not set
+    - LLM does not specify timeout_sec in the tool call
+
+    Args:
+        timeout_sec: Timeout in seconds. Use 0 or negative to disable timeout.
+    """
+    global _default_tool_timeout_sec
+    _default_tool_timeout_sec = timeout_sec
+
+
+def get_default_tool_timeout() -> float:
+    """Get the current global default timeout for tool execution.
+
+    Returns:
+        Timeout in seconds. 0 or negative means no timeout.
+    """
+    return _default_tool_timeout_sec
+
+
 @dataclass
 class RunnerConfig:
     lease_ttl_sec: int = 10
@@ -62,6 +89,8 @@ class RunnerConfig:
     # API timeout: None = 600s default, 0 = no timeout, >0 = timeout in seconds
     # Per-thread settings (via thread.scheduling events) override this
     api_timeout_sec: Optional[float] = None
+    # Tool execution timeout: None = 600s default, 0 = no timeout, >0 = timeout in seconds
+    tool_timeout_sec: Optional[float] = None
     # Read-only mode: block RA1/RA2, allow RA3 (overridden by NO_API_CALLS env var)
     no_api_calls: bool = False
 
@@ -1526,6 +1555,13 @@ class ThreadRunner:
                 # asyncio event loop, which is especially important for
                 # tools like `wait` that may sleep and poll.
                 loop = asyncio.get_running_loop()
+                # Determine tool timeout: config setting > global default (30s)
+                # 0 or negative means no timeout
+                if self.cfg is not None and self.cfg.tool_timeout_sec is not None:
+                    tool_timeout = self.cfg.tool_timeout_sec
+                else:
+                    tool_timeout = _default_tool_timeout_sec
+                tool_timeout_int = int(tool_timeout) if tool_timeout > 0 else None
                 try:
                     full_result = await loop.run_in_executor(
                         None,
@@ -1537,6 +1573,7 @@ class ThreadRunner:
                             tc.arguments,
                             thread_id=self.thread_id,
                             initial_model_key=current_model,
+                            tool_timeout_sec=tool_timeout_int,
                         ),
                     )
                 except Exception as e:
