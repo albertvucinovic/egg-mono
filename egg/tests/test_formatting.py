@@ -32,10 +32,12 @@ class TestFormatThreadLine:
 
     def test_shows_streaming_flag(self, egg_app, monkeypatch):
         """Should show STREAMING when thread has open stream."""
-        # Mock current_open to return a stream
-        class MockStreamRow:
-            purpose = "assistant_stream"
-        monkeypatch.setattr(egg_app.db, "current_open", lambda tid: MockStreamRow())
+        # Mock current_open to return a stream with non-expired lease
+        mock_row = {
+            "purpose": "assistant_stream",
+            "lease_until": "9999-12-31T23:59:59",  # Far future = not expired
+        }
+        monkeypatch.setattr(egg_app.db, "current_open", lambda tid: mock_row)
 
         line = egg_app.format_thread_line(egg_app.current_thread)
 
