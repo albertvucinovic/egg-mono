@@ -1562,6 +1562,20 @@ class ThreadRunner:
                 else:
                     tool_timeout = _default_tool_timeout_sec
                 tool_timeout_int = int(tool_timeout) if tool_timeout > 0 else None
+
+                # Create a cancel check that returns True if lease is lost (e.g., Ctrl+C)
+                def make_cancel_check(db, thread_id, invoke_id):
+                    def check():
+                        # Check if we still hold the lease by verifying the stream is still open
+                        row = db.conn.execute(
+                            "SELECT 1 FROM open_streams WHERE thread_id=? AND invoke_id=?",
+                            (thread_id, invoke_id)
+                        ).fetchone()
+                        return row is None  # True = cancelled (lease lost)
+                    return check
+
+                cancel_check = make_cancel_check(self.db, self.thread_id, invoke_id)
+
                 try:
                     full_result = await loop.run_in_executor(
                         None,
@@ -1574,6 +1588,7 @@ class ThreadRunner:
                             thread_id=self.thread_id,
                             initial_model_key=current_model,
                             tool_timeout_sec=tool_timeout_int,
+                            cancel_check=cancel_check,
                         ),
                     )
                 except Exception as e:

@@ -85,6 +85,11 @@ class ToolRegistry:
         if tool_timeout is not None and "_tool_timeout_sec" not in args:
             args["_tool_timeout_sec"] = tool_timeout
 
+        # Propagate cancel check callback for interruptible tools
+        cancel_check = context.get("cancel_check")
+        if cancel_check is not None and "_cancel_check" not in args:
+            args["_cancel_check"] = cancel_check
+
         return impl(args)
 
 
@@ -117,6 +122,7 @@ def create_default_tools() -> ToolRegistry:
         from .api import get_thread_working_directory
         from .db import ThreadsDB
         import subprocess
+        import time as _time
 
         script = args.get('script', '')
         # Timeout priority: LLM-specified > RunnerConfig > None
@@ -126,6 +132,8 @@ def create_default_tools() -> ToolRegistry:
             timeout = float(llm_timeout) if llm_timeout is not None else config_timeout
         except (ValueError, TypeError):
             timeout = config_timeout
+        # Cancel check callback - returns True if command should be cancelled
+        cancel_check = args.get('_cancel_check')
         # Mirror the async runner: build an explicit argv and optionally
         # wrap it in the sandbox instead of relying on shell=True.
         base_argv = ['/bin/bash', '-lc', script]
@@ -146,15 +154,34 @@ def create_default_tools() -> ToolRegistry:
             # No thread context: default behaviour (use default policy).
             from .sandbox import wrap_argv_for_sandbox
             argv = wrap_argv_for_sandbox(base_argv)
+
+        # Use Popen for interruptible execution
+        start_time = _time.time()
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
         try:
-            res = subprocess.run(argv, capture_output=True, text=True, cwd=cwd, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds"
+            while proc.poll() is None:
+                # Check for cancellation (e.g., Ctrl+C in UI)
+                if cancel_check and cancel_check():
+                    proc.kill()
+                    proc.wait()
+                    return "--- INTERRUPTED ---\nCommand was interrupted by user"
+                # Check for timeout
+                if timeout and (_time.time() - start_time) >= timeout:
+                    proc.kill()
+                    proc.wait()
+                    return f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds"
+                _time.sleep(0.1)  # Poll interval
+            stdout, stderr = proc.communicate()
+        except Exception as e:
+            proc.kill()
+            proc.wait()
+            return f"--- ERROR ---\n{e}"
+
         out = ''
-        if res.stdout:
-            out += f"--- STDOUT ---\n{res.stdout.strip()}\n"
-        if res.stderr:
-            out += f"--- STDERR ---\n{res.stderr.strip()}\n"
+        if stdout:
+            out += f"--- STDOUT ---\n{stdout.strip()}\n"
+        if stderr:
+            out += f"--- STDERR ---\n{stderr.strip()}\n"
         return out.strip() or "--- The command executed successfully and produced no output ---"
 
     reg.register(
@@ -184,6 +211,7 @@ def create_default_tools() -> ToolRegistry:
         from .api import get_thread_working_directory
         from .db import ThreadsDB
         import subprocess, sys
+        import time as _time
 
         script = args.get('script', '')
         thread_id = (args.get('_thread_id') or '').strip()
@@ -194,6 +222,8 @@ def create_default_tools() -> ToolRegistry:
             timeout = float(llm_timeout) if llm_timeout is not None else config_timeout
         except (ValueError, TypeError):
             timeout = config_timeout
+        # Cancel check callback - returns True if command should be cancelled
+        cancel_check = args.get('_cancel_check')
 
         # Build argv for python -c.
         base_argv = ['python3', '-c', script]
@@ -213,15 +243,33 @@ def create_default_tools() -> ToolRegistry:
             from .sandbox import wrap_argv_for_sandbox
             argv = wrap_argv_for_sandbox(base_argv)
 
+        # Use Popen for interruptible execution
+        start_time = _time.time()
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
         try:
-            res = subprocess.run(argv, capture_output=True, text=True, cwd=cwd, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return f"--- TIMEOUT ---\nScript timed out after {timeout} seconds"
+            while proc.poll() is None:
+                # Check for cancellation (e.g., Ctrl+C in UI)
+                if cancel_check and cancel_check():
+                    proc.kill()
+                    proc.wait()
+                    return "--- INTERRUPTED ---\nScript was interrupted by user"
+                # Check for timeout
+                if timeout and (_time.time() - start_time) >= timeout:
+                    proc.kill()
+                    proc.wait()
+                    return f"--- TIMEOUT ---\nScript timed out after {timeout} seconds"
+                _time.sleep(0.1)  # Poll interval
+            stdout, stderr = proc.communicate()
+        except Exception as e:
+            proc.kill()
+            proc.wait()
+            return f"--- ERROR ---\n{e}"
+
         out = ''
-        if res.stdout:
-            out += f"--- STDOUT ---\n{res.stdout.strip()}\n"
-        if res.stderr:
-            out += f"--- STDERR ---\n{res.stderr.strip()}\n"
+        if stdout:
+            out += f"--- STDOUT ---\n{stdout.strip()}\n"
+        if stderr:
+            out += f"--- STDERR ---\n{stderr.strip()}\n"
         return out.strip() or "--- The script executed successfully and produced no output ---"
 
     reg.register(
