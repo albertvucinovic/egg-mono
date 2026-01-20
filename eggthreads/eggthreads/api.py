@@ -1032,7 +1032,8 @@ def get_thread_status(db: ThreadsDB, thread_id: str) -> str:
     try:
         row_open = db.current_open(thread_id)
         if row_open:
-            lease_until = row_open.get('lease_until')
+            # sqlite3.Row uses [] access, not .get()
+            lease_until = row_open['lease_until']
             if lease_until:
                 now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 if lease_until > now_iso:
