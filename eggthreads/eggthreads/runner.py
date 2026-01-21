@@ -1629,17 +1629,28 @@ class ThreadRunner:
                 tool_timeout_int = int(tool_timeout) if tool_timeout > 0 else None
 
                 # Create a cancel check that returns True if lease is lost (e.g., Ctrl+C)
-                def make_cancel_check(db, thread_id, invoke_id):
+                def make_cancel_check(db_path, thread_id, invoke_id):
+                    # Thread-local storage for executor thread's own connection
+                    import threading
+                    local = threading.local()
+
                     def check():
-                        # Check if we still hold the lease by verifying the stream is still open
-                        row = db.conn.execute(
-                            "SELECT 1 FROM open_streams WHERE thread_id=? AND invoke_id=?",
-                            (thread_id, invoke_id)
-                        ).fetchone()
-                        return row is None  # True = cancelled (lease lost)
+                        try:
+                            # Create a fresh connection in the executor thread if needed.
+                            # SQLite connections cannot be shared between threads.
+                            if not hasattr(local, 'conn') or local.conn is None:
+                                import sqlite3
+                                local.conn = sqlite3.connect(str(db_path), timeout=5)
+                            row = local.conn.execute(
+                                "SELECT 1 FROM open_streams WHERE thread_id=? AND invoke_id=?",
+                                (thread_id, invoke_id)
+                            ).fetchone()
+                            return row is None  # True = cancelled (lease lost)
+                        except Exception:
+                            return False  # If we can't check, assume not cancelled
                     return check
 
-                cancel_check = make_cancel_check(self.db, self.thread_id, invoke_id)
+                cancel_check = make_cancel_check(self.db.path, self.thread_id, invoke_id)
 
                 try:
                     full_result = await loop.run_in_executor(
