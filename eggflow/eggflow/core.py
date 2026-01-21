@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Coroutine, Dict, Optional, List, Tuple, Union
 
 _current_executor: ContextVar['FlowExecutor'] = ContextVar('executor')
+_key_scope: ContextVar[tuple] = ContextVar('key_scope', default=())
 
 logger = logging.getLogger("flow")
 
@@ -81,14 +82,25 @@ class Task:
 
     Raises:
         TaskError: If raw=False and the result has an error.
+
+    Note:
+        If called within a keyed_scope, the task's cache key is automatically
+        extended with the scope's keys (unless cached=False).
     """
     executor = _current_executor.get(None)
     if executor:
+      # Apply key scope if caching is enabled
+      task = self
+      if cached:
+        scope_keys = _key_scope.get()
+        if scope_keys:
+          task = Keyed(self, scope_keys)
+
       if cached:
         if raw:
-          result = await executor.run(wrapped(self))
+          result = await executor.run(wrapped(task))
         else:
-          return await executor.run(self)
+          return await executor.run(task)
       else:
         if raw:
           result = await executor.run(wrapped(nocache(self)))
@@ -157,6 +169,139 @@ def wrapped(task: Task) -> Wrapped:
       result = yield wrapped(nocache(MyTask("foo")))
   """
   return Wrapped(task)
+
+class Keyed(Task):
+  """Wrapper to extend a task's cache key with additional dependency context.
+
+  Use this when a task's result depends on external state not captured in its
+  default cache key. The extension is appended to the original key.
+
+  This is a Task subclass that delegates run() to the wrapped task while
+  providing a modified cache key.
+  """
+  def __init__(self, task: Task, keys: tuple):
+    self.task = task
+    self.keys = keys
+
+  def get_cache_key(self) -> str:
+    original = self.task.get_cache_key()
+    extension = ":".join(str(k) for k in self.keys)
+    return hashlib.sha256(f"{original}:{extension}".encode()).hexdigest()
+
+  def run(self):
+    return self.task.run()
+
+  async def recover(self) -> bool:
+    # Delegate recovery to wrapped task
+    recover_method = getattr(self.task, 'recover', None)
+    if recover_method and callable(recover_method):
+      result = recover_method()
+      if inspect.iscoroutine(result):
+        return await result
+      return result
+    return True
+
+def keyed(task: Task, *keys) -> Keyed:
+  """Extend a task's cache key with additional dependency context.
+
+  Use this when a task depends on external state not captured in its parameters.
+  The keys are appended to the task's original cache key.
+
+  Usage:
+      # Cache key now includes solution_hash as dependency
+      result = yield keyed(ExecuteBashCommand(...), solution_hash)
+
+      # Can combine with wrapped
+      result = yield wrapped(keyed(MyTask(...), version, context_id))
+  """
+  return Keyed(task, keys)
+
+class Rekeyed(Task):
+  """Wrapper to completely replace a task's cache key.
+
+  Use this when you need complete control over the cache key, replacing
+  the task's default key entirely. Use with caution - you lose any
+  key components the original task computed.
+
+  This is a Task subclass that delegates run() to the wrapped task while
+  providing a completely new cache key.
+  """
+  def __init__(self, task: Task, keys: tuple):
+    self.task = task
+    self.keys = keys
+
+  def get_cache_key(self) -> str:
+    key_str = ":".join(str(k) for k in self.keys)
+    return hashlib.sha256(f"rekeyed:{key_str}".encode()).hexdigest()
+
+  def run(self):
+    return self.task.run()
+
+  async def recover(self) -> bool:
+    # Delegate recovery to wrapped task
+    recover_method = getattr(self.task, 'recover', None)
+    if recover_method and callable(recover_method):
+      result = recover_method()
+      if inspect.iscoroutine(result):
+        return await result
+      return result
+    return True
+
+def rekeyed(task: Task, *keys) -> Rekeyed:
+  """Completely replace a task's cache key with custom keys.
+
+  Use this when the task's default cache key is wrong for your context.
+  The original cache key is discarded entirely.
+
+  Usage:
+      # Cache key is now based solely on custom_id
+      result = yield rekeyed(SomeTask(...), custom_id)
+
+  Warning: Use with caution. The task's original cache key components
+  (which may capture important state) are completely replaced.
+  """
+  return Rekeyed(task, keys)
+
+class keyed_scope:
+  """Context manager that automatically keys all tasks executed within its scope.
+
+  All tasks executed via Task.execute() within this scope will have their
+  cache keys extended with the scope's keys. Scopes can be nested - keys
+  accumulate from outer to inner scopes.
+
+  Usage:
+      async with keyed_scope(attempt):
+          # All tasks here are automatically keyed by `attempt`
+          result = await SomeTask(...).execute()
+          result2 = await AnotherTask(...).execute()
+
+      # Can nest scopes
+      async with keyed_scope(outer_key):
+          async with keyed_scope(inner_key):
+              # Keyed by both outer_key and inner_key
+              result = await Task(...).execute()
+  """
+  def __init__(self, *keys):
+    self.keys = keys
+    self.token = None
+
+  def __enter__(self):
+    current = _key_scope.get()
+    self.token = _key_scope.set(current + self.keys)
+    return self
+
+  def __exit__(self, *args):
+    _key_scope.reset(self.token)
+
+  async def __aenter__(self):
+    return self.__enter__()
+
+  async def __aexit__(self, *args):
+    return self.__exit__(*args)
+
+def get_current_key_scope() -> tuple:
+  """Get the current key scope (for internal use)."""
+  return _key_scope.get()
 
 class FuncTask(Task):
   """Task that wraps a function or method call with configurable cache key.
@@ -452,6 +597,11 @@ class FlowExecutor:
     return result.value
 
   async def _execute_task(self, task: Task) -> Result:
+    # Apply key scope if present (extends cache key with scope keys)
+    scope_keys = _key_scope.get()
+    if scope_keys:
+      task = Keyed(task, scope_keys)
+
     # Check if task should skip caching
     if not getattr(task, 'cacheable', True):
       try:

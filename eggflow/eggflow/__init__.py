@@ -34,6 +34,9 @@ from .core import (
     Task, Result, TaskStore, FlowExecutor,
     NoCache, nocache,
     Wrapped, wrapped,
+    Keyed, keyed,
+    Rekeyed, rekeyed,
+    keyed_scope,
     TaskError,
     FuncTask, as_task,
 )
