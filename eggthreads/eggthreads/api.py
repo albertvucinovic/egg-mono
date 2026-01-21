@@ -40,6 +40,49 @@ def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
     return None
 
 
+def validate_model_handle(model_handle: str, models_path: str = "models.json") -> bool:
+    """Check if a model handle exists in models.json.
+
+    Args:
+        model_handle: The model name/key to validate
+        models_path: Path to models.json file
+
+    Returns:
+        True if the model handle exists, False otherwise
+    """
+    import os.path
+    if not model_handle or not model_handle.strip():
+        return False
+    model_handle = model_handle.strip()
+
+    if EGGLLM_AVAILABLE:
+        try:
+            models_config, providers_config = load_models_config(models_path)
+            catalog = AllModelsCatalog(None)
+            registry = ModelRegistry(models_config, providers_config, catalog)
+            resolved = registry.resolve(model_handle)
+            return resolved is not None
+        except Exception:
+            pass
+
+    # Fallback: parse models.json directly
+    if not os.path.exists(models_path):
+        return False
+    try:
+        with open(models_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return False
+        providers = data.get('providers', {})
+        for provider_data in providers.values():
+            models = provider_data.get('models', {})
+            if model_handle in models:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
     """Return nested providers dict for a given model key.
     
