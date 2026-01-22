@@ -40,4 +40,7 @@ from .core import (
     TaskError,
     FuncTask, as_task,
 )
-from .eggthreads_tasks import CreateThread, ContinueThread, ForkThread, Config, ThreadResult
+from .eggthreads_tasks import (
+    CreateThread, ContinueThread, ForkThread, Config, ThreadResult,
+    PICTask, PICRecoveryError, ContextLimitExceededError,
+)

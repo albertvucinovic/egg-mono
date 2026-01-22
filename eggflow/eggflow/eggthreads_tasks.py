@@ -1,5 +1,4 @@
 import os
-import json
 import asyncio
 from dataclasses import dataclass, field
 from typing import Optional, List, Any, Dict
@@ -71,8 +70,8 @@ async def _get_last_content(tid: str):
     if not EGGTHREADS_INSTALLED or Config.MOCK_MODE:
         return f"Mock Reply to prompt"
     db = get_egg_db()
-    snap = json.loads(egg_api.create_snapshot(db, tid))
-    msgs = snap.get("messages", [])
+    snap = egg_api.create_snapshot(db, tid)
+    msgs = snap.get("messages", []) if isinstance(snap, dict) else []
     return msgs[-1].get("content", "") if msgs else ""
 
 # --- Exceptions ---
@@ -83,6 +82,22 @@ class PICRecoveryError(Exception):
     This error indicates that a thread was in an unhealthy state (e.g., unclosed
     streams, unpublished tool calls) and the recovery attempt via continue_thread
     was unsuccessful.
+    """
+    pass
+
+
+class ContextLimitExceededError(Exception):
+    """Raised when a thread has exceeded its context limit.
+
+    This is a terminal, non-recoverable error. When a thread hits its context
+    limit, the runner emits a system message with the error and the thread fails.
+    Unlike other thread failures, this should NOT be "recovered" via continue_thread
+    because:
+    1. The context limit was set intentionally to bound resource usage
+    2. Recovery via summarization loses important context
+    3. The thread will likely hit the limit again, causing infinite loops
+
+    The task should propagate this error up and fail gracefully.
     """
     pass
 
@@ -115,6 +130,8 @@ class PICTask(Task):
 
         Raises:
             PICRecoveryError: If the thread is unhealthy and recovery fails
+            ContextLimitExceededError: If the thread failed due to context limit
+                (this is terminal and should NOT be recovered)
         """
         if not EGGTHREADS_INSTALLED:
             return
@@ -122,6 +139,26 @@ class PICTask(Task):
         diagnosis = egg_api.diagnose_thread(db, thread_id)
 
         if not diagnosis.is_healthy:
+            # CRITICAL: Check for context limit error BEFORE attempting recovery.
+            # Context limit exceeded is a terminal error that should NOT be recovered
+            # via continue_thread, because:
+            # 1. It's an intentional resource bound
+            # 2. Recovery via summarization loses context
+            # 3. The thread will hit the limit again → infinite loop
+            snap = egg_api.create_snapshot(db, thread_id)
+            messages = snap.get("messages", []) if isinstance(snap, dict) else []
+
+            # Check recent system messages for context limit error
+            for msg in reversed(messages[-5:]):  # Check last 5 messages
+                if msg.get('role') == 'system':
+                    content = msg.get('content', '').lower()
+                    if 'context limit' in content and 'error' in content:
+                        raise ContextLimitExceededError(
+                            f"Thread {thread_id} exceeded context limit. "
+                            f"This is terminal and cannot be recovered. "
+                            f"Error: {msg.get('content')}"
+                        )
+
             # Use continue_thread to recover the thread state.
             # continue_thread handles expired leases (from heartbeat timeout) automatically,
             # so we don't need to call interrupt_thread first.
@@ -194,8 +231,8 @@ class CreateThread(PICTask):
         self._ensure_thread_healthy(db, tid)
 
         # Idempotent message append: check if prompt already exists
-        snap = json.loads(egg_api.create_snapshot(db, tid))
-        msgs = snap.get("messages", [])
+        snap = egg_api.create_snapshot(db, tid)
+        msgs = snap.get("messages", []) if isinstance(snap, dict) else []
         has_prompt = any(
             m.get('role') == 'user' and m.get('content') == self.prompt
             for m in msgs
@@ -248,8 +285,8 @@ class ContinueThread(PICTask):
         self._ensure_thread_healthy(db, self.thread_id)
 
         # Idempotent message append: only add if not already present
-        snap = json.loads(egg_api.create_snapshot(db, self.thread_id))
-        msgs = snap.get("messages", [])
+        snap = egg_api.create_snapshot(db, self.thread_id)
+        msgs = snap.get("messages", []) if isinstance(snap, dict) else []
         last = msgs[-1] if msgs else None
 
         if not (last and last.get('role') == self.role and last.get('content') == self.content):
