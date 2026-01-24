@@ -1318,3 +1318,188 @@ class TestNoApiCallsMode:
 
         captured = capsys.readouterr()
         assert "[NO_API_CALLS]" in captured.out, "Should log NO_API_CALLS mode"
+
+
+def _make_mock_llm():
+    """Create a properly configured mock LLM that won't cause JSON serialization errors."""
+    mock_llm = MagicMock()
+    mock_llm.current_model_key = "test-model"
+    mock_llm.stream = AsyncMock(return_value=iter([]))
+    return mock_llm
+
+
+def _get_events_with_content(db, thread_id: str, content_substring: str) -> List[Any]:
+    """Find events containing a substring in their payload content."""
+    events = list(db.events_since(thread_id, 0))
+    matching = []
+    for e in events:
+        # sqlite3.Row objects can be accessed by column name
+        payload_json = e['payload_json'] if 'payload_json' in e.keys() else None
+        if payload_json:
+            try:
+                payload = json.loads(payload_json)
+                content = payload.get('content', '') if isinstance(payload, dict) else ''
+                if content_substring in str(content):
+                    matching.append(e)
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return matching
+
+
+class TestContextLimit:
+    """Tests for RunnerConfig.context_limit (global context token limit)."""
+
+    def test_runner_config_context_limit_default_is_none(self):
+        """RunnerConfig.context_limit should default to None (no limit)."""
+        cfg = RunnerConfig()
+        assert cfg.context_limit is None, "Default context_limit should be None"
+
+    def test_runner_config_context_limit_can_be_set(self):
+        """RunnerConfig.context_limit can be set to a positive integer."""
+        cfg = RunnerConfig(context_limit=32000)
+        assert cfg.context_limit == 32000
+
+    def test_global_context_limit_blocks_ra1_when_exceeded(self, tmp_path):
+        """RA1 should be blocked when context tokens exceed RunnerConfig.context_limit."""
+        db = _make_db(tmp_path)
+        root = ts.create_root_thread(db, name="root")
+        _make_thread_runnable(db, root)  # Creates RA1 condition
+
+        from eggthreads.runner import ThreadRunner
+
+        # Mock total_token_stats to return tokens exceeding the limit
+        mock_stats = {'context_tokens': 50000, 'output_tokens': 1000}
+
+        async def test():
+            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+                # Set global limit lower than current tokens
+                cfg = RunnerConfig(context_limit=32000)
+                runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
+
+                # run_once should detect limit exceeded and not make LLM call
+                await runner.run_once()
+
+                # Check that an error message was created
+                error_events = _get_events_with_content(db, root, 'Context limit exceeded')
+                assert len(error_events) > 0, "Should have created error message for context limit exceeded"
+
+        asyncio.run(test())
+
+    def test_global_context_limit_allows_ra1_when_under_limit(self, tmp_path):
+        """RA1 should proceed when context tokens are under RunnerConfig.context_limit."""
+        db = _make_db(tmp_path)
+        root = ts.create_root_thread(db, name="root")
+        _make_thread_runnable(db, root)  # Creates RA1 condition
+
+        from eggthreads.runner import ThreadRunner
+
+        # Mock total_token_stats to return tokens under the limit
+        mock_stats = {'context_tokens': 10000, 'output_tokens': 500}
+
+        async def test():
+            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+                # Set global limit higher than current tokens
+                cfg = RunnerConfig(context_limit=32000)
+                runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
+
+                # run_once should proceed (may fail for other reasons, but not context limit)
+                try:
+                    await runner.run_once()
+                except Exception:
+                    pass  # We're just checking context limit doesn't block
+
+                # Check that NO context limit error was created
+                error_events = _get_events_with_content(db, root, 'Context limit exceeded')
+                assert len(error_events) == 0, "Should NOT have context limit error when under limit"
+
+        asyncio.run(test())
+
+    def test_per_thread_limit_overrides_global_limit(self, tmp_path):
+        """Per-thread context limit (via set_context_limit) should override RunnerConfig.context_limit."""
+        db = _make_db(tmp_path)
+        root = ts.create_root_thread(db, name="root")
+        _make_thread_runnable(db, root)  # Creates RA1 condition
+
+        # Set a per-thread limit that is higher than current tokens
+        from eggthreads import set_context_limit
+        set_context_limit(db, root, 100000, reason="test override")
+
+        from eggthreads.runner import ThreadRunner
+
+        # Mock total_token_stats to return 50000 tokens
+        # Global limit is 32000 (would block), but per-thread is 100000 (should allow)
+        mock_stats = {'context_tokens': 50000, 'output_tokens': 1000}
+
+        async def test():
+            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+                # Global limit would block (32000 < 50000), but per-thread allows (100000 > 50000)
+                cfg = RunnerConfig(context_limit=32000)
+                runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
+
+                try:
+                    await runner.run_once()
+                except Exception:
+                    pass  # We're just checking per-thread limit is used
+
+                # Check that NO context limit error was created (per-thread limit allows it)
+                error_events = _get_events_with_content(db, root, 'Context limit exceeded')
+                assert len(error_events) == 0, "Per-thread limit should override global limit"
+
+        asyncio.run(test())
+
+    def test_no_limit_when_context_limit_is_none(self, tmp_path):
+        """No context limit check when RunnerConfig.context_limit is None."""
+        db = _make_db(tmp_path)
+        root = ts.create_root_thread(db, name="root")
+        _make_thread_runnable(db, root)  # Creates RA1 condition
+
+        from eggthreads.runner import ThreadRunner
+
+        # Mock total_token_stats to return very high tokens
+        mock_stats = {'context_tokens': 1000000, 'output_tokens': 10000}
+
+        async def test():
+            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+                # No global limit set (None)
+                cfg = RunnerConfig(context_limit=None)
+                runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
+
+                try:
+                    await runner.run_once()
+                except Exception:
+                    pass  # We're just checking no context limit block
+
+                # Check that NO context limit error was created
+                error_events = _get_events_with_content(db, root, 'Context limit exceeded')
+                assert len(error_events) == 0, "Should NOT check context limit when None"
+
+        asyncio.run(test())
+
+    def test_global_limit_used_as_fallback_when_no_per_thread_limit(self, tmp_path):
+        """RunnerConfig.context_limit should be used when no per-thread limit is set."""
+        db = _make_db(tmp_path)
+        root = ts.create_root_thread(db, name="root")
+        _make_thread_runnable(db, root)  # Creates RA1 condition
+
+        # Verify no per-thread limit is set
+        from eggthreads import get_context_limit
+        assert get_context_limit(db, root) is None, "Should have no per-thread limit initially"
+
+        from eggthreads.runner import ThreadRunner
+
+        # Mock total_token_stats to return tokens that exceed global limit
+        mock_stats = {'context_tokens': 40000, 'output_tokens': 1000}
+
+        async def test():
+            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+                # Set global limit that will be exceeded
+                cfg = RunnerConfig(context_limit=32000)
+                runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
+
+                await runner.run_once()
+
+                # Check that context limit error WAS created (global limit should apply)
+                error_events = _get_events_with_content(db, root, 'Context limit exceeded')
+                assert len(error_events) > 0, "Global limit should be used as fallback"
+
+        asyncio.run(test())
