@@ -93,6 +93,9 @@ class RunnerConfig:
     tool_timeout_sec: Optional[float] = None
     # Read-only mode: block RA1/RA2, allow RA3 (overridden by NO_API_CALLS env var)
     no_api_calls: bool = False
+    # Global context limit: None = no limit, >0 = max tokens before LLM call is rejected
+    # Per-thread settings (via thread.context_limit events) override this
+    context_limit: Optional[int] = None
 
 
 class ThreadRunner:
@@ -228,13 +231,16 @@ class ThreadRunner:
                 payload=payload,
             )
 
-        # Get context limit for this thread (with ancestor inheritance)
+        # Get context limit for this thread (with ancestor inheritance), fall back to config
         context_limit: Optional[int] = None
         try:
             from .api import get_context_limit
             context_limit = get_context_limit(self.db, self.thread_id)
         except Exception:
             context_limit = None
+        # Fall back to global config if no per-thread limit is set
+        if context_limit is None and self.cfg.context_limit is not None:
+            context_limit = self.cfg.context_limit
 
         try:
             if ra.kind == 'RA1_llm':
