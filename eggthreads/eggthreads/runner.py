@@ -512,6 +512,27 @@ class ThreadRunner:
                         return val
                     return None
 
+                def _should_include_reasoning_field(idx: int) -> bool:
+                    """Return True if this message index should have reasoning field (even if empty).
+
+                    This applies when a thinking policy is active that would send reasoning
+                    for this message. Providers like DeepSeek require the field to be
+                    present even when empty.
+                    """
+                    # Regular thinking mode (plaintext reasoning)
+                    if encrypted_thinking_mode is None:
+                        if thinking_policy == 'send all':
+                            return True
+                        if thinking_policy == 'last assistant turn':
+                            return last_user_idx != -1 and idx > last_user_idx
+                    # Encrypted thinking mode
+                    else:
+                        if encrypted_thinking_mode == 'send all':
+                            return True
+                        if encrypted_thinking_mode == 'last assistant turn':
+                            return last_user_idx != -1 and idx > last_user_idx
+                    return False
+
                 def _passthrough_provider_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
                     """Copy provider-specific fields from a snapshot message.
 
@@ -569,8 +590,11 @@ class ThreadRunner:
                         }
                         if thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
-                        if encrypted_thinking_val is not None:
+                        elif encrypted_thinking_val is not None:
                             msg_out[out_thinking_key] = encrypted_thinking_val
+                        elif _should_include_reasoning_field(idx):
+                            # Provider requires reasoning field even when empty
+                            msg_out[out_thinking_key] = ""
                         _passthrough_provider_fields(m, msg_out)
                         base_messages.append(msg_out)
                     elif r == 'tool':
@@ -589,8 +613,11 @@ class ThreadRunner:
                         msg_out: Dict[str, Any] = {'role': r, 'content': content}
                         if r == 'assistant' and thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
-                        if r == 'assistant' and encrypted_thinking_val is not None:
+                        elif r == 'assistant' and encrypted_thinking_val is not None:
                             msg_out[out_thinking_key] = encrypted_thinking_val
+                        elif r == 'assistant' and _should_include_reasoning_field(idx):
+                            # Provider requires reasoning field even when empty
+                            msg_out[out_thinking_key] = ""
                         if r == 'assistant':
                             _passthrough_provider_fields(m, msg_out)
                         base_messages.append(msg_out)
