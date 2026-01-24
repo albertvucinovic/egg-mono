@@ -521,22 +521,22 @@ class ThreadRunner:
                 def _should_include_reasoning_field(idx: int) -> bool:
                     """Return True if this message index should have reasoning field (even if empty).
 
-                    This applies when a thinking policy is active that would send reasoning
-                    for this message. Providers like DeepSeek require the field to be
-                    present even when empty.
+                    This applies when a plaintext thinking policy is active that would send
+                    reasoning for this message. Providers like DeepSeek require the field to
+                    be present even when empty.
+
+                    NOTE: This does NOT apply to encrypted thinking modes (e.g., Gemini),
+                    which use structured objects, not strings. Adding an empty string ""
+                    would cause "Value is not a struct" errors from those providers.
                     """
-                    # Regular thinking mode (plaintext reasoning)
-                    if encrypted_thinking_mode is None:
-                        if thinking_policy == 'send all':
-                            return True
-                        if thinking_policy == 'last assistant turn':
-                            return last_user_idx != -1 and idx > last_user_idx
-                    # Encrypted thinking mode
-                    else:
-                        if encrypted_thinking_mode == 'send all':
-                            return True
-                        if encrypted_thinking_mode == 'last assistant turn':
-                            return last_user_idx != -1 and idx > last_user_idx
+                    # Only for plaintext reasoning mode (e.g., DeepSeek)
+                    # Encrypted modes (Gemini) use structured objects and don't need this fallback
+                    if encrypted_thinking_mode is not None:
+                        return False
+                    if thinking_policy == 'send all':
+                        return True
+                    if thinking_policy == 'last assistant turn':
+                        return last_user_idx != -1 and idx > last_user_idx
                     return False
 
                 def _passthrough_provider_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
