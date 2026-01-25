@@ -152,7 +152,13 @@ class PICTask(Task):
             for msg in reversed(messages[-5:]):  # Check last 5 messages
                 if msg.get('role') == 'system':
                     content = msg.get('content', '').lower()
-                    if 'context limit' in content and 'error' in content:
+                    # Match both our internal "context limit" error and API "context size" errors
+                    is_context_error = (
+                        ('context limit' in content and 'error' in content) or
+                        ('context size' in content and 'exceed' in content) or
+                        ('exceed_context_size_error' in content)
+                    )
+                    if is_context_error:
                         raise ContextLimitExceededError(
                             f"Thread {thread_id} exceeded context limit. "
                             f"This is terminal and cannot be recovered. "
