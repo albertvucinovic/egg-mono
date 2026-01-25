@@ -30,6 +30,11 @@ from .tool_call_id import normalize_tool_call_id
 ISO = "%Y-%m-%d %H:%M:%S"
 
 
+class ContextLimitExceeded(Exception):
+    """Raised when a thread's context exceeds the configured limit."""
+    pass
+
+
 def _now_plus(ttl_sec: int) -> str:
     return (datetime.utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
 
@@ -261,9 +266,14 @@ class ThreadRunner:
                                 msg_id=os.urandom(10).hex(),
                                 payload={'role': 'system', 'content': f'LLM/runner error: {error_msg}'},
                             )
-                            raise Exception(error_msg)  # Skip to finally block
+                            raise ContextLimitExceeded(error_msg)  # Propagate to outer handler
                     except ImportError:
                         pass  # If token_count unavailable, proceed with call (fail-open)
+                    except ContextLimitExceeded:
+                        raise  # Don't swallow intentional context limit errors
+                    except Exception as e:
+                        # Log but don't block on token counting errors (fail-open)
+                        print(f"Warning: context limit check failed: {e}")
 
                 # ---------------- RA1: LLM call ----------------
                 await self._run_ra1_llm(invoke_id, current_model)
