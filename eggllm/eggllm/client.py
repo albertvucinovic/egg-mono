@@ -5,7 +5,8 @@ from typing import Dict, Any, Generator, Optional, List
 from .config import load_models_config
 from .catalog import AllModelsCatalog
 from .registry import ModelRegistry
-from .providers.openai_compat import OpenAICompatAdapter
+from .providers.factory import AdapterFactory
+from .providers.base import ProviderAdapter
 
 
 class LLMClient:
@@ -28,8 +29,6 @@ class LLMClient:
                 self.current_model_key = resolved
         if not self.current_model_key:
             self.current_model_key = list(models_config.keys())[0]
-
-        self._provider_adapter = OpenAICompatAdapter()  # default adapter
 
     # Public: configuration / model management
     def get_providers(self) -> List[str]:
@@ -189,9 +188,17 @@ class LLMClient:
         pc = self.registry.provider_config(provider_name)
         if not pc:
             raise KeyError(f"Provider '{provider_name}' not found")
-        base_url = pc.get("api_base")
+
+        # Model-level api_base takes precedence over provider-level
+        base_url = mc.get("api_base") or pc.get("api_base")
         if not base_url:
             raise ValueError(f"Provider '{provider_name}' missing api_base")
+
+        # Auto-rewrite URL for Responses API if no explicit model-level api_base
+        api_type = mc.get("api_type", "chat_completions")
+        if api_type == "responses" and not mc.get("api_base"):
+            # Convert chat/completions URL to responses URL
+            base_url = self._rewrite_url_for_api_type(base_url, api_type)
 
         headers = {"Content-Type": "application/json"}
         api_key_env = pc.get("api_key_env")
@@ -201,6 +208,32 @@ class LLMClient:
                 raise EnvironmentError(f"Env var '{api_key_env}' is not set for '{provider_name}'")
             headers["Authorization"] = f"Bearer {api_key}"
         return provider_name, base_url, headers
+
+    def _get_adapter_for_current_model(self) -> ProviderAdapter:
+        """Get the appropriate adapter based on current model's api_type config."""
+        mc = self.registry.get_model_config(self.current_model_key)
+        api_type = mc.get("api_type", "chat_completions")
+        return AdapterFactory.get_adapter(api_type)
+
+    def _rewrite_url_for_api_type(self, url: str, api_type: str) -> str:
+        """Rewrite a provider URL to match the target API type.
+
+        Converts between Chat Completions and Responses API endpoints:
+        - /v1/chat/completions <-> /v1/responses
+        - /chat/completions <-> /responses
+        """
+        if api_type == "responses":
+            # Convert chat completions URL to responses URL
+            if "/chat/completions" in url:
+                return url.replace("/chat/completions", "/responses")
+            # Handle case where URL ends with /v1 or similar
+            if url.rstrip("/").endswith("/v1"):
+                return url.rstrip("/") + "/responses"
+        elif api_type == "chat_completions":
+            # Convert responses URL to chat completions URL
+            if "/responses" in url:
+                return url.replace("/responses", "/chat/completions")
+        return url
 
     def update_all_models(self, provider: str) -> str:
         return self.catalog.update_provider(provider, self.registry.providers_config)
@@ -275,8 +308,8 @@ class LLMClient:
                 payload["tool_choice"] = tool_choice
         payload.update(merged_params)
 
-        # Use OpenAI-compatible adapter for now
-        for evt in self._provider_adapter.stream(base_url, headers, payload, timeout=timeout):
+        adapter = self._get_adapter_for_current_model()
+        for evt in adapter.stream(base_url, headers, payload, timeout=timeout):
             yield evt
 
     async def astream_chat(self,
@@ -328,7 +361,8 @@ class LLMClient:
                 payload["tool_choice"] = tool_choice
         payload.update(merged_params)
 
-        async for evt in self._provider_adapter.stream_async(base_url, headers, payload, timeout=timeout):
+        adapter = self._get_adapter_for_current_model()
+        async for evt in adapter.stream_async(base_url, headers, payload, timeout=timeout):
             yield evt
 
     # Backward-compat alias
