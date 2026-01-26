@@ -597,7 +597,8 @@ class FlowExecutor:
     # Regular task - execute and return value (raise on error)
     result = await self._execute_task(flow)
     if result.error:
-      raise TaskError(result.error, result)
+      # Preserve terminal flag so caller can detect terminal errors
+      raise TaskError(result.error, result, terminal=result.is_terminal)
     return result.value
 
   async def _run_item(self, item: Union[Task, Coroutine, NoCache, Wrapped]) -> Union[Result, Any]:
@@ -653,7 +654,8 @@ class FlowExecutor:
     # Regular task - return value, raise on error
     result = await self._execute_task(item)
     if result.error:
-      raise TaskError(result.error, result)
+      # Preserve terminal flag so caller can detect terminal errors
+      raise TaskError(result.error, result, terminal=result.is_terminal)
     return result.value
 
   async def _execute_task(self, task: Task) -> Result:
