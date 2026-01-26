@@ -513,6 +513,24 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
 
     messages: List[Dict[str, Any]] = []
 
+    # Collect msg_ids that have been marked as skipped via msg.edit events.
+    # These should not be counted in token stats (they're excluded from API calls).
+    skipped_msg_ids: set = set()
+    try:
+        cur_edit = db.conn.execute(
+            "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+            (thread_id,),
+        )
+        for edit_msg_id, edit_pj in cur_edit.fetchall():
+            try:
+                edit_payload = json.loads(edit_pj) if isinstance(edit_pj, str) else (edit_pj or {})
+            except Exception:
+                edit_payload = {}
+            if edit_payload.get('skipped_on_continue'):
+                skipped_msg_ids.add(edit_msg_id)
+    except Exception:
+        pass
+
     # Streaming accumulators (only for the currently open invoke).
     stream_model_key: Optional[str] = None
     stream_text_parts: List[str] = []
@@ -557,6 +575,9 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
             payload = {}
 
         if ev_type == "msg.create":
+            # Skip messages that have been marked as skipped_on_continue
+            if msg_id and msg_id in skipped_msg_ids:
+                continue
             m = dict(payload) if isinstance(payload, dict) else {}
             m["msg_id"] = msg_id
             m["ts"] = ts
@@ -848,6 +869,30 @@ def _attach_costs(stats: Dict[str, Any], *, llm: Any = None) -> Dict[str, Any]:
     return out
 
 
+def _get_skipped_msg_ids(db: "ThreadsDB", thread_id: str) -> set:
+    """Query msg.edit events to find messages marked as skipped_on_continue.
+
+    This is the source of truth for which messages are excluded from API calls.
+    Used to filter snapshot messages when the snapshot might be stale.
+    """
+    skipped: set = set()
+    try:
+        cur = db.conn.execute(
+            "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+            (thread_id,),
+        )
+        for msg_id, pj in cur.fetchall():
+            try:
+                payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+            except Exception:
+                payload = {}
+            if payload.get('skipped_on_continue'):
+                skipped.add(msg_id)
+    except Exception:
+        pass
+    return skipped
+
+
 def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Dict[str, Any]:
     """Return snapshot+streaming token stats (optionally including cost).
 
@@ -879,11 +924,27 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
             except Exception:
                 snap = None
             if isinstance(snap, dict):
+                # Query current skipped msg_ids from msg.edit events.
+                # This is the source of truth for which messages are excluded.
+                skipped_msg_ids = _get_skipped_msg_ids(db, thread_id)
+
+                # Check if any skipped messages are in the snapshot's message list.
+                # If so, the cached token_stats is stale and we must recalculate.
+                msgs = snap.get("messages") or []
+                snap_msg_ids = {m.get("msg_id") for m in msgs if isinstance(m, dict)}
+                has_stale_skipped = bool(skipped_msg_ids & snap_msg_ids)
+
                 ts = snap.get("token_stats")
-                if isinstance(ts, dict):
+                if isinstance(ts, dict) and not has_stale_skipped:
+                    # Use cached token_stats (for performance) when accurate.
                     snap_stats = ts
                 else:
-                    snap_stats = snapshot_token_stats(snap)
+                    # Recalculate with filtered messages to exclude skipped ones.
+                    filtered_msgs = [
+                        m for m in msgs
+                        if isinstance(m, dict) and m.get("msg_id") not in skipped_msg_ids
+                    ]
+                    snap_stats = _token_stats_for_messages(filtered_msgs)
 
     stream_stats = streaming_token_stats(db, thread_id)
     total = _merge_token_stats(snap_stats, stream_stats)
