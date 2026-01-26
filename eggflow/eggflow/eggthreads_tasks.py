@@ -98,8 +98,15 @@ class ContextLimitExceededError(Exception):
     3. The thread will likely hit the limit again, causing infinite loops
 
     The task should propagate this error up and fail gracefully.
+
+    This exception has terminal=True, meaning it will automatically propagate
+    through wrapped() calls in the executor.
     """
-    pass
+    terminal = True  # Class attribute marks this as a terminal error
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.terminal = True  # Instance attribute for safety
 
 
 # --- Base Classes ---

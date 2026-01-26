@@ -14,6 +14,23 @@ _key_scope: ContextVar[tuple] = ContextVar('key_scope', default=())
 
 logger = logging.getLogger("flow")
 
+
+def _is_terminal_exception(e: Exception) -> bool:
+  """Check if an exception type is inherently terminal (non-recoverable).
+
+  Terminal exceptions propagate automatically through wrapped() calls.
+  """
+  # Import here to avoid circular imports
+  try:
+    from .eggthreads_tasks import ContextLimitExceededError
+    if isinstance(e, ContextLimitExceededError):
+      return True
+  except ImportError:
+    pass
+
+  # Check for terminal attribute on exception
+  return getattr(e, 'terminal', False)
+
 @dataclass
 class Task:
   """Base class for cacheable tasks.
@@ -120,10 +137,20 @@ class Task:
     return result
 
 class TaskError(Exception):
-  """Raised when a task fails and values are being returned (not wrapped)."""
-  def __init__(self, message: str, result: 'Result'):
+  """Raised when a task fails and values are being returned (not wrapped).
+
+  Terminal errors (like context limit exceeded) propagate automatically
+  even through wrapped() calls - they can only be caught with try/except.
+  """
+  def __init__(self, message: str, result: 'Result', terminal: bool = False):
     super().__init__(message)
     self.result = result
+    self.terminal = terminal
+
+  @property
+  def is_terminal(self) -> bool:
+    """Check if this is a terminal error that should not be retried."""
+    return self.terminal
 
 class NoCache:
   """Wrapper to skip caching for a specific task execution."""
@@ -384,15 +411,23 @@ class Result:
       value: The return value if task succeeded, None otherwise.
       metadata: Additional data like artifacts, timing info, etc.
       error: Error message if task failed, None if successful.
+      terminal: If True, error is terminal and accepted (recover() returned False).
+                This signals that the error should NOT be raised as an exception.
   """
   value: Any = None
   metadata: Dict[str, Any] = field(default_factory=dict)
   error: Optional[str] = None
+  terminal: bool = False
 
   @property
   def is_success(self) -> bool:
     """Check if the task completed successfully (no error)."""
     return self.error is None
+
+  @property
+  def is_terminal(self) -> bool:
+    """Check if this is a terminal error that auto-propagates through wrapped()."""
+    return self.error is not None and self.terminal
 
   @property
   def artifacts(self) -> Dict[str, str]:
@@ -512,16 +547,28 @@ class FlowExecutor:
         try:
           return await self._handle_task_uncached(inner.task)
         except Exception as e:
-          return Result(error=str(e))
+          is_terminal = _is_terminal_exception(e)
+          result = Result(error=str(e), terminal=is_terminal)
+          if is_terminal:
+            raise TaskError(str(e), result, terminal=True)
+          return result
       elif isinstance(inner, Task):
-        return await self._execute_task(inner)
+        result = await self._execute_task(inner)
+        # CRITICAL: Terminal errors propagate even through wrapped()
+        if result.is_terminal:
+          raise TaskError(result.error, result, terminal=True)
+        return result
       else:
         # Handle wrapped coroutine
         try:
           value = await inner
           return Result(value=value)
         except Exception as e:
-          return Result(error=str(e))
+          is_terminal = _is_terminal_exception(e)
+          result = Result(error=str(e), terminal=is_terminal)
+          if is_terminal:
+            raise TaskError(str(e), result, terminal=True)
+          return result
 
     if isinstance(flow, NoCache):
       # NoCache wrapper - execute without caching, return value
@@ -561,16 +608,28 @@ class FlowExecutor:
         try:
           return await self._handle_task_uncached(inner.task)
         except Exception as e:
-          return Result(error=str(e))
+          is_terminal = _is_terminal_exception(e)
+          result = Result(error=str(e), terminal=is_terminal)
+          if is_terminal:
+            raise TaskError(str(e), result, terminal=True)
+          return result
       elif isinstance(inner, Task):
-        return await self._execute_task(inner)
+        result = await self._execute_task(inner)
+        # CRITICAL: Terminal errors propagate even through wrapped()
+        if result.is_terminal:
+          raise TaskError(result.error, result, terminal=True)
+        return result
       else:
         # Wrapped coroutine
         try:
           value = await inner
           return Result(value=value)
         except Exception as e:
-          return Result(error=str(e))
+          is_terminal = _is_terminal_exception(e)
+          result = Result(error=str(e), terminal=is_terminal)
+          if is_terminal:
+            raise TaskError(str(e), result, terminal=True)
+          return result
 
     if isinstance(item, NoCache):
       try:
@@ -621,6 +680,20 @@ class FlowExecutor:
     # Call recover() before re-running a FAILED task
     if row and row['status'] == "FAILED":
       logger.debug(f"Task {task.__class__.__name__} was FAILED, attempting recovery...")
+
+      # CRITICAL: Check if the cached result is terminal - if so, DON'T retry
+      cached_result = None
+      try:
+        cached_result = pickle.loads(row['result_blob'])
+      except Exception:
+        pass
+
+      if cached_result and cached_result.is_terminal:
+        # Terminal error - never retry, return cached failure immediately
+        logger.debug(f"Task {task.__class__.__name__} has terminal error, not retrying")
+        return cached_result
+
+      # Non-terminal error - check if task wants to recover
       should_retry = True  # Default: retry
       try:
         recover_method = getattr(task, 'recover', None)
@@ -639,10 +712,9 @@ class FlowExecutor:
 
       if not should_retry:
         # Task decided not to retry - return the cached FAILED result
-        try:
-          return pickle.loads(row['result_blob'])
-        except Exception:
-          return Result(error="Task recovery returned False, not retrying")
+        if cached_result:
+          return cached_result
+        return Result(error="Task recovery returned False, not retrying")
 
     if not row:
       self.store.create(key, task)
@@ -652,7 +724,9 @@ class FlowExecutor:
     try:
       return await self._handle_task(task, key)
     except Exception as e:
-      res = Result(error=str(e))
+      # Check if this is a terminal error (e.g., ContextLimitExceededError)
+      is_terminal = _is_terminal_exception(e)
+      res = Result(error=str(e), terminal=is_terminal)
       self.store.update(key, "FAILED", result=res)
       return res
 
