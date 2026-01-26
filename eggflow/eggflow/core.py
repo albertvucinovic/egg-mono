@@ -411,8 +411,9 @@ class Result:
       value: The return value if task succeeded, None otherwise.
       metadata: Additional data like artifacts, timing info, etc.
       error: Error message if task failed, None if successful.
-      terminal: If True, error is terminal and accepted (recover() returned False).
-                This signals that the error should NOT be raised as an exception.
+      terminal: If True, this is a terminal (non-recoverable) error that will
+                auto-propagate through wrapped() calls as a TaskError exception.
+                Terminal errors skip recover() and are never retried.
   """
   value: Any = None
   metadata: Dict[str, Any] = field(default_factory=dict)
@@ -666,7 +667,9 @@ class FlowExecutor:
       try:
         return await self._handle_task_uncached(task)
       except Exception as e:
-        return Result(error=str(e))
+        # Preserve terminal flag for uncached tasks too
+        is_terminal = _is_terminal_exception(e)
+        return Result(error=str(e), terminal=is_terminal)
 
     key = task.get_cache_key()
     row = self.store.get(key)
