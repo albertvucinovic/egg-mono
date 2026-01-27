@@ -29,7 +29,36 @@ def _is_terminal_exception(e: Exception) -> bool:
     pass
 
   # Check for terminal attribute on exception
-  return getattr(e, 'terminal', False)
+  if getattr(e, 'terminal', False):
+    return True
+
+  # Check for context limit errors in the error message (e.g., HTTP 400 from LLM API)
+  error_msg = str(e).lower()
+  if _is_context_limit_error_message(error_msg):
+    return True
+
+  return False
+
+
+def _is_context_limit_error_message(error_msg: str) -> bool:
+  """Check if an error message indicates a context limit exceeded error.
+
+  These are terminal errors that should not be retried.
+  """
+  error_msg = error_msg.lower()
+  # HTTP 400 from OpenAI/compatible APIs
+  if 'maximum context length' in error_msg:
+    return True
+  # Our internal runner error
+  if 'context limit exceeded' in error_msg:
+    return True
+  # API "context size" errors
+  if 'context size' in error_msg and 'exceed' in error_msg:
+    return True
+  # Token limit errors
+  if 'token limit' in error_msg and ('exceed' in error_msg or 'maximum' in error_msg):
+    return True
+  return False
 
 @dataclass
 class Task:
@@ -149,8 +178,16 @@ class TaskError(Exception):
 
   @property
   def is_terminal(self) -> bool:
-    """Check if this is a terminal error that should not be retried."""
-    return self.terminal
+    """Check if this is a terminal error that should not be retried.
+
+    Returns True if:
+    - terminal=True was explicitly set, or
+    - The error message contains context limit exceeded patterns (fallback check)
+    """
+    if self.terminal:
+      return True
+    # Fallback: check error message for known terminal patterns
+    return _is_context_limit_error_message(str(self))
 
 class NoCache:
   """Wrapper to skip caching for a specific task execution."""
@@ -318,7 +355,12 @@ class keyed_scope:
     return self
 
   def __exit__(self, *args):
-    _key_scope.reset(self.token)
+    try:
+      _key_scope.reset(self.token)
+    except ValueError:
+      # Token was created in a different context (can happen when generators
+      # are cancelled and garbage collected across async context boundaries)
+      pass
 
   async def __aenter__(self):
     return self.__enter__()
@@ -427,8 +469,18 @@ class Result:
 
   @property
   def is_terminal(self) -> bool:
-    """Check if this is a terminal error that auto-propagates through wrapped()."""
-    return self.error is not None and self.terminal
+    """Check if this is a terminal error that auto-propagates through wrapped().
+
+    Returns True if:
+    - terminal=True was explicitly set, or
+    - The error message contains context limit exceeded patterns (fallback check)
+    """
+    if self.error is None:
+      return False
+    if self.terminal:
+      return True
+    # Fallback: check error message for known terminal patterns
+    return _is_context_limit_error_message(self.error)
 
   @property
   def artifacts(self) -> Dict[str, str]:
@@ -581,7 +633,8 @@ class FlowExecutor:
       except TaskError:
         raise
       except Exception as e:
-        raise TaskError(str(e), Result(error=str(e)))
+        is_terminal = _is_terminal_exception(e)
+        raise TaskError(str(e), Result(error=str(e), terminal=is_terminal), terminal=is_terminal)
 
     if inspect.iscoroutine(flow):
       # Raw coroutine - execute without caching, return value
@@ -589,10 +642,39 @@ class FlowExecutor:
         value = await flow
         return value
       except Exception as e:
-        raise TaskError(str(e), Result(error=str(e)))
+        is_terminal = _is_terminal_exception(e)
+        raise TaskError(str(e), Result(error=str(e), terminal=is_terminal), terminal=is_terminal)
 
     if isinstance(flow, list):
-      return await asyncio.gather(*(self._run_item(item) for item in flow))
+      # Use return_exceptions=True so one failing task doesn't crash the batch
+      # This is critical for batch operations where one failure shouldn't abort all tasks
+      results = await asyncio.gather(*(self._run_item(item) for item in flow), return_exceptions=True)
+      # Process results: handle terminal errors gracefully, re-raise others
+      processed = []
+      non_terminal_error = None
+      for r in results:
+        if isinstance(r, TaskError):
+          if r.is_terminal:
+            # Terminal error - include the result value if available, otherwise None
+            # The caller should check for None or failed results
+            processed.append(r.result.value if r.result and r.result.value is not None else None)
+          else:
+            # Non-terminal error - save it to raise after collecting all results
+            # (so we don't lose progress on other tasks)
+            if non_terminal_error is None:
+              non_terminal_error = r
+            processed.append(None)
+        elif isinstance(r, Exception):
+          # Other exceptions - save to raise after collecting all results
+          if non_terminal_error is None:
+            non_terminal_error = TaskError(str(r), Result(error=str(r)))
+          processed.append(None)
+        else:
+          processed.append(r)
+      # If there was a non-terminal error, raise it (but results are still partially available)
+      if non_terminal_error is not None:
+        raise non_terminal_error
+      return processed
 
     # Regular task - execute and return value (raise on error)
     result = await self._execute_task(flow)
@@ -642,14 +724,16 @@ class FlowExecutor:
       except TaskError:
         raise
       except Exception as e:
-        raise TaskError(str(e), Result(error=str(e)))
+        is_terminal = _is_terminal_exception(e)
+        raise TaskError(str(e), Result(error=str(e), terminal=is_terminal), terminal=is_terminal)
 
     if inspect.iscoroutine(item):
       try:
         value = await item
         return value
       except Exception as e:
-        raise TaskError(str(e), Result(error=str(e)))
+        is_terminal = _is_terminal_exception(e)
+        raise TaskError(str(e), Result(error=str(e), terminal=is_terminal), terminal=is_terminal)
 
     # Regular task - return value, raise on error
     result = await self._execute_task(item)
@@ -746,7 +830,18 @@ class FlowExecutor:
             res = await self.run(yielded)
             yielded = gen.send(res)
           except TaskError as e:
-            yielded = gen.throw(type(e), e, e.__traceback__)
+            # Throw the exception into the generator so it can handle it
+            # If the generator doesn't catch it or re-raises, the exception
+            # will propagate out of gen.throw() and be caught below
+            try:
+              yielded = gen.throw(type(e), e, e.__traceback__)
+            except StopIteration as stop:
+              # Generator caught the exception and returned a value
+              final_val = stop.value
+              break
+            except TaskError:
+              # Generator re-raised the TaskError - propagate it
+              raise
       except StopIteration as e:
         final_val = e.value
     elif inspect.iscoroutine(gen):
@@ -770,7 +865,16 @@ class FlowExecutor:
             res = await self.run(yielded)
             yielded = gen.send(res)
           except TaskError as e:
-            yielded = gen.throw(type(e), e, e.__traceback__)
+            # Throw the exception into the generator so it can handle it
+            try:
+              yielded = gen.throw(type(e), e, e.__traceback__)
+            except StopIteration as stop:
+              # Generator caught the exception and returned a value
+              final_val = stop.value
+              break
+            except TaskError:
+              # Generator re-raised the TaskError - propagate it
+              raise
       except StopIteration as e:
         final_val = e.value
     elif inspect.iscoroutine(gen):
