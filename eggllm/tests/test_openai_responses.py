@@ -117,6 +117,86 @@ class TestMessageConversion:
         assert instructions == "Part 1.\nPart 2."
 
 
+class TestToolConversion:
+    """Tests for converting Chat Completions tools to Responses API format."""
+
+    def setup_method(self):
+        self.adapter = OpenAIResponsesAdapter()
+
+    def test_function_tool_conversion(self):
+        """Chat Completions function tools should be flattened."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"}
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }
+        ]
+        converted = self.adapter._convert_tools_to_responses_format(tools)
+
+        assert len(converted) == 1
+        assert converted[0]["type"] == "function"
+        assert converted[0]["name"] == "get_weather"
+        assert converted[0]["description"] == "Get current weather"
+        assert "parameters" in converted[0]
+        assert "function" not in converted[0]  # Should be flattened
+
+    def test_builtin_tool_passthrough(self):
+        """Built-in tools like web_search_preview should pass through unchanged."""
+        tools = [
+            {"type": "web_search_preview"},
+            {"type": "code_interpreter"},
+        ]
+        converted = self.adapter._convert_tools_to_responses_format(tools)
+
+        assert converted == tools
+
+    def test_mixed_tools(self):
+        """Mix of function tools and built-in tools."""
+        tools = [
+            {"type": "web_search_preview"},
+            {
+                "type": "function",
+                "function": {
+                    "name": "calculate",
+                    "description": "Do math",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }
+        ]
+        converted = self.adapter._convert_tools_to_responses_format(tools)
+
+        assert len(converted) == 2
+        assert converted[0] == {"type": "web_search_preview"}
+        assert converted[1]["name"] == "calculate"
+        assert "function" not in converted[1]
+
+    def test_strict_parameter_preserved(self):
+        """The 'strict' parameter should be preserved."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "strict_func",
+                    "parameters": {"type": "object"},
+                    "strict": True
+                }
+            }
+        ]
+        converted = self.adapter._convert_tools_to_responses_format(tools)
+
+        assert converted[0]["strict"] is True
+
+
 class TestPayloadBuilding:
     """Tests for building Responses API payload."""
 
@@ -152,8 +232,8 @@ class TestPayloadBuilding:
         assert payload["instructions"] == "Be helpful."
         assert len(payload["input"]) == 1
 
-    def test_payload_with_tools(self):
-        """Tools should be passed through."""
+    def test_payload_with_builtin_tools(self):
+        """Built-in tools should be passed through unchanged."""
         original = {
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -163,6 +243,29 @@ class TestPayloadBuilding:
         payload = self.adapter._build_payload(original)
 
         assert payload["tools"] == [{"type": "web_search_preview"}]
+
+    def test_payload_with_function_tools_converted(self):
+        """Function tools should be converted to Responses API format."""
+        original = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {"type": "object"}
+                    }
+                }
+            ],
+            "stream": True,
+        }
+        payload = self.adapter._build_payload(original)
+
+        assert len(payload["tools"]) == 1
+        assert payload["tools"][0]["name"] == "get_weather"
+        assert "function" not in payload["tools"][0]
 
     def test_max_tokens_becomes_max_output_tokens(self):
         """max_tokens should be converted to max_output_tokens."""

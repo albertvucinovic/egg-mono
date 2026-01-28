@@ -106,6 +106,44 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             return ""
         return str(content)
 
+    def _convert_tools_to_responses_format(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert Chat Completions tools format to Responses API format.
+
+        Chat Completions format:
+            {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+
+        Responses API format:
+            {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+
+        Built-in tools like web_search_preview are passed through unchanged.
+        """
+        converted = []
+        for tool in tools:
+            tool_type = tool.get("type", "function")
+
+            # Built-in Responses API tools (web_search_preview, code_interpreter, etc.)
+            # don't have a "function" nested object - pass through as-is
+            if "function" not in tool:
+                converted.append(tool)
+                continue
+
+            # Convert Chat Completions function format to Responses API format
+            func = tool["function"]
+            converted_tool: Dict[str, Any] = {
+                "type": tool_type,
+                "name": func.get("name", ""),
+            }
+            if "description" in func:
+                converted_tool["description"] = func["description"]
+            if "parameters" in func:
+                converted_tool["parameters"] = func["parameters"]
+            if "strict" in func:
+                converted_tool["strict"] = func["strict"]
+
+            converted.append(converted_tool)
+
+        return converted
+
     def _build_payload(self, original_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Build Responses API payload from Chat Completions format payload."""
         messages = original_payload.get("messages", [])
@@ -120,9 +158,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if instructions:
             payload["instructions"] = instructions
 
-        # Pass through tools if provided
+        # Convert and include tools if provided
         if "tools" in original_payload:
-            payload["tools"] = original_payload["tools"]
+            payload["tools"] = self._convert_tools_to_responses_format(original_payload["tools"])
 
         # Pass through other common parameters
         for key in ("temperature", "top_p", "max_output_tokens", "max_tokens", "reasoning"):
