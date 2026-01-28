@@ -66,16 +66,17 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 tool_calls = msg.get("tool_calls") or []
                 if tool_calls:
                     # Add function_call items for each tool call
+                    # IMPORTANT: Responses API uses 'call_id' field, not 'id'!
                     for tc in tool_calls:
                         func = tc.get("function") or {}
-                        # id is required by the Responses API
+                        # Chat Completions uses 'id', Responses API needs 'call_id'
                         tc_id = tc.get("id") or ""
                         if not tc_id:
                             # Skip tool calls without valid id
                             continue
                         fc_item: Dict[str, Any] = {
                             "type": "function_call",
-                            "id": tc_id,
+                            "call_id": tc_id,  # Must be 'call_id' for Responses API!
                             "name": func.get("name") or "",
                             "arguments": func.get("arguments") or "{}",
                         }

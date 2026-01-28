@@ -46,7 +46,7 @@ class TestMessageConversion:
         assert input_items[2] == {"type": "message", "role": "user", "content": "Thanks!"}
 
     def test_tool_calls_conversion(self):
-        """Assistant tool calls should become function_call items."""
+        """Assistant tool calls should become function_call items with call_id."""
         messages = [
             {"role": "user", "content": "Search for cats"},
             {
@@ -68,7 +68,9 @@ class TestMessageConversion:
 
         assert len(input_items) == 2
         assert input_items[1]["type"] == "function_call"
-        assert input_items[1]["id"] == "call_123"
+        # IMPORTANT: Responses API uses 'call_id', not 'id'!
+        assert input_items[1]["call_id"] == "call_123"
+        assert "id" not in input_items[1]  # Should NOT have 'id' field
         assert input_items[1]["name"] == "web_search"
         assert input_items[1]["arguments"] == '{"query": "cats"}'
 
@@ -180,6 +182,47 @@ class TestMessageConversion:
 
         # Should only have the user message, function call skipped
         assert len(input_items) == 1
+
+    def test_parallel_tool_calls_conversion(self):
+        """Multiple parallel tool calls should each become function_call items."""
+        messages = [
+            {"role": "user", "content": "Get weather in NYC and LA"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city": "NYC"}'}
+                    },
+                    {
+                        "id": "call_def",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city": "LA"}'}
+                    }
+                ]
+            },
+            # Both tool results
+            {"role": "tool", "tool_call_id": "call_abc", "content": "72°F sunny"},
+            {"role": "tool", "tool_call_id": "call_def", "content": "68°F cloudy"},
+        ]
+        instructions, input_items = self.adapter._convert_messages_to_input(messages)
+
+        # Should have: user message, 2 function_calls, 2 function_call_outputs
+        assert len(input_items) == 5
+
+        # Check function_call items use call_id
+        assert input_items[1]["type"] == "function_call"
+        assert input_items[1]["call_id"] == "call_abc"
+        assert input_items[2]["type"] == "function_call"
+        assert input_items[2]["call_id"] == "call_def"
+
+        # Check function_call_output items
+        assert input_items[3]["type"] == "function_call_output"
+        assert input_items[3]["call_id"] == "call_abc"
+        assert input_items[4]["type"] == "function_call_output"
+        assert input_items[4]["call_id"] == "call_def"
 
 
 class TestToolConversion:
