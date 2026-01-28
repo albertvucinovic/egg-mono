@@ -63,16 +63,21 @@ class OpenAIResponsesAdapter(ProviderAdapter):
 
             elif role == "assistant":
                 # Assistant messages with tool_calls need special handling
-                tool_calls = msg.get("tool_calls", [])
+                tool_calls = msg.get("tool_calls") or []
                 if tool_calls:
                     # Add function_call items for each tool call
                     for tc in tool_calls:
-                        func = tc.get("function", {})
+                        func = tc.get("function") or {}
+                        # id is required by the Responses API
+                        tc_id = tc.get("id") or ""
+                        if not tc_id:
+                            # Skip tool calls without valid id
+                            continue
                         fc_item: Dict[str, Any] = {
                             "type": "function_call",
-                            "id": tc.get("id", ""),
-                            "name": func.get("name", ""),
-                            "arguments": func.get("arguments", "{}"),
+                            "id": tc_id,
+                            "name": func.get("name") or "",
+                            "arguments": func.get("arguments") or "{}",
                         }
                         input_items.append(fc_item)
                 else:
@@ -86,9 +91,15 @@ class OpenAIResponsesAdapter(ProviderAdapter):
 
             elif role == "tool":
                 # Tool results become function_call_output
+                # call_id is required by the Responses API - must be non-empty
+                call_id = msg.get("tool_call_id") or ""
+                if not call_id:
+                    # Skip tool results without a valid call_id - this shouldn't
+                    # happen in normal operation but prevents API errors
+                    continue
                 output_item: Dict[str, Any] = {
                     "type": "function_call_output",
-                    "call_id": msg.get("tool_call_id", ""),
+                    "call_id": call_id,
                     "output": content if isinstance(content, str) else json.dumps(content),
                 }
                 input_items.append(output_item)
@@ -214,8 +225,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 item = event_data.get("item", {})
                 current_output_index = event_data.get("output_index", current_output_index + 1)
                 if item.get("type") == "function_call":
+                    # The API may use 'id' or 'call_id' for the function call identifier
+                    call_id = item.get("id") or item.get("call_id") or ""
                     tool_calls_buf[current_output_index] = {
-                        "id": item.get("id", ""),
+                        "id": call_id,
                         "type": "function",
                         "function": {
                             "name": item.get("name", ""),
@@ -352,8 +365,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         item = event_data.get("item", {})
                         current_output_index = event_data.get("output_index", current_output_index + 1)
                         if item.get("type") == "function_call":
+                            # The API may use 'id' or 'call_id' for the function call identifier
+                            call_id = item.get("id") or item.get("call_id") or ""
                             tool_calls_buf[current_output_index] = {
-                                "id": item.get("id", ""),
+                                "id": call_id,
                                 "type": "function",
                                 "function": {
                                     "name": item.get("name", ""),

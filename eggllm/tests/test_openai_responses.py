@@ -116,6 +116,71 @@ class TestMessageConversion:
 
         assert instructions == "Part 1.\nPart 2."
 
+    def test_tool_result_with_none_call_id_skipped(self):
+        """Tool results with None tool_call_id should be skipped."""
+        messages = [
+            {"role": "user", "content": "Test"},
+            {
+                "role": "tool",
+                "tool_call_id": None,  # None value
+                "content": "result"
+            },
+        ]
+        instructions, input_items = self.adapter._convert_messages_to_input(messages)
+
+        # Should only have the user message, tool result skipped
+        assert len(input_items) == 1
+        assert input_items[0]["role"] == "user"
+
+    def test_tool_result_with_empty_call_id_skipped(self):
+        """Tool results with empty tool_call_id should be skipped."""
+        messages = [
+            {"role": "user", "content": "Test"},
+            {
+                "role": "tool",
+                "tool_call_id": "",  # Empty string
+                "content": "result"
+            },
+        ]
+        instructions, input_items = self.adapter._convert_messages_to_input(messages)
+
+        # Should only have the user message, tool result skipped
+        assert len(input_items) == 1
+
+    def test_tool_result_with_missing_call_id_skipped(self):
+        """Tool results without tool_call_id key should be skipped."""
+        messages = [
+            {"role": "user", "content": "Test"},
+            {
+                "role": "tool",
+                # No tool_call_id key at all
+                "content": "result"
+            },
+        ]
+        instructions, input_items = self.adapter._convert_messages_to_input(messages)
+
+        assert len(input_items) == 1
+
+    def test_function_call_with_none_id_skipped(self):
+        """Function calls with None id should be skipped."""
+        messages = [
+            {"role": "user", "content": "Test"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": None,  # None value
+                        "type": "function",
+                        "function": {"name": "test", "arguments": "{}"}
+                    }
+                ]
+            },
+        ]
+        instructions, input_items = self.adapter._convert_messages_to_input(messages)
+
+        # Should only have the user message, function call skipped
+        assert len(input_items) == 1
+
 
 class TestToolConversion:
     """Tests for converting Chat Completions tools to Responses API format."""
