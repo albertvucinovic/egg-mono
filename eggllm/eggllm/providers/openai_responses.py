@@ -225,8 +225,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 item = event_data.get("item", {})
                 current_output_index = event_data.get("output_index", current_output_index + 1)
                 if item.get("type") == "function_call":
-                    # The API may use 'id' or 'call_id' for the function call identifier
-                    call_id = item.get("id") or item.get("call_id") or ""
+                    # IMPORTANT: Responses API has two IDs:
+                    # - 'id': internal ID like "fc_xxx"
+                    # - 'call_id': the ID used to match with function_call_output like "call_xxx"
+                    # We MUST use 'call_id' for tool result matching to work!
+                    call_id = item.get("call_id") or item.get("id") or ""
                     tool_calls_buf[current_output_index] = {
                         "id": call_id,
                         "type": "function",
@@ -275,6 +278,33 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     # Use final arguments if provided
                     if arguments:
                         tool_calls_buf[output_index]["function"]["arguments"] = arguments
+                    yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
+
+            elif event_type == "response.output_item.done":
+                # Complete output item - contains final state with call_id
+                item = event_data.get("item", {})
+                output_index = event_data.get("output_index", current_output_index)
+                if item.get("type") == "function_call":
+                    # Update with final call_id and arguments from completed item
+                    call_id = item.get("call_id") or item.get("id") or ""
+                    if output_index in tool_calls_buf:
+                        # Update existing entry with final values
+                        if call_id:
+                            tool_calls_buf[output_index]["id"] = call_id
+                        if item.get("name"):
+                            tool_calls_buf[output_index]["function"]["name"] = item["name"]
+                        if item.get("arguments"):
+                            tool_calls_buf[output_index]["function"]["arguments"] = item["arguments"]
+                    else:
+                        # Create new entry from completed item
+                        tool_calls_buf[output_index] = {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": item.get("arguments", "")
+                            }
+                        }
                     yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
 
             elif event_type in ("response.completed", "response.done"):
@@ -365,8 +395,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         item = event_data.get("item", {})
                         current_output_index = event_data.get("output_index", current_output_index + 1)
                         if item.get("type") == "function_call":
-                            # The API may use 'id' or 'call_id' for the function call identifier
-                            call_id = item.get("id") or item.get("call_id") or ""
+                            # IMPORTANT: Responses API has two IDs:
+                            # - 'id': internal ID like "fc_xxx"
+                            # - 'call_id': the ID used to match with function_call_output like "call_xxx"
+                            # We MUST use 'call_id' for tool result matching to work!
+                            call_id = item.get("call_id") or item.get("id") or ""
                             tool_calls_buf[current_output_index] = {
                                 "id": call_id,
                                 "type": "function",
@@ -410,6 +443,33 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         if output_index in tool_calls_buf:
                             if arguments:
                                 tool_calls_buf[output_index]["function"]["arguments"] = arguments
+                            yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
+
+                    elif event_type == "response.output_item.done":
+                        # Complete output item - contains final state with call_id
+                        item = event_data.get("item", {})
+                        output_index = event_data.get("output_index", current_output_index)
+                        if item.get("type") == "function_call":
+                            # Update with final call_id and arguments from completed item
+                            call_id = item.get("call_id") or item.get("id") or ""
+                            if output_index in tool_calls_buf:
+                                # Update existing entry with final values
+                                if call_id:
+                                    tool_calls_buf[output_index]["id"] = call_id
+                                if item.get("name"):
+                                    tool_calls_buf[output_index]["function"]["name"] = item["name"]
+                                if item.get("arguments"):
+                                    tool_calls_buf[output_index]["function"]["arguments"] = item["arguments"]
+                            else:
+                                # Create new entry from completed item
+                                tool_calls_buf[output_index] = {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": item.get("name", ""),
+                                        "arguments": item.get("arguments", "")
+                                    }
+                                }
                             yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
 
                     elif event_type in ("response.completed", "response.done"):
