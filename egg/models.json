@@ -4,6 +4,21 @@
       "api_base": "https://api.openai.com/v1/chat/completions",
       "api_key_env": "OPENAI_API_KEY",
       "models": {
+        "GPT 5.2 Codex high": {
+          "model_name": "gpt-5.2-codex",
+          "max_tokens": 400000,
+          "api_type": "responses",
+          "api_base": "https://api.openai.com/v1/responses",
+          "parameters": {
+            "reasoning_effort": "high",
+            "prompt_cache_retention": "24h"
+          },
+          "cost": {
+            "input_tokens": 0.175,
+            "cached_input": 0.0175,
+            "output_tokens": 1.4
+          }
+        },
         "GPT 5.2 high": {
           "model_name": "gpt-5.2",
           "max_tokens": 400000,
