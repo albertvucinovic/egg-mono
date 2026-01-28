@@ -143,7 +143,7 @@ class TestCmdEnableTool:
 class TestCmdToolsStatus:
     """Tests for cmd_toolsStatus()."""
 
-    def test_displays_tools_config(self, egg_app, monkeypatch):
+    def test_displays_tools_config(self, egg_app, monkeypatch, capsys):
         """Should display current tools configuration."""
         class MockConfig:
             llm_tools_enabled = True
@@ -154,7 +154,11 @@ class TestCmdToolsStatus:
 
         egg_app.cmd_toolsStatus("")
 
-        assert any("enabled" in msg.lower() or "python" in msg.lower() for msg in egg_app._system_log)
+        # The main output goes to console, system log gets a brief message
+        captured = capsys.readouterr()
+        assert "python" in captured.out.lower() or "DISABLED" in captured.out
+        # System log gets a brief confirmation
+        assert any("tools status" in msg.lower() for msg in egg_app._system_log)
 
 
 class TestCmdToolsSecrets:

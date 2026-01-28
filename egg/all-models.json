@@ -1,17 +1,17 @@
 {
   "providers": {
     "openai": {
-      "fetched_at": 1765505366,
+      "fetched_at": 1769586942,
       "source": "https://api.openai.com/v1/models",
       "models": [
         "gpt-4-0613",
         "gpt-4",
         "gpt-3.5-turbo",
-        "gpt-5.2-chat-latest",
-        "gpt-5.2-2025-12-11",
-        "gpt-5.2",
-        "gpt-5.2-pro-2025-12-11",
-        "gpt-5.2-pro",
+        "gpt-5.2-codex",
+        "gpt-4o-mini-tts-2025-12-15",
+        "gpt-realtime-mini-2025-12-15",
+        "gpt-audio-mini-2025-12-15",
+        "chatgpt-image-latest",
         "davinci-002",
         "babbage-002",
         "gpt-3.5-turbo-instruct",
@@ -110,6 +110,15 @@
         "gpt-5.1-codex",
         "gpt-5.1-codex-mini",
         "gpt-5.1-codex-max",
+        "gpt-image-1.5",
+        "gpt-5.2-2025-12-11",
+        "gpt-5.2",
+        "gpt-5.2-pro-2025-12-11",
+        "gpt-5.2-pro",
+        "gpt-5.2-chat-latest",
+        "gpt-4o-mini-transcribe-2025-12-15",
+        "gpt-4o-mini-transcribe-2025-03-20",
+        "gpt-4o-mini-tts-2025-03-20",
         "gpt-3.5-turbo-16k",
         "tts-1",
         "whisper-1",
@@ -611,12 +620,13 @@
       ]
     },
     "zai": {
-      "fetched_at": 1766381695,
+      "fetched_at": 1769246376,
       "source": "https://api.z.ai/api/paas/v4/models",
       "models": [
         "glm-4.5",
         "glm-4.5-air",
-        "glm-4.6"
+        "glm-4.6",
+        "glm-4.7"
       ]
     },
     "google": {
@@ -768,6 +778,22 @@
         "voxtral-mini-transcribe-2507",
         "voxtral-mini-2507",
         "voxtral-mini-latest"
+      ]
+    },
+    "x.ai": {
+      "fetched_at": 1769268865,
+      "source": "https://api.x.ai/v1/models",
+      "models": [
+        "grok-2-vision-1212",
+        "grok-3",
+        "grok-3-mini",
+        "grok-4-0709",
+        "grok-4-1-fast-non-reasoning",
+        "grok-4-1-fast-reasoning",
+        "grok-4-fast-non-reasoning",
+        "grok-4-fast-reasoning",
+        "grok-code-fast-1",
+        "grok-2-image-1212"
       ]
     }
   }
