@@ -277,6 +277,8 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
       or explicit) so the duplicate uses the same working directory.
     - **Sandbox settings**: Copies the ``sandbox.config`` event (inherited
       or explicit) so the duplicate runs in the same sandbox environment.
+    - **Active model**: Copies the ``model.switch`` event (inherited or
+      explicit) so the duplicate uses the same LLM model.
 
     The duplicate is intended as a "checkpoint" copy: a frozen backup
     of the conversation that can be inspected or resumed independently
@@ -374,6 +376,18 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
             payload=sandbox_payload,
         )
 
+    # Copy the active model configuration from the source thread or its
+    # ancestors. This preserves model.switch events so the duplicate uses
+    # the same model (including any concrete_model_info for ephemeral models).
+    model_payload = _nearest_model_switch_payload(db, source_thread_id)
+    if model_payload:
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=new_tid,
+            type_='model.switch',
+            payload=model_payload,
+        )
+
     # Build a fresh snapshot for the duplicate so UIs and runners see a
     # consistent cached view of messages.
     create_snapshot(db, new_tid)
@@ -388,7 +402,7 @@ def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: s
     at a specific point in the conversation.
 
     The duplicate also preserves the source thread's effective configuration
-    (working directory and sandbox settings), same as duplicate_thread.
+    (working directory, sandbox settings, and active model), same as duplicate_thread.
 
     Args:
         db: ThreadsDB instance
@@ -497,6 +511,18 @@ def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: s
             thread_id=new_tid,
             type_='sandbox.config',
             payload=sandbox_payload,
+        )
+
+    # Copy the active model configuration from the source thread or its
+    # ancestors. This preserves model.switch events so the duplicate uses
+    # the same model (including any concrete_model_info for ephemeral models).
+    model_payload = _nearest_model_switch_payload(db, source_thread_id)
+    if model_payload:
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=new_tid,
+            type_='model.switch',
+            payload=model_payload,
         )
 
     create_snapshot(db, new_tid)
@@ -1489,6 +1515,36 @@ def current_thread_model_info(db: ThreadsDB, thread_id: str) -> Optional[Dict[st
             return payload.get('concrete_model_info')
     except Exception:
         pass
+    return None
+
+
+def _nearest_model_switch_payload(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the nearest ancestor's model.switch payload (including self).
+
+    Walks up the parent chain to find the first model.switch event.
+    Used by duplicate_thread to copy the active model configuration.
+
+    Returns:
+        The payload dict if found, or None if no model switch is configured.
+    """
+    tid: Optional[str] = thread_id
+    seen: set[str] = set()
+    while tid and tid not in seen:
+        seen.add(tid)
+        row = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='model.switch' ORDER BY event_seq DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        if row:
+            try:
+                payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and payload:
+                return payload
+        # Walk up to parent
+        p_row = db.conn.execute("SELECT parent_id FROM children WHERE child_id=?", (tid,)).fetchone()
+        tid = p_row[0] if p_row else None
     return None
 
 

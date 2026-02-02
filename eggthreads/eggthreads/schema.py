@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS children(
 CREATE INDEX IF NOT EXISTS children_waiting_idx ON children(waiting_until);
 CREATE INDEX IF NOT EXISTS children_parent_wait_idx ON children(parent_id, waiting_until);
 CREATE INDEX IF NOT EXISTS children_parent ON children(parent_id);
+-- Index on child_id for fast "is this a root thread" lookups (NOT IN subqueries)
+CREATE INDEX IF NOT EXISTS children_child ON children(child_id);
 
 CREATE TABLE IF NOT EXISTS events(
   event_seq INTEGER PRIMARY KEY AUTOINCREMENT,  -- canonical order
@@ -47,6 +49,8 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE INDEX IF NOT EXISTS events_thread_seq ON events(thread_id, event_seq);
 CREATE INDEX IF NOT EXISTS events_msg_seq    ON events(msg_id, event_seq);
 CREATE INDEX IF NOT EXISTS events_invoke_seq ON events(invoke_id, event_seq);
+-- Composite index for type-filtered queries (e.g., SELECT ... WHERE thread_id=? AND type='msg.edit')
+CREATE INDEX IF NOT EXISTS events_thread_type ON events(thread_id, type);
 -- Dedupe stream deltas by (invoke_id, chunk_seq)
 CREATE UNIQUE INDEX IF NOT EXISTS events_delta_unique ON events(invoke_id, chunk_seq) WHERE type='stream.delta';
 -- Optional: fast timestamp scans
