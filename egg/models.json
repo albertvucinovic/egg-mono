@@ -471,6 +471,15 @@
           }
         }
       }
+    },
+    "stepfun": {
+      "api_base": "https://api.stepfun.ai/v1/chat/completions",
+      "api_key_env": "STEPFUN_API_KEY",
+      "models": {
+        "StepFun 3.5 Flash": {
+          "model_name": "step-3.5-flash"
+        }
+      }
     }
   },
   "default_model": "Qwen3 Coder Local"
