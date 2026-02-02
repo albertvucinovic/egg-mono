@@ -600,8 +600,11 @@ class ThreadRunner:
                         # Assistant messages with tool_calls may also
                         # carry thinking. We forward tool_calls plus any
                         # allowed thinking under the configured key.
+                        # NOTE: content field is required by some providers
+                        # (e.g., StepFun) even when empty.
                         msg_out: Dict[str, Any] = {
                             'role': 'assistant',
+                            'content': content,
                             'tool_calls': m.get('tool_calls'),
                         }
                         if thinking_text is not None:
