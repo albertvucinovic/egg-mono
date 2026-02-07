@@ -57,6 +57,9 @@ def load_models_config(models_path: str | Path) -> Tuple[Dict[str, Dict[str, Any
                 "api_base": api_base,
                 "api_key_env": api_key_env,
             }
+            auth_type = prov_obj.get("auth_type")
+            if auth_type:
+                providers_config[prov_name]["auth_type"] = auth_type
             if parameters:
                 providers_config[prov_name]["parameters"] = parameters
 

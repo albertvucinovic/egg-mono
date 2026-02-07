@@ -201,13 +201,28 @@ class LLMClient:
             base_url = self._rewrite_url_for_api_type(base_url, api_type)
 
         headers = {"Content-Type": "application/json"}
-        api_key_env = pc.get("api_key_env")
-        if api_key_env:
-            api_key = os.environ.get(api_key_env)
-            if not api_key:
-                raise EnvironmentError(f"Env var '{api_key_env}' is not set for '{provider_name}'")
-            headers["Authorization"] = f"Bearer {api_key}"
+        auth_type = pc.get("auth_type", "api_key")
+        if auth_type == "chatgpt_oauth":
+            from .auth import TokenStore
+            store = TokenStore()
+            if not store.is_logged_in():
+                raise EnvironmentError("Not logged in to ChatGPT. Run /login first.")
+            token = store.get_access_token()  # auto-refreshes
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            api_key_env = pc.get("api_key_env")
+            if api_key_env:
+                api_key = os.environ.get(api_key_env)
+                if not api_key:
+                    raise EnvironmentError(f"Env var '{api_key_env}' is not set for '{provider_name}'")
+                headers["Authorization"] = f"Bearer {api_key}"
         return provider_name, base_url, headers
+
+    def auth_status(self) -> dict:
+        """Return the current ChatGPT OAuth login state."""
+        from .auth import TokenStore
+        store = TokenStore()
+        return store.get_status()
 
     def _get_adapter_for_current_model(self) -> ProviderAdapter:
         """Get the appropriate adapter based on current model's api_type config."""
