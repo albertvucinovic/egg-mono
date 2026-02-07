@@ -21,47 +21,6 @@ DEFAULT_AUTH_PATH = Path.home() / ".eggllm" / "auth.json"
 REFRESH_MARGIN_SECONDS = 300
 
 
-def _obtain_api_key(id_token: str) -> Optional[str]:
-    """Exchange the id_token for an API-scoped access token via RFC 8693 token exchange.
-
-    The initial access_token from PKCE only has identity scopes; this exchange
-    produces a token with api.responses.write scope needed for API calls.
-    """
-    try:
-        resp = requests.post(
-            TOKEN_URL,
-            data=urlencode({
-                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                "client_id": CLIENT_ID,
-                "requested_token": "openai-api-key",
-                "subject_token": id_token,
-                "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
-            }),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=30,
-        )
-        if not resp.ok:
-            import sys
-            print(
-                f"[eggllm] API key exchange failed (HTTP {resp.status_code}): {resp.text}",
-                file=sys.stderr,
-            )
-            return None
-        body = resp.json()
-        api_key = body.get("access_token")
-        if not api_key:
-            import sys
-            print(
-                f"[eggllm] API key exchange: no access_token in response. Keys: {list(body.keys())}",
-                file=sys.stderr,
-            )
-        return api_key
-    except Exception as exc:
-        import sys
-        print(f"[eggllm] API key exchange error: {exc}", file=sys.stderr)
-        return None
-
-
 def _extract_account_id_from_jwt(id_token: str) -> Optional[str]:
     """Parse the id_token JWT and extract chatgpt_account_id from the
     'https://api.openai.com/auth' claim."""
@@ -155,7 +114,6 @@ class TokenStore:
         refresh_token: str,
         id_token: Optional[str] = None,
         expires_at: Optional[int] = None,
-        api_key: Optional[str] = None,
     ) -> None:
         """Persist a new set of tokens to disk."""
         account_id = _extract_account_id_from_jwt(id_token) if id_token else None
@@ -168,7 +126,6 @@ class TokenStore:
                 "expires_at": expires_at or 0,
             },
             "chatgpt_account_id": account_id,
-            "openai_api_key": api_key,
             "last_refresh": int(time.time()),
         }
         self._save(data)
@@ -208,9 +165,7 @@ class TokenStore:
         expires_in = body.get("expires_in", 3600)
         new_expires_at = int(time.time()) + int(expires_in)
 
-        # Re-obtain the API-scoped key since the id_token changed
-        api_key = _obtain_api_key(new_id) if new_id else None
-        self.store_tokens(new_access, new_refresh, new_id, new_expires_at, api_key=api_key)
+        self.store_tokens(new_access, new_refresh, new_id, new_expires_at)
 
     def get_status(self) -> Dict[str, Any]:
         """Return a summary of the current auth state."""
