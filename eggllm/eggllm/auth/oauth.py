@@ -16,7 +16,7 @@ from .token_store import TokenStore, CLIENT_ID
 
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
-SCOPES = "openid profile email offline_access api.responses.write"
+SCOPES = "openid profile email offline_access"
 CALLBACK_TIMEOUT = 120  # seconds to wait for the browser callback
 
 
