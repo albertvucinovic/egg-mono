@@ -82,6 +82,7 @@ async def get_autocomplete(
                 '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
                 '/setContextLimit', '/setThreadPriority',
                 '/togglePanel', '/toggleBorders', '/theme',
+                '/login', '/logout', '/authStatus',
                 '/cost', '/schedulers', '/enterMode', '/paste', '/quit',
             ]
             pref_lower = prefix.lower()
