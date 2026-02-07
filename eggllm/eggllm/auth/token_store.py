@@ -40,10 +40,25 @@ def _obtain_api_key(id_token: str) -> Optional[str]:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=30,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            import sys
+            print(
+                f"[eggllm] API key exchange failed (HTTP {resp.status_code}): {resp.text}",
+                file=sys.stderr,
+            )
+            return None
         body = resp.json()
-        return body.get("access_token")
-    except Exception:
+        api_key = body.get("access_token")
+        if not api_key:
+            import sys
+            print(
+                f"[eggllm] API key exchange: no access_token in response. Keys: {list(body.keys())}",
+                file=sys.stderr,
+            )
+        return api_key
+    except Exception as exc:
+        import sys
+        print(f"[eggllm] API key exchange error: {exc}", file=sys.stderr)
         return None
 
 
