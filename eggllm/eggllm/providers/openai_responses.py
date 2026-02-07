@@ -175,7 +175,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             payload["tools"] = self._convert_tools_to_responses_format(original_payload["tools"])
 
         # Pass through other common parameters
-        for key in ("temperature", "top_p", "max_output_tokens", "max_tokens", "reasoning"):
+        for key in ("temperature", "top_p", "max_output_tokens", "max_tokens", "reasoning", "store"):
             if key in original_payload:
                 # Responses API uses max_output_tokens, not max_tokens
                 if key == "max_tokens":
