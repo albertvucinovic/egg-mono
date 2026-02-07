@@ -21,6 +21,32 @@ DEFAULT_AUTH_PATH = Path.home() / ".eggllm" / "auth.json"
 REFRESH_MARGIN_SECONDS = 300
 
 
+def _obtain_api_key(id_token: str) -> Optional[str]:
+    """Exchange the id_token for an API-scoped access token via RFC 8693 token exchange.
+
+    The initial access_token from PKCE only has identity scopes; this exchange
+    produces a token with api.responses.write scope needed for API calls.
+    """
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            data=urlencode({
+                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                "client_id": CLIENT_ID,
+                "requested_token": "openai-api-key",
+                "subject_token": id_token,
+                "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+            }),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        return body.get("access_token")
+    except Exception:
+        return None
+
+
 def _extract_account_id_from_jwt(id_token: str) -> Optional[str]:
     """Parse the id_token JWT and extract chatgpt_account_id from the
     'https://api.openai.com/auth' claim."""
@@ -90,7 +116,10 @@ class TokenStore:
         return bool(tokens.get("access_token") and tokens.get("refresh_token"))
 
     def get_access_token(self) -> str:
-        """Return a valid access token, refreshing automatically if needed.
+        """Return a valid access token for API calls, refreshing automatically if needed.
+
+        Prefers the API-scoped key (from RFC 8693 token exchange) over the
+        identity access_token, since the latter lacks api.responses.write scope.
 
         Raises EnvironmentError if not logged in or refresh fails.
         """
@@ -98,7 +127,8 @@ class TokenStore:
             raise EnvironmentError("Not logged in to ChatGPT. Run /login first.")
         self.refresh_if_needed()
         data = self._load()
-        return data["tokens"]["access_token"]
+        # Prefer the API-scoped key; fall back to the identity access_token
+        return data.get("openai_api_key") or data["tokens"]["access_token"]
 
     def get_account_id(self) -> Optional[str]:
         """Return the chatgpt_account_id extracted from the id_token JWT."""
@@ -111,6 +141,7 @@ class TokenStore:
         refresh_token: str,
         id_token: Optional[str] = None,
         expires_at: Optional[int] = None,
+        api_key: Optional[str] = None,
     ) -> None:
         """Persist a new set of tokens to disk."""
         account_id = _extract_account_id_from_jwt(id_token) if id_token else None
@@ -123,6 +154,7 @@ class TokenStore:
                 "expires_at": expires_at or 0,
             },
             "chatgpt_account_id": account_id,
+            "openai_api_key": api_key,
             "last_refresh": int(time.time()),
         }
         self._save(data)
@@ -162,7 +194,9 @@ class TokenStore:
         expires_in = body.get("expires_in", 3600)
         new_expires_at = int(time.time()) + int(expires_in)
 
-        self.store_tokens(new_access, new_refresh, new_id, new_expires_at)
+        # Re-obtain the API-scoped key since the id_token changed
+        api_key = _obtain_api_key(new_id) if new_id else None
+        self.store_tokens(new_access, new_refresh, new_id, new_expires_at, api_key=api_key)
 
     def get_status(self) -> Dict[str, Any]:
         """Return a summary of the current auth state."""

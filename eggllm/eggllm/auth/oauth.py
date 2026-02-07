@@ -12,7 +12,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
 
-from .token_store import TokenStore, CLIENT_ID
+from .token_store import TokenStore, CLIENT_ID, _obtain_api_key
 
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -76,11 +76,12 @@ def _generate_pkce_pair() -> tuple[str, str]:
 def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
     """Run the full OAuth PKCE login flow via the user's browser.
 
-    1. Start a localhost HTTP server on an OS-assigned port.
+    1. Start a localhost HTTP server on port 1455.
     2. Open the OpenAI authorization URL in the default browser.
     3. Wait for the redirect callback with the authorization code.
-    4. Exchange the code for tokens.
-    5. Persist tokens via TokenStore.
+    4. Exchange the code for tokens (Stage 1).
+    5. Exchange the id_token for an API key (Stage 2 — RFC 8693).
+    6. Persist tokens via TokenStore.
 
     Returns the TokenStore instance with fresh tokens.
     """
@@ -141,7 +142,7 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
 
     auth_code = _CallbackHandler.auth_code
 
-    # 5. Exchange code for tokens (form-urlencoded, matching Codex CLI)
+    # 5. Stage 1: Exchange code for tokens (form-urlencoded, matching Codex CLI)
     resp = requests.post(
         TOKEN_URL,
         data=urlencode({
@@ -163,7 +164,10 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
     expires_in = body.get("expires_in", 3600)
     expires_at = int(time.time()) + int(expires_in)
 
-    store.store_tokens(access_token, refresh_token, id_token, expires_at)
+    # 6. Stage 2: Exchange id_token for an API-scoped key (RFC 8693)
+    api_key = _obtain_api_key(id_token)
+
+    store.store_tokens(access_token, refresh_token, id_token, expires_at, api_key=api_key)
     return store
 
 
