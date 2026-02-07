@@ -131,10 +131,10 @@ class TokenStore:
         return bool(tokens.get("access_token") and tokens.get("refresh_token"))
 
     def get_access_token(self) -> str:
-        """Return a valid access token for API calls, refreshing automatically if needed.
+        """Return a valid access token, refreshing automatically if needed.
 
-        Prefers the API-scoped key (from RFC 8693 token exchange) over the
-        identity access_token, since the latter lacks api.responses.write scope.
+        The PKCE access_token is used directly for ChatGPT backend API calls
+        (chatgpt.com/backend-api). No RFC 8693 exchange is needed.
 
         Raises EnvironmentError if not logged in or refresh fails.
         """
@@ -142,8 +142,7 @@ class TokenStore:
             raise EnvironmentError("Not logged in to ChatGPT. Run /login first.")
         self.refresh_if_needed()
         data = self._load()
-        # Prefer the API-scoped key; fall back to the identity access_token
-        return data.get("openai_api_key") or data["tokens"]["access_token"]
+        return data["tokens"]["access_token"]
 
     def get_account_id(self) -> Optional[str]:
         """Return the chatgpt_account_id extracted from the id_token JWT."""

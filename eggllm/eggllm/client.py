@@ -212,6 +212,7 @@ class LLMClient:
             account_id = store.get_account_id()
             if account_id:
                 headers["ChatGPT-Account-Id"] = account_id
+            headers["OpenAI-Beta"] = "responses=experimental"
         else:
             api_key_env = pc.get("api_key_env")
             if api_key_env:
