@@ -213,6 +213,9 @@ class LLMClient:
             if account_id:
                 headers["ChatGPT-Account-Id"] = account_id
             headers["OpenAI-Beta"] = "responses=experimental"
+            headers["originator"] = "eggllm"
+            import platform
+            headers["User-Agent"] = f"eggllm/1.0 ({platform.system()} {platform.release()}; {platform.machine()})"
         else:
             api_key_env = pc.get("api_key_env")
             if api_key_env:
