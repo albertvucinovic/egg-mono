@@ -92,8 +92,9 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
     _CallbackHandler.error = None
     _CallbackHandler.received_state = None
 
-    # 1. Spin up a localhost callback server
-    server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
+    # 1. Spin up a localhost callback server on port 1455 (registered with
+    #    OpenAI's OAuth client app_EMoamEEZ73f0CkXaXp7hrann)
+    server = HTTPServer(("127.0.0.1", 1455), _CallbackHandler)
     port = server.server_address[1]
     redirect_uri = f"http://localhost:{port}/auth/callback"
 
