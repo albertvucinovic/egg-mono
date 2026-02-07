@@ -97,6 +97,55 @@
         }
       }
     },
+    "openai-pro": {
+      "api_base": "https://api.openai.com/v1/responses",
+      "auth_type": "chatgpt_oauth",
+      "models": {
+        "ChatGPT Codex": {
+          "model_name": "codex-mini",
+          "max_tokens": 400000,
+          "api_type": "responses",
+          "cost": {
+            "input_tokens": 0,
+            "cached_input": 0,
+            "output_tokens": 0
+          }
+        },
+        "ChatGPT o3": {
+          "model_name": "o3",
+          "max_tokens": 200000,
+          "api_type": "responses",
+          "cost": {
+            "input_tokens": 0,
+            "cached_input": 0,
+            "output_tokens": 0
+          }
+        },
+        "ChatGPT o4-mini": {
+          "model_name": "o4-mini",
+          "max_tokens": 200000,
+          "api_type": "responses",
+          "cost": {
+            "input_tokens": 0,
+            "cached_input": 0,
+            "output_tokens": 0
+          }
+        },
+        "ChatGPT GPT-5.2": {
+          "model_name": "gpt-5.2",
+          "max_tokens": 400000,
+          "api_type": "responses",
+          "parameters": {
+            "reasoning_effort": "high"
+          },
+          "cost": {
+            "input_tokens": 0,
+            "cached_input": 0,
+            "output_tokens": 0
+          }
+        }
+      }
+    },
     "anthropic": {
       "api_base": "https://api.anthropic.com/v1/messages",
       "api_key_env": "ANTHROPIC_API_KEY",
