@@ -100,6 +100,9 @@
     "openai-pro": {
       "api_base": "https://chatgpt.com/backend-api/codex/responses",
       "auth_type": "chatgpt_oauth",
+      "parameters": {
+        "store": false
+      },
       "models": {
         "ChatGPT Codex": {
           "model_name": "codex-mini",
