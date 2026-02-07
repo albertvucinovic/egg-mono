@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     # Initialize LLM client
     # Look for models.json in CWD first, then fall back to egg directory
     cwd_models = Path.cwd() / "models.json"
-    egg_models = PROJECT_ROOT / "egg" / "models.json"
+    egg_models = PROJECT_ROOT / "eggconfig" / "models.json"
     models_path = cwd_models if cwd_models.exists() else egg_models
     try:
         from eggllm import LLMClient

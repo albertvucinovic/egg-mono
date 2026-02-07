@@ -13,8 +13,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "eggllm"))
 from eggthreads import ThreadsDB, SubtreeScheduler
 
 # Paths
-MODELS_PATH = PROJECT_ROOT / "egg" / "models.json"
-ALL_MODELS_PATH = PROJECT_ROOT / "egg" / "all-models.json"
+EGGCONFIG_DIR = PROJECT_ROOT / "eggconfig"
+MODELS_PATH = EGGCONFIG_DIR / "models.json"
+ALL_MODELS_PATH = EGGCONFIG_DIR / "all-models.json"
 DB_PATH = Path(".egg/threads.sqlite")
 
 # Global state - initialized in lifespan

@@ -143,7 +143,7 @@ async def create_thread(request: CreateThreadRequest):
 
     model_key = request.model_key or core.default_model_key or next(iter(core.models_config.keys()), None)
 
-    models_path = str(core.PROJECT_ROOT / "egg" / "models.json")
+    models_path = str(core.MODELS_PATH)
 
     if request.parent_id:
         # Create child thread

@@ -27,6 +27,7 @@ from models import CommandResponse
 import core
 from core import (
     PROJECT_ROOT,
+    MODELS_PATH,
     get_thread_root_id,
     ensure_scheduler_for,
 )
@@ -34,7 +35,7 @@ from core import (
 
 async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
     """Handle /spawn or /spawnChildThread command."""
-    models_path = str(PROJECT_ROOT / "egg" / "models.json")
+    models_path = str(MODELS_PATH)
 
     # Get parent's model
     parent_model = current_thread_model(core.db, thread_id)
@@ -61,7 +62,7 @@ async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
 
 async def cmd_new_thread(name: str) -> CommandResponse:
     """Handle /newThread command."""
-    models_path = str(PROJECT_ROOT / "egg" / "models.json")
+    models_path = str(MODELS_PATH)
     model_key = core.default_model_key or next(iter(core.models_config.keys()), None)
 
     thread_id = create_root_thread(
@@ -421,7 +422,7 @@ async def cmd_spawn_auto_approved(thread_id: str, context: str) -> CommandRespon
     """Handle /spawnAutoApprovedChildThread command."""
     from eggthreads import approve_tool_calls_for_thread
 
-    models_path = str(PROJECT_ROOT / "egg" / "models.json")
+    models_path = str(MODELS_PATH)
 
     # Get parent's model
     parent_model = current_thread_model(core.db, thread_id)
