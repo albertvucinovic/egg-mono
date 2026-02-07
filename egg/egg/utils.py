@@ -11,8 +11,9 @@ from typing import Any, Dict, List, Optional
 ROOT = Path(__file__).resolve().parent
 
 # Path constants
-MODELS_PATH = ROOT / 'models.json'
-ALL_MODELS_PATH = ROOT / 'all-models.json'
+EGGCONFIG_DIR = ROOT.parent / 'eggconfig'
+MODELS_PATH = EGGCONFIG_DIR / 'models.json'
+ALL_MODELS_PATH = EGGCONFIG_DIR / 'all-models.json'
 SYSTEM_PROMPT_PATH = ROOT / 'systemPrompt'
 
 COMMANDS_TEXT = """
