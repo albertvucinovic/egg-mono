@@ -101,25 +101,34 @@ async def get_autocomplete(
 
             if cmd == '/model':
                 # Model name suggestions - replace entire argument (supports multi-word search)
+                # Also searches provider:model format so "openai-pro" finds its models
                 # Strip trailing whitespace from arg for matching
                 arg_stripped = arg.rstrip()
                 if arg_stripped:
                     # Split into words and check if all words are found in the model name
+                    # or in the provider:model string
                     words = arg_stripped.lower().split()
                     for key in sorted(core.models_config.keys()):
-                        if all(w in key.lower() for w in words):
+                        cfg = core.models_config.get(key, {})
+                        provider = cfg.get("provider", "")
+                        searchable = f"{provider}:{key}".lower()
+                        if all(w in key.lower() or w in searchable for w in words):
                             suggestions.append({
                                 "display": key,
                                 "insert": key,
                                 "replace": len(arg_stripped),  # Replace entire argument
+                                "meta": provider,
                             })
                 else:
                     # No argument - show all models
                     for key in sorted(core.models_config.keys()):
+                        cfg = core.models_config.get(key, {})
+                        provider = cfg.get("provider", "")
                         suggestions.append({
                             "display": key,
                             "insert": key,
                             "replace": 0,
+                            "meta": provider,
                         })
 
             elif cmd in ('/thread', '/deleteThread', '/waitForThreads'):
