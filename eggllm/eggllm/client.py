@@ -209,6 +209,9 @@ class LLMClient:
                 raise EnvironmentError("Not logged in to ChatGPT. Run /login first.")
             token = store.get_access_token()  # auto-refreshes
             headers["Authorization"] = f"Bearer {token}"
+            account_id = store.get_account_id()
+            if account_id:
+                headers["ChatGPT-Account-Id"] = account_id
         else:
             api_key_env = pc.get("api_key_env")
             if api_key_env:

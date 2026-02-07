@@ -1,9 +1,9 @@
 """OAuth 2.0 PKCE browser login flow for OpenAI ChatGPT subscriptions."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import secrets
-import threading
 import time
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -14,7 +14,7 @@ import requests
 
 from .token_store import TokenStore, CLIENT_ID
 
-AUTH_URL = "https://auth.openai.com/authorize"
+AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 SCOPES = "openid profile email offline_access"
 CALLBACK_TIMEOUT = 120  # seconds to wait for the browser callback
@@ -66,8 +66,7 @@ def _generate_pkce_pair() -> tuple[str, str]:
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     # base64url-encode without padding
     code_challenge = (
-        __import__("base64")
-        .urlsafe_b64encode(digest)
+        base64.urlsafe_b64encode(digest)
         .rstrip(b"=")
         .decode("ascii")
     )
@@ -100,16 +99,19 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
 
     # 2. PKCE + state
     code_verifier, code_challenge = _generate_pkce_pair()
-    state = secrets.token_urlsafe(16)
+    state = secrets.token_urlsafe(32)
 
     auth_params = urlencode({
         "response_type": "code",
         "client_id": CLIENT_ID,
         "redirect_uri": redirect_uri,
+        "scope": SCOPES,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
-        "scope": SCOPES,
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow": "true",
         "state": state,
+        "originator": "eggllm",
     })
     auth_full_url = f"{AUTH_URL}?{auth_params}"
 
@@ -138,17 +140,17 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
 
     auth_code = _CallbackHandler.auth_code
 
-    # 5. Exchange code for tokens
+    # 5. Exchange code for tokens (form-urlencoded, matching Codex CLI)
     resp = requests.post(
         TOKEN_URL,
-        json={
+        data=urlencode({
             "grant_type": "authorization_code",
             "client_id": CLIENT_ID,
             "code": auth_code,
             "redirect_uri": redirect_uri,
             "code_verifier": code_verifier,
-        },
-        headers={"Content-Type": "application/json"},
+        }),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=30,
     )
     resp.raise_for_status()

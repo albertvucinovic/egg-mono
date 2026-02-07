@@ -1,10 +1,12 @@
 """OAuth token persistence and automatic refresh for OpenAI ChatGPT subscriptions."""
 from __future__ import annotations
 
+import base64
 import json
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any
+from urllib.parse import urlencode
 
 import requests
 
@@ -19,6 +21,26 @@ DEFAULT_AUTH_PATH = Path.home() / ".eggllm" / "auth.json"
 REFRESH_MARGIN_SECONDS = 300
 
 
+def _extract_account_id_from_jwt(id_token: str) -> Optional[str]:
+    """Parse the id_token JWT and extract chatgpt_account_id from the
+    'https://api.openai.com/auth' claim."""
+    try:
+        parts = id_token.split(".")
+        if len(parts) < 2:
+            return None
+        # JWT payload is base64url-encoded; add padding as needed
+        payload_b64 = parts[1]
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        claims = json.loads(payload_bytes)
+        auth_claim = claims.get("https://api.openai.com/auth", {})
+        return auth_claim.get("chatgpt_account_id")
+    except Exception:
+        return None
+
+
 class TokenStore:
     """Manages OAuth token storage, retrieval, and automatic refresh.
 
@@ -31,6 +53,7 @@ class TokenStore:
                 "id_token": "...",
                 "expires_at": 1234567890
             },
+            "chatgpt_account_id": "...",
             "last_refresh": 1234567890
         }
     """
@@ -77,6 +100,11 @@ class TokenStore:
         data = self._load()
         return data["tokens"]["access_token"]
 
+    def get_account_id(self) -> Optional[str]:
+        """Return the chatgpt_account_id extracted from the id_token JWT."""
+        data = self._load()
+        return data.get("chatgpt_account_id")
+
     def store_tokens(
         self,
         access_token: str,
@@ -85,6 +113,7 @@ class TokenStore:
         expires_at: Optional[int] = None,
     ) -> None:
         """Persist a new set of tokens to disk."""
+        account_id = _extract_account_id_from_jwt(id_token) if id_token else None
         data = {
             "auth_mode": "chatgpt",
             "tokens": {
@@ -93,6 +122,7 @@ class TokenStore:
                 "id_token": id_token or "",
                 "expires_at": expires_at or 0,
             },
+            "chatgpt_account_id": account_id,
             "last_refresh": int(time.time()),
         }
         self._save(data)
@@ -113,12 +143,12 @@ class TokenStore:
         try:
             resp = requests.post(
                 TOKEN_URL,
-                json={
+                data=urlencode({
                     "grant_type": "refresh_token",
                     "client_id": CLIENT_ID,
                     "refresh_token": refresh_token,
-                },
-                headers={"Content-Type": "application/json"},
+                }),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=30,
             )
             resp.raise_for_status()
