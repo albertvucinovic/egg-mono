@@ -84,6 +84,7 @@ from commands import (
     SandboxCommandsMixin,
     DisplayCommandsMixin,
     UtilityCommandsMixin,
+    AuthCommandsMixin,
 )
 
 # eggllm (optional, for /model and catalogs)
@@ -99,6 +100,7 @@ class EggDisplayApp(
     SandboxCommandsMixin,
     DisplayCommandsMixin,
     UtilityCommandsMixin,
+    AuthCommandsMixin,
     FormattingMixin,
     PanelsMixin,
     ApprovalMixin,

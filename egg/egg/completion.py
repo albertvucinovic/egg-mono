@@ -572,6 +572,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/togglePanel',
                 '/toggleBorders',
                 '/redraw',
+                '/login', '/logout', '/authStatus',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
 

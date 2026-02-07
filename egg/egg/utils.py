@@ -34,6 +34,8 @@ Commands:
     /togglePanel (chat|children|system)
     /toggleBorders
     /redraw
+  Auth (ChatGPT OAuth):
+    /login, /logout, /authStatus
   Other:
     /enterMode <send|newline>, /cost, /paste, /quit
     /setContextLimit [limit]
