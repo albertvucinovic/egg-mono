@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import secrets
+import sys
 import time
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
@@ -16,6 +18,7 @@ from .token_store import TokenStore, CLIENT_ID, _obtain_api_key
 
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
+PLATFORM_URL = "https://platform.openai.com"
 SCOPES = "openid profile email offline_access"
 CALLBACK_TIMEOUT = 120  # seconds to wait for the browser callback
 
@@ -55,6 +58,47 @@ class _CallbackHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         # Silence request logging
         pass
+
+
+def _parse_jwt_claims(token: str) -> Dict[str, Any]:
+    """Decode a JWT payload without verifying the signature."""
+    try:
+        payload_b64 = token.split(".")[1]
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+        return json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return {}
+
+
+def _check_platform_onboarding(id_token: str) -> Optional[str]:
+    """Check if the user needs to complete OpenAI platform onboarding.
+
+    Returns the setup URL if onboarding is needed, None otherwise.
+    """
+    claims = _parse_jwt_claims(id_token)
+    auth = claims.get("https://api.openai.com/auth", {})
+
+    # If organization_id already exists as a flat claim, no setup needed
+    if auth.get("organization_id"):
+        return None
+
+    completed = auth.get("completed_platform_onboarding", False)
+    if completed:
+        return None
+
+    # Extract org info for the setup redirect
+    orgs = auth.get("organizations", [])
+    org_id = orgs[0]["id"] if orgs else ""
+    project_id = auth.get("project_id", "")
+    plan_type = auth.get("chatgpt_plan_type", "")
+
+    setup_url = (
+        f"{PLATFORM_URL}/org-setup?"
+        + urlencode({"p": plan_type, "t": id_token, "with_org": org_id, "project_id": project_id})
+    )
+    return setup_url
 
 
 def _generate_pkce_pair() -> tuple[str, str]:
@@ -166,6 +210,17 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
 
     # 6. Stage 2: Exchange id_token for an API-scoped key (RFC 8693)
     api_key = _obtain_api_key(id_token)
+
+    if not api_key:
+        # Check if platform onboarding is needed
+        setup_url = _check_platform_onboarding(id_token)
+        if setup_url:
+            print(
+                "[eggllm] First-time setup required: opening OpenAI platform setup in your browser.\n"
+                "[eggllm] Complete the setup, then run /login again.",
+                file=sys.stderr,
+            )
+            webbrowser.open(setup_url)
 
     store.store_tokens(access_token, refresh_token, id_token, expires_at, api_key=api_key)
     return store
