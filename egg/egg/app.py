@@ -284,7 +284,7 @@ class EggDisplayApp(
         # Pending approval prompt state (execution/output approvals)
         self._pending_prompt: Dict[str, Any] = {}
         # Last time we refreshed the children tree panel (sec since epoch)
-        self._last_children_refresh: float = 0.0
+        self._last_children_refresh: float = time.time()
 
         # Log any global sandbox availability warning.
         try:

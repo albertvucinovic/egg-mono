@@ -82,7 +82,7 @@ class FormattingMixin:
 
         # Compute real-time status for all threads in one batch (efficient)
         all_tids = [t.thread_id for t in all_threads]
-        status_map = get_thread_statuses_bulk(self.db, all_tids)
+        status_map = get_thread_statuses_bulk(self.db, all_tids, skip_runnability=True)
 
         # Get scheduled threads from self
         scheduled_set: Set[str] = set()
