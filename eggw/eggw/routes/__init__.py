@@ -8,6 +8,7 @@ from .stats import router as stats_router
 from .events import router as events_router
 from .commands import router as commands_router
 from .health import router as health_router
+from .auth import router as auth_router
 
 __all__ = [
     "threads_router",
@@ -19,4 +20,5 @@ __all__ = [
     "events_router",
     "commands_router",
     "health_router",
+    "auth_router",
 ]

@@ -99,6 +99,7 @@ from routes import (
     events_router,
     commands_router,
     health_router,
+    auth_router,
 )
 from autocomplete import autocomplete_router
 
@@ -111,6 +112,7 @@ app.include_router(stats_router)
 app.include_router(events_router)
 app.include_router(commands_router)
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(autocomplete_router)
 
 

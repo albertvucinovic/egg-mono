@@ -27,6 +27,7 @@ from .sandbox import (
     cmd_set_sandbox_configuration,
     cmd_get_sandboxing_config,
 )
+from .auth import cmd_login, cmd_logout, cmd_auth_status
 from .utility import (
     cmd_toggle_auto_approval,
     cmd_cost,
@@ -91,6 +92,10 @@ __all__ = [
     "get_auto_approval_status",
     "cmd_setContextLimit",
     "cmd_setThreadPriority",
+    # Auth commands
+    "cmd_login",
+    "cmd_logout",
+    "cmd_auth_status",
     # Dispatcher
     "dispatch_command",
 ]
@@ -191,6 +196,13 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_setContextLimit(thread_id, command_arg)
         elif command_name == "setThreadPriority":
             return await cmd_setThreadPriority(thread_id, command_arg)
+        # Auth commands
+        elif command_name == "login":
+            return await cmd_login(thread_id)
+        elif command_name == "logout":
+            return await cmd_logout(thread_id)
+        elif command_name == "authStatus":
+            return await cmd_auth_status(thread_id)
         else:
             return CommandResponse(
                 success=False,

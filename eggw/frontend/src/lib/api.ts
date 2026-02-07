@@ -249,3 +249,29 @@ export async function setSandboxEnabled(threadId: string, enabled: boolean): Pro
   if (!res.ok) throw new Error("Failed to set sandbox");
   return res.json();
 }
+
+// --- Auth (ChatGPT OAuth) ---
+
+export interface AuthStatus {
+  logged_in: boolean;
+  expires_at: number | null;
+  auth_mode: string | null;
+}
+
+export async function fetchAuthStatus(): Promise<AuthStatus> {
+  const res = await fetch(`${API_BASE}/api/auth/status`);
+  if (!res.ok) throw new Error("Failed to fetch auth status");
+  return res.json();
+}
+
+export async function triggerLogin(): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/api/auth/login`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to trigger login");
+  return res.json();
+}
+
+export async function triggerLogout(): Promise<{ success: boolean; message: string }> {
+  const res = await fetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to trigger logout");
+  return res.json();
+}
