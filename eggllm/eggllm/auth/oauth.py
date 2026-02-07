@@ -31,7 +31,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
 
-        if parsed.path != "/callback":
+        if parsed.path != "/auth/callback":
             self.send_response(404)
             self.end_headers()
             return
@@ -95,7 +95,7 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
     # 1. Spin up a localhost callback server
     server = HTTPServer(("127.0.0.1", 0), _CallbackHandler)
     port = server.server_address[1]
-    redirect_uri = f"http://localhost:{port}/callback"
+    redirect_uri = f"http://localhost:{port}/auth/callback"
 
     # 2. PKCE + state
     code_verifier, code_challenge = _generate_pkce_pair()
@@ -111,7 +111,7 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
         "state": state,
-        "originator": "eggllm",
+        "originator": "codex_cli_rs",
     })
     auth_full_url = f"{AUTH_URL}?{auth_params}"
 
