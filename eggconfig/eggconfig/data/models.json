@@ -134,7 +134,7 @@
         "store": false
       },
       "models": {
-        "ChatGPT GPT-5.3 Codex high": {
+        "Pro: GPT-5.3 Codex high": {
           "model_name": "gpt-5.3-codex",
           "max_tokens": 400000,
           "api_type": "responses",
@@ -147,7 +147,7 @@
             "output_tokens": 0
           }
         },
-        "ChatGPT GPT-5.3 Codex xhigh": {
+        "Pro: GPT-5.3 Codex xhigh": {
           "model_name": "gpt-5.3-codex",
           "max_tokens": 400000,
           "api_type": "responses",
@@ -160,7 +160,7 @@
             "output_tokens": 0
           }
         },
-        "ChatGPT Codex": {
+        "Pro: Codex": {
           "model_name": "codex-mini",
           "max_tokens": 400000,
           "api_type": "responses",
@@ -170,7 +170,7 @@
             "output_tokens": 0
           }
         },
-        "ChatGPT o3": {
+        "Pro: o3": {
           "model_name": "o3",
           "max_tokens": 200000,
           "api_type": "responses",
@@ -180,7 +180,7 @@
             "output_tokens": 0
           }
         },
-        "ChatGPT o4-mini": {
+        "Pro: o4-mini": {
           "model_name": "o4-mini",
           "max_tokens": 200000,
           "api_type": "responses",
@@ -190,7 +190,7 @@
             "output_tokens": 0
           }
         },
-        "ChatGPT GPT-5.2": {
+        "Pro: GPT-5.2": {
           "model_name": "gpt-5.2",
           "max_tokens": 400000,
           "api_type": "responses",
