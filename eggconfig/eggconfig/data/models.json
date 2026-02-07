@@ -128,8 +128,11 @@
       }
     },
     "openai-pro": {
-      "api_base": "https://api.openai.com/v1/responses",
+      "api_base": "https://chatgpt.com/backend-api/codex/responses",
       "auth_type": "chatgpt_oauth",
+      "parameters": {
+        "store": false
+      },
       "models": {
         "ChatGPT GPT-5.3 Codex high": {
           "model_name": "gpt-5.3-codex",
