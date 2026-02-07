@@ -1176,7 +1176,7 @@ def get_thread_status(db: ThreadsDB, thread_id: str) -> str:
     return "idle"
 
 
-def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str]) -> dict[str, str]:
+def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str], *, skip_runnability: bool = False) -> dict[str, str]:
     """Return real-time status for multiple threads efficiently.
 
     Uses batch queries where possible:
@@ -1184,6 +1184,10 @@ def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str]) -> dict[str, 
     2. Checks runnability for remaining threads (uses internal cache)
 
     Status values: "streaming", "runnable", "idle"
+
+    Args:
+        skip_runnability: When True, skip the expensive per-thread
+            runnability checks.  Streaming detection still works.
     """
     from datetime import datetime
     from .tool_state import discover_runner_actionable_cached
@@ -1208,13 +1212,14 @@ def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str]) -> dict[str, 
 
     # Check runnability for non-streaming threads
     # discover_runner_actionable_cached has internal caching per thread
-    for tid in thread_ids:
-        if tid not in streaming_set:
-            try:
-                if discover_runner_actionable_cached(db, tid) is not None:
-                    result[tid] = "runnable"
-            except Exception:
-                pass
+    if not skip_runnability:
+        for tid in thread_ids:
+            if tid not in streaming_set:
+                try:
+                    if discover_runner_actionable_cached(db, tid) is not None:
+                        result[tid] = "runnable"
+                except Exception:
+                    pass
 
     return result
 
@@ -1230,7 +1235,11 @@ def list_threads(db: ThreadsDB) -> list[ThreadRow]:
         List of ThreadRow objects for all threads.
     """
     try:
-        cur = db.conn.execute("SELECT * FROM threads")
+        cur = db.conn.execute(
+            "SELECT thread_id, name, short_recap, status, NULL AS snapshot_json, "
+            "snapshot_last_event_seq, initial_model_key, depth, created_at "
+            "FROM threads"
+        )
         rows = [ThreadRow(**dict(r)) for r in cur.fetchall()]
     except Exception:
         rows = []
