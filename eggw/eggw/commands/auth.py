@@ -1,8 +1,8 @@
 """Authentication commands for eggw backend (/login, /logout, /authStatus)."""
 from __future__ import annotations
 
-from models import CommandResponse
-import core
+from ..models import CommandResponse
+from .. import core
 
 
 async def cmd_login(thread_id: str) -> CommandResponse:

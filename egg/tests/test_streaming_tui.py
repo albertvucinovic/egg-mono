@@ -2,16 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
-import sys
 import uuid
-
-
-# Pytest may chdir into a temporary directory; ensure we can still import the
-# project module (egg.py).
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _uid() -> str:
@@ -33,10 +24,10 @@ def _make_app(tmp_path, monkeypatch):
     # (Egg only needs aiohttp for HTTP cancellation during real streaming.)
     monkeypatch.setenv("EGG_FORCE_WITHOUT_AIOHTTP", "1")
 
-    import egg
+    from egg.app import EggDisplayApp
 
-    monkeypatch.setattr(egg.EggDisplayApp, "start_scheduler", lambda self, root_tid: None)
-    return egg.EggDisplayApp()
+    monkeypatch.setattr(EggDisplayApp, "start_scheduler", lambda self, root_tid: None)
+    return EggDisplayApp()
 
 
 def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypatch):
@@ -90,7 +81,7 @@ def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypat
 
     # Patch EventWatcher so watch_thread runs the "preload" logic once and
     # then terminates (otherwise it polls forever).
-    import streaming
+    import egg.streaming as streaming_mod
 
     class _NoOpWatcher:
         def __init__(self, *args, **kwargs):
@@ -100,7 +91,7 @@ def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypat
             if False:  # pragma: no cover - keep it an async generator
                 yield []
 
-    monkeypatch.setattr(streaming, "EventWatcher", _NoOpWatcher)
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _NoOpWatcher)
 
     asyncio.run(app.watch_thread(tid))
 

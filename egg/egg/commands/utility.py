@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from utils import COMMANDS_TEXT, read_clipboard
+from ..utils import COMMANDS_TEXT, read_clipboard
 from eggthreads import set_context_limit, get_context_limit, get_thread_scheduling, set_thread_scheduling, UNSET, parse_args
 
 

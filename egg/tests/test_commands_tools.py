@@ -2,15 +2,8 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class TestCmdToggleAutoApproval:
@@ -22,7 +15,7 @@ class TestCmdToggleAutoApproval:
         def mock_approve(db, tid, decision, reason=None, tool_call_id=None):
             approved.append(decision)
         # Mock at commands.tools level since it's imported there
-        import commands.tools as tools_mod
+        import egg.commands.tools as tools_mod
         monkeypatch.setattr(tools_mod, "approve_tool_calls_for_thread", mock_approve)
 
         egg_app.cmd_toggleAutoApproval("")
@@ -31,7 +24,7 @@ class TestCmdToggleAutoApproval:
 
     def test_logs_status_change(self, egg_app, monkeypatch):
         """Should log the status change."""
-        import commands.tools as tools_mod
+        import egg.commands.tools as tools_mod
         monkeypatch.setattr(tools_mod, "approve_tool_calls_for_thread", lambda *a, **k: None)
 
         egg_app.cmd_toggleAutoApproval("")
@@ -229,7 +222,7 @@ class TestEnqueueBashTool:
         def mock_append(db, tid, role, content, extra=None):
             messages.append((role, content, extra))
             return "msg_id"
-        monkeypatch.setattr("commands.tools.append_message", mock_append)
+        monkeypatch.setattr("egg.commands.tools.append_message", mock_append)
         monkeypatch.setattr("eggthreads.approve_tool_calls_for_thread", lambda *a, **k: None)
         monkeypatch.setattr("eggthreads.create_snapshot", lambda *a: None)
 
@@ -246,7 +239,7 @@ class TestEnqueueBashTool:
         def mock_approve(db, tid, decision, reason=None, tool_call_id=None):
             approved.append((decision, tool_call_id))
         # Mock at commands.tools level since it's imported there
-        import commands.tools as tools_mod
+        import egg.commands.tools as tools_mod
         monkeypatch.setattr(tools_mod, "approve_tool_calls_for_thread", mock_approve)
         monkeypatch.setattr(tools_mod, "append_message", lambda *a, **k: "msg_id")
         monkeypatch.setattr(tools_mod, "create_snapshot", lambda *a: None)
@@ -262,7 +255,7 @@ class TestEnqueueBashTool:
         def mock_append(db, tid, role, content, extra=None):
             messages.append((role, content, extra))
             return "msg_id"
-        monkeypatch.setattr("commands.tools.append_message", mock_append)
+        monkeypatch.setattr("egg.commands.tools.append_message", mock_append)
         monkeypatch.setattr("eggthreads.approve_tool_calls_for_thread", lambda *a, **k: None)
         monkeypatch.setattr("eggthreads.create_snapshot", lambda *a: None)
 
@@ -272,7 +265,7 @@ class TestEnqueueBashTool:
 
     def test_logs_enqueue_message(self, egg_app, monkeypatch):
         """Should log message about queued command."""
-        monkeypatch.setattr("commands.tools.append_message", lambda *a, **k: "msg_id")
+        monkeypatch.setattr("egg.commands.tools.append_message", lambda *a, **k: "msg_id")
         monkeypatch.setattr("eggthreads.approve_tool_calls_for_thread", lambda *a, **k: None)
         monkeypatch.setattr("eggthreads.create_snapshot", lambda *a: None)
 

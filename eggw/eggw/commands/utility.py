@@ -18,9 +18,9 @@ from eggthreads import (
     parse_args,
 )
 
-from models import CommandResponse
-import core
-from core import ensure_scheduler_for
+from ..models import CommandResponse
+from .. import core
+from ..core import ensure_scheduler_for
 
 # Available themes (text-colored variants first, then background variants)
 THEMES = [

@@ -5,8 +5,8 @@ from fastapi import APIRouter, HTTPException
 
 from eggthreads import set_thread_model
 
-from models import ModelInfo, ModelsResponse, SetModelRequest
-import core
+from ..models import ModelInfo, ModelsResponse, SetModelRequest
+from .. import core
 
 router = APIRouter(prefix="/api", tags=["models"])
 

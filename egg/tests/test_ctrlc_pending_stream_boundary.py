@@ -15,16 +15,6 @@ active lease.
 """
 
 import uuid
-import sys
-from pathlib import Path
-
-
-# Ensure we can import sibling libs (eggthreads lives next to the egg repo).
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SIBLING_ROOT = PROJECT_ROOT.parent
-for p in (PROJECT_ROOT, SIBLING_ROOT / 'eggthreads'):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
 
 
 def _uid() -> str:

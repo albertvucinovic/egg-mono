@@ -19,9 +19,9 @@ from eggthreads import (
     thread_state,
 )
 
-from models import ThreadInfo, CreateThreadRequest
-import core
-from core import get_thread_root_id
+from ..models import ThreadInfo, CreateThreadRequest
+from .. import core
+from ..core import get_thread_root_id
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 

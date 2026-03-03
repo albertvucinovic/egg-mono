@@ -16,13 +16,8 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
 
-# Local development: add sibling libraries to sys.path
 import sys as _sys
 import subprocess
-_ROOT = Path(__file__).resolve().parent
-_sys.path.insert(0, str(_ROOT.parent / 'eggthreads'))
-_sys.path.insert(0, str(_ROOT.parent / 'eggllm'))
-_sys.path.insert(0, str(_ROOT.parent / 'eggdisplay'))
 
 # Global flag: allow forcing run without aiohttp (no hard HTTP cancellation)
 _FORCE_WITHOUT_AIOHTTP = '--force-without-aiohttp' in _sys.argv
@@ -56,10 +51,10 @@ from eggthreads.event_watcher import EventWatcher  # type: ignore
 
 # eggdisplay UI components
 from eggdisplay import OutputPanel, InputPanel, HStack, VStack  # type: ignore
-from completion import get_autocomplete_items  # type: ignore
+from .completion import get_autocomplete_items  # type: ignore
 
 # Local mixins and utilities
-from utils import (
+from .utils import (
     MODELS_PATH,
     ALL_MODELS_PATH,
     SYSTEM_PROMPT_PATH,
@@ -72,12 +67,12 @@ from utils import (
     read_clipboard,
     restore_tty,
 )
-from formatting import FormattingMixin
-from panels import PanelsMixin
-from approval import ApprovalMixin
-from streaming import StreamingMixin
-from input import InputMixin
-from commands import (
+from .formatting import FormattingMixin
+from .panels import PanelsMixin
+from .approval import ApprovalMixin
+from .streaming import StreamingMixin
+from .input import InputMixin
+from .commands import (
     ModelCommandsMixin,
     ThreadCommandsMixin,
     ToolCommandsMixin,
@@ -491,5 +486,9 @@ async def run_cli():
     await app.run()
 
 
-if __name__ == '__main__':
+def main():
     asyncio.run(run_cli())
+
+
+if __name__ == '__main__':
+    main()

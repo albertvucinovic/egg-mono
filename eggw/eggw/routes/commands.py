@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from models import CommandRequest, CommandResponse
-import core
-from commands import dispatch_command
+from ..models import CommandRequest, CommandResponse
+from .. import core
+from ..commands import dispatch_command
 
 router = APIRouter(prefix="/api/threads", tags=["commands"])
 

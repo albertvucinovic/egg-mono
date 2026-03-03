@@ -24,9 +24,9 @@ dev = [
   "pdoc3",
 ]
 
-[tool.setuptools]
-packages = ["eggflow"]
-package-dir = {"eggflow" = "."}
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eggflow*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

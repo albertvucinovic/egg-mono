@@ -2,15 +2,8 @@
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class TestUpdatePanels:
@@ -312,7 +305,7 @@ class TestPrintStaticViewCurrent:
         created = []
         def mock_create(db, tid):
             created.append(tid)
-        monkeypatch.setattr("panels.create_snapshot", mock_create)
+        monkeypatch.setattr("egg.panels.create_snapshot", mock_create)
         monkeypatch.setattr(egg_app.db, "current_open", lambda tid: None)
         monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: None)
 

@@ -7,8 +7,8 @@ import re
 
 from prompt_toolkit.completion import Completer, Completion
 
-# Import eggthreads API helpers through the app's sys.path. The CLI already
-# inserts eggthreads on sys.path, so this import should succeed at runtime.
+# Import eggthreads API helpers. The eggthreads package is a declared
+# dependency, so this import should succeed at runtime.
 try:
     from eggthreads import list_threads, list_children_with_meta
 except Exception:

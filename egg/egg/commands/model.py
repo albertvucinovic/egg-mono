@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from eggthreads import create_snapshot, current_thread_model_info
 
-from utils import MODELS_PATH, ALL_MODELS_PATH
+from ..utils import MODELS_PATH, ALL_MODELS_PATH
 
 
 class ModelCommandsMixin:

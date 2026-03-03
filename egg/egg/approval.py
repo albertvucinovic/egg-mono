@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from eggthreads import approve_tool_calls_for_thread, create_snapshot
 
-from utils import shorten_output_preview
+from .utils import shorten_output_preview
 
 
 class ApprovalMixin:

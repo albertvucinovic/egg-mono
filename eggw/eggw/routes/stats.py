@@ -5,8 +5,8 @@ from fastapi import APIRouter, HTTPException
 
 from eggthreads import total_token_stats
 
-from models import ThreadTokenStats
-import core
+from ..models import ThreadTokenStats
+from .. import core
 
 router = APIRouter(prefix="/api/threads", tags=["stats"])
 

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from eggthreads import list_children_with_meta, list_root_threads, list_threads, get_thread_status, get_thread_statuses_bulk
 
-from utils import snapshot_messages
+from .utils import snapshot_messages
 
 
 class FormattingMixin:

@@ -8,17 +8,8 @@ create_child_thread or spawn_agent tools.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-# Ensure we can import sibling libs (eggthreads lives next to the egg repo).
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SIBLING_ROOT = PROJECT_ROOT.parent
-for p in (PROJECT_ROOT, SIBLING_ROOT / 'eggthreads'):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
 
 
 def test_child_thread_inherits_model(tmp_path, monkeypatch):

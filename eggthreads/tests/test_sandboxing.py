@@ -1,22 +1,11 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
-
-def _import_eggthreads(monkeypatch, tmp_path: Path):
-    """Import eggthreads from the monorepo checkout, isolated to tmp_path."""
-
-    monkeypatch.chdir(tmp_path)
-    repo_root = Path(__file__).resolve().parents[1]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    import eggthreads  # noqa: F401
-
-    return sys.modules["eggthreads"]
+import eggthreads as _eggthreads_mod
 
 
 @pytest.mark.skipif(
@@ -24,7 +13,8 @@ def _import_eggthreads(monkeypatch, tmp_path: Path):
     reason="Sandbox-runtime tests disabled via EGG_SKIP_SRT_TESTS=1",
 )
 def test_python_tool_is_sandboxed_and_children_inherit_latest_config(tmp_path, monkeypatch):
-    eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    eggthreads = _eggthreads_mod
 
     # Require srt to be present for this integration-like test.
     if not eggthreads.sandbox.provider_available("srt"):

@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      eggllm: ${{ steps.filter.outputs.eggllm }}
+      eggthreads: ${{ steps.filter.outputs.eggthreads }}
+      eggdisplay: ${{ steps.filter.outputs.eggdisplay }}
+      eggflow: ${{ steps.filter.outputs.eggflow }}
+      egg: ${{ steps.filter.outputs.egg }}
+      eggw: ${{ steps.filter.outputs.eggw }}
+      eggconfig: ${{ steps.filter.outputs.eggconfig }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            eggllm:
+              - 'eggllm/**'
+            eggthreads:
+              - 'eggthreads/**'
+            eggdisplay:
+              - 'eggdisplay/**'
+            eggflow:
+              - 'eggflow/**'
+            egg:
+              - 'egg/**'
+            eggw:
+              - 'eggw/**'
+            eggconfig:
+              - 'eggconfig/**'
+
+  test-eggllm:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.eggllm == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ./eggllm[dev]
+      - run: pytest eggllm/tests -q
+
+  test-eggthreads:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.eggthreads == 'true' || needs.detect-changes.outputs.eggllm == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: |
+          pip install -e ./eggllm
+          pip install -e ./eggthreads[dev]
+      - run: pytest eggthreads/tests -q
+
+  test-eggdisplay:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.eggdisplay == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ./eggdisplay
+      - run: pytest eggdisplay/tests -q
+
+  test-eggflow:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.eggflow == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: |
+          pip install -e ./eggllm
+          pip install -e ./eggconfig
+          pip install -e ./eggthreads
+          pip install -e ./eggflow[dev]
+      - run: pytest eggflow/tests -q
+
+  test-egg:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.egg == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: |
+          pip install -e ./eggllm
+          pip install -e ./eggconfig
+          pip install -e ./eggthreads
+          pip install -e ./eggdisplay
+          pip install -e ./eggflow
+          pip install -e ./egg[dev]
+      - run: pytest egg/tests -q

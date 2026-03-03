@@ -4,27 +4,19 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 import pytest
 
-
-def _import_eggthreads(monkeypatch, tmp_path: Path):
-    """Import eggthreads from the monorepo checkout, isolated to tmp_path."""
-    monkeypatch.chdir(tmp_path)
-    repo_root = Path(__file__).resolve().parents[1]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    import eggthreads  # noqa: F401
-    return sys.modules["eggthreads"]
+import eggthreads as _eggthreads_mod
 
 
 @pytest.fixture
 def eggthreads(monkeypatch, tmp_path):
-    """Fixture to import eggthreads with isolated environment."""
-    return _import_eggthreads(monkeypatch, tmp_path)
+    """Fixture providing eggthreads module with isolated environment."""
+    monkeypatch.chdir(tmp_path)
+    return _eggthreads_mod
 
 
 def test_get_provider_names(eggthreads):

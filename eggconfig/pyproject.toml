@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eggconfig"
+version = "0.1.0"
+description = "Shared configuration data for the egg ecosystem"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eggconfig*"]
+
+[tool.setuptools.package-data]
+eggconfig = ["data/*.json"]

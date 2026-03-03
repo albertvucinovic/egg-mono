@@ -10,10 +10,11 @@ from typing import Any, Dict, List, Optional
 # Root directory of the egg application
 ROOT = Path(__file__).resolve().parent
 
-# Path constants
-EGGCONFIG_DIR = ROOT.parent / 'eggconfig'
-MODELS_PATH = EGGCONFIG_DIR / 'models.json'
-ALL_MODELS_PATH = EGGCONFIG_DIR / 'all-models.json'
+# Path constants - eggconfig provides canonical locations for model config files
+from eggconfig import get_models_path, get_all_models_path
+
+MODELS_PATH = get_models_path()
+ALL_MODELS_PATH = get_all_models_path()
 SYSTEM_PROMPT_PATH = ROOT / 'systemPrompt'
 
 COMMANDS_TEXT = """

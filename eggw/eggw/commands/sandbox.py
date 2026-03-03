@@ -8,8 +8,8 @@ from eggthreads import (
     is_user_sandbox_control_enabled,
 )
 
-from models import CommandResponse
-import core
+from ..models import CommandResponse
+from .. import core
 
 
 async def cmd_toggle_sandboxing(thread_id: str) -> CommandResponse:

@@ -11,7 +11,7 @@ from fastapi import APIRouter
 
 from eggthreads import list_threads, create_default_tools
 
-import core
+from .. import core
 
 
 def get_tool_names() -> List[str]:

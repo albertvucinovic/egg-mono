@@ -1,15 +1,7 @@
 """Tests for commands/utility.py UtilityCommandsMixin."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class TestCmdHelp:
@@ -29,7 +21,7 @@ class TestCmdPaste:
 
     def test_pastes_clipboard_to_input(self, egg_app, monkeypatch):
         """Should paste clipboard content to input."""
-        import commands.utility as util_mod
+        import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: "pasted content")
 
         egg_app.cmd_paste("")
@@ -38,7 +30,7 @@ class TestCmdPaste:
 
     def test_handles_empty_clipboard(self, egg_app, monkeypatch):
         """Should handle empty clipboard gracefully."""
-        import commands.utility as util_mod
+        import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: "")
 
         egg_app.cmd_paste("")
@@ -48,7 +40,7 @@ class TestCmdPaste:
 
     def test_handles_clipboard_failure(self, egg_app, monkeypatch):
         """Should handle clipboard failure gracefully."""
-        import commands.utility as util_mod
+        import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: None)
 
         egg_app.cmd_paste("")
@@ -58,7 +50,7 @@ class TestCmdPaste:
 
     def test_logs_paste_success(self, egg_app, monkeypatch):
         """Should log success with character count."""
-        import utils
+        import egg.utils as utils
         monkeypatch.setattr(utils, "read_clipboard", lambda: "test content")
 
         egg_app.cmd_paste("")

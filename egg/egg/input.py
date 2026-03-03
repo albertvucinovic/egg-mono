@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from eggthreads import interrupt_thread
 
-from utils import read_clipboard
+from .utils import read_clipboard
 
 
 class InputMixin:

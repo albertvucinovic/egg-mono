@@ -3,16 +3,10 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 
 import pytest
 
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from utils import (
+from egg.utils import (
     get_system_prompt,
     snapshot_messages,
     get_subtree,
@@ -34,7 +28,7 @@ class TestGetSystemPrompt:
         prompt_file.write_text("Custom system prompt for testing.")
 
         # Patch SYSTEM_PROMPT_PATH to use our temp file
-        import utils
+        import egg.utils as utils
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", prompt_file)
 
         result = get_system_prompt()
@@ -45,7 +39,7 @@ class TestGetSystemPrompt:
         prompt_file = tmp_path / "systemPrompt"
         prompt_file.write_text("  \n  Prompt with whitespace  \n  ")
 
-        import utils
+        import egg.utils as utils
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", prompt_file)
 
         result = get_system_prompt()
@@ -53,7 +47,7 @@ class TestGetSystemPrompt:
 
     def test_returns_default_on_missing_file(self, tmp_path, monkeypatch):
         """Should return default prompt when file is missing."""
-        import utils
+        import egg.utils as utils
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", tmp_path / "nonexistent")
 
         result = get_system_prompt()
@@ -65,7 +59,7 @@ class TestGetSystemPrompt:
         prompt_dir = tmp_path / "systemPrompt"
         prompt_dir.mkdir()
 
-        import utils
+        import egg.utils as utils
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", prompt_dir)
 
         result = get_system_prompt()
@@ -293,7 +287,7 @@ class TestReadClipboard:
         monkeypatch.setitem(sys.modules, 'pyperclip', MockPyperclip())
 
         # Need to reimport to pick up mocked module
-        import utils
+        import egg.utils as utils
         import importlib
         importlib.reload(utils)
 
@@ -311,7 +305,7 @@ class TestReadClipboard:
 
         monkeypatch.setattr("subprocess.run", mock_run)
 
-        import utils
+        import egg.utils as utils
         import importlib
         importlib.reload(utils)
 

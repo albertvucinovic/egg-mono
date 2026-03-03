@@ -1,21 +1,15 @@
 """Global state management for eggw backend."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Add parent directories to path for eggthreads/eggllm imports
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(PROJECT_ROOT / "eggthreads"))
-sys.path.insert(0, str(PROJECT_ROOT / "eggllm"))
-
+from eggconfig import get_models_path, get_all_models_path
 from eggthreads import ThreadsDB, SubtreeScheduler
 
 # Paths
-EGGCONFIG_DIR = PROJECT_ROOT / "eggconfig"
-MODELS_PATH = EGGCONFIG_DIR / "models.json"
-ALL_MODELS_PATH = EGGCONFIG_DIR / "all-models.json"
+MODELS_PATH = get_models_path()
+ALL_MODELS_PATH = get_all_models_path()
 DB_PATH = Path(".egg/threads.sqlite")
 
 # Global state - initialized in lifespan

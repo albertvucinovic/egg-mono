@@ -2,16 +2,9 @@
 from __future__ import annotations
 
 import json
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
-
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class TestFormatThreadLine:
@@ -92,7 +85,6 @@ class TestFormatMessagesText:
         db, tid = thread_with_messages
 
         # Create app to use the method
-        import egg
         # Create minimal app with mocked scheduler
         class MinimalApp:
             def __init__(self):
@@ -100,7 +92,7 @@ class TestFormatMessagesText:
                 self.current_thread = tid
                 self._live_state = {"active_invoke": None, "content": "", "tools": {}, "tc_text": {}, "tc_order": []}
 
-        from formatting import FormattingMixin
+        from egg.formatting import FormattingMixin
         class TestApp(FormattingMixin, MinimalApp):
             pass
 
@@ -121,7 +113,7 @@ class TestFormatMessagesText:
                 self.current_thread = tid
                 self._live_state = {"active_invoke": None, "content": "", "tools": {}, "tc_text": {}, "tc_order": []}
 
-        from formatting import FormattingMixin
+        from egg.formatting import FormattingMixin
         class TestApp(FormattingMixin, MinimalApp):
             pass
 

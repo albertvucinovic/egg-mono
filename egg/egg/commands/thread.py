@@ -22,7 +22,7 @@ from eggthreads import (
     parse_args,
 )
 
-from utils import MODELS_PATH, get_subtree as _get_subtree
+from ..utils import MODELS_PATH, get_subtree as _get_subtree
 
 
 class ThreadCommandsMixin:

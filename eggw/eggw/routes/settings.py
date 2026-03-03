@@ -14,8 +14,8 @@ from eggthreads import (
     is_user_sandbox_control_enabled,
 )
 
-import core
-from commands.utility import get_auto_approval_status
+from .. import core
+from ..commands.utility import get_auto_approval_status
 
 router = APIRouter(prefix="/api/threads", tags=["settings"])
 

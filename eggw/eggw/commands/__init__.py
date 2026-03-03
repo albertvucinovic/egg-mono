@@ -46,7 +46,7 @@ from .utility import (
     cmd_setThreadPriority,
 )
 
-from models import CommandResponse
+from ..models import CommandResponse
 
 __all__ = [
     # Thread commands

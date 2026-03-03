@@ -16,8 +16,8 @@ from eggthreads import (
     approve_tool_calls_for_thread,
 )
 
-import core
-from core import get_thread_root_id
+from .. import core
+from ..core import get_thread_root_id
 
 router = APIRouter(tags=["events"])
 

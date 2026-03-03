@@ -3,11 +3,6 @@ Test that the InputPanel shows typed text.
 """
 from __future__ import annotations
 
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
 from eggdisplay import InputPanel
 
 

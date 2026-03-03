@@ -23,10 +23,9 @@ from eggthreads import (
     get_thread_statuses_bulk,
 )
 
-from models import CommandResponse
-import core
-from core import (
-    PROJECT_ROOT,
+from ..models import CommandResponse
+from .. import core
+from ..core import (
     MODELS_PATH,
     get_thread_root_id,
     ensure_scheduler_for,

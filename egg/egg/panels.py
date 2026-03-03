@@ -14,7 +14,7 @@ from rich import box as rich_box
 
 from eggthreads import create_snapshot
 
-from utils import snapshot_messages, looks_markdown
+from .utils import snapshot_messages, looks_markdown
 
 
 class PanelsMixin:

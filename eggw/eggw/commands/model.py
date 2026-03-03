@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from eggthreads import current_thread_model, set_thread_model
 
-from models import CommandResponse
-import core
-from core import ALL_MODELS_PATH
+from ..models import CommandResponse
+from .. import core
+from ..core import ALL_MODELS_PATH
 
 
 async def cmd_model(thread_id: str, model_name: str) -> CommandResponse:

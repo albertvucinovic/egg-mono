@@ -3,27 +3,22 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Mock LLM for testing
-from mock_llm import is_test_mode, get_llm_client
-
-# Add parent directories to path for eggthreads/eggllm imports
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT / "eggthreads"))
-sys.path.insert(0, str(PROJECT_ROOT / "eggllm"))
-
+from eggconfig import get_models_path
 from eggthreads import ThreadsDB
 
+# Mock LLM for testing
+from .mock_llm import is_test_mode, get_llm_client
+
 # Import core state management
-import core
-from core import state as core_state
-from core import load_models_config, MODELS_PATH
+from . import core
+from .core import state as core_state
+from .core import load_models_config, MODELS_PATH
 
 
 @asynccontextmanager
@@ -50,10 +45,9 @@ async def lifespan(app: FastAPI):
     core_state.models_config, core_state.default_model_key = load_models_config()
 
     # Initialize LLM client
-    # Look for models.json in CWD first, then fall back to egg directory
+    # Look for models.json in CWD first, then fall back to eggconfig default
     cwd_models = Path.cwd() / "models.json"
-    egg_models = PROJECT_ROOT / "eggconfig" / "models.json"
-    models_path = cwd_models if cwd_models.exists() else egg_models
+    models_path = cwd_models if cwd_models.exists() else get_models_path()
     try:
         from eggllm import LLMClient
         core_state.llm_client = LLMClient(models_path=models_path)
@@ -89,7 +83,7 @@ app.add_middleware(
 )
 
 # Register routers
-from routes import (
+from .routes import (
     threads_router,
     messages_router,
     tools_router,
@@ -101,7 +95,7 @@ from routes import (
     health_router,
     auth_router,
 )
-from autocomplete import autocomplete_router
+from .autocomplete import autocomplete_router
 
 app.include_router(threads_router)
 app.include_router(messages_router)

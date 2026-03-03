@@ -1,15 +1,7 @@
 """Tests for input.py InputMixin handle_key functionality."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class TestHandleKeyCtrlD:
@@ -125,7 +117,7 @@ class TestHandleKeyCtrlC:
         interrupted = []
         def mock_interrupt(db, tid):
             interrupted.append(tid)
-        monkeypatch.setattr("input.interrupt_thread", mock_interrupt)
+        monkeypatch.setattr("egg.input.interrupt_thread", mock_interrupt)
 
         # Mock cancel_pending_tools_on_interrupt
         monkeypatch.setattr(egg_app, "cancel_pending_tools_on_interrupt", lambda: None)
@@ -180,7 +172,7 @@ class TestHandleKeyCtrlP:
 
     def test_ctrl_p_pastes_clipboard_content(self, egg_app, monkeypatch):
         """Ctrl+P should paste from clipboard."""
-        monkeypatch.setattr("input.read_clipboard", lambda: "clipboard content")
+        monkeypatch.setattr("egg.input.read_clipboard", lambda: "clipboard content")
 
         result = egg_app.handle_key('\x10')  # Ctrl+P
 
@@ -189,7 +181,7 @@ class TestHandleKeyCtrlP:
 
     def test_ctrl_p_logs_error_on_clipboard_failure(self, egg_app, monkeypatch):
         """Ctrl+P should log error when clipboard read fails."""
-        monkeypatch.setattr("input.read_clipboard", lambda: None)
+        monkeypatch.setattr("egg.input.read_clipboard", lambda: None)
 
         result = egg_app.handle_key('\x10')
 
@@ -199,7 +191,7 @@ class TestHandleKeyCtrlP:
 
     def test_ctrl_p_logs_message_on_empty_clipboard(self, egg_app, monkeypatch):
         """Ctrl+P should log message when clipboard is empty."""
-        monkeypatch.setattr("input.read_clipboard", lambda: "")
+        monkeypatch.setattr("egg.input.read_clipboard", lambda: "")
 
         result = egg_app.handle_key('\x10')
 

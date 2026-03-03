@@ -3,23 +3,9 @@ from __future__ import annotations
 
 import json
 import os
-import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
-
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-# Add sibling libraries to path (eggthreads, eggllm, eggdisplay)
-SIBLING_LIBS = ['eggthreads', 'eggllm', 'eggdisplay']
-for lib in SIBLING_LIBS:
-    lib_path = str(PROJECT_ROOT.parent / lib)
-    if lib_path not in sys.path:
-        sys.path.insert(0, lib_path)
 
 
 @pytest.fixture
@@ -45,12 +31,12 @@ def egg_app(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EGG_FORCE_WITHOUT_AIOHTTP", "1")
 
-    import egg
+    from egg.app import EggDisplayApp
 
     # Disable scheduler to avoid async complications in tests
-    monkeypatch.setattr(egg.EggDisplayApp, "start_scheduler", lambda self, root_tid: None)
+    monkeypatch.setattr(EggDisplayApp, "start_scheduler", lambda self, root_tid: None)
 
-    app = egg.EggDisplayApp()
+    app = EggDisplayApp()
     return app
 
 

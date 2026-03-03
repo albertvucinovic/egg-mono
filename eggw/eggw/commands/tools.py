@@ -13,8 +13,8 @@ from eggthreads import (
     create_default_tools,
 )
 
-from models import CommandResponse
-import core
+from ..models import CommandResponse
+from .. import core
 
 
 def get_available_tools() -> Dict[str, Dict[str, Any]]:

@@ -9,20 +9,17 @@ Tests verify that:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
+import eggthreads as _eggthreads_mod
+
 
 def _import_eggthreads(monkeypatch, tmp_path: Path):
-    """Import eggthreads from the monorepo checkout, isolated to tmp_path."""
+    """Return the eggthreads module with cwd set to tmp_path."""
     monkeypatch.chdir(tmp_path)
-    repo_root = Path(__file__).resolve().parents[1]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    import eggthreads  # noqa: F401
-    return sys.modules["eggthreads"]
+    return _eggthreads_mod
 
 
 class TestToolTimeout:

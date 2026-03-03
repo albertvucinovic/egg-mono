@@ -10,7 +10,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pdoc3"]
+llm = ["eggllm>=0.1.0"]
+dev = ["pdoc3", "eggllm>=0.1.0"]
 
 [build-system]
 requires = ["setuptools", "wheel"]

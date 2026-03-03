@@ -4,7 +4,6 @@ from .state import (
     MODELS_PATH,
     ALL_MODELS_PATH,
     DB_PATH,
-    PROJECT_ROOT,
     init_db,
     get_db,
 )
@@ -37,7 +36,6 @@ __all__ = [
     "MODELS_PATH",
     "ALL_MODELS_PATH",
     "DB_PATH",
-    "PROJECT_ROOT",
     "init_db",
     "get_db",
     # Config

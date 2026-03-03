@@ -1,0 +1,17 @@
+__pycache__/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.venv/
+venv/
+node_modules/
+.next/
+.env
+*.swp
+*.swo
+*.swn

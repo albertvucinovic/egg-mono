@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eggdisplay"
+version = "0.1.0"
+description = "Rich.Live-based text editor and display panels"
+requires-python = ">=3.10"
+dependencies = ["rich>=10.0.0", "readchar"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eggdisplay*"]

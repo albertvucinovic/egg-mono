@@ -18,13 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Add paths for imports
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT / "eggthreads"))
-sys.path.insert(0, str(PROJECT_ROOT / "eggllm"))
-
 from fastapi.testclient import TestClient
-from core import state as core_state
+from eggw.core import state as core_state
 
 
 # Fixture to create a test database and app instance
@@ -43,9 +38,9 @@ def app(test_db_path, monkeypatch):
     monkeypatch.setenv("EGG_DB_PATH", test_db_path)
 
     # Import main after setting env - force reimport
-    if "main" in sys.modules:
-        del sys.modules["main"]
-    import main
+    if "eggw.main" in sys.modules:
+        del sys.modules["eggw.main"]
+    from eggw import main
 
     # Reset global state in core.state (routes use core.db which delegates to core.state.db)
     core_state.db = None

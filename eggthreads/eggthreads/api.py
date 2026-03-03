@@ -14,13 +14,7 @@ try:
     from eggllm.catalog import AllModelsCatalog
     EGGLLM_AVAILABLE = True
 except ImportError:
-    try:
-        from eggllm.eggllm.config import load_models_config
-        from eggllm.eggllm.registry import ModelRegistry
-        from eggllm.eggllm.catalog import AllModelsCatalog
-        EGGLLM_AVAILABLE = True
-    except ImportError:
-        EGGLLM_AVAILABLE = False
+    EGGLLM_AVAILABLE = False
 
 
 def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
@@ -94,13 +88,8 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
         from eggllm.registry import ModelRegistry
         from eggllm.catalog import AllModelsCatalog
     except ImportError:
-        try:
-            from eggllm.eggllm.config import load_models_config
-            from eggllm.eggllm.registry import ModelRegistry
-            from eggllm.eggllm.catalog import AllModelsCatalog
-        except ImportError:
-            # eggllm not available, fall back to direct parsing
-            load_models_config = None
+        # eggllm not available, fall back to direct parsing
+        load_models_config = None
     
     if load_models_config is not None:
         try:

@@ -3,16 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
-
-# Ensure project root is in path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class TestMessageSubmissionWorkflow:
@@ -27,7 +20,7 @@ class TestMessageSubmissionWorkflow:
         create_snapshot(egg_app.db, egg_app.current_thread)
 
         # Verify snapshot was created by checking we can get messages
-        from utils import snapshot_messages
+        from egg.utils import snapshot_messages
         messages = snapshot_messages(egg_app.db, egg_app.current_thread)
         assert len(messages) >= 1
 
@@ -227,7 +220,7 @@ class TestSnapshotWorkflow:
     def test_snapshot_contains_messages(self, egg_app):
         """Snapshot should contain thread messages."""
         from eggthreads import append_message, create_snapshot
-        from utils import snapshot_messages
+        from egg.utils import snapshot_messages
 
         append_message(egg_app.db, egg_app.current_thread, "user", "Test snapshot message")
         create_snapshot(egg_app.db, egg_app.current_thread)
@@ -240,7 +233,7 @@ class TestSnapshotWorkflow:
     def test_snapshot_updates_on_new_message(self, egg_app):
         """Snapshot should update when new message is added."""
         from eggthreads import append_message, create_snapshot
-        from utils import snapshot_messages
+        from egg.utils import snapshot_messages
 
         append_message(egg_app.db, egg_app.current_thread, "user", "First message")
         create_snapshot(egg_app.db, egg_app.current_thread)

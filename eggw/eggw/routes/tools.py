@@ -11,9 +11,9 @@ from eggthreads import (
     approve_tool_calls_for_thread,
 )
 
-from models import ToolCallInfo, ApprovalRequest
-import core
-from core import ensure_scheduler_for, shorten_output_preview
+from ..models import ToolCallInfo, ApprovalRequest
+from .. import core
+from ..core import ensure_scheduler_for, shorten_output_preview
 
 router = APIRouter(prefix="/api/threads", tags=["tools"])
 
