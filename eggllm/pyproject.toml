@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eggllm"
+version = "0.1.0"
+description = "Lightweight, OpenAI-compatible LLM router library"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Entropy Gradient" }]
+license = { file = "LICENSE" }
+dependencies = [
+  "requests>=2.31",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_ORG/eggllm"
+Source = "https://github.com/YOUR_ORG/eggllm"
+Issues = "https://github.com/YOUR_ORG/eggllm/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eggllm*"]
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "pyflakes>=3",
+  "coverage[toml]>=7",
+  "tox>=4",
+  "build>=1",
+]
