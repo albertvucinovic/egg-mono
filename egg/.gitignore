@@ -1,0 +1,10 @@
+*.swo
+*.swp
+*.swn
+.env
+.egg/
+doc/
+temp/
+venv/
+.beads
+__pycache__/

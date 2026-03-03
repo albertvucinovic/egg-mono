@@ -1,0 +1,4 @@
+eggllm
+eggthreads
+rich
+prompt_toolkit
