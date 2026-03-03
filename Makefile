@@ -18,7 +18,7 @@ install-dev:
 	pip install -e "./egg[dev]"
 	pip install -e ./eggw
 
-test:
+test: install-dev
 	pytest eggllm/tests -q
 	pytest eggthreads/tests -q
 	pytest eggdisplay/tests -q
