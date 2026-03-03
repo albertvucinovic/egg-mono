@@ -9,6 +9,9 @@ description = "Rich.Live-based text editor and display panels"
 requires-python = ">=3.10"
 dependencies = ["rich>=10.0.0", "readchar"]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["eggdisplay*"]
