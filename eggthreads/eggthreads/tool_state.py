@@ -1,0 +1,765 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from .db import ThreadsDB
+
+
+@dataclass
+class ToolCallState:
+    """Represents the state of a single tool call within a thread.
+
+    States (TC = Tool Call):
+      - TC1: needs approval
+      - TC2.1: approved
+      - TC2.2: denied
+      - TC3: executing
+      - TC4: finished (tool completed, waiting for output approval)
+      - TC5: output decision made (waiting for publish)
+      - TC6: publishing done (final tool message exists)
+    """
+
+    thread_id: str
+    tool_call_id: str
+    parent_msg_id: str
+    parent_event_seq: int
+    parent_role: Optional[str]
+    index: int  # index within tool_calls list of parent message
+    name: str
+    arguments: Any
+
+    # Derived state
+    approval_decision: Optional[str] = None  # "granted" | "denied"
+    execution_started: bool = False
+    finished_reason: Optional[str] = None  # "success" | "interrupted" | ...
+    finished_output: Optional[str] = None  # full tool output from tool_call.finished, if any
+    output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
+    published: bool = False  # final tool message written
+    # Last output_approval payload (if any) for this tool call; allows UI to
+    # encode preview/truncation/paths that the runner can later use when
+    # publishing the final tool message.
+    last_output_approval_payload: Optional[Dict[str, Any]] = None
+
+    @property
+    def state(self) -> str:
+        if self.published:
+            return "TC6"
+        if self.output_decision is not None:
+            return "TC5"
+        if self.finished_reason is not None:
+            return "TC4"
+        if self.execution_started:
+            return "TC3"
+        if self.approval_decision == "granted":
+            return "TC2.1"
+        if self.approval_decision == "denied":
+            return "TC2.2"
+        return "TC1"
+
+
+@dataclass
+class RunnerActionable:
+    """Describes a unit of work the ThreadRunner can perform.
+
+    kind:
+      - "RA1_llm"            -> call LLM (assistant turn)
+      - "RA2_tools_assistant" -> process assistant-originated tool calls
+      - "RA3_tools_user"      -> process user-originated tool calls (user commands)
+    """
+
+    kind: str
+    thread_id: str
+    triggering_event_seq: int
+    msg_id: Optional[str] = None
+    tool_calls: Optional[List[ToolCallState]] = None
+
+
+def _iter_events(db: ThreadsDB, thread_id: str) -> Iterable[Dict[str, Any]]:
+    cur = db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur.fetchall():
+        yield dict(row)
+
+
+def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallState]:
+    """Scan events for a thread and reconstruct ToolCallState per tool_call_id.
+
+    This is intentionally stateless and computed on demand; threads are
+    typically small enough that this is acceptable, and it avoids schema
+    changes.
+
+    Note: This function respects the skipped_on_continue flag: tool calls
+    from messages that have been marked as skipped are not included.
+    """
+    states: Dict[str, ToolCallState] = {}
+
+    # Track global tool auto-approval intervals for this thread. These
+    # are derived purely from tool_call.approval events with
+    # decision="global_approval" / "revoke_global_approval".
+    global_auto_approval = False
+    global_intervals: list[tuple[int, Optional[int]]] = []
+    current_global_start: Optional[int] = None
+
+    # First, collect msg_ids that have been marked as skipped
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        msg_id = row[0]
+        try:
+            payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            payload = {}
+        if payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(msg_id)
+
+    # Find the continue boundary: if there's a control.interrupt with purpose='continue',
+    # we should ignore tool_call.* events that occurred BETWEEN the continue_from message
+    # and the control.interrupt. Events AFTER the control.interrupt are new and should be processed.
+    continue_boundary_seq: Optional[int] = None
+    continue_interrupt_seq: Optional[int] = None
+    cur_interrupt = db.conn.execute(
+        "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND type='control.interrupt' ORDER BY event_seq DESC LIMIT 1",
+        (thread_id,),
+    )
+    interrupt_row = cur_interrupt.fetchone()
+    if interrupt_row:
+        try:
+            interrupt_payload = json.loads(interrupt_row[1]) if isinstance(interrupt_row[1], str) else (interrupt_row[1] or {})
+        except Exception:
+            interrupt_payload = {}
+        if interrupt_payload.get('purpose') == 'continue':
+            continue_interrupt_seq = int(interrupt_row[0])
+            continue_from_msg_id = interrupt_payload.get('continue_from_msg_id')
+            if continue_from_msg_id:
+                # Find the event_seq for the continue_from message
+                cur_msg = db.conn.execute(
+                    "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' AND msg_id=?",
+                    (thread_id, continue_from_msg_id),
+                )
+                msg_row = cur_msg.fetchone()
+                if msg_row:
+                    continue_boundary_seq = int(msg_row[0])
+
+    # First pass: find messages that declare tool_calls
+    for ev in _iter_events(db, thread_id):
+        if ev.get("type") != "msg.create":
+            continue
+        ev_seq = int(ev["event_seq"])
+        msg_id = ev.get("msg_id") or ""
+
+        # Skip messages that have been marked as skipped_on_continue
+        if msg_id and msg_id in skipped_msg_ids:
+            continue
+
+        try:
+            payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+        except Exception:
+            payload = {}
+        role = payload.get("role")
+        tcs = payload.get("tool_calls") or []
+        if not isinstance(tcs, list) or not tcs:
+            continue
+        for idx, tc in enumerate(tcs):
+            if not isinstance(tc, dict):
+                continue
+            tcid = (tc.get("id") or f"{msg_id}:{idx}")
+            fn = (tc.get("function") or {})
+            name = fn.get("name") or tc.get("name") or ""
+            args = fn.get("arguments") if "function" in tc else tc.get("arguments")
+            states[tcid] = ToolCallState(
+                thread_id=thread_id,
+                tool_call_id=str(tcid),
+                parent_msg_id=msg_id,
+                parent_event_seq=ev_seq,
+                parent_role=str(role) if isinstance(role, str) else None,
+                index=idx,
+                name=str(name),
+                arguments=args,
+            )
+
+    if not states:
+        return states
+
+    # Precompute user message event sequences so that "all-in-turn"
+    # approvals can be scoped from the approval event until the next
+    # user message.
+    user_seqs: list[int] = []
+    for ev in _iter_events(db, thread_id):
+        if ev.get("type") != "msg.create":
+            continue
+        try:
+            payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+        except Exception:
+            payload = {}
+        if payload.get("role") == "user":
+            try:
+                user_seqs.append(int(ev["event_seq"]))
+            except Exception:
+                continue
+
+    # Helper to check if a tool_call.* event should be skipped due to continue boundary
+    def _should_skip_tc_event(ev: Dict[str, Any], tcid: Optional[str]) -> bool:
+        """Skip tool_call.* events that occurred BETWEEN continue_from message and control.interrupt.
+
+        Events AFTER the control.interrupt are new approvals/executions and should be processed.
+        """
+        if continue_boundary_seq is None or continue_interrupt_seq is None:
+            return False
+        try:
+            ev_seq = int(ev.get("event_seq"))
+        except Exception:
+            return False
+        # Only skip events BETWEEN continue boundary and interrupt (exclusive on both ends)
+        # Events before or at continue_boundary: valid (from before the assistant message)
+        # Events after continue_interrupt: new events, should be processed
+        if ev_seq <= continue_boundary_seq or ev_seq > continue_interrupt_seq:
+            return False
+        # Event is in the "skipped" range - check if tool call is from continue point
+        if tcid and tcid in states:
+            tc = states[tcid]
+            if tc.parent_event_seq >= continue_boundary_seq:
+                return True
+        return False
+
+    # Second pass: fold tool_call.* events and tool messages into states,
+    # and record global auto-approval intervals.
+    for ev in _iter_events(db, thread_id):
+        ev_type = ev.get("type")
+        try:
+            payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+        except Exception:
+            payload = {}
+
+        if ev_type == "tool_call.approval":
+            decision = payload.get("decision")
+            # global_approval / revoke_global_approval mark intervals
+            # (by event_seq) during which automatic approval is active
+            # for all tool calls in this thread.
+            if decision == "global_approval":
+                global_auto_approval = True
+                try:
+                    current_global_start = int(ev.get("event_seq"))
+                except Exception:
+                    current_global_start = None
+                continue
+            if decision == "revoke_global_approval":
+                if global_auto_approval and current_global_start is not None:
+                    try:
+                        end_seq = int(ev.get("event_seq"))
+                    except Exception:
+                        end_seq = None
+                    global_intervals.append((current_global_start, end_seq))
+                global_auto_approval = False
+                current_global_start = None
+                continue
+
+            # Special case: "all-in-turn" means: mark all tool calls in the
+            # current USER turn as granted, even if some tool calls are
+            # declared after this event. A USER turn is the span between
+            # one user msg.create and the next.
+            if decision == "all-in-turn":
+                try:
+                    cur_seq = int(ev.get("event_seq"))
+                except Exception:
+                    cur_seq = None
+                if cur_seq is None:
+                    continue
+                prev_user_seq = -1
+                next_user_seq = None
+                if user_seqs:
+                    for us in user_seqs:
+                        if us <= cur_seq:
+                            prev_user_seq = us
+                        elif us > cur_seq and next_user_seq is None:
+                            next_user_seq = us
+                            break
+                for tc in states.values():
+                    if tc.approval_decision is not None:
+                        continue
+                    # Parent must exist within the approved user turn
+                    if tc.parent_event_seq < prev_user_seq:
+                        continue
+                    if next_user_seq is not None and tc.parent_event_seq >= next_user_seq:
+                        continue
+                    tc.approval_decision = "granted"
+            else:
+                tcid = payload.get("tool_call_id")
+                if tcid in states and not _should_skip_tc_event(ev, tcid):
+                    if isinstance(decision, str):
+                        states[tcid].approval_decision = decision
+        elif ev_type == "tool_call.execution_started":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev, tcid):
+                states[tcid].execution_started = True
+        elif ev_type == "tool_call.finished":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev, tcid):
+                reason = payload.get("reason")
+                if isinstance(reason, str):
+                    states[tcid].finished_reason = reason
+                out = payload.get('output')
+                if out is not None:
+                    states[tcid].finished_output = str(out)
+        elif ev_type == "tool_call.output_approval":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev, tcid):
+                decision = payload.get("decision")
+                if isinstance(decision, str):
+                    states[tcid].output_decision = decision
+                # Preserve full payload for later use when publishing
+                states[tcid].last_output_approval_payload = payload
+        elif ev_type == "msg.create":
+            # Final published tool result
+            try:
+                role = payload.get("role")
+            except Exception:
+                role = None
+            if role == "tool":
+                tcid = payload.get("tool_call_id")
+                msg_id = ev.get("msg_id")
+                # Skip tool results that are marked as skipped_on_continue
+                if msg_id and msg_id in skipped_msg_ids:
+                    continue
+                # Also skip if this is after continue boundary and belongs to a continued tool call
+                if tcid in states and not _should_skip_tc_event(ev, tcid):
+                    states[tcid].published = True
+
+    # Finalize global intervals: if auto-approval was still active at the
+    # end of the log, close the interval with an open-ended end (None).
+    if global_auto_approval and current_global_start is not None:
+        global_intervals.append((current_global_start, None))
+
+    # Helper: is a given event_seq covered by any global auto-approval
+    # interval? This is purely derived from events.
+    def _has_global_approval(ev_seq: int) -> bool:
+        for start, end in global_intervals:
+            if start is None:
+                continue
+            if ev_seq < start:
+                continue
+            if end is not None and ev_seq > end:
+                continue
+            return True
+        return False
+
+    # Apply global auto-approval to any tool calls that are still in TC1
+    # and whose parent message falls within an active interval (i.e.,
+    # that were created after the last global_approval and before a
+    # revoke_global_approval).
+    for tc in states.values():
+        if tc.approval_decision is None and _has_global_approval(tc.parent_event_seq):
+            tc.approval_decision = "granted"
+
+    return states
+
+
+def list_tool_calls_for_message(db: ThreadsDB, thread_id: str, msg_id: str) -> List[ToolCallState]:
+
+    """Return ToolCallState objects for tool calls declared in a given message."""
+    all_states = build_tool_call_states(db, thread_id)
+    out = [tc for tc in all_states.values() if tc.parent_msg_id == msg_id]
+    out.sort(key=lambda tc: tc.index)
+    return out
+
+
+def list_tool_calls_for_thread(db: ThreadsDB, thread_id: str) -> List[ToolCallState]:
+    """Return ToolCallState objects for all tool calls in this thread."""
+    all_states = build_tool_call_states(db, thread_id)
+    return sorted(all_states.values(), key=lambda tc: (tc.parent_event_seq, tc.index))
+
+
+def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
+    """Return the event_seq of the last *LLM* stream boundary for a thread.
+
+    Boundaries are either:
+      - a stream.close whose invoke_id saw LLM-style deltas (``text`` or
+        ``reason`` fields), or
+      - a control.interrupt whose payload.old_invoke_id matches such an
+        invoke_id.
+
+    We intentionally ignore stream.close events that belong purely to
+    tool-execution streams (RA2/RA3). Those streams only emit deltas
+    with a ``tool`` field (and no top-level ``text``/``reason``),
+    whereas LLM streams (RA1) emit deltas with ``text`` and/or
+    ``reason`` keys.
+
+    This distinction matters because RA1 (LLM turns) should be driven by
+    user/tool messages that appear *after* the last LLM turn finishes or
+    is explicitly interrupted by the user, but we do not want
+    tool-execution streams to reset that boundary.
+
+    Note: This function also respects the skipped_on_continue flag when
+    finding the last assistant message as a fallback boundary.
+    """
+    last_close = -1
+    llm_invokes: set[str] = set()
+    # Fallback for threads that have assistant messages but no
+    # associated LLM streams (e.g. imported transcripts, sync-only
+    # completions, or duplicated threads that copied msg.create events
+    # but not stream.*). In that case, we treat the last assistant
+    # message as the effective RA1 boundary so that RA1 does not
+    # re-trigger on already-answered user messages.
+    last_assistant_seq = -1
+
+    # First, collect msg_ids that have been marked as skipped
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        msg_id = row[0]
+        try:
+            payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            payload = {}
+        if payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(msg_id)
+
+    # Single pass over events in order: mark invoke_ids that have LLM
+    # deltas, then record the last stream.close/control.interrupt for any
+    # such invoke_id.
+    cur = db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur.fetchall():
+        ev = dict(row)
+        t = ev.get("type")
+        inv = ev.get("invoke_id")
+        if t == "stream.open":
+            # Newer runners tag stream.open with stream_kind so we can
+            # identify an LLM invoke even if it was interrupted before
+            # the first delta.
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and payload.get('stream_kind') == 'llm':
+                if isinstance(inv, str) and inv:
+                    llm_invokes.add(inv)
+
+        elif t == "stream.delta":
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and ("text" in payload or "reason" in payload):
+                if isinstance(inv, str) and inv:
+                    llm_invokes.add(inv)
+        elif t == "stream.close" and isinstance(inv, str) and inv in llm_invokes:
+            try:
+                last_close = int(ev.get("event_seq"))
+            except Exception:
+                continue
+        elif t == "control.interrupt":
+            # Treat an explicit interrupt of an LLM invoke as a boundary
+            # equivalent to a stream.close for RA1 purposes.
+            #
+            # Note: Ctrl+C may happen *before* a runner acquires a lease
+            # and emits any stream.open/delta events ("pending RA1"). In
+            # that case, old_invoke_id may be None. If the payload
+            # explicitly marks purpose=='llm', we still advance the
+            # boundary so the same triggering user message does not
+            # re-trigger RA1 immediately.
+            try:
+                payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
+            except Exception:
+                payload = {}
+            old_inv = payload.get("old_invoke_id")
+            purpose = payload.get('purpose')
+
+            # If the interrupt is explicitly for an LLM step, treat it as a boundary.
+            if purpose == 'llm':
+                try:
+                    last_close = int(ev.get("event_seq"))
+                except Exception:
+                    continue
+                continue
+
+            # For continue interrupts, set boundary to BEFORE the continue point
+            # so the continue_from message becomes visible to RA1 detection.
+            if purpose == 'continue':
+                continue_from_msg_id = payload.get('continue_from_msg_id')
+                if continue_from_msg_id:
+                    # Look up the event_seq for the continue_from message
+                    msg_cur = db.conn.execute(
+                        "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' AND msg_id=?",
+                        (thread_id, continue_from_msg_id),
+                    )
+                    msg_row = msg_cur.fetchone()
+                    if msg_row:
+                        # Set boundary to one BEFORE the continue point
+                        last_close = int(msg_row[0]) - 1
+                        continue
+                # Fallback: use interrupt seq if msg not found
+                try:
+                    last_close = int(ev.get("event_seq"))
+                except Exception:
+                    continue
+                continue
+
+            # Otherwise, only treat it as a boundary when it refers to a
+            # known LLM invoke_id.
+            if isinstance(old_inv, str) and old_inv in llm_invokes:
+                try:
+                    last_close = int(ev.get("event_seq"))
+                except Exception:
+                    continue
+        elif t == "msg.create":
+            # Track the last assistant message as a potential fallback
+            # RA1 boundary when no LLM streams are present.
+            try:
+                pj = ev.get("payload_json")
+                payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+            except Exception:
+                payload = {}
+            role = payload.get("role")
+            no_api = bool(payload.get("no_api"))
+            msg_id = ev.get("msg_id")
+            # Skip messages that have been marked as skipped_on_continue
+            skipped = msg_id and msg_id in skipped_msg_ids
+            if role == "assistant" and not no_api and not skipped:
+                try:
+                    last_assistant_seq = int(ev.get("event_seq"))
+                except Exception:
+                    continue
+    # If we never observed an LLM stream boundary but we did see an
+    # assistant message, treat the last assistant msg.create as the
+    # effective RA1 boundary. This prevents RA1 from re-triggering on
+    # historical user/tool messages in threads that were populated
+    # without streaming metadata (e.g. duplicates, imports).
+    if last_close == -1 and last_assistant_seq != -1:
+        last_close = last_assistant_seq
+    return last_close
+
+
+def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Iterable[Dict[str, Any]]:
+    """Iterate over msg.create events after a given event_seq.
+
+    This function respects the skipped_on_continue flag: messages that have
+    been marked as skipped (via a msg.edit event) are not yielded. This allows
+    continue_thread to effectively "reset" the conversation to an earlier point.
+    """
+    # First, collect msg_ids that have been marked as skipped
+    skipped_msg_ids: set = set()
+    cur_edit = db.conn.execute(
+        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    for row in cur_edit.fetchall():
+        msg_id = row[0]
+        try:
+            payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+        except Exception:
+            payload = {}
+        if payload.get('skipped_on_continue'):
+            skipped_msg_ids.add(msg_id)
+
+    cur = db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
+        (thread_id, after_seq),
+    )
+    for row in cur.fetchall():
+        ev = dict(row)
+        msg_id = ev.get("msg_id")
+        # Skip messages that have been marked as skipped_on_continue
+        if msg_id and msg_id in skipped_msg_ids:
+            continue
+        yield ev
+
+
+_RA_CACHE: Dict[Tuple[str, int], Optional[RunnerActionable]] = {}
+
+
+def discover_runner_actionable_cached(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
+    """Cached wrapper around :func:`discover_runner_actionable`.
+
+    The underlying implementation walks the full event log and
+    reconstructs tool-call state, which is relatively expensive.  For a
+    given thread the result only changes when new events are appended,
+    so we key the cache by ``(thread_id, max_event_seq)`` and reuse the
+    previously computed value when possible.
+
+    The cache is deliberately local to this module (process-local, not
+    persisted) and is safe to keep very small: on each write we evict
+    any older entry for the same ``thread_id``.
+    """
+
+    try:
+        max_seq = db.max_event_seq(thread_id)
+    except Exception:
+        max_seq = -1
+
+    cache_key = (thread_id, max_seq)
+    if cache_key in _RA_CACHE:
+        return _RA_CACHE[cache_key]
+
+    result = discover_runner_actionable(db, thread_id)
+    _RA_CACHE[cache_key] = result
+
+    # Evict stale entries for this thread so the cache does not grow
+    # unbounded if long-lived processes see many generations.
+    for k in list(_RA_CACHE.keys()):
+        if k[0] == thread_id and k != cache_key:
+            del _RA_CACHE[k]
+
+    return result
+
+
+def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
+    """Determine the next actionable work item for a thread.
+
+    This function encapsulates the Runner Actionables (RA1/RA2/RA3) logic
+    based on the event log and tool call states.
+
+    RA1 (LLM) uses messages *after* the last stream.close, while RA2/RA3
+    operate directly on tool call states so that they can act on tool
+    calls whose parent message may have been emitted before the last
+    stream.close (e.g. assistant tool calls created by a prior LLM turn
+    or user commands that have already finished execution).
+    """
+    last_close = _last_stream_close_seq(db, thread_id)
+    all_states = build_tool_call_states(db, thread_id)
+
+    # -------- RA3: user-originated tool calls (user commands) --------
+    user_tcs = [
+        tc for tc in all_states.values()
+        if tc.parent_role == 'user' and tc.state in ("TC2.1", "TC2.2", "TC5")
+    ]
+    if user_tcs:
+        # Pick earliest parent message and group its runnable tool calls
+        user_tcs.sort(key=lambda tc: tc.parent_event_seq)
+        msg_id = user_tcs[0].parent_msg_id
+        parent_seq = user_tcs[0].parent_event_seq
+        tcs_for_msg = [tc for tc in user_tcs if tc.parent_msg_id == msg_id]
+        return RunnerActionable(
+            kind="RA3_tools_user",
+            thread_id=thread_id,
+            triggering_event_seq=parent_seq,
+            msg_id=msg_id,
+            tool_calls=tcs_for_msg,
+        )
+
+    # -------- RA2: assistant-originated tool calls --------
+    # Consider tool calls whose parent assistant message occurred at or
+    # before the last stream.close (i.e. produced by a prior LLM turn).
+    assistant_tcs = [
+        tc for tc in all_states.values()
+        if tc.parent_role == 'assistant'
+        and tc.state in ("TC2.1", "TC2.2", "TC5")
+        # Consider assistant tool calls that have already been approved,                                                                         │ │ │
+        # denied, or are ready to be published. RA2 operates purely on tool                                                                      │ │ │
+        # call state; we do not need to gate by last LLM boundary here                                                                           │ │ │
+        # because the per-thread lease (open_streams) ensures that RA2 does                                                                      │ │ │
+        # not run concurrently with an active RA1 stream.
+        #and tc.parent_event_seq <= last_close
+    ]
+    if assistant_tcs:
+        assistant_tcs.sort(key=lambda tc: tc.parent_event_seq)
+        msg_id = assistant_tcs[0].parent_msg_id
+        parent_seq = assistant_tcs[0].parent_event_seq
+        tcs_for_msg = [tc for tc in assistant_tcs if tc.parent_msg_id == msg_id]
+        return RunnerActionable(
+            kind="RA2_tools_assistant",
+            thread_id=thread_id,
+            triggering_event_seq=parent_seq,
+            msg_id=msg_id,
+            tool_calls=tcs_for_msg,
+        )
+
+    # Before we consider a new LLM turn (RA1), ensure there are no
+    # assistant-originated tool calls that are still unresolved from the
+    # provider's point of view. The OpenAI tools protocol requires that
+    # every assistant tool_call has a corresponding tool message before
+    # the next assistant call.
+    has_unpublished_assistant_tool = any(
+        tc.parent_role == 'assistant' and not tc.published
+        for tc in all_states.values()
+    )
+    if has_unpublished_assistant_tool:
+        return None
+
+    # -------- RA1: LLM call --------
+    # Scan messages after the last stream.close to find a user or tool
+    # message that should trigger an LLM turn.
+    for ev in _iter_messages_after(db, thread_id, last_close):
+        ev_seq = int(ev["event_seq"])
+        msg_id = ev.get("msg_id") or ""
+        try:
+            payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+        except Exception:
+            payload = {}
+        role = payload.get("role")
+        keep_user_turn = bool(payload.get("keep_user_turn"))
+        no_api = bool(payload.get("no_api"))
+        tool_calls = payload.get("tool_calls") or []
+
+        # RA1: LLM call
+        # - user messages without tool_calls and without keep_user_turn
+        #   and not marked no_api (no_api user messages are metadata and
+        #   must not trigger an LLM turn)
+        # - tool messages that are not no_api and not keep_user_turn
+        if role == "user" and not tool_calls and not keep_user_turn and not no_api:
+            return RunnerActionable(
+                kind="RA1_llm",
+                thread_id=thread_id,
+                triggering_event_seq=ev_seq,
+                msg_id=msg_id,
+                tool_calls=None,
+            )
+        if role == "tool" and not no_api and not keep_user_turn:
+            return RunnerActionable(
+                kind="RA1_llm",
+                thread_id=thread_id,
+                triggering_event_seq=ev_seq,
+                msg_id=msg_id,
+                tool_calls=None,
+            )
+
+    return None
+
+
+def thread_state(db: ThreadsDB, thread_id: str) -> str:
+    """Coarse thread state used by tools and UIs.
+
+    Returns one of:
+      - "running"                 (streaming or runnable RA present)
+      - "waiting_tool_approval"   (TC1 exists, no RA)
+      - "waiting_output_approval" (TC4 exists, no RA)
+      - "waiting_user"            (idle, waiting for user input)
+      - "paused"                  (thread.status == 'paused')
+    """
+    th = db.get_thread(thread_id)
+    if th and th.status == "paused":
+        return "paused"
+
+    # Active stream -> running
+    try:
+        row = db.current_open(thread_id)
+    except Exception:
+        row = None
+    if row is not None:
+        return "running"
+
+    # Any actionable RA -> running
+    if discover_runner_actionable_cached(db, thread_id) is not None:
+        return "running"
+
+    # Otherwise, inspect tool call states
+    all_states = build_tool_call_states(db, thread_id)
+    any_tc1 = any(tc.state == "TC1" for tc in all_states.values())
+    any_tc4 = any(tc.state == "TC4" for tc in all_states.values())
+
+    if any_tc1:
+        return "waiting_tool_approval"
+    if any_tc4:
+        return "waiting_output_approval"
+    return "waiting_user"

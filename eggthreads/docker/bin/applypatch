@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Wrapper that redirects to /usr/bin/apply_patch.py (self-contained)
+set -euo pipefail
+exec /usr/bin/apply_patch.py "$@"

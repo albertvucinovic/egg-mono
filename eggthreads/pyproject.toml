@@ -1,0 +1,21 @@
+[project]
+name = "eggthreads"
+version = "0.1.0"
+description = "Asyncio thread runner for tree-structured AI chats on SQLite (egg schema)"
+authors = [{name="Entropy Gradient", email="noreply@example.com"}]
+requires-python = ">=3.10"
+dependencies = [
+  "rich",
+  "uvloop; platform_system != 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = ["pdoc3"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["eggthreads"]
+exclude = ["temp*"]

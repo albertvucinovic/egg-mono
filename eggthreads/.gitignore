@@ -1,0 +1,7 @@
+__pycache__/
+*.swo
+*.swp
+*.swn
+*-info
+.egg/
+docs/
