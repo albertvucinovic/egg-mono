@@ -10,9 +10,13 @@ class AuthCommandsMixin:
     def cmd_login(self, arg: str) -> None:
         """Handle /login command - trigger OAuth PKCE browser login for ChatGPT."""
         try:
-            from eggllm.auth import login_browser
+            from eggllm.auth import TokenStore, login_browser
+            store = TokenStore()
+            if store.is_logged_in():
+                self.log_system("Already logged in. Use /logout first to re-authenticate.")
+                return
             self.log_system("Opening browser for ChatGPT login...")
-            store = login_browser()
+            store = login_browser(store)
             status = store.get_status()
             self.log_system(f"Login successful (expires_at: {status.get('expires_at')})")
         except TimeoutError:
