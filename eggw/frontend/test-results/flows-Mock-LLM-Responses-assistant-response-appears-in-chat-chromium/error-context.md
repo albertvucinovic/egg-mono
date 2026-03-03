@@ -1,0 +1,146 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e3]:
+      - heading "eggw" [level=1] [ref=e4]
+      - generic [ref=e5]: "Thread: EQ2HZ08Z"
+      - generic "Sandbox ON (docker)" [ref=e6]: Sandbox[ON]
+      - button "Press ? for help" [ref=e8] [cursor=pointer]
+    - generic [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e11]:
+          - generic [ref=e13]: Children (0)
+          - generic [ref=e14]: No children. Use /spawn to create one.
+        - generic [ref=e15]:
+          - generic [ref=e16]:
+            - generic [ref=e17]:
+              - generic [ref=e18]: User
+              - generic [ref=e19]: 01/07/2026, 02:54:59 PM
+            - paragraph [ref=e21]: What is this?
+          - generic [ref=e22]:
+            - generic [ref=e23]:
+              - generic [ref=e24]: Command
+              - generic [ref=e25]: (openai 120b Local)
+              - generic [ref=e26]: 01/07/2026, 02:54:59 PM
+            - generic [ref=e27]: "LLM/runner error: name 'stop_flag' is not defined"
+        - generic [ref=e28]:
+          - generic [ref=e29]:
+            - textbox "Message, /command, or $ shell..." [active] [ref=e30]
+            - button "Send" [disabled] [ref=e31]:
+              - img [ref=e32]
+              - text: Send
+          - generic [ref=e35]:
+            - generic [ref=e36]: "Thread: EQ2HZ08Z"
+            - generic "Enter to send, Shift+Enter for newline" [ref=e37]: "[⏎ send]"
+      - generic [ref=e39]:
+        - generic [ref=e40]:
+          - heading "Thread Info" [level=3] [ref=e41]
+          - generic [ref=e42]:
+            - generic [ref=e43]:
+              - generic [ref=e44]: "ID:"
+              - generic [ref=e45]: RK2PEQ2HZ08Z
+            - generic [ref=e46]:
+              - generic [ref=e47]: "Status:"
+              - generic [ref=e50]: Ready
+            - generic [ref=e51]:
+              - generic [ref=e52]: "Model:"
+              - combobox [ref=e53]:
+                - option "GPT 5.2 high"
+                - option "GPT 5.2 xhigh"
+                - option "GP#T 5.1 high"
+                - option "GPT 5 high"
+                - option "GPT 5"
+                - option "GPT 5 Chat"
+                - option "GPT 5 Mini"
+                - option "OpenAI o3-mini"
+                - option "OpenAI GPT-4.1"
+                - option "OpenAI GPT-4o"
+                - option "GPT 5 Nano"
+                - option "Anthropic Claude Haiku"
+                - option "Google Gemini 3 Flash Preview High"
+                - option "Google Gemini 3 Pro Preview High"
+                - option "Google Gemini 2.5 Flash"
+                - option "Google Gemini 2.5 Pro"
+                - option "openai 120b Local" [selected]
+                - option "Qwen3 Coder Local"
+                - option "Qwen3 30B Thinking 2507"
+                - option "Qwen3 30B MoE 2507"
+                - option "Qwen3 32B Q6"
+                - option "Devstral 2507 QK_K"
+                - option "Qwen 32B AWQ"
+                - option "Qwen3 235B 2597 Thinking PI"
+                - option "Qwen3 30B 2507 Instruct PI"
+                - option "Qwen3 30B 2507 Thinking PI"
+                - option "OpenAI GPT 120B PI"
+                - option "Kimi K2 Groq"
+                - option "R1 0528"
+                - option "Qwen3-Thinking OR"
+                - option "glm-4.5-air"
+                - option "openai 120B"
+                - option "Kimi K2 openrouter"
+                - option "Horizon Beta"
+                - option "Horizon Alpha"
+                - option "Qwen3 Coder OR"
+                - option "OpenAI o3"
+                - option "Sonnet 4"
+                - option "deepseek-reasoner-speciale"
+                - option "deepseek-chat"
+                - option "deepseek-reasoner"
+                - option "Deepseek-V3-1"
+                - option "Openai-120b"
+                - option "qwen3-coder-plus"
+                - option "grok-4-latest"
+                - option "grok-code-fast-1"
+                - option "kimi-k2-0905-preview"
+                - option "kimi-k2-thinking"
+                - option "GLM-4.6"
+            - generic [ref=e54]:
+              - generic [ref=e55]: "Auto-approve:"
+              - button [ref=e56] [cursor=pointer]
+            - generic [ref=e58]:
+              - generic "Sandbox ON (docker)" [ref=e59]: Sandbox[ON]
+              - button "Toggle sandboxing" [ref=e60] [cursor=pointer]
+          - generic [ref=e62]:
+            - generic [ref=e63]:
+              - img [ref=e64]
+              - generic [ref=e68]: Navigation
+            - generic [ref=e69]: Root thread, no children
+          - generic [ref=e70]:
+            - generic [ref=e71]:
+              - generic [ref=e72]: Token Stats
+              - button [ref=e73] [cursor=pointer]:
+                - img [ref=e74]
+            - generic [ref=e79]:
+              - generic [ref=e80]: "Input:"
+              - generic [ref=e81]: "0"
+              - generic [ref=e82]: "Output:"
+              - generic [ref=e83]: "0"
+              - generic [ref=e84]: "Reasoning:"
+              - generic [ref=e85]: "0"
+              - generic [ref=e86]: "Cached:"
+              - generic [ref=e87]: "0"
+              - generic [ref=e88]: "Context:"
+              - generic [ref=e89]: "18"
+              - generic [ref=e90]: "Total:"
+              - generic [ref=e91]: "0"
+              - generic [ref=e92]: "Cost:"
+              - generic [ref=e93]: $0.0000
+        - generic [ref=e94]:
+          - generic [ref=e95]: System Log
+          - button "Clear logs" [ref=e96] [cursor=pointer]:
+            - img [ref=e97]
+        - generic [ref=e101]:
+          - generic [ref=e102]: 2:54:58 PM Opened thread AABNGERD
+          - generic [ref=e103]: 2:54:58 PM SSE connected
+          - generic [ref=e104]: 2:54:58 PM Opened thread AABNGERD
+          - generic [ref=e105]: "2:54:58 PM Created new thread: EQ2HZ08Z"
+          - generic [ref=e106]: 2:54:58 PM SSE connected
+          - generic [ref=e107]: 2:54:59 PM Message sent
+          - generic [ref=e108]: "2:54:59 PM Message created: user"
+          - generic [ref=e109]: 2:54:59 PM Streaming started
+          - generic [ref=e110]: "2:54:59 PM Message created: system"
+          - generic [ref=e111]: 2:54:59 PM Streaming complete
+  - alert [ref=e112]
+```
