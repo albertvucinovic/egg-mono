@@ -95,7 +95,7 @@ fi
 # Start backend
 echo "Starting backend on port $BACKEND_PORT (HTTP/2)..."
 cd "$CALLER_CWD"
-hypercorn eggw.main:app --bind 0.0.0.0:$BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
+PYTHONSAFEPATH=1 hypercorn eggw.main:app --bind 0.0.0.0:$BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
 BACKEND_PID=$!
 
 # Wait a moment for backend to start

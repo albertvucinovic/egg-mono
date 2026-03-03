@@ -24,4 +24,4 @@ elif [ -f "$MONO_ROOT/.env" ]; then
     set -a && source "$MONO_ROOT/.env" && set +a
 fi
 
-cd "$CALLER_CWD" && python -c "from egg.app import main; main()" "$@"
+cd "$CALLER_CWD" && PYTHONSAFEPATH=1 python -c "from egg.app import main; main()" "$@"
