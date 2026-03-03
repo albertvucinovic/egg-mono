@@ -70,8 +70,11 @@ def test_isolation_behavior(db):
 
 def test_safety_constraints(db):
     root_tid = create_root_thread(db, "root")
+    # Use a path guaranteed to be outside CWD (sibling of CWD under its parent)
+    cwd = Path.cwd().resolve()
+    outside = str(cwd.parent / ("_not_" + cwd.name + "_safety_test"))
     with pytest.raises(ValueError, match="must be a subdirectory"):
-        set_thread_working_directory(db, root_tid, "/tmp/should_not_exist_in_repo")
+        set_thread_working_directory(db, root_tid, outside)
     egg_dir = Path.cwd() / ".egg"
     egg_dir.mkdir(exist_ok=True)
     with pytest.raises(ValueError, match="cannot be inside the .egg system folder"):

@@ -50,8 +50,8 @@ class TestCmdPaste:
 
     def test_logs_paste_success(self, egg_app, monkeypatch):
         """Should log success with character count."""
-        import egg.utils as utils
-        monkeypatch.setattr(utils, "read_clipboard", lambda: "test content")
+        import egg.commands.utility as util_mod
+        monkeypatch.setattr(util_mod, "read_clipboard", lambda: "test content")
 
         egg_app.cmd_paste("")
 
