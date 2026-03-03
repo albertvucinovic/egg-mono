@@ -3,7 +3,9 @@ set -euo pipefail
 
 # Resolve symlinks to get the real script directory
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+MONO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CALLER_CWD="$(pwd)"
+VENV_DIR="$MONO_ROOT/venv"
 
 # Configuration - can be overridden via environment variables
 BACKEND_PORT="${EGGW_BACKEND_PORT:-8000}"
@@ -66,18 +68,22 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM EXIT
 
-# Try to activate Python virtual environment (use egg's venv if available)
-VENV_PATH="$SCRIPT_DIR/../egg/venv/bin/activate"
-if [ -f "$VENV_PATH" ]; then
-    echo "Using egg's virtual environment"
-    source "$VENV_PATH"
+# Create venv and install monorepo packages on first run
+if [ ! -f "$VENV_DIR/bin/activate" ]; then
+    echo "First run — creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
+    echo "Installing egg-mono packages..."
+    make -C "$MONO_ROOT" install
 else
-    echo "No venv found, using system Python"
-    # Verify hypercorn is available
-    if ! command -v hypercorn &> /dev/null; then
-        echo "Error: hypercorn not found. Install it with: pip install hypercorn h2"
-        exit 1
-    fi
+    source "$VENV_DIR/bin/activate"
+fi
+
+# Load .env if present (API keys, etc.)
+if [ -f "$CALLER_CWD/.env" ]; then
+    set -a && source "$CALLER_CWD/.env" && set +a
+elif [ -f "$MONO_ROOT/.env" ]; then
+    set -a && source "$MONO_ROOT/.env" && set +a
 fi
 
 # Check if .egg directory exists, create if needed
@@ -86,16 +92,10 @@ if [ ! -d "$CALLER_CWD/.egg" ]; then
     mkdir -p "$CALLER_CWD/.egg"
 fi
 
-# Install/update backend dependencies
-echo "Checking backend dependencies..."
-pip install -q -r "$SCRIPT_DIR/backend/requirements.txt"
-
 # Start backend
 echo "Starting backend on port $BACKEND_PORT (HTTP/2)..."
-# Get api keys
-source .env
-cd "$SCRIPT_DIR/backend"
-hypercorn main:app --bind 0.0.0.0:$BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
+cd "$CALLER_CWD"
+hypercorn eggw.main:app --bind 0.0.0.0:$BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
 BACKEND_PID=$!
 
 # Wait a moment for backend to start
