@@ -211,9 +211,14 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {token}"
             account_id = store.get_account_id()
             if account_id:
-                headers["ChatGPT-Account-Id"] = account_id
+                headers["chatgpt-account-id"] = account_id
+            else:
+                import sys
+                print("[eggllm] Warning: chatgpt_account_id not found in access token. "
+                      "Try /logout and /login again.", file=sys.stderr)
             headers["OpenAI-Beta"] = "responses=experimental"
-            headers["originator"] = "eggllm"
+            headers["originator"] = "codex_cli_rs"
+            headers["accept"] = "text/event-stream"
             import platform
             headers["User-Agent"] = f"eggllm/1.0 ({platform.system()} {platform.release()}; {platform.machine()})"
         else:

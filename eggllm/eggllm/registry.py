@@ -119,14 +119,8 @@ class ModelRegistry:
         if not provider:
             raise KeyError(f"Model {display_key} has no provider")
         provider_cfg = self.provider_config(provider)
-        # Build provider dict with api_base, api_key_env, parameters
-        prov_dict = {}
-        if "api_base" in provider_cfg:
-            prov_dict["api_base"] = provider_cfg["api_base"]
-        if "api_key_env" in provider_cfg:
-            prov_dict["api_key_env"] = provider_cfg["api_key_env"]
-        if "parameters" in provider_cfg and isinstance(provider_cfg["parameters"], dict):
-            prov_dict["parameters"] = provider_cfg["parameters"]
+        # Preserve all provider-level keys (api_base, api_key_env, auth_type, parameters, etc.)
+        prov_dict = {k: v for k, v in provider_cfg.items() if k != "models"}
         # Build model dict without 'provider' key
         model_dict = {k: v for k, v in model_cfg.items() if k != "provider"}
         # Ensure model_name is present (should be)
@@ -159,14 +153,14 @@ class ModelRegistry:
             raise ValueError("concrete_info must contain exactly one provider")
         provider_name = next(iter(providers))
         provider_info = providers[provider_name]
-        # Update providers_config (overwrite if exists)
-        prov_cfg = {}
-        if "api_base" in provider_info:
-            prov_cfg["api_base"] = provider_info["api_base"]
-        if "api_key_env" in provider_info:
-            prov_cfg["api_key_env"] = provider_info["api_key_env"]
-        if "parameters" in provider_info and isinstance(provider_info["parameters"], dict):
-            prov_cfg["parameters"] = provider_info["parameters"]
+        # Merge into existing providers_config, preserving keys like auth_type
+        # that may already be loaded from models.json
+        existing = self.providers_config.get(provider_name, {})
+        prov_cfg = dict(existing)
+        for k, v in provider_info.items():
+            if k == "models":
+                continue
+            prov_cfg[k] = v
         self.providers_config[provider_name] = prov_cfg
         # Process models
         models = provider_info.get("models")

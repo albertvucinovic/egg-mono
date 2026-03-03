@@ -21,11 +21,14 @@ DEFAULT_AUTH_PATH = Path.home() / ".eggllm" / "auth.json"
 REFRESH_MARGIN_SECONDS = 300
 
 
-def _extract_account_id_from_jwt(id_token: str) -> Optional[str]:
-    """Parse the id_token JWT and extract chatgpt_account_id from the
-    'https://api.openai.com/auth' claim."""
+def _extract_account_id_from_jwt(token: str) -> Optional[str]:
+    """Parse a JWT and extract chatgpt_account_id from the
+    'https://api.openai.com/auth' claim.
+
+    Works with both access_token and id_token JWTs.
+    """
     try:
-        parts = id_token.split(".")
+        parts = token.split(".")
         if len(parts) < 2:
             return None
         # JWT payload is base64url-encoded; add padding as needed
@@ -104,8 +107,20 @@ class TokenStore:
         return data["tokens"]["access_token"]
 
     def get_account_id(self) -> Optional[str]:
-        """Return the chatgpt_account_id extracted from the id_token JWT."""
+        """Return the chatgpt_account_id.
+
+        Prefers the value extracted live from the current access_token JWT
+        (matching pi-mono/codex-cli behavior). Falls back to the stored
+        value from login/refresh time.
+        """
         data = self._load()
+        # Extract fresh from the current access_token (most reliable)
+        access_token = data.get("tokens", {}).get("access_token", "")
+        if access_token:
+            live_id = _extract_account_id_from_jwt(access_token)
+            if live_id:
+                return live_id
+        # Fall back to stored value
         return data.get("chatgpt_account_id")
 
     def store_tokens(
@@ -116,7 +131,11 @@ class TokenStore:
         expires_at: Optional[int] = None,
     ) -> None:
         """Persist a new set of tokens to disk."""
-        account_id = _extract_account_id_from_jwt(id_token) if id_token else None
+        # Extract account_id from access_token first (primary source),
+        # fall back to id_token if access_token doesn't contain it.
+        account_id = _extract_account_id_from_jwt(access_token)
+        if not account_id and id_token:
+            account_id = _extract_account_id_from_jwt(id_token)
         data = {
             "auth_mode": "chatgpt",
             "tokens": {

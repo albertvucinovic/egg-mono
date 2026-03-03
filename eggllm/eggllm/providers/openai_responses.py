@@ -175,13 +175,19 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             payload["tools"] = self._convert_tools_to_responses_format(original_payload["tools"])
 
         # Pass through other common parameters
-        for key in ("temperature", "top_p", "max_output_tokens", "max_tokens", "reasoning", "store"):
+        for key in ("temperature", "top_p", "max_output_tokens", "max_tokens",
+                     "reasoning", "store", "prompt_cache_key", "prompt_cache_retention"):
             if key in original_payload:
                 # Responses API uses max_output_tokens, not max_tokens
                 if key == "max_tokens":
                     payload["max_output_tokens"] = original_payload[key]
                 else:
                     payload[key] = original_payload[key]
+
+        # Convert flat reasoning_effort to nested reasoning object
+        # (Responses API expects {"reasoning": {"effort": "high"}})
+        if "reasoning_effort" in original_payload and "reasoning" not in payload:
+            payload["reasoning"] = {"effort": original_payload["reasoning_effort"]}
 
         return payload
 
