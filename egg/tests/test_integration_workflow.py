@@ -272,6 +272,14 @@ class TestEnterModeWorkflow:
         assert egg_app.enter_sends is False
 
 
+class TestEnterModeDefaults:
+    """Tests for default enter mode."""
+
+    def test_default_enter_mode_is_send(self, egg_app):
+        """New app instances should default to send-on-enter."""
+        assert egg_app.enter_sends is True
+
+
 class TestThreadListingWorkflow:
     """Tests for thread listing workflow."""
 

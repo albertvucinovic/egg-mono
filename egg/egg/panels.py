@@ -119,7 +119,7 @@ class PanelsMixin:
         # the single-column layout.
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
-            "Send: Enter/Ctrl+D | New line: Ctrl+J | Clear: Ctrl+E | Quit: Ctrl+C",
+            "Send: Enter/Ctrl+D | New line: Shift+Enter/Alt+Enter | Clear: Ctrl+E | Quit: Ctrl+C",
             "Commands: /help  |  Display: /togglePanel chat|children|system",
         ]
 
@@ -430,8 +430,8 @@ class PanelsMixin:
         try:
             self.console.print("[bold blue]Egg Chat (eggdisplay UI)[/bold blue]")
             self.console.print(
-                "Press Enter or Ctrl+D to send (configurable). Ctrl+E clears input. Ctrl+P paste, "
-                "Ctrl+C to quit. Type /help for commands.\n"
+                "Press Enter or Ctrl+D to send. Shift+Enter or Alt+Enter inserts a newline. "
+                "Ctrl+E clears input. Ctrl+P paste, Ctrl+C to quit. Type /help for commands.\n"
             )
         except Exception:
             pass

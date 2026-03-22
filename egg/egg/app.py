@@ -108,7 +108,8 @@ class EggDisplayApp(
       - HStack(ChatOutput, SystemOutput)
       - InputPanel
 
-    Use Ctrl+D to send, Ctrl+E to clear input, Ctrl+C to quit.
+    Use Enter/Ctrl+D to send. Use Shift+Enter or Alt+Enter for a newline.
+    Ctrl+E clears input, Ctrl+C quits.
     Commands start with '/'.
     """
 
@@ -222,8 +223,21 @@ class EggDisplayApp(
         io_mode = os.environ.get("EGG_IO_MODE", "threaded").strip().lower()
         def _adapter(line: str, row: int, col: int):
             return get_autocomplete_items(line, col, self.db, lambda: self.current_thread, self.llm_client)
-        self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12,
-                                      autocomplete_callback=_adapter, io_mode=io_mode)
+        # Input panel (no footer/status line; keep it visually clean).
+        try:
+            from eggdisplay import InputPanel as _InputPanel  # type: ignore
+            input_style = _InputPanel.PanelStyle(show_footer=False)
+        except Exception:
+            input_style = None
+
+        self.input_panel = InputPanel(
+            title="Message Input",
+            initial_height=8,
+            max_height=12,
+            autocomplete_callback=_adapter,
+            io_mode=io_mode,
+            style=input_style,
+        )
 
         # Panel visibility (single-column layout).
         # Users can toggle these at runtime via /togglePanel.
@@ -270,9 +284,10 @@ class EggDisplayApp(
         # ensure system log exists (double safety)
         if not hasattr(self, '_system_log'):
             self._system_log = []
-        # Input behavior: default to Enter inserts newline (toggle with
-        # /enterMode). Ctrl+D always sends.
-        self.enter_sends: bool = False
+        # Input behavior: Enter sends by default.
+        # Use Alt+Enter / Shift+Enter to insert a newline. Ctrl+D always sends.
+        # (/enterMode can still override this behaviour.)
+        self.enter_sends: bool = True
         # Track last printed event sequence per thread for console output
         self._last_printed_seq_by_thread: Dict[str, int] = {}
 

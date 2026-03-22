@@ -1204,6 +1204,9 @@ class InputPanel:
         cursor_style: str = "black on white"
         line_num_style: str = "dim"
         current_line_num_style: str = "bold green"
+        # Whether to show the informational footer line inside the panel
+        # (e.g. key hints / counts).
+        show_footer: bool = True
 
     def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12,
                  style: Optional['InputPanel.PanelStyle'] = None,
@@ -1269,8 +1272,11 @@ class InputPanel:
         except Exception:
             extra = 0
 
-        # 4 = line numbers + status line etc. (legacy sizing)
-        target_height = max(6, min(self.max_height, editor_lines + 4 + extra))
+        # 4 = line numbers + status line etc. (legacy sizing).
+        # The footer is optional, so use a slightly smaller baseline when it
+        # is disabled.
+        baseline = 4 if getattr(self.style, "show_footer", False) else 3
+        target_height = max(6, min(self.max_height, editor_lines + baseline + extra))
         self.current_height = float(target_height)
         return target_height
 
@@ -1412,7 +1418,7 @@ class InputPanel:
         header_lines = len(rows)
 
         # Layout budgeting (within the inner content region)
-        status_lines = 1
+        status_lines = 1 if getattr(self.style, "show_footer", False) else 0
 
         # Header + editor + suggestions + status must fit in inner_height.
         available_body = inner_height - header_lines - status_lines
@@ -1497,26 +1503,33 @@ class InputPanel:
             # try to reuse an out-of-range offset.
             self._suggestion_scroll_top = 0
 
-        # -------- Status line --------
-        total_lines = len(lines)
-        showing_range = (
-            f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > editor_lines_budget else f"{total_lines}"
-        )
-        rows.append(
-            Text(
-                f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send",
-                style=self.style.status_style,
-                no_wrap=True,
+        # -------- Optional footer/status line --------
+        if getattr(self.style, "show_footer", False):
+            total_lines = len(lines)
+            showing_range = (
+                f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > editor_lines_budget else f"{total_lines}"
             )
-        )
+            rows.append(
+                Text(
+                    (
+                        f"Lines: {showing_range} | Messages sent: {self.message_count} | "
+                        "Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send"
+                    ),
+                    style=self.style.status_style,
+                    no_wrap=True,
+                )
+            )
 
         # Final assembly: exactly inner_height rows.
         if len(rows) < inner_height:
             rows.extend(Text("", no_wrap=True) for _ in range(inner_height - len(rows)))
         elif len(rows) > inner_height:
-            # Prefer keeping the status line (last). Trim from the middle.
-            tail = rows[-1:]
-            rows = rows[: max(0, inner_height - 1)] + tail
+            # Prefer keeping the footer line (last) if present.
+            if getattr(self.style, "show_footer", False) and rows:
+                tail = rows[-1:]
+                rows = rows[: max(0, inner_height - 1)] + tail
+            else:
+                rows = rows[:inner_height]
 
         editor_content = Text(no_wrap=True)
         for i, row in enumerate(rows):
