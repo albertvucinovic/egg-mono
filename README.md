@@ -17,19 +17,14 @@ A modular AI conversation platform. Tree-structured threads, multi-provider LLM 
 ## Architecture
 
 ```
-eggconfig    eggdisplay
-    │            │
-eggllm       eggflow
-    │        ╱
-eggthreads ─┘
-     │
-   ┌─┼────┐
-egg  │    eggw
-     │
-  your agent
+         eggllm
+            │
+        eggthreads
+      ┌─────┼──────────┐
+     egg   eggw    your agent
 ```
 
-The core libraries (`eggthreads`, `eggllm`, `eggflow`, `eggconfig`) have no UI dependencies and can be composed into headless agents that run unattended. `egg` and `eggw` are just two frontends built on top of them.
+`egg` also depends on `eggdisplay`; headless agents typically add `eggflow` for caching and crash recovery. The core libraries have no UI dependencies and can be composed into agents that run unattended — `egg` and `eggw` are just two frontends built on top of them.
 
 ## Install
 
