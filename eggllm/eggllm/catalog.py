@@ -1,9 +1,181 @@
 import json
+import os
 import time
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from .provider_http import build_provider_headers
+
+
+def derive_models_url(provider: str, provider_config: Dict[str, Any]) -> str:
+    """Derive a provider's catalog endpoint from its configured API base.
+
+    Returns either the derived URL or an ``Error: ...`` string when the
+    provider cannot be refreshed via ``/updateAllModels``.
+    """
+    api_base = str(provider_config.get('api_base') or '')
+    if not api_base:
+        return f"Error: Provider '{provider}' is missing api_base in models.json."
+
+    auth_type = provider_config.get('auth_type', 'api_key')
+    if auth_type == 'chatgpt_oauth':
+        # ChatGPT/Codex OAuth-backed providers are Responses-only and do not
+        # expose an OpenAI-compatible /models endpoint that can be derived by
+        # path rewriting. Their model catalog should be curated in models.json.
+        return (
+            f"Error: Provider '{provider}' uses ChatGPT OAuth / Responses API, "
+            "which does not support catalog refresh via /updateAllModels. "
+            "Add models explicitly to models.json instead."
+        )
+
+    # Derive a /models endpoint from an OpenAI-compatible base
+    models_url = api_base.rstrip('/')
+    for seg in ("/chat/completions", "/completions", "/responses"):
+        if models_url.endswith(seg):
+            models_url = models_url[: -len(seg)]
+            break
+    if not models_url.endswith('/models'):
+        models_url = models_url + '/models'
+    return models_url
+
+
+def format_update_all_models_text(
+    providers_config: Dict[str, Any],
+    provider: Optional[str] = None,
+    *,
+    result: Optional[str] = None,
+    all_models_path: Optional[str | Path] = None,
+) -> str:
+    """Return a human-readable help/status block for ``/updateAllModels``."""
+
+    configured: list[tuple[str, Dict[str, Any]]] = []
+    for name in sorted(providers_config.keys()):
+        if name == '_meta':
+            continue
+        cfg = providers_config.get(name)
+        if isinstance(cfg, dict):
+            configured.append((name, cfg))
+
+    def _auth_label(cfg: Dict[str, Any]) -> str:
+        auth_type = str(cfg.get('auth_type') or 'api_key')
+        if auth_type == 'chatgpt_oauth':
+            return 'ChatGPT OAuth'
+        return 'API key'
+
+    def _status_text(message: Optional[str]) -> str:
+        if not message:
+            return 'info'
+        if message.startswith('Error:'):
+            return 'error'
+        if message.startswith('Warning:'):
+            return 'warning'
+        return 'ok'
+
+    lines: List[str] = []
+
+    if not provider:
+        lines.append('Update a provider model catalog and refresh all-models.json.')
+        lines.append('')
+        lines.append('Usage:')
+        lines.append('  /updateAllModels <provider>')
+        lines.append('')
+        lines.append('Configured providers:')
+        if configured:
+            for name, cfg in configured:
+                api_base = str(cfg.get('api_base') or '(missing api_base)')
+                lines.append(f'  - {name} ({_auth_label(cfg)})')
+                lines.append(f'      api_base: {api_base}')
+        else:
+            lines.append('  (none)')
+
+        if all_models_path:
+            lines.append('')
+            lines.append(f'Catalog file: {all_models_path}')
+
+        lines.append('')
+        lines.append('What it does:')
+        lines.append('  - fetches the provider model catalog')
+        lines.append('  - writes or updates all-models.json')
+        lines.append('  - enables /model all:provider:model selection and autocomplete')
+        lines.append('')
+        lines.append('How catalog discovery works:')
+        lines.append('  - start from the provider api_base')
+        lines.append('  - replace /chat/completions, /completions, or /responses with /models')
+        lines.append('')
+        lines.append('Note:')
+        lines.append('  - a provider may support Responses inference but still not expose')
+        lines.append('    a standard model-list endpoint for /updateAllModels')
+        lines.append('  - in that case, define the models explicitly in models.json')
+        return '\n'.join(lines)
+
+    cfg = providers_config.get(provider)
+    lines.append(f'Update All Models: {provider}')
+    lines.append('')
+
+    if not isinstance(cfg, dict):
+        lines.append('Status:')
+        lines.append('  error: unknown provider')
+        lines.append('')
+        lines.append('Configured providers:')
+        if configured:
+            for name, cfg2 in configured:
+                lines.append(f'  - {name} ({_auth_label(cfg2)})')
+        else:
+            lines.append('  (none)')
+        lines.append('')
+        lines.append('Usage:')
+        lines.append('  /updateAllModels <provider>')
+        return '\n'.join(lines)
+
+    api_base = str(cfg.get('api_base') or '(missing api_base)')
+    models_url = derive_models_url(provider, cfg)
+    auth_label = _auth_label(cfg)
+    lines.append('Provider:')
+    lines.append(f'  name:              {provider}')
+    lines.append(f'  auth:              {auth_label}')
+    api_key_env = str(cfg.get('api_key_env') or '').strip()
+    if api_key_env:
+        env_state = 'set' if os.environ.get(api_key_env) else 'missing'
+        lines.append(f'  api_key_env:       {api_key_env} ({env_state})')
+    lines.append(f'  api_base:          {api_base}')
+    if models_url.startswith('Error:'):
+        lines.append('  catalog_endpoint:  unavailable')
+    else:
+        lines.append(f'  catalog_endpoint:  {models_url}')
+
+    if all_models_path:
+        lines.append(f'  catalog_file:      {all_models_path}')
+
+    if result is not None:
+        msg_lines = [s for s in str(result).splitlines()] or ['']
+        lines.append('')
+        lines.append('Result:')
+        lines.append(f'  status:            {_status_text(result)}')
+        lines.append(f'  message:           {msg_lines[0]}')
+        for extra in msg_lines[1:]:
+            lines.append(f'                     {extra}')
+
+    lines.append('')
+    if result is None or _status_text(result) == 'ok':
+        lines.append('Next:')
+        lines.append(f'  - use /model all:{provider}:<model_id> to select a catalog model')
+        lines.append(f'  - autocomplete should offer all:{provider}:... after refresh')
+    elif str(cfg.get('auth_type') or 'api_key') == 'chatgpt_oauth':
+        lines.append('Why this provider is different:')
+        lines.append('  - it can accept Responses-style inference requests')
+        lines.append('  - but /updateAllModels needs a separate model-list endpoint')
+        lines.append('  - we do not currently know a standard catalog endpoint for')
+        lines.append('    ChatGPT or Codex OAuth providers that we can derive safely')
+        lines.append('')
+        lines.append('What to do instead:')
+        lines.append('  - add the models you want explicitly to models.json')
+        lines.append('  - then select them with /model <name>')
+    else:
+        lines.append('Hint:')
+        lines.append('  - verify the provider api_base and credentials')
+        lines.append('  - then run /updateAllModels again')
+
+    return '\n'.join(lines)
 
 
 class AllModelsCatalog:
@@ -63,30 +235,7 @@ class AllModelsCatalog:
         return out
 
     def _derive_models_url(self, provider: str, provider_config: Dict[str, Any]) -> str:
-        api_base = str(provider_config.get('api_base') or '')
-        if not api_base:
-            return f"Error: Provider '{provider}' is missing api_base in models.json."
-
-        auth_type = provider_config.get('auth_type', 'api_key')
-        if auth_type == 'chatgpt_oauth':
-            # ChatGPT/Codex OAuth-backed providers are Responses-only and do not
-            # expose an OpenAI-compatible /models endpoint that can be derived by
-            # path rewriting. Their model catalog should be curated in models.json.
-            return (
-                f"Error: Provider '{provider}' uses ChatGPT OAuth / Responses API, "
-                "which does not support catalog refresh via /updateAllModels. "
-                "Add models explicitly to models.json instead."
-            )
-
-        # Derive a /models endpoint from an OpenAI-compatible base
-        models_url = api_base.rstrip('/')
-        for seg in ("/chat/completions", "/completions", "/responses"):
-            if models_url.endswith(seg):
-                models_url = models_url[: -len(seg)]
-                break
-        if not models_url.endswith('/models'):
-            models_url = models_url + '/models'
-        return models_url
+        return derive_models_url(provider, provider_config)
 
     def update_provider(self, provider: str, providers_config: Dict[str, Any]) -> str:
         prov_cfg = providers_config.get(provider)

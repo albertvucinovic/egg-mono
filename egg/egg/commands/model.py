@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, List
 
 from eggthreads import create_snapshot, current_thread_model_info
+from eggllm.catalog import format_update_all_models_text
 
 from ..utils import MODELS_PATH, ALL_MODELS_PATH
 
@@ -72,23 +73,45 @@ class ModelCommandsMixin:
     def cmd_updateAllModels(self, arg: str) -> None:
         """Handle /updateAllModels command - refresh model catalog for a provider."""
         provider = (arg or '').strip()
-        if not provider:
-            self.log_system('Usage: /updateAllModels <provider>')
-        else:
-            try:
-                # Prefer to use the long-lived LLM client instance
-                # so that its in-memory AllModelsCatalog is updated
-                # and autocomplete (/model all:...<tab>) immediately
-                # sees the new models. If no client is available in
-                # this UI, fall back to a temporary one.
-                if self.llm_client is not None:
-                    res = self.llm_client.update_all_models(provider)
-                else:
-                    from eggllm import LLMClient
-                    if not LLMClient:
-                        raise RuntimeError('eggllm not available')
-                    llm_tmp = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
-                    res = llm_tmp.update_all_models(provider)
-                self.log_system("Update All Models:\n" + res)
-            except Exception as e:
-                self.log_system(f"Update All Models error: {e}")
+        try:
+            # Prefer to use the long-lived LLM client instance
+            # so that its in-memory AllModelsCatalog is updated
+            # and autocomplete (/model all:...<tab>) immediately
+            # sees the new models. If no client is available in
+            # this UI, fall back to a temporary one.
+            if self.llm_client is not None:
+                llm = self.llm_client
+            else:
+                from eggllm import LLMClient
+                if not LLMClient:
+                    raise RuntimeError('eggllm not available')
+                llm = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
+
+            if not provider:
+                block = format_update_all_models_text(
+                    llm.registry.providers_config,
+                    all_models_path=ALL_MODELS_PATH,
+                )
+                self.log_system('Update-all-models help (see console for full details).')
+                self.console_print_block('Update All Models', block, border_style='blue')
+                return
+
+            res = llm.update_all_models(provider)
+            block = format_update_all_models_text(
+                llm.registry.providers_config,
+                provider=provider,
+                result=res,
+                all_models_path=ALL_MODELS_PATH,
+            )
+            status = 'ok'
+            if isinstance(res, str):
+                if res.startswith('Error:'):
+                    status = 'error'
+                elif res.startswith('Warning:'):
+                    status = 'warning'
+            border = 'green' if status == 'ok' else ('yellow' if status == 'warning' else 'red')
+            summary = 'Update-all-models result (see console for details).' if status == 'ok' else 'Update-all-models issue (see console for details).'
+            self.log_system(summary)
+            self.console_print_block('Update All Models', block, border_style=border)
+        except Exception as e:
+            self.log_system(f"Update All Models error: {e}")

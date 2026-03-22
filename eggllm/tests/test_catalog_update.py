@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from eggllm.catalog import AllModelsCatalog
+from eggllm.catalog import AllModelsCatalog, format_update_all_models_text
 
 
 def test_derive_models_url_trims_responses_endpoint(tmp_path: Path):
@@ -69,3 +69,52 @@ def test_update_provider_uses_bearer_header_for_api_key_provider(tmp_path: Path,
 
     saved = json.loads((tmp_path / "all-models.json").read_text())
     assert saved["providers"]["openai"]["models"] == ["gpt-4.1", "gpt-4o"]
+
+
+def test_format_update_all_models_help_text_lists_providers(tmp_path: Path):
+    text = format_update_all_models_text(
+        {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/responses",
+                "api_key_env": "OPENAI_API_KEY",
+            },
+            "openai-pro": {
+                "api_base": "https://chatgpt.com/backend-api/codex/responses",
+                "auth_type": "chatgpt_oauth",
+            },
+            "_meta": {"default_model": "GPT 5"},
+        },
+        all_models_path=tmp_path / "all-models.json",
+    )
+
+    assert "Usage:" in text
+    assert "/updateAllModels <provider>" in text
+    assert "Configured providers:" in text
+    assert "openai (API key)" in text
+    assert "openai-pro (ChatGPT OAuth)" in text
+    assert "Catalog file:" in text
+    assert "What it does:" in text
+
+
+def test_format_update_all_models_result_for_oauth_provider(tmp_path: Path):
+    text = format_update_all_models_text(
+        {
+            "openai-pro": {
+                "api_base": "https://chatgpt.com/backend-api/codex/responses",
+                "auth_type": "chatgpt_oauth",
+            }
+        },
+        provider="openai-pro",
+        result=(
+            "Error: Provider 'openai-pro' uses ChatGPT OAuth / Responses API, "
+            "which does not support catalog refresh via /updateAllModels. "
+            "Add models explicitly to models.json instead."
+        ),
+        all_models_path=tmp_path / "all-models.json",
+    )
+
+    assert "Update All Models: openai-pro" in text
+    assert "catalog_endpoint:  unavailable" in text
+    assert "status:            error" in text
+    assert "Why this provider is different:" in text
+    assert "What to do instead:" in text

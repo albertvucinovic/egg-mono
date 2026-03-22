@@ -1,6 +1,7 @@
 """Model management commands for eggw backend."""
 from __future__ import annotations
 
+from eggllm.catalog import format_update_all_models_text
 from eggthreads import current_thread_model, set_thread_model
 
 from ..models import CommandResponse
@@ -47,27 +48,36 @@ async def cmd_model(thread_id: str, model_name: str) -> CommandResponse:
 async def cmd_update_all_models(provider: str) -> CommandResponse:
     """Handle /updateAllModels command - refresh model catalog for a provider."""
     provider = provider.strip()
-    if not provider:
-        return CommandResponse(
-            success=True,
-            message="Usage: /updateAllModels <provider>\nAvailable providers: openai, anthropic, google, etc.",
-        )
-
     try:
-        # Prefer the long-lived client so the in-memory catalog is updated and
-        # autocomplete sees new all:provider:model entries immediately.
         if core.llm_client is not None:
-            result = core.llm_client.update_all_models(provider)
+            llm = core.llm_client
         else:
             from eggllm import LLMClient
 
             llm = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
-            result = llm.update_all_models(provider)
+
+        if not provider:
+            return CommandResponse(
+                success=True,
+                message=format_update_all_models_text(
+                    llm.registry.providers_config,
+                    all_models_path=ALL_MODELS_PATH,
+                ),
+            )
+
+        # Prefer the long-lived client so the in-memory catalog is updated and
+        # autocomplete sees new all:provider:model entries immediately.
+        result = llm.update_all_models(provider)
 
         ok = isinstance(result, str) and not result.startswith(("Error:", "Warning:"))
         return CommandResponse(
             success=ok,
-            message=result if isinstance(result, str) else str(result),
+            message=format_update_all_models_text(
+                llm.registry.providers_config,
+                provider=provider,
+                result=result if isinstance(result, str) else str(result),
+                all_models_path=ALL_MODELS_PATH,
+            ),
             data={"provider": provider} if ok else None,
         )
     except Exception as e:
