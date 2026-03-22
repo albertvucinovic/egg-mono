@@ -1,8 +1,9 @@
 import json
-import os
 import time
 from pathlib import Path
 from typing import Dict, Any, List
+
+from .provider_http import build_provider_headers
 
 
 class AllModelsCatalog:
@@ -61,15 +62,21 @@ class AllModelsCatalog:
                     out.append(cand)
         return out
 
-    def update_provider(self, provider: str, providers_config: Dict[str, Any]) -> str:
-        prov_cfg = providers_config.get(provider)
-        if not isinstance(prov_cfg, dict):
-            return f"Error: Unknown provider '{provider}'."
-        api_base = str(prov_cfg.get('api_base') or '')
-        key_env = prov_cfg.get('api_key_env')
-        api_key = os.environ.get(key_env) if key_env else None
+    def _derive_models_url(self, provider: str, provider_config: Dict[str, Any]) -> str:
+        api_base = str(provider_config.get('api_base') or '')
         if not api_base:
             return f"Error: Provider '{provider}' is missing api_base in models.json."
+
+        auth_type = provider_config.get('auth_type', 'api_key')
+        if auth_type == 'chatgpt_oauth':
+            # ChatGPT/Codex OAuth-backed providers are Responses-only and do not
+            # expose an OpenAI-compatible /models endpoint that can be derived by
+            # path rewriting. Their model catalog should be curated in models.json.
+            return (
+                f"Error: Provider '{provider}' uses ChatGPT OAuth / Responses API, "
+                "which does not support catalog refresh via /updateAllModels. "
+                "Add models explicitly to models.json instead."
+            )
 
         # Derive a /models endpoint from an OpenAI-compatible base
         models_url = api_base.rstrip('/')
@@ -79,10 +86,20 @@ class AllModelsCatalog:
                 break
         if not models_url.endswith('/models'):
             models_url = models_url + '/models'
+        return models_url
 
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+    def update_provider(self, provider: str, providers_config: Dict[str, Any]) -> str:
+        prov_cfg = providers_config.get(provider)
+        if not isinstance(prov_cfg, dict):
+            return f"Error: Unknown provider '{provider}'."
+        models_url = self._derive_models_url(provider, prov_cfg)
+        if models_url.startswith('Error:'):
+            return models_url
+
+        try:
+            headers = build_provider_headers(provider, prov_cfg, accept_sse=False)
+        except Exception as e:
+            return f"Error: {e}"
 
         import requests
         try:

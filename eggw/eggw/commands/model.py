@@ -5,7 +5,7 @@ from eggthreads import current_thread_model, set_thread_model
 
 from ..models import CommandResponse
 from .. import core
-from ..core import ALL_MODELS_PATH
+from ..core import ALL_MODELS_PATH, MODELS_PATH
 
 
 async def cmd_model(thread_id: str, model_name: str) -> CommandResponse:
@@ -54,19 +54,21 @@ async def cmd_update_all_models(provider: str) -> CommandResponse:
         )
 
     try:
-        from eggllm import AllModelsCatalog
-        catalog = AllModelsCatalog(str(ALL_MODELS_PATH))
-        result = catalog.update_provider(provider)
-
-        if result.get("success"):
-            count = result.get("models_count", 0)
-            return CommandResponse(
-                success=True,
-                message=f"Updated {provider} catalog: {count} models",
-                data={"provider": provider, "models_count": count},
-            )
+        # Prefer the long-lived client so the in-memory catalog is updated and
+        # autocomplete sees new all:provider:model entries immediately.
+        if core.llm_client is not None:
+            result = core.llm_client.update_all_models(provider)
         else:
-            error = result.get("error", "Unknown error")
-            return CommandResponse(success=False, message=f"Failed to update {provider}: {error}")
+            from eggllm import LLMClient
+
+            llm = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
+            result = llm.update_all_models(provider)
+
+        ok = isinstance(result, str) and not result.startswith(("Error:", "Warning:"))
+        return CommandResponse(
+            success=ok,
+            message=result if isinstance(result, str) else str(result),
+            data={"provider": provider} if ok else None,
+        )
     except Exception as e:
         return CommandResponse(success=False, message=f"/updateAllModels error: {e}")

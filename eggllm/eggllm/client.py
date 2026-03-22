@@ -4,6 +4,7 @@ from typing import Dict, Any, Generator, Optional, List
 
 from .config import load_models_config
 from .catalog import AllModelsCatalog
+from .provider_http import build_provider_headers
 from .registry import ModelRegistry
 from .providers.factory import AdapterFactory
 from .providers.base import ProviderAdapter
@@ -200,34 +201,7 @@ class LLMClient:
             # Convert chat/completions URL to responses URL
             base_url = self._rewrite_url_for_api_type(base_url, api_type)
 
-        headers = {"Content-Type": "application/json"}
-        auth_type = pc.get("auth_type", "api_key")
-        if auth_type == "chatgpt_oauth":
-            from .auth import TokenStore
-            store = TokenStore()
-            if not store.is_logged_in():
-                raise EnvironmentError("Not logged in to ChatGPT. Run /login first.")
-            token = store.get_access_token()  # auto-refreshes
-            headers["Authorization"] = f"Bearer {token}"
-            account_id = store.get_account_id()
-            if account_id:
-                headers["chatgpt-account-id"] = account_id
-            else:
-                import sys
-                print("[eggllm] Warning: chatgpt_account_id not found in access token. "
-                      "Try /logout and /login again.", file=sys.stderr)
-            headers["OpenAI-Beta"] = "responses=experimental"
-            headers["originator"] = "codex_cli_rs"
-            headers["accept"] = "text/event-stream"
-            import platform
-            headers["User-Agent"] = f"eggllm/1.0 ({platform.system()} {platform.release()}; {platform.machine()})"
-        else:
-            api_key_env = pc.get("api_key_env")
-            if api_key_env:
-                api_key = os.environ.get(api_key_env)
-                if not api_key:
-                    raise EnvironmentError(f"Env var '{api_key_env}' is not set for '{provider_name}'")
-                headers["Authorization"] = f"Bearer {api_key}"
+        headers = build_provider_headers(provider_name, pc, accept_sse=True)
         return provider_name, base_url, headers
 
     def auth_status(self) -> dict:
