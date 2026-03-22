@@ -167,8 +167,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             "stream": True,
         }
 
-        if instructions:
-            payload["instructions"] = instructions
+        # Always include instructions — the Codex backend (chatgpt.com)
+        # requires this field for newer models like gpt-5.4.
+        payload["instructions"] = instructions or ""
 
         # Convert and include tools if provided
         if "tools" in original_payload:
