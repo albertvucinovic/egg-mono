@@ -1,6 +1,6 @@
 # egg-mono
 
-A modular AI conversation platform. Tree-structured threads, multi-provider LLM routing, sandboxed tool execution — usable from a terminal TUI or a web UI.
+A modular AI conversation platform. Tree-structured threads, multi-provider LLM routing, sandboxed tool execution — usable from a terminal TUI, a web UI, or as building blocks for headless agents.
 
 ## Packages
 
@@ -22,10 +22,14 @@ eggconfig    eggdisplay
 eggllm       eggflow
     │        ╱
 eggthreads ─┘
-    │
-  ┌─┴──┐
- egg  eggw
+     │
+   ┌─┼────┐
+egg  │    eggw
+     │
+  your agent
 ```
+
+The core libraries (`eggthreads`, `eggllm`, `eggflow`, `eggconfig`) have no UI dependencies and can be composed into headless agents that run unattended. `egg` and `eggw` are just two frontends built on top of them.
 
 ## Install
 
@@ -65,6 +69,43 @@ eggflow[eggthreads] @ git+https://github.com/albertvucinovic/egg-mono.git#subdir
 ```bash
 ./eggw/eggw.sh
 ```
+
+**Headless agent:**
+
+The core packages can drive LLM conversations programmatically — no UI needed. Spawn a thread tree, route to any provider, execute tools in sandboxes, and let `eggflow` handle caching and crash recovery. A minimal example:
+
+```python
+import asyncio
+from eggthreads import (
+    ThreadsDB, SubtreeScheduler, RunnerConfig, create_llm_client,
+    create_root_thread, create_child_thread, append_message,
+    create_snapshot, set_subtree_tools_enabled, wait_subtree_idle,
+)
+
+async def main():
+    db = ThreadsDB()
+    db.init_schema()
+
+    root = create_root_thread(db, name="batch")
+    for i in range(3):
+        child = create_child_thread(db, root, name=f"agent-{i}")
+        append_message(db, child, "system", "You are a helpful assistant.")
+        append_message(db, child, "user", f"Write a haiku about topic #{i}.")
+        create_snapshot(db, child)
+
+    set_subtree_tools_enabled(db, root, True)
+
+    llm = create_llm_client()
+    scheduler = SubtreeScheduler(db, root_thread_id=root, llm=llm,
+                                  config=RunnerConfig(max_concurrent_threads=3))
+    task = asyncio.create_task(scheduler.run_forever(poll_sec=0.05))
+    await wait_subtree_idle(db, root)
+    task.cancel()
+
+asyncio.run(main())
+```
+
+For a real-world example see [EvolveTropy](https://github.com/albertvucinovic/EvolveTropy), which uses `eggthreads` + `eggflow` to run dozens of sandboxed LLM agents in parallel with full crash recovery.
 
 ### Run from anywhere
 
