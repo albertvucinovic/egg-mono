@@ -119,6 +119,23 @@ alias eggw="$EGG_MONO_HOME/eggw/eggw.sh"
 
 Then reload your shell (`source ~/.bashrc`) and run `egg` or `eggw` from any directory.
 
+## Requirements
+
+- **Python** >= 3.10
+- **Platform**: Linux (macOS and Windows are untested)
+
+### Sandboxing (optional)
+
+Tool execution can run in a sandbox. Three providers are supported — use whichever is available on your system:
+
+| Provider | Platforms | Install |
+|----------|-----------|---------|
+| **Docker** (default) | Linux, macOS, Windows | [docker.com](https://docs.docker.com/get-docker/) |
+| **bubblewrap** | Linux only | `apt install bubblewrap` |
+| **srt** (Anthropic sandbox runtime) | Linux, macOS | `npm install -g @anthropic-ai/sandbox-runtime` |
+
+If no provider is available, commands run unsandboxed. Sandboxing can be disabled entirely with `EGG_SANDBOX_MODE=off`.
+
 ## Development
 
 ```bash
