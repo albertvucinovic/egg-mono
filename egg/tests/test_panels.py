@@ -37,6 +37,14 @@ class TestUpdatePanels:
         # Should contain current thread info
         assert any(egg_app.current_thread[-8:] in call for call in set_content_calls)
 
+    def test_system_output_shows_paste_shortcut(self, egg_app):
+        """System panel should advertise the paste shortcut."""
+        egg_app.update_panels()
+
+        content = egg_app.system_output.content
+        assert content is not None
+        assert "Paste: Ctrl+P" in content
+
     def test_updates_children_output(self, egg_app, monkeypatch):
         """Should update children_output with tree view."""
         import time

@@ -119,7 +119,7 @@ class PanelsMixin:
         # the single-column layout.
         status_lines = [
             f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
-            "Send: Enter/Ctrl+D | New line: Shift+Enter/Alt+Enter | Clear: Ctrl+E | Quit: Ctrl+C",
+            "Send: Enter/Ctrl+D | New line: Shift+Enter/Alt+Enter | Paste: Ctrl+P | Clear: Ctrl+E | Quit: Ctrl+C",
             "Commands: /help  |  Display: /togglePanel chat|children|system",
         ]
 
