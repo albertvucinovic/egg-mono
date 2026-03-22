@@ -651,10 +651,52 @@ class LiveEditorBase:
         # distinguish paste from typed input.
         self._bracketed_paste_active: bool = False
         self._bracketed_paste_buffer: str = ""
-        # Some input stacks (notably readchar on POSIX) split ESC[200~ into
-        # two deliveries: "\x1b[200" and then "~". Track a pending marker
-        # prefix so we can join it.
-        self._bracketed_paste_marker_pending: str = ""
+        # Some input stacks (notably readchar on POSIX) split longer ANSI
+        # escape sequences across multiple deliveries. Track a pending prefix
+        # so we can reassemble it before interpreting the key.
+        self._ansi_pending: str = ""
+
+    def _ansi_seq_complete(self, seq: str) -> bool:
+        """Heuristic: consider an ANSI escape sequence complete."""
+        if not isinstance(seq, str) or not seq:
+            return False
+        last = seq[-1]
+        return last.isalpha() or last == "~"
+
+    def _ansi_seq_needs_more(self, key: str) -> bool:
+        """Return True if key looks like a partial ANSI escape sequence."""
+        if not isinstance(key, str) or not key:
+            return False
+        return (key.startswith("\x1b[") or key.startswith("\x1bO")) and not self._ansi_seq_complete(key)
+
+    def normalize_key(self, key: str) -> Optional[str]:
+        """Normalize raw terminal input into a stable logical key string.
+
+        Returns None when the key was buffered as part of an incomplete ANSI
+        sequence and the caller should wait for more input.
+        """
+        pending = self._ansi_pending
+        if isinstance(pending, str) and pending:
+            pending = pending + (key or "")
+            if self._ansi_seq_complete(pending):
+                self._ansi_pending = ""
+                key = pending
+            else:
+                self._ansi_pending = pending
+                return None
+        elif self._ansi_seq_needs_more(key):
+            self._ansi_pending = key
+            return None
+
+        # Alt+Enter is commonly encoded as ESC + Enter.
+        if key in ("\x1b\n", "\x1b\r"):
+            return "alt-enter"
+
+        # Common Shift+Enter encodings seen with CSI-u capable terminals.
+        if key in ("\x1b[13;2u", "\x1b[27;2;13~"):
+            return "shift-enter"
+
+        return key
 
     # ------------ Shared rendering ------------
     def _render(self) -> Text:
@@ -700,6 +742,10 @@ class LiveEditorBase:
         """Handle a key press and return False if should quit."""
         # Debug: uncomment to see what keys are being received
         # print(f"DEBUG: Key received: {repr(key)}")
+        key = self.normalize_key(key)
+        if key is None:
+            return True
+
         try:
             ctrl_c = readchar.key.CTRL_C
         except Exception:
@@ -714,33 +760,6 @@ class LiveEditorBase:
         PASTE_END = "\x1b[201~"
 
         if isinstance(key, str):
-            # Handle split marker prefixes as produced by readchar.readkey().
-            # Example: "\x1b[200" then "~".
-            if self._bracketed_paste_marker_pending:
-                if key.startswith("~"):
-                    marker = self._bracketed_paste_marker_pending + "~"
-                    rest = key[1:]
-                    self._bracketed_paste_marker_pending = ""
-                    if marker == PASTE_START:
-                        self._bracketed_paste_active = True
-                        self._bracketed_paste_buffer = ""
-                        if rest:
-                            return self._handle_key(rest)
-                        return True
-                    if marker == PASTE_END:
-                        # End paste and flush buffer.
-                        if self._bracketed_paste_buffer:
-                            self.editor.insert_text_block(self._bracketed_paste_buffer)
-                        self._bracketed_paste_active = False
-                        self._bracketed_paste_buffer = ""
-                        if rest:
-                            return self._handle_key(rest)
-                        return True
-                else:
-                    # Unexpected char after pending prefix: drop the prefix and
-                    # continue processing current key normally.
-                    self._bracketed_paste_marker_pending = ""
-
             # Enter bracketed paste mode (and optionally handle same-chunk end)
             if not self._bracketed_paste_active and PASTE_START in key:
                 _pre, _rest = key.split(PASTE_START, 1)
@@ -759,18 +778,9 @@ class LiveEditorBase:
                 self._bracketed_paste_buffer = _rest
                 return True
 
-            # Handle readchar-split start marker prefix
-            if not self._bracketed_paste_active and key == "\x1b[200":
-                self._bracketed_paste_marker_pending = key
-                return True
-
             # While in bracketed paste mode, treat everything as literal text
             # until we see PASTE_END.
             if self._bracketed_paste_active:
-                # Handle readchar-split end marker prefix
-                if key == "\x1b[201":
-                    self._bracketed_paste_marker_pending = key
-                    return True
                 if PASTE_END in key:
                     payload, trailing = key.split(PASTE_END, 1)
                     self._bracketed_paste_buffer += payload
@@ -806,6 +816,8 @@ class LiveEditorBase:
             self.editor.handle_key('backspace')
         elif key == getattr(readchar.key, 'DELETE', '\x1b[3~') or key == '\x1b[3~':
             self.editor.handle_key('delete')
+        elif key in ('alt-enter', 'shift-enter'):
+            self.editor.handle_key('enter')
         elif key in (getattr(readchar.key, 'ENTER', '\r'), '\r', '\n'):
             self.editor.handle_key('enter')
         elif key == getattr(readchar.key, 'TAB', '\t') or key == '\t':

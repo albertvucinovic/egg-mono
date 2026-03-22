@@ -11,86 +11,12 @@ from .utils import read_clipboard
 class InputMixin:
     """Mixin providing keyboard input handling: handle_key."""
 
-    def _ansi_seq_complete(self, seq: str) -> bool:
-        """Heuristic: consider an ANSI CSI sequence complete.
-
-        readchar.readkey() reads at most 5 chars for escape sequences on POSIX,
-        which means longer sequences (notably CSI-u keyboard protocol) can be
-        delivered split across multiple handle_key() calls.
-
-        We treat a CSI sequence as complete when it ends in a typical final
-        byte (alphabetic) or '~'.
-        """
-        if not isinstance(seq, str) or not seq:
-            return False
-        last = seq[-1]
-        return last.isalpha() or last == "~"
-
-    def _ansi_seq_needs_more(self, key: str) -> bool:
-        """Return True if key looks like a partial ESC[... sequence."""
-        if not isinstance(key, str) or not key.startswith("\x1b["):
-            return False
-        return not self._ansi_seq_complete(key)
-
-    def _reassemble_ansi_key(self, key: str) -> str | None:
-        """Best-effort reassembly for split ANSI escape sequences.
-
-        Returns:
-          - full key string when complete
-          - None when the key was consumed into a pending buffer
-        """
-        pending = getattr(self, "_ansi_pending", "")
-        if isinstance(pending, str) and pending:
-            pending = pending + (key or "")
-            if self._ansi_seq_complete(pending):
-                setattr(self, "_ansi_pending", "")
-                return pending
-            setattr(self, "_ansi_pending", pending)
-            return None
-
-        if self._ansi_seq_needs_more(key):
-            setattr(self, "_ansi_pending", key)
-            return None
-        return key
-
-    def _is_alt_enter(self, key: str) -> bool:
-        """Return True if the key string looks like an Alt+Enter sequence.
-
-        Many terminals encode Alt+<key> as an ESC prefix. With readchar,
-        that often arrives as "\x1b" + "\n" (Alt+Enter) or "\x1b" + "\r".
-        """
-        if not isinstance(key, str):
-            return False
-        return key in ("\x1b\n", "\x1b\r")
-
-    def _is_shift_enter(self, key: str) -> bool:
-        """Return True if the key string looks like a Shift+Enter sequence.
-
-        There isn't a single universal encoding for Shift+Enter across
-        terminals. Some terminals (especially those supporting the CSI-u
-        protocol) may send sequences like "\x1b[13;2u" or "\x1b[27;2;13~".
-
-        We match a small set of common encodings. If your terminal uses a
-        different sequence, consider mapping it in the terminal config.
-        """
-        if not isinstance(key, str):
-            return False
-        # Common CSI-u and legacy encodings.
-        return key in ("\x1b[13;2u", "\x1b[27;2;13~")
-
     def handle_key(self, key: str) -> bool:
         """Handle a single key press from the input panel.
 
         Returns True if the key was handled and the app should continue,
         False if the app should exit.
         """
-        # Some terminals deliver longer ANSI sequences split across
-        # multiple reads; reassemble before we interpret keys.
-        assembled = self._reassemble_ansi_key(key)
-        if assembled is None:
-            return True
-        key = assembled
-
         # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits
         try:
             import readchar  # type: ignore
@@ -249,7 +175,8 @@ class InputMixin:
         # Newline insertion shortcuts (independent of /enterMode):
         #   - Shift+Enter
         #   - Alt+Enter
-        if self._is_shift_enter(key) or self._is_alt_enter(key):
+        # These are normalized by eggdisplay into logical key names.
+        if key in ('shift-enter', 'alt-enter'):
             try:
                 self.input_panel.editor.editor.insert_newline()
             except Exception:

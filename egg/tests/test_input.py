@@ -254,6 +254,52 @@ class TestHandleKeyEnter:
         assert len(approval_called) == 1
         assert approval_called[0] == ("y", "Enter")
 
+    def test_alt_enter_inserts_newline_even_in_send_mode(self, egg_app, monkeypatch):
+        """Alt+Enter should insert newline without submitting."""
+        egg_app.enter_sends = True
+        egg_app.input_panel.editor.editor.set_text("Line 1")
+
+        submitted = []
+        monkeypatch.setattr(egg_app, "on_submit", lambda t: (submitted.append(t), True)[1])
+
+        newline_inserted = []
+        original_insert = egg_app.input_panel.editor.editor.insert_newline
+
+        def mock_insert():
+            newline_inserted.append(True)
+            return original_insert()
+
+        monkeypatch.setattr(egg_app.input_panel.editor.editor, "insert_newline", mock_insert)
+
+        result = egg_app.handle_key('alt-enter')
+
+        assert result is True
+        assert newline_inserted == [True]
+        assert submitted == []
+
+    def test_shift_enter_inserts_newline_even_in_send_mode(self, egg_app, monkeypatch):
+        """Shift+Enter should insert newline without submitting."""
+        egg_app.enter_sends = True
+        egg_app.input_panel.editor.editor.set_text("Line 1")
+
+        submitted = []
+        monkeypatch.setattr(egg_app, "on_submit", lambda t: (submitted.append(t), True)[1])
+
+        newline_inserted = []
+        original_insert = egg_app.input_panel.editor.editor.insert_newline
+
+        def mock_insert():
+            newline_inserted.append(True)
+            return original_insert()
+
+        monkeypatch.setattr(egg_app.input_panel.editor.editor, "insert_newline", mock_insert)
+
+        result = egg_app.handle_key('shift-enter')
+
+        assert result is True
+        assert newline_inserted == [True]
+        assert submitted == []
+
 
 class TestHandleKeyEsc:
     """Tests for Escape key handling."""
