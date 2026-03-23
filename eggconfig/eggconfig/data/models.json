@@ -357,6 +357,32 @@
         "Qwen 32B AWQ": {
           "model_name": "Qwen/Qwen3-32B-AWQ",
           "max_tokens": 32000
+        },
+        "Qwen3.5 35B A3B": {
+          "model_name": "Qwen3.5-35B-A3B-Q8_0.unsloth.gguf",
+          "max_tokens": 260000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "cost": {
+            "input_tokens": 0.01,
+            "cached_input": 0.005,
+            "output_tokens": 0.03
+          }
+        },
+        "Qwen3.5 27B": {
+          "model_name": "Qwen3.5-27B-UD-Q8_K_XL.unsloth.gguf",
+          "max_tokens": 260000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "cost": {
+            "input_tokens": 0.01,
+            "cached_input": 0.005,
+            "output_tokens": 0.03
+          }
         }
       }
     },
