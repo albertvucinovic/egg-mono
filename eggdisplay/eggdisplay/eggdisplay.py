@@ -13,7 +13,7 @@ Features:
 
 from typing import List, Optional, Callable, Dict, Any
 import shutil
-import textwrap
+import unicodedata
 from rich.live import Live
 from rich.text import Text
 from rich.console import Console, Group
@@ -994,6 +994,11 @@ class OutputPanel:
         #   - "wrap" (default): wrap to multiple visual lines
         #   - "crop": crop/clip each logical line to panel width
         line_wrap_mode: str = "wrap"
+        # Whether panel body content should be interpreted as Rich markup.
+        # Keep this enabled for system/status panels that intentionally emit
+        # markup, but disable it for plain-text chat transcripts so user/model
+        # text containing square brackets is rendered literally.
+        markup: bool = True
 
     def __init__(self, title: str = "Output", initial_height: int = 8, max_height: int = 20,
                  style: Optional['OutputPanel.PanelStyle'] = None, columns_hint: int = 1):
@@ -1052,6 +1057,65 @@ class OutputPanel:
             return getattr(rich_box, name, rich_box.SQUARE)
         return b or rich_box.SQUARE
 
+    @staticmethod
+    def _sanitize_display_line(text: str) -> str:
+        """Return a terminal-safe single logical line for rendering.
+
+        We preserve ordinary printable Unicode, tabs, and spaces, but replace
+        control characters and lone surrogate code points that frequently lead
+        to broken rendering or placeholder glyphs in terminals.
+        """
+        if not isinstance(text, str) or not text:
+            return text
+
+        out: List[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            cp = ord(ch)
+            # Recombine surrogate pairs that may have been split across
+            # streaming chunks and parsed separately.
+            if 0xD800 <= cp <= 0xDBFF:
+                if i + 1 < n:
+                    cp2 = ord(text[i + 1])
+                    if 0xDC00 <= cp2 <= 0xDFFF:
+                        combined = 0x10000 + ((cp - 0xD800) << 10) + (cp2 - 0xDC00)
+                        out.append(chr(combined))
+                        i += 2
+                        continue
+                out.append("\uFFFD")
+                i += 1
+                continue
+            if 0xDC00 <= cp <= 0xDFFF:
+                out.append("\uFFFD")
+                i += 1
+                continue
+            if ch == "\t":
+                out.append(ch)
+                i += 1
+                continue
+            cat = unicodedata.category(ch)
+            # Replace only true control chars (Cc) and surrogate code points
+            # (Cs). Keep format characters such as ZWJ so composed emoji and
+            # other legitimate text still render naturally.
+            if cat in ("Cc", "Cs"):
+                out.append("\uFFFD")
+            else:
+                out.append(ch)
+            i += 1
+        return "".join(out)
+
+    def _line_to_renderable_text(self, line: str) -> Text:
+        """Convert one logical line into a Rich Text renderable."""
+        safe_line = self._sanitize_display_line(line)
+        if not getattr(self.style, "markup", True):
+            return Text(safe_line)
+        try:
+            return Text.from_markup(safe_line)
+        except MarkupError:
+            return Text(safe_line)
+
     def render(self) -> Panel:
         """Render the panel, showing only the last lines that fit.
 
@@ -1104,10 +1168,7 @@ class OutputPanel:
                     if line == "":
                         display_segments.append(Text())
                         continue
-                    try:
-                        rich_line = Text.from_markup(line)
-                    except MarkupError:
-                        rich_line = Text(line)
+                    rich_line = self._line_to_renderable_text(line)
                     # Explicitly crop to the available width so that
                     # long lines do not expand the column and break
                     # the overall layout.
@@ -1132,29 +1193,12 @@ class OutputPanel:
                     if line == "":
                         display_segments.append(Text())
                         continue
-                    try:
-                        rich_line = Text.from_markup(line)
-                        wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
-                        if not wrapped_segments:
-                            display_segments.append(Text())
-                        else:
-                            display_segments.extend(wrapped_segments)
-                    except MarkupError:
-                        # Fallback: use plain text wrapping if markup is
-                        # invalid; this will drop styling but keep layout.
-                        wrapped = textwrap.wrap(
-                            line,
-                            width=approx_width,
-                            replace_whitespace=False,
-                            drop_whitespace=False,
-                            break_long_words=True,
-                            break_on_hyphens=False,
-                        )
-                        if not wrapped:
-                            display_segments.append(Text())
-                        else:
-                            for wl in wrapped:
-                                display_segments.append(Text(wl))
+                    rich_line = self._line_to_renderable_text(line)
+                    wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
+                    if not wrapped_segments:
+                        display_segments.append(Text())
+                    else:
+                        display_segments.extend(wrapped_segments)
 
                 # Now render only the tail that fits
                 total_segments = len(display_segments)
