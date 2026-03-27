@@ -26,7 +26,7 @@ from typing import Any, Dict, List
 import pytest
 
 import eggthreads as ts
-import examples.headless_subtree_scheduler as hs  # type: ignore
+from eggthreads.examples import headless_subtree_scheduler as hs  # type: ignore
 
 import json
 import os
