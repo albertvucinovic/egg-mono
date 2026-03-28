@@ -396,6 +396,19 @@
             "cached_input": 0.005,
             "output_tokens": 0.03
           }
+        },
+        "Nemotron Cascade 2 30b": {
+          "model_name": "nvidia_Nemotron-Cascade-2-30B-A3B-Q8_0.gguf",
+          "max_tokens": 260000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "cost": {
+            "input_tokens": 0.01,
+            "cached_input": 0.005,
+            "output_tokens": 0.03
+          }
         }
       }
     },
