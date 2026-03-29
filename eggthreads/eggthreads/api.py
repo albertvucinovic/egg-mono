@@ -699,6 +699,14 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
     2. After the last complete assistant message (with no pending tool calls)
     3. After the last user message that doesn't have keep_user_turn
 
+    A candidate is only valid if continuing from it would also remove any
+    still-unpublished tool calls. Since tool-call state is anchored to the
+    parent ``msg.create`` event, a continue point that comes *after* an
+    unpublished tool call's parent message is not actually safe: the
+    unpublished tool call would remain in the reconstructed state and can block
+    future RA1 turns. In that case we must choose an earlier point so the
+    parent message itself gets skipped by ``continue_thread``.
+
     Returns:
         The msg_id to continue from, or None if the thread should continue
         from the very beginning (no messages to skip).
@@ -733,14 +741,29 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
     # Build tool call states to understand pending work
     tc_states = build_tool_call_states(db, thread_id)
 
-    # Find messages with unpublished tool calls
+    # Find messages with unpublished tool calls.
+    #
+    # ``continue_thread`` only marks msg.create events after the continue point
+    # as skipped; it does not directly mutate tool_call.* events. Therefore a
+    # continue point is only safe if it lies *before* the parent message of any
+    # unpublished tool call, so that the skipped parent message removes the
+    # stale tool-call state from reconstruction.
     unpublished_tc_msg_ids = set()
+    earliest_unpublished_parent_seq: Optional[int] = None
     for tc in tc_states.values():
         if not tc.published:
             unpublished_tc_msg_ids.add(tc.parent_msg_id)
+            if earliest_unpublished_parent_seq is None or tc.parent_event_seq < earliest_unpublished_parent_seq:
+                earliest_unpublished_parent_seq = tc.parent_event_seq
 
     # Iterate backward to find a good continue point
     for msg_id, pj, event_seq in rows:
+        # If an unpublished tool call exists, the continue point must be before
+        # the earliest such parent message. Otherwise the stale tool-call state
+        # survives the continue and can keep the thread blocked in TC2-TC5.
+        if earliest_unpublished_parent_seq is not None and int(event_seq) >= earliest_unpublished_parent_seq:
+            continue
+
         # Skip already-skipped messages (check msg.edit events, not msg.create payload)
         if msg_id in skipped_msg_ids:
             continue
@@ -1705,6 +1728,47 @@ async def wait_subtree_idle(db: ThreadsDB, root_id: str, poll_sec: float = 0.1, 
         await asyncio.sleep(poll_sec)
         # Refresh subtree in case new children were spawned
         subtree = collect_subtree(db, root_id)
+
+
+async def wait_thread_settled(db: ThreadsDB, thread_id: str, poll_sec: float = 0.1, quiet_checks: int = 3) -> str:
+    """Wait until a thread reaches a stable non-running state.
+
+    Unlike :func:`wait_subtree_idle`, which only answers whether a subtree has
+    any *running or runnable* work, this helper preserves the distinction
+    between different non-running states.  That matters for callers that need
+    to know whether a thread is genuinely waiting for user input or is blocked
+    on approval/state cleanup.
+
+    Returns one of the coarse :func:`eggthreads.tool_state.thread_state`
+    values, typically:
+
+    - ``"waiting_user"``
+    - ``"waiting_tool_approval"``
+    - ``"waiting_output_approval"``
+    - ``"paused"``
+
+    The state must remain non-``"running"`` for ``quiet_checks`` consecutive
+    polls before it is returned.
+    """
+    import asyncio
+    from .tool_state import thread_state as _thread_state
+
+    stable = 0
+    last_state = "running"
+    while True:
+        state = _thread_state(db, thread_id)
+        if state != "running":
+            if state == last_state:
+                stable += 1
+            else:
+                stable = 1
+                last_state = state
+            if stable >= quiet_checks:
+                return state
+        else:
+            stable = 0
+            last_state = state
+        await asyncio.sleep(poll_sec)
 
 def word_count_from_snapshot(db: ThreadsDB, thread_id: str) -> int:
     """Return the word count of all messages in the thread snapshot."""

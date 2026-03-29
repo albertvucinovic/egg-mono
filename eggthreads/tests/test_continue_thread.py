@@ -20,6 +20,7 @@ from eggthreads import (
     diagnose_thread,
     continue_thread,
     is_thread_continuable,
+    wait_thread_settled,
 )
 from eggthreads.api import list_active_threads, collect_subtree
 from eggthreads.tool_state import discover_runner_actionable, _last_stream_close_seq
@@ -266,6 +267,125 @@ class TestDiagnoseAndContinue:
         ra = discover_runner_actionable(db, tid)
         assert ra is not None
         assert ra.kind == "RA1_llm"
+
+
+class TestContinuePointWithPendingToolCalls:
+    """Regression tests for continue-point selection around TC4/TC5 state."""
+
+    def test_find_continue_point_skips_before_unpublished_tool_parent(self, tmp_path):
+        """continue_thread should remove stale unpublished tool calls from state.
+
+        If a thread has a later user retry prompt but an older assistant tool call
+        is still stuck in TC4/TC5, the continue point must move to *before* the
+        assistant parent message. Otherwise the stale tool call survives recovery
+        and blocks RA1.
+        """
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        user_msg_id = append_message(db, tid, "user", "Solve it")
+
+        # Assistant tool call that finishes but never receives output approval.
+        assistant_msg_id = _ulid_like()
+        tool_call_id = "tc-pending"
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='msg.create',
+            msg_id=assistant_msg_id,
+            payload={
+                'role': 'assistant',
+                'content': 'Checking something...',
+                'tool_calls': [
+                    {
+                        'id': tool_call_id,
+                        'type': 'function',
+                        'function': {'name': 'bash', 'arguments': '{}'},
+                    }
+                ],
+            },
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='tool_call.approval',
+            payload={'tool_call_id': tool_call_id, 'decision': 'granted'},
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='tool_call.execution_started',
+            payload={'tool_call_id': tool_call_id},
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='tool_call.finished',
+            payload={'tool_call_id': tool_call_id, 'reason': 'success', 'output': 'big output'},
+        )
+
+        retry_msg_id = append_message(db, tid, "user", "Please write solution.py now")
+
+        diagnosis = diagnose_thread(db, tid)
+        assert diagnosis.is_healthy is False
+        assert diagnosis.suggested_continue_point == user_msg_id
+
+        result = continue_thread(db, tid, diagnosis.suggested_continue_point)
+        assert result.success is True
+
+        ra = discover_runner_actionable(db, tid)
+        assert ra is not None
+        assert ra.kind == "RA1_llm"
+        assert ra.msg_id == user_msg_id
+
+
+class TestWaitThreadSettled:
+    def test_wait_thread_settled_distinguishes_waiting_output_approval(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        assistant_msg_id = _ulid_like()
+        tool_call_id = "tc1"
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='msg.create',
+            msg_id=assistant_msg_id,
+            payload={
+                'role': 'assistant',
+                'content': 'Running tool',
+                'tool_calls': [
+                    {
+                        'id': tool_call_id,
+                        'type': 'function',
+                        'function': {'name': 'bash', 'arguments': '{}'},
+                    }
+                ],
+            },
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='tool_call.approval',
+            payload={'tool_call_id': tool_call_id, 'decision': 'granted'},
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='tool_call.execution_started',
+            payload={'tool_call_id': tool_call_id},
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_='tool_call.finished',
+            payload={'tool_call_id': tool_call_id, 'reason': 'success', 'output': 'out'},
+        )
+
+        import asyncio
+
+        state = asyncio.run(wait_thread_settled(db, tid, poll_sec=0.01, quiet_checks=1))
+        assert state == 'waiting_output_approval'
 
 
 class TestLeaseTakeover:

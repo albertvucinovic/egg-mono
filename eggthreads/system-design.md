@@ -142,7 +142,9 @@ This ensures the user message becomes visible to RA1 detection again.
 
 **Recovery:**
 1. `diagnose_thread` detects unpublished tool calls → `is_healthy=False`
-2. `continue_thread` marks incomplete tool response as skipped
+2. `continue_thread` must choose a continue point *before* the parent message
+   of any unpublished tool call; otherwise the stale tool-call state survives
+   recovery and can keep the thread blocked in TC4/TC5
 3. Tool call appears unanswered, RA2 or RA1 re-triggers
 
 ## Design Principles
