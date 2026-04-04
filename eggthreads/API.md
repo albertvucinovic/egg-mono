@@ -1007,6 +1007,7 @@ Returns a registry pre-populated with common tools:
 - spawn_agent_auto: Create auto-approved child threads
 - replace_between: File text replacement
 - search_tavily: Web search via Tavily API
+- fetch_tavily: Fetch and extract page content via Tavily
 - wait: Synchronize on child thread completion
 
 Returns:
