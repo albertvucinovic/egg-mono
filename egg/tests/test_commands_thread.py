@@ -56,6 +56,7 @@ class TestCmdSpawnChildThread:
         assert len(spawned) == 1
         assert spawned[0][0] == "spawn_agent"
         assert "Do this task" in spawned[0][1]["context_text"]
+        assert "initial_model_key" not in spawned[0][1]
 
     def test_ensures_scheduler_for_child(self, egg_app, monkeypatch):
         """Should ensure scheduler for child thread."""

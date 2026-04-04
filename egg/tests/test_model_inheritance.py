@@ -181,6 +181,280 @@ def test_spawn_agent_inherits_model(tmp_path, monkeypatch):
     assert child_concrete == concrete
 
 
+def test_spawn_agent_ignores_explicit_model_selection_for_model_calls(tmp_path, monkeypatch):
+    """Model-initiated spawn_agent calls should ignore explicit model selection."""
+    monkeypatch.chdir(tmp_path)
+
+    from eggthreads import (
+        ThreadsDB, create_root_thread, set_thread_model,
+        current_thread_model, current_thread_model_info, append_message
+    )
+    from eggthreads.tools import create_default_tools
+
+    db = ThreadsDB()
+    db.init_schema()
+
+    models_json = tmp_path / "models.json"
+    models_json.write_text(json.dumps({
+        "default_model": "GPT-3.5",
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "GPT-3.5": {"model_name": "gpt-3.5-turbo"},
+                    "GPT-4": {"model_name": "gpt-4"},
+                }
+            }
+        }
+    }))
+
+    parent = create_root_thread(db, name="Parent", models_path=str(models_json))
+    append_message(db, parent, "system", "You are a helpful assistant.")
+
+    concrete = {
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "GPT-4": {
+                        "model_name": "gpt-4",
+                        "max_tokens": 8192,
+                    }
+                }
+            }
+        }
+    }
+    set_thread_model(db, parent, "GPT-4", concrete_model_info=concrete, reason="user")
+
+    tools = create_default_tools()
+    child = tools.execute('spawn_agent', {
+        'context_text': 'Do something',
+        'label': 'spawned',
+        'initial_model_key': 'GPT-3.5',
+    }, thread_id=parent, initial_model_key='GPT-4')
+
+    assert current_thread_model(db, child) == "GPT-4"
+    assert current_thread_model_info(db, child) == concrete
+
+
+def test_spawn_agent_allows_explicit_model_for_direct_callers(tmp_path, monkeypatch):
+    """Direct/local callers can still override the model explicitly."""
+    monkeypatch.chdir(tmp_path)
+
+    from eggthreads import (
+        ThreadsDB, create_root_thread, set_thread_model,
+        current_thread_model, append_message
+    )
+    from eggthreads.tools import create_default_tools
+
+    db = ThreadsDB()
+    db.init_schema()
+
+    models_json = tmp_path / "models.json"
+    models_json.write_text(json.dumps({
+        "default_model": "GPT-3.5",
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "GPT-3.5": {"model_name": "gpt-3.5-turbo"},
+                    "GPT-4": {"model_name": "gpt-4"},
+                }
+            }
+        }
+    }))
+
+    parent = create_root_thread(db, name="Parent", models_path=str(models_json))
+    append_message(db, parent, "system", "You are a helpful assistant.")
+    set_thread_model(db, parent, "GPT-4", reason="user", models_path=str(models_json))
+
+    tools = create_default_tools()
+    child = tools.execute('spawn_agent', {
+        'parent_thread_id': parent,
+        'context_text': 'Do something',
+        'label': 'spawned',
+        'initial_model_key': 'GPT-3.5',
+    })
+
+    assert current_thread_model(db, child) == "GPT-3.5"
+
+
+def test_spawn_agent_inherits_latest_parent_model_after_parent_switch(tmp_path, monkeypatch):
+    """New children should inherit the parent's latest effective model."""
+    monkeypatch.chdir(tmp_path)
+
+    from eggthreads import (
+        ThreadsDB, create_root_thread, set_thread_model,
+        current_thread_model, current_thread_model_info, append_message,
+    )
+    from eggthreads.tools import create_default_tools
+
+    db = ThreadsDB()
+    db.init_schema()
+
+    parent = create_root_thread(db, name="Parent")
+    append_message(db, parent, "system", "You are a helpful assistant.")
+
+    first = {
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "GPT-4": {"model_name": "gpt-4"}
+                }
+            }
+        }
+    }
+    second = {
+        "providers": {
+            "anthropic": {
+                "api_base": "https://api.anthropic.com/v1/messages",
+                "api_key_env": "ANTHROPIC_API_KEY",
+                "models": {
+                    "Claude-3": {"model_name": "claude-3-opus"}
+                }
+            }
+        }
+    }
+    set_thread_model(db, parent, "GPT-4", concrete_model_info=first, reason="user")
+    set_thread_model(db, parent, "Claude-3", concrete_model_info=second, reason="user")
+
+    tools = create_default_tools()
+    child = tools.execute('spawn_agent', {
+        'context_text': 'Do something',
+        'label': 'spawned',
+    }, thread_id=parent, initial_model_key='Claude-3')
+
+    assert current_thread_model(db, child) == "Claude-3"
+    assert current_thread_model_info(db, child) == second
+
+
+def test_spawned_child_can_change_model_after_spawn(tmp_path, monkeypatch):
+    """A spawned child should still honor later model changes on itself."""
+    monkeypatch.chdir(tmp_path)
+
+    from eggthreads import (
+        ThreadsDB, create_root_thread, set_thread_model,
+        current_thread_model, current_thread_model_info, append_message,
+    )
+    from eggthreads.tools import create_default_tools
+
+    db = ThreadsDB()
+    db.init_schema()
+
+    parent = create_root_thread(db, name="Parent")
+    append_message(db, parent, "system", "You are a helpful assistant.")
+
+    inherited = {
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "GPT-4": {"model_name": "gpt-4"}
+                }
+            }
+        }
+    }
+    updated = {
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "GPT-3.5": {"model_name": "gpt-3.5-turbo"}
+                }
+            }
+        }
+    }
+    set_thread_model(db, parent, "GPT-4", concrete_model_info=inherited, reason="user")
+
+    tools = create_default_tools()
+    child = tools.execute('spawn_agent', {
+        'context_text': 'Do something',
+        'label': 'spawned',
+    }, thread_id=parent, initial_model_key='GPT-4')
+
+    assert current_thread_model(db, child) == "GPT-4"
+    assert current_thread_model_info(db, child) == inherited
+
+    set_thread_model(db, child, "GPT-3.5", concrete_model_info=updated, reason="user")
+
+    assert current_thread_model(db, child) == "GPT-3.5"
+    assert current_thread_model_info(db, child) == updated
+
+
+def test_spawn_tools_schema_hides_model_selection(tmp_path, monkeypatch):
+    """spawn tool specs should not expose an initial_model_key parameter."""
+    monkeypatch.chdir(tmp_path)
+
+    from eggthreads.tools import create_default_tools
+
+    tools = create_default_tools()
+    specs = tools.tools_spec()
+    by_name = {spec['function']['name']: spec for spec in specs}
+
+    for name in ('spawn_agent', 'spawn_agent_auto'):
+        props = by_name[name]['function']['parameters']['properties']
+        assert 'initial_model_key' not in props
+
+
+def test_spawn_agent_auto_inherits_model(tmp_path, monkeypatch):
+    """spawn_agent_auto should inherit the parent's model."""
+    monkeypatch.chdir(tmp_path)
+
+    from eggthreads import (
+        ThreadsDB, create_root_thread, set_thread_model,
+        current_thread_model, current_thread_model_info, append_message,
+        build_tool_call_states,
+    )
+    from eggthreads.tools import create_default_tools
+
+    db = ThreadsDB()
+    db.init_schema()
+
+    parent = create_root_thread(db, name="Parent")
+    append_message(db, parent, "system", "You are a helpful assistant.")
+
+    concrete = {
+        "providers": {
+            "anthropic": {
+                "api_base": "https://api.anthropic.com/v1/messages",
+                "api_key_env": "ANTHROPIC_API_KEY",
+                "models": {
+                    "Claude-3": {
+                        "model_name": "claude-3-opus",
+                        "max_tokens": 200000,
+                    }
+                }
+            }
+        }
+    }
+    set_thread_model(db, parent, "Claude-3", concrete_model_info=concrete, reason="user")
+
+    tools = create_default_tools()
+    child = tools.execute('spawn_agent_auto', {
+        'context_text': 'Do something',
+        'label': 'spawned-auto',
+        'initial_model_key': 'SomeOtherModel',
+    }, thread_id=parent, initial_model_key='Claude-3')
+
+    assert current_thread_model(db, child) == "Claude-3"
+    assert current_thread_model_info(db, child) == concrete
+
+    approvals = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.approval'",
+        (child,),
+    ).fetchall()
+    assert approvals
+    payload = json.loads(approvals[-1][0])
+    assert payload['decision'] == 'global_approval'
+
+
 def test_grandchild_inherits_model(tmp_path, monkeypatch):
     """Test that grandchild inherits model through the chain."""
     monkeypatch.chdir(tmp_path)
