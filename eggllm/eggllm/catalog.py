@@ -179,12 +179,12 @@ def format_update_all_models_text(
 
 
 class AllModelsCatalog:
-    def __init__(self, all_models_path: str | Path):
-        self._path = Path(all_models_path)
+    def __init__(self, all_models_path: str | Path | None):
+        self._path = Path(all_models_path) if all_models_path is not None else None
         self._providers: Dict[str, Dict[str, Any]] = self._load()
 
     def _load(self) -> Dict[str, Dict[str, Any]]:
-        if not self._path.exists():
+        if self._path is None or not self._path.exists():
             return {}
         try:
             with open(self._path, 'r', encoding='utf-8') as f:
@@ -196,6 +196,8 @@ class AllModelsCatalog:
         return {}
 
     def _save(self):
+        if self._path is None:
+            return
         out = {"providers": self._providers}
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, 'w', encoding='utf-8') as f:

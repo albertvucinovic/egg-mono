@@ -34,12 +34,17 @@ def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
     return None
 
 
-def validate_model_handle(model_handle: str, models_path: str = "models.json") -> bool:
-    """Check if a model handle exists in models.json.
+def validate_model_handle(model_handle: str, models_path: str = "models.json",
+                          all_models_path: str | None = None) -> bool:
+    """Check if a model handle exists in models.json or all-models.json catalog.
+
+    Supports both named models from models.json and catalog models using the
+    ``all:provider:model`` format (populated by ``/updateAllModels``).
 
     Args:
         model_handle: The model name/key to validate
         models_path: Path to models.json file
+        all_models_path: Path to all-models.json catalog file (optional)
 
     Returns:
         True if the model handle exists, False otherwise
@@ -52,7 +57,7 @@ def validate_model_handle(model_handle: str, models_path: str = "models.json") -
     if EGGLLM_AVAILABLE:
         try:
             models_config, providers_config = load_models_config(models_path)
-            catalog = AllModelsCatalog(None)
+            catalog = AllModelsCatalog(all_models_path)
             registry = ModelRegistry(models_config, providers_config, catalog)
             resolved = registry.resolve(model_handle)
             return resolved is not None
@@ -72,14 +77,26 @@ def validate_model_handle(model_handle: str, models_path: str = "models.json") -
             models = provider_data.get('models', {})
             if model_handle in models:
                 return True
+        # Fallback for all: prefix - if it starts with all:provider:model, accept it
+        # as long as the provider exists in models.json
+        if model_handle.startswith('all:'):
+            rest = model_handle[4:]
+            if ':' in rest:
+                prov = rest.split(':', 1)[0]
+                if prov in providers:
+                    return True
         return False
     except Exception:
         return False
 
 
-def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
+def _get_concrete_model_info(model_key: str, models_path: str = "models.json",
+                             all_models_path: str | None = None):
     """Return nested providers dict for a given model key.
-    
+
+    Supports both named models from models.json and catalog models using the
+    ``all:provider:model`` format.
+
     Raises ValueError if model_key not found or eggllm not available.
     """
     # First try eggllm if available
@@ -90,11 +107,11 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
     except ImportError:
         # eggllm not available, fall back to direct parsing
         load_models_config = None
-    
+
     if load_models_config is not None:
         try:
             models_config, providers_config = load_models_config(models_path)
-            catalog = AllModelsCatalog(None)  # dummy catalog
+            catalog = AllModelsCatalog(all_models_path)
             registry = ModelRegistry(models_config, providers_config, catalog)
             if model_key not in models_config:
                 # try to resolve aliases
@@ -173,7 +190,7 @@ def _ulid_like() -> str:
 
 
 def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_key: Optional[str] = None,
-                       models_path: str = "models.json") -> str:
+                       models_path: str = "models.json", all_models_path: str | None = None) -> str:
     """Create a new root thread (top-level conversation).
 
     A root thread has no parent and serves as the entry point for a
@@ -186,6 +203,7 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
         initial_model_key: Model key to use for this thread. If None,
             defaults to the ``default_model`` from models.json.
         models_path: Path to models.json configuration file.
+        all_models_path: Path to all-models.json catalog file (optional).
 
     Returns:
         The new thread's unique ID (ULID format).
@@ -201,12 +219,13 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
 
     # Emit model.switch event with concrete_model_info if we have a model
     if effective_model_key:
-        set_thread_model(db, tid, effective_model_key, reason='initial', models_path=models_path)
+        set_thread_model(db, tid, effective_model_key, reason='initial', models_path=models_path,
+                         all_models_path=all_models_path)
     return tid
 
 
 def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None,
-                        models_path: str = "models.json") -> str:
+                        models_path: str = "models.json", all_models_path: str | None = None) -> str:
     """Create a child thread branching from a parent thread.
 
     Child threads inherit the parent's model configuration by default
@@ -220,6 +239,7 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
         initial_model_key: Model key to use for this thread. If None,
             inherits from the parent thread's current model.
         models_path: Path to models.json configuration file.
+        all_models_path: Path to all-models.json catalog file (optional).
 
     Returns:
         The new child thread's unique ID (ULID format).
@@ -233,7 +253,8 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     # Otherwise, inherit from parent's model.switch event (including concrete_model_info).
     if initial_model_key:
         # Explicit model specified - look it up from models_path
-        set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path)
+        set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path,
+                         all_models_path=all_models_path)
     else:
         # Inherit from parent: copy parent's model.switch event with concrete_model_info
         parent_model = current_thread_model(db, parent_id)
@@ -1443,7 +1464,8 @@ def resume_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:
 
 def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str = 'user',
                          concrete_model_info: Optional[Dict[str, Any]] = None,
-                         models_path: str = "models.json") -> None:
+                         models_path: str = "models.json",
+                         all_models_path: str | None = None) -> None:
     """Append a model.switch event to a thread.
 
     This is the authoritative record of model selection for a thread.
@@ -1461,7 +1483,8 @@ def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str 
     }
     if concrete_model_info is None:
         try:
-            concrete_model_info = _get_concrete_model_info(model_key, models_path)
+            concrete_model_info = _get_concrete_model_info(model_key, models_path,
+                                                           all_models_path=all_models_path)
         except Exception:
             concrete_model_info = {}
     if concrete_model_info:
