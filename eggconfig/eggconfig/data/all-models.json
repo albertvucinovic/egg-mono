@@ -798,10 +798,9 @@
       ]
     },
     "x.ai": {
-      "fetched_at": 1769268865,
+      "fetched_at": 1775350739,
       "source": "https://api.x.ai/v1/models",
       "models": [
-        "grok-2-vision-1212",
         "grok-3",
         "grok-3-mini",
         "grok-4-0709",
@@ -809,8 +808,13 @@
         "grok-4-1-fast-reasoning",
         "grok-4-fast-non-reasoning",
         "grok-4-fast-reasoning",
+        "grok-4.20-0309-non-reasoning",
+        "grok-4.20-0309-reasoning",
+        "grok-4.20-multi-agent-0309",
         "grok-code-fast-1",
-        "grok-2-image-1212"
+        "grok-imagine-image",
+        "grok-imagine-image-pro",
+        "grok-imagine-video"
       ]
     }
   }
