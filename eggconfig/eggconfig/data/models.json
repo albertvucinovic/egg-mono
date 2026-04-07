@@ -681,5 +681,5 @@
       }
     }
   },
-  "default_model": "Qwen3 Coder Local"
+  "default_model": "openai 120b Local"
 }
