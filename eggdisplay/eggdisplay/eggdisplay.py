@@ -1004,7 +1004,7 @@ class OutputPanel:
                  style: Optional['OutputPanel.PanelStyle'] = None, columns_hint: int = 1):
         """
         Initialize the output panel.
-        
+
         Args:
             title: Panel title
             initial_height: Initial panel height in lines
@@ -1017,10 +1017,17 @@ class OutputPanel:
         self.style = style or OutputPanel.PanelStyle()
         # Hint how many equal-width columns this panel shares row with (for width estimate)
         self.columns_hint = max(1, int(columns_hint or 1))
+        # Differential rendering: dirty flag and cached render
+        self._dirty: bool = True
+        self._cached_render: Optional[Panel] = None
+        self._last_term_cols: int = 0
+        self._last_title: str = title
         
     def set_content(self, content: str) -> None:
         """Set the content to display."""
-        self.content = content
+        if content != self.content:
+            self.content = content
+            self._dirty = True
         
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on content.
@@ -1116,12 +1123,38 @@ class OutputPanel:
         except MarkupError:
             return Text(safe_line)
 
+    def mark_dirty(self) -> None:
+        """Force the panel to re-render on the next render() call."""
+        self._dirty = True
+
+    def is_dirty(self) -> bool:
+        """Return True if the panel needs re-rendering."""
+        if self._dirty:
+            return True
+        # Title changed externally (e.g. egg updates token stats in the title)
+        if self.title != self._last_title:
+            return True
+        # Terminal resize invalidates the cache
+        try:
+            term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            term_cols = 100
+        if term_cols != self._last_term_cols:
+            return True
+        return False
+
     def render(self) -> Panel:
         """Render the panel, showing only the last lines that fit.
 
         Content is interpreted as Rich markup so callers can embed
         simple markup tags (e.g. ``[yellow]``) in panel bodies.
+
+        Uses cached output when content has not changed since the last
+        render, eliminating flicker from unconditional rebuilds.
         """
+        if not self.is_dirty() and self._cached_render is not None:
+            return self._cached_render
+
         height = self.calculate_height()
 
         # Create content text
@@ -1228,7 +1261,7 @@ class OutputPanel:
                 content_text.append(Text("No content"))
 
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
-        return Panel(
+        result = Panel(
             content_text,
             title=panel_title,
             title_align=self.style.title_align,
@@ -1236,6 +1269,15 @@ class OutputPanel:
             box=self._resolve_box(),
             height=height
         )
+        # Cache the result and clear the dirty flag
+        self._cached_render = result
+        self._dirty = False
+        self._last_title = self.title
+        try:
+            self._last_term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            self._last_term_cols = 0
+        return result
 
 
 class InputPanel:
@@ -1306,6 +1348,10 @@ class InputPanel:
         self._suggestion_scroll_top: int = 0
         # Horizontal scroll offset (columns) for long lines.
         self._hscroll_left: int = 0
+        # Differential rendering: cached render and state snapshot
+        self._cached_render: Optional[Panel] = None
+        self._last_snapshot: Optional[tuple] = None
+        self._last_term_cols: int = 0
         
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on editor content.
@@ -1412,6 +1458,7 @@ class InputPanel:
         self._scroll_top = 0
         self._suggestion_scroll_top = 0
         self._hscroll_left = 0
+        self._last_snapshot = None
     
     def increment_message_count(self) -> None:
         """Increment the message counter."""
@@ -1424,8 +1471,54 @@ class InputPanel:
             return getattr(rich_box, name, rich_box.SQUARE)
         return b or rich_box.SQUARE
 
+    def _take_snapshot(self) -> tuple:
+        """Capture the current state that affects rendering."""
+        ed = self.editor.editor
+        try:
+            comp_active = bool(getattr(ed, "_completion_active", False))
+            comp_items_len = len(getattr(ed, "_completion_items", []) or [])
+            comp_index = int(getattr(ed, "_completion_index", 0))
+        except Exception:
+            comp_active, comp_items_len, comp_index = False, 0, 0
+        return (
+            tuple(ed.lines),
+            ed.cursor.row,
+            ed.cursor.col,
+            comp_active,
+            comp_items_len,
+            comp_index,
+            self._scroll_top,
+            self._hscroll_left,
+            self._suggestion_scroll_top,
+            self.message_count,
+        )
+
+    def mark_dirty(self) -> None:
+        """Force the panel to re-render on the next render() call."""
+        self._last_snapshot = None
+
+    def is_dirty(self) -> bool:
+        """Return True if the panel needs re-rendering."""
+        if self._cached_render is None or self._last_snapshot is None:
+            return True
+        # Terminal resize invalidates the cache
+        try:
+            term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            term_cols = 100
+        if term_cols != self._last_term_cols:
+            return True
+        return self._take_snapshot() != self._last_snapshot
+
     def render(self) -> Panel:
-        """Render the input panel."""
+        """Render the input panel.
+
+        Uses cached output when editor state has not changed since the
+        last render, eliminating flicker from unconditional rebuilds.
+        """
+        if not self.is_dirty() and self._cached_render is not None:
+            return self._cached_render
+
         height = self.calculate_height()
         # Rich's Panel(height=...) includes the border lines. The renderable
         # content sits inside those borders.
@@ -1594,7 +1687,7 @@ class InputPanel:
                 editor_content.append("\n")
 
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
-        return Panel(
+        result = Panel(
             editor_content,
             title=panel_title,
             title_align=self.style.title_align,
@@ -1602,6 +1695,14 @@ class InputPanel:
             box=self._resolve_box(),
             height=height
         )
+        # Cache the result and record the state snapshot
+        self._cached_render = result
+        self._last_snapshot = self._take_snapshot()
+        try:
+            self._last_term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            self._last_term_cols = 0
+        return result
 
 
 # Inline-friendly layout helpers (don't claim full-screen like Layout)

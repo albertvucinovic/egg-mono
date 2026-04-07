@@ -248,19 +248,22 @@ class FinalChatDemo:
                 
                 while self.running:
                     # Process input
+                    had_input = False
                     try:
                         while True:
                             key = self.input_panel.editor.input_queue.get_nowait()
+                            had_input = True
                             if not self._handle_key(key):
                                 self.running = False
                                 self.input_panel.editor.running = False
                                 break
                     except:
                         pass
-                    
-                    # Update display
-                    live.update(self._render_stack())
-                    
+
+                    # Only rebuild and push to Live when something changed
+                    if had_input or any(p.is_dirty() for p in self.output_panels) or self.input_panel.is_dirty():
+                        live.update(self._render_stack())
+
                     time.sleep(0.033)
                     
         except KeyboardInterrupt:

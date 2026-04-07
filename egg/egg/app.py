@@ -436,17 +436,23 @@ class EggDisplayApp(
             with Live(self.render_group(), refresh_per_second=10, screen=False, console=self.console) as live:
                 while self.running:
                     # Drain input queue
+                    had_input = False
                     try:
                         while True:
                             key = self.input_panel.editor.input_queue.get_nowait()
+                            had_input = True
                             if not self.handle_key(key):
                                 self.running = False
                                 break
                     except Exception:
                         pass
-                    # Update panels and live region
+                    # Update panels content (sets dirty flags on changes)
                     self.update_panels()
-                    live.update(self.render_group())
+                    # Only rebuild and push to Live when something changed
+                    panels = [self.system_output, self.children_output,
+                              self.chat_output, self.approval_panel]
+                    if had_input or any(p.is_dirty() for p in panels) or self.input_panel.is_dirty():
+                        live.update(self.render_group())
 
                     # Optional: auto-redraw static view on terminal resize.
                     # We keep this low-overhead by only sampling terminal size

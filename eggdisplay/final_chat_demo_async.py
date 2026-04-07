@@ -233,17 +233,20 @@ class FinalChatDemoAsync:
             with Live(self._render_inline(), refresh_per_second=30, screen=False, console=self.console) as live:
                 while self.running:
                     # Drain input queue
+                    had_input = False
                     try:
                         while True:
                             key = self.input_panel.editor.input_queue.get_nowait()
+                            had_input = True
                             if not self._handle_key(key):
                                 self.running = False
                                 break
                     except Exception:
                         pass
 
-                    # Update live region
-                    live.update(self._render_inline())
+                    # Only rebuild and push to Live when something changed
+                    if had_input or any(p.is_dirty() for p in self.output_panels) or self.input_panel.is_dirty():
+                        live.update(self._render_inline())
                     try:
                         await asyncio.sleep(0.033)
                     except asyncio.CancelledError:
