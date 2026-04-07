@@ -1705,6 +1705,241 @@ class InputPanel:
         return result
 
 
+# ---------------------------------------------------------------------------
+# Flicker-free differential renderer
+# ---------------------------------------------------------------------------
+
+import sys
+import io
+
+
+class DiffRenderer:
+    """Flicker-free terminal renderer using line-level diffing and synchronized output.
+
+    Replaces Rich's ``Live`` for SSH / tmux-friendly inline rendering.
+
+    Key techniques (inspired by pi-mono / pi-tui):
+      * **Synchronized output** (DEC private mode 2026) wraps every frame in
+        ``CSI ?2026h`` / ``CSI ?2026l`` so the terminal batches all writes
+        into a single atomic paint – no partial redraws visible to the user.
+      * **Line-level diffing** compares the ANSI-encoded output of each line
+        with the previous frame and only rewrites lines that actually changed.
+        This dramatically reduces bytes sent over SSH.
+      * **Single write** – every frame is accumulated into one Python string and
+        flushed with a single ``sys.stdout.write()`` call.
+
+    Usage::
+
+        from eggdisplay import DiffRenderer
+
+        renderer = DiffRenderer(console=my_console)
+        with renderer:
+            renderer.update(my_renderable)   # first frame
+            ...
+            renderer.update(my_renderable)   # subsequent frames (diffed)
+            renderer.print_above("[dim]status message[/dim]")  # above live region
+    """
+
+    # DEC synchronized output
+    _SYNC_START = "\x1b[?2026h"
+    _SYNC_END = "\x1b[?2026l"
+
+    def __init__(self, initial=None, *, console: Optional[Console] = None,
+                 refresh_per_second: int = 30, screen: bool = False):
+        self.console = console or Console()
+        self._initial = initial
+        self._prev_lines: List[str] = []
+        self._width: int = 0
+        self._color_system: Optional[str] = None
+
+    # -- context manager ----------------------------------------------------
+
+    def __enter__(self):
+        sys.stdout.write("\x1b[?25l")  # hide cursor
+        sys.stdout.flush()
+        try:
+            self._color_system = self.console.color_system
+        except Exception:
+            self._color_system = "truecolor"
+        if self._initial is not None:
+            self.update(self._initial)
+        return self
+
+    def __exit__(self, *_exc):
+        buf = ""
+        if self._prev_lines:
+            buf += "\n"  # move past live region
+        buf += "\x1b[?25h"  # show cursor
+        sys.stdout.write(buf)
+        sys.stdout.flush()
+        self._prev_lines = []
+
+    # -- public API ---------------------------------------------------------
+
+    def update(self, renderable) -> None:
+        """Render *renderable* with line-level diffing and synchronized output."""
+        new_lines, new_width = self._render_to_lines(renderable)
+
+        if not self._prev_lines or new_width != self._width:
+            self._full_render(new_lines)
+        else:
+            self._diff_render(new_lines)
+
+        self._prev_lines = new_lines
+        self._width = new_width
+
+    def print_above(self, *objects, **kwargs) -> None:
+        """Print Rich content above the live region (like ``console.print``).
+
+        Clears the live region, prints the content so it enters scrollback,
+        then re-renders the live region below – all inside one synchronized
+        output block so the operation is flicker-free.
+        """
+        # Render message to ANSI string
+        msg = self._rich_print_to_str(*objects, **kwargs)
+
+        n = len(self._prev_lines)
+        parts: List[str] = [self._SYNC_START]
+
+        # Move to top of live region and clear it
+        if n > 0:
+            parts.append(f"\x1b[{n}A\r")
+            for i in range(n):
+                parts.append("\x1b[2K")
+                if i < n - 1:
+                    parts.append("\n")
+            if n > 1:
+                parts.append(f"\x1b[{n - 1}A\r")
+            else:
+                parts.append("\r")
+
+        # Emit the message (enters scrollback)
+        parts.append(msg)
+        if msg and not msg.endswith("\n"):
+            parts.append("\n")
+
+        # Re-render live region
+        for line in self._prev_lines:
+            parts.append(f"\x1b[2K{line}\n")
+
+        parts.append(self._SYNC_END)
+        sys.stdout.write("".join(parts))
+        sys.stdout.flush()
+
+    # -- internal -----------------------------------------------------------
+
+    def _render_to_lines(self, renderable) -> tuple:
+        """Render a Rich renderable to a list of ANSI-encoded terminal lines."""
+        width = shutil.get_terminal_size(fallback=(100, 24)).columns
+        buf = io.StringIO()
+        c = Console(
+            file=buf,
+            width=width,
+            force_terminal=True,
+            color_system=self._color_system or "truecolor",
+        )
+        c.print(renderable, end="")
+        lines = buf.getvalue().split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        return lines, width
+
+    def _rich_print_to_str(self, *objects, **kwargs) -> str:
+        """Render a ``console.print()`` call to an ANSI string."""
+        width = self._width or shutil.get_terminal_size(fallback=(100, 24)).columns
+        buf = io.StringIO()
+        c = Console(
+            file=buf,
+            width=width,
+            force_terminal=True,
+            color_system=self._color_system or "truecolor",
+        )
+        c.print(*objects, **kwargs)
+        return buf.getvalue()
+
+    # -- rendering strategies -----------------------------------------------
+
+    def _full_render(self, lines: List[str]) -> None:
+        """Full render – write every line (used for first frame or resize)."""
+        old_n = len(self._prev_lines)
+        parts: List[str] = [self._SYNC_START]
+
+        # Move cursor to top of previous region
+        if old_n > 0:
+            parts.append(f"\x1b[{old_n}A\r")
+
+        # Write all new lines
+        for line in lines:
+            parts.append(f"\x1b[2K{line}\n")
+
+        # Clear leftover old lines
+        if old_n > len(lines):
+            for _ in range(old_n - len(lines)):
+                parts.append("\x1b[2K\n")
+            # Move back to end of new content
+            parts.append(f"\x1b[{old_n - len(lines)}A")
+
+        parts.append(self._SYNC_END)
+        sys.stdout.write("".join(parts))
+        sys.stdout.flush()
+
+    def _diff_render(self, new_lines: List[str]) -> None:
+        """Incremental render – only rewrite changed lines."""
+        old = self._prev_lines
+        old_n = len(old)
+        new_n = len(new_lines)
+
+        # Find first and last changed lines
+        first = last = -1
+        for i in range(max(old_n, new_n)):
+            o = old[i] if i < old_n else ""
+            n = new_lines[i] if i < new_n else ""
+            if o != n:
+                if first == -1:
+                    first = i
+                last = i
+
+        if first == -1:
+            return  # identical – nothing to write
+
+        parts: List[str] = [self._SYNC_START]
+
+        # Cursor is at row old_n (one past last line).
+        # Move up to row ``first``.
+        up = old_n - first
+        if up > 0:
+            parts.append(f"\x1b[{up}A\r")
+
+        # Rewrite lines first..last
+        for i in range(first, last + 1):
+            line = new_lines[i] if i < new_n else ""
+            parts.append(f"\x1b[2K{line}\n")
+        # Cursor is now at row last + 1
+
+        if old_n > new_n:
+            # Content shrank – clear any extra old lines below new content
+            clear_from = max(last + 1, new_n)
+            # Move to clear_from if cursor isn't there already
+            gap = clear_from - (last + 1)
+            if gap > 0:
+                parts.append(f"\x1b[{gap}B")
+            for _ in range(clear_from, old_n):
+                parts.append("\x1b[2K\n")
+            # Cursor is now at old_n; move back to new_n
+            back = old_n - new_n
+            if back > 0:
+                parts.append(f"\x1b[{back}A")
+        else:
+            # Move cursor to row new_n (end of new content)
+            forward = new_n - (last + 1)
+            if forward > 0:
+                parts.append(f"\x1b[{forward}B")
+
+        parts.append(self._SYNC_END)
+        sys.stdout.write("".join(parts))
+        sys.stdout.flush()
+
+
 # Inline-friendly layout helpers (don't claim full-screen like Layout)
 class HStack:
     """Horizontal stack of renderables using Columns.

@@ -11,9 +11,8 @@ import os
 import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from eggdisplay import OutputPanel, InputPanel, HStack, VStack
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer
 from rich.console import Console, Group
-from rich.live import Live
 from typing import List, Callable, Optional
 
 
@@ -23,7 +22,8 @@ class FinalChatDemo:
     def __init__(self):
         self.console = Console()
         self.running = False
-        
+        self._renderer: Optional[DiffRenderer] = None
+
         # Create panels using the library classes
         self.chat_output = OutputPanel(
             title="Chat Messages",
@@ -193,8 +193,11 @@ class FinalChatDemo:
                 self.input_panel.clear_text()
                 self.input_panel.increment_message_count()
                 
-                # Debug output to console (above panels)
-                self.console.print(f"[dim]📤 Sent {line_count}-line message[/dim]")
+                # Debug output above panels
+                if self._renderer:
+                    self._renderer.print_above(f"[dim]📤 Sent {line_count}-line message[/dim]")
+                else:
+                    self.console.print(f"[dim]📤 Sent {line_count}-line message[/dim]")
                 
             return True
         else:
@@ -238,14 +241,15 @@ class FinalChatDemo:
         ])
         
         try:
-            # Use screen=False to render inline with normal terminal scrolling.
-            # Share the same Console so non-live prints appear above the live region.
-            with Live(self._render_stack(), refresh_per_second=30, screen=False, console=self.console) as live:
+            # Use DiffRenderer for flicker-free rendering over SSH/tmux.
+            # Line-level diffing + synchronized output (CSI 2026).
+            self._renderer = DiffRenderer(self._render_stack(), console=self.console)
+            with self._renderer as renderer:
                 # Start input handling
                 import threading
                 input_thread = threading.Thread(target=self.input_panel.editor._input_worker, daemon=True)
                 input_thread.start()
-                
+
                 while self.running:
                     # Process input
                     had_input = False
@@ -260,9 +264,9 @@ class FinalChatDemo:
                     except:
                         pass
 
-                    # Only rebuild and push to Live when something changed
+                    # Only rebuild when something changed
                     if had_input or any(p.is_dirty() for p in self.output_panels) or self.input_panel.is_dirty():
-                        live.update(self._render_stack())
+                        renderer.update(self._render_stack())
 
                     time.sleep(0.033)
                     

@@ -20,6 +20,14 @@ from .utils import snapshot_messages, looks_markdown
 class PanelsMixin:
     """Mixin providing panel management methods for EggDisplayApp."""
 
+    def _live_print(self, *args, **kwargs) -> None:
+        """Print to console, routing through DiffRenderer when the live loop is active."""
+        renderer = getattr(self, '_renderer', None)
+        if renderer is not None:
+            renderer.print_above(*args, **kwargs)
+        else:
+            self.console.print(*args, **kwargs)
+
     def _get_static_box(self) -> Any:
         """Get the box style to use for static console panels.
 
@@ -265,10 +273,10 @@ class PanelsMixin:
                 parts.append(f"[dim]{msg_id[-8:]}[/dim]")
             full_title = " | ".join(parts)
             try:
-                self.console.print(Panel(renderable, title=full_title, border_style=border, box=self._get_static_box()))
+                self._live_print(Panel(renderable, title=full_title, border_style=border, box=self._get_static_box()))
             except Exception:
                 # Fallback to plain text if Panel fails for any reason
-                self.console.print(f"[{border}]{full_title}[/] {getattr(renderable, 'plain', str(renderable))}")
+                self._live_print(f"[{border}]{full_title}[/] {getattr(renderable, 'plain', str(renderable))}")
 
         if role == 'system':
             title = '[bold blue]System[/bold blue]'
@@ -338,18 +346,18 @@ class PanelsMixin:
                 if msg_id:
                     tc_title_parts.append(f"[dim]{msg_id[-8:]}[/dim]")
                 tc_title = " | ".join(tc_title_parts)
-                self.console.print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'), title=tc_title, border_style='yellow', box=self._get_static_box()))
+                self._live_print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'), title=tc_title, border_style='yellow', box=self._get_static_box()))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
             if isinstance(tstream, dict) and tstream:
                 for nm, txt in tstream.items():
                     if txt:
-                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=f'[bold yellow]Tool Output: {nm}[/bold yellow]', border_style='yellow', box=self._get_static_box()))
+                        self._live_print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=f'[bold yellow]Tool Output: {nm}[/bold yellow]', border_style='yellow', box=self._get_static_box()))
             tc_stream = m.get('tool_calls_stream') or {}
             if isinstance(tc_stream, dict) and tc_stream:
                 for nm, txt in tc_stream.items():
                     if txt:
-                        self.console.print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=f'[bold yellow]Tool Call Args (streamed): {nm}[/bold yellow]', border_style='yellow', box=self._get_static_box()))
+                        self._live_print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=f'[bold yellow]Tool Call Args (streamed): {nm}[/bold yellow]', border_style='yellow', box=self._get_static_box()))
             return
 
         if role == 'tool':
@@ -375,15 +383,15 @@ class PanelsMixin:
             if markup and ('[' in text and ']' in text):
                 # Text contains Rich markup - parse it via Text.from_markup
                 styled_text = Text.from_markup(text)
-                self.console.print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
+                self._live_print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
             else:
                 # Plain text - apply border_style as text color
                 styled_text = Text(text, style=border_style)
-                self.console.print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
+                self._live_print(Panel(styled_text, title=title, border_style=border_style, box=self._get_static_box()))
         except Exception as e:
             # Fallback plain - show error for debugging
             import traceback
-            self.console.print(f"{title}\n{text}\n[Error: {e}]\n{traceback.format_exc()}")
+            self._live_print(f"{title}\n{text}\n[Error: {e}]\n{traceback.format_exc()}")
 
     def print_static_view_current(self, heading: Optional[str] = None) -> None:
         """Print a static view of recent messages for the selected thread."""
@@ -404,12 +412,12 @@ class PanelsMixin:
                 pass
         if heading:
             try:
-                self.console.print(Panel(heading, border_style='blue', box=self._get_static_box()))
+                self._live_print(Panel(heading, border_style='blue', box=self._get_static_box()))
             except Exception:
-                self.console.print(heading)
+                self._live_print(heading)
         msgs = snapshot_messages(self.db, tid)
         if not msgs:
-            self.console.print(Panel('[dim]No messages yet[/dim]', border_style='blue', box=self._get_static_box()))
+            self._live_print(Panel('[dim]No messages yet[/dim]', border_style='blue', box=self._get_static_box()))
         else:
             for m in msgs:
                 if isinstance(m, dict):
@@ -443,6 +451,11 @@ class PanelsMixin:
             self.console.clear()
         except Exception:
             pass
+        # Reset DiffRenderer state after terminal clear so it does a full
+        # re-render on the next update() instead of diffing against stale lines.
+        renderer = getattr(self, '_renderer', None)
+        if renderer is not None:
+            renderer._prev_lines = []
         self.print_banner()
         heading = f"Redraw: {reason}\nSwitched to thread: {self.current_thread}" if reason else f"Switched to thread: {self.current_thread}"
         self.print_static_view_current(heading=heading)

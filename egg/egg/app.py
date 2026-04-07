@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console, Group
-from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
@@ -50,7 +49,7 @@ from eggthreads import (  # type: ignore
 from eggthreads.event_watcher import EventWatcher  # type: ignore
 
 # eggdisplay UI components
-from eggdisplay import OutputPanel, InputPanel, HStack, VStack  # type: ignore
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer  # type: ignore
 from .completion import get_autocomplete_items  # type: ignore
 
 # Local mixins and utilities
@@ -431,9 +430,10 @@ class EggDisplayApp(
         input_thread.start()
 
         try:
-            # Lower refresh rate to reduce CPU, and rely on EventWatcher
-            # / input changes to keep the UI responsive.
-            with Live(self.render_group(), refresh_per_second=10, screen=False, console=self.console) as live:
+            # DiffRenderer: flicker-free rendering via line-level diffing +
+            # synchronized output (CSI 2026h/l). Critical for SSH / tmux.
+            self._renderer = DiffRenderer(self.render_group(), console=self.console)
+            with self._renderer as renderer:
                 while self.running:
                     # Drain input queue
                     had_input = False
@@ -448,11 +448,11 @@ class EggDisplayApp(
                         pass
                     # Update panels content (sets dirty flags on changes)
                     self.update_panels()
-                    # Only rebuild and push to Live when something changed
+                    # Only rebuild when something changed
                     panels = [self.system_output, self.children_output,
                               self.chat_output, self.approval_panel]
                     if had_input or any(p.is_dirty() for p in panels) or self.input_panel.is_dirty():
-                        live.update(self.render_group())
+                        renderer.update(self.render_group())
 
                     # Optional: auto-redraw static view on terminal resize.
                     # We keep this low-overhead by only sampling terminal size
