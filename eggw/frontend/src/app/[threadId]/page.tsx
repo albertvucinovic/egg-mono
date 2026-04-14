@@ -14,6 +14,7 @@ import { createThread, openThread, interruptThread, fetchThread, executeCommand,
 import { useMutation } from "@tanstack/react-query";
 import { PanelRight } from "lucide-react";
 import clsx from "clsx";
+import { formatTokenCount } from "@/lib/tps";
 
 export default function ThreadPage() {
   const params = useParams();
@@ -90,6 +91,7 @@ export default function ThreadPage() {
     queryKey: ["threadSettings", threadId],
     queryFn: () => fetchThreadSettings(threadId),
     enabled: !!threadId,
+    refetchInterval: 1000,
   });
 
   // Model change mutation
@@ -144,6 +146,9 @@ export default function ThreadPage() {
     enabled: !!threadId,
     refetchInterval: isStreaming && streamingKind === "llm" ? 1000 : false,
   });
+
+  const contextHeaderText = formatTokenCount(tokenStats?.context_tokens ?? null);
+  const costHeaderText = tokenStats ? `$${(tokenStats.cost_usd || 0).toFixed(4)} cost` : null;
 
   // Connect to SSE for real-time streaming
   useSSE(threadId);
@@ -363,7 +368,7 @@ export default function ThreadPage() {
           {/* Context length */}
           {threadId && tokenStats && (
             <span className="ml-4 text-xs" style={{ color: "var(--muted)" }}>
-              Context: <span style={{ color: "var(--foreground)" }}>{(tokenStats.context_tokens || 0).toLocaleString()}</span>
+              Context: <span style={{ color: "var(--foreground)" }}>{contextHeaderText}</span>
             </span>
           )}
 
@@ -489,7 +494,7 @@ export default function ThreadPage() {
             <div className="flex items-center gap-1.5">
               <span style={{ color: "var(--muted)" }}>Cost:</span>
               <span style={{ color: "var(--reasoning-border)" }} className="font-medium">
-                ${(tokenStats.cost_usd || 0).toFixed(4)}
+                {costHeaderText}
               </span>
             </div>
           )}

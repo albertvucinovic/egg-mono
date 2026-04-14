@@ -4,8 +4,9 @@ import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Trash2, RefreshCw, ArrowUp, ArrowDown, GitBranch } from "lucide-react";
-import { fetchTokenStats, fetchThread, fetchThreadChildren, fetchThreadState } from "@/lib/api";
+import { fetchTokenStats, fetchThread, fetchThreadChildren, fetchThreadState, fetchThreadSettings } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
 
 interface SystemPanelProps {
@@ -20,6 +21,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     currentThreadId,
     systemLogs,
     clearSystemLogs,
+    streamingKind,
   } = useAppStore();
 
   // Fetch current thread details
@@ -34,6 +36,13 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["threadState", currentThreadId],
     queryFn: () => fetchThreadState(currentThreadId!),
     enabled: !!currentThreadId,
+  });
+
+  const { data: threadSettings } = useQuery({
+    queryKey: ["threadSettings", currentThreadId],
+    queryFn: () => fetchThreadSettings(currentThreadId!),
+    enabled: !!currentThreadId,
+    refetchInterval: 1000,
   });
 
   // Helper to get state display info
@@ -61,7 +70,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     enabled: !!currentThreadId && currentThreadData?.has_children,
   });
 
-  const { isStreaming, streamingKind } = useAppStore();
+  const { isStreaming } = useAppStore();
 
   // Fetch token stats for current thread - poll only during LLM streaming.
   const { data: stats, refetch: refetchStats } = useQuery({
@@ -181,26 +190,26 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
               </div>
               <div className="grid grid-cols-2 gap-1" style={{ color: "var(--foreground)" }}>
                 <span>Input:</span>
-                <span className="text-right">{(stats.input_tokens || 0).toLocaleString()}</span>
+                <span className="text-right">{formatTokenCount(stats.input_tokens || 0)}</span>
                 <span>Output:</span>
-                <span className="text-right">{(stats.output_tokens || 0).toLocaleString()}</span>
+                <span className="text-right">{formatTokenCount(stats.output_tokens || 0)}</span>
                 <span>Reasoning:</span>
-                <span className="text-right">{(stats.reasoning_tokens || 0).toLocaleString()}</span>
+                <span className="text-right">{formatTokenCount(stats.reasoning_tokens || 0)}</span>
                 <span style={{ color: "var(--tool-msg-border)" }}>Cached:</span>
-                <span className="text-right" style={{ color: "var(--tool-msg-border)" }}>{(stats.cached_tokens || 0).toLocaleString()}</span>
+                <span className="text-right" style={{ color: "var(--tool-msg-border)" }}>{formatTokenCount(stats.cached_tokens || 0)}</span>
                 <span>Context:</span>
-                <span className="text-right">{(stats.context_tokens || 0).toLocaleString()}</span>
+                <span className="text-right">{formatTokenCount(stats.context_tokens || 0)}</span>
                 {isStreaming && streamingKind === "llm" && typeof stats.streaming_tps === "number" && Number.isFinite(stats.streaming_tps) && stats.streaming_tps > 0 && (
                   <>
                     <span>TPS:</span>
-                    <span className="text-right">{stats.streaming_tps < 10 ? stats.streaming_tps.toFixed(1) : Math.round(stats.streaming_tps)}</span>
+                    <span className="text-right">{formatStreamingTps(stats.streaming_tps)}</span>
                   </>
                 )}
                 <span className="font-medium">Total:</span>
-                <span className="text-right font-medium">{(stats.total_tokens || 0).toLocaleString()}</span>
+                <span className="text-right font-medium">{formatTokenCount(stats.total_tokens || 0)}</span>
                 <span className="font-medium" style={{ color: "var(--reasoning-border)" }}>Cost:</span>
                 <span className="text-right font-medium" style={{ color: "var(--reasoning-border)" }}>
-                  ${(stats.cost_usd || 0).toFixed(4)}
+                  ${Number(stats.cost_usd || 0).toFixed(4)} cost
                 </span>
               </div>
             </div>
@@ -210,7 +219,21 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
 
       {/* System log header */}
       <div className={`p-2 flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
-        <span className="text-sm font-medium">System Log</span>
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">System Log</span>
+          {threadSettings && (
+            <span
+              className="text-xs px-1.5 py-0.5 rounded border"
+              style={{
+                color: threadSettings.auto_approval ? "#fca5a5" : "#86efac",
+                borderColor: threadSettings.auto_approval ? "#7f1d1d" : "#14532d",
+                background: threadSettings.auto_approval ? "rgba(127,29,29,0.25)" : "rgba(20,83,45,0.25)",
+              }}
+            >
+              Autoapproval[{threadSettings.auto_approval ? "On" : "Off"}]
+            </span>
+          )}
+        </div>
         <button
           onClick={clearSystemLogs}
           className="p-1 rounded"

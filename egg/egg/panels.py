@@ -20,6 +20,42 @@ from .utils import snapshot_messages, looks_markdown
 class PanelsMixin:
     """Mixin providing panel management methods for EggDisplayApp."""
 
+    def _fmt_header_metric(self, value: Any, label: str) -> str:
+        """Format a compact header metric as '<value> <label>'."""
+        if label == 'tok':
+            try:
+                iv = int(value)
+            except Exception:
+                return ""
+            if iv <= 0:
+                return ""
+            return f"{iv} tok" if iv < 1000 else f"{iv/1000:.2f}k tok"
+        if label == 'tps':
+            try:
+                fv = float(value)
+            except Exception:
+                return ""
+            if fv <= 0:
+                return ""
+            return f"{fv:.1f} tps" if fv < 10 else f"{fv:.0f} tps"
+        if label == 'calls':
+            try:
+                iv = int(value)
+            except Exception:
+                return ""
+            if iv < 0:
+                return ""
+            return f"{iv} calls"
+        if label == 'cost':
+            try:
+                fv = float(value)
+            except Exception:
+                return ""
+            if fv <= 0:
+                return ""
+            return f"${fv:.4f} cost"
+        return ""
+
     def _live_print(self, *args, **kwargs) -> None:
         """Print to console, routing through DiffRenderer when the live loop is active."""
         renderer = getattr(self, '_renderer', None)
@@ -47,9 +83,7 @@ class PanelsMixin:
             ctx_tokens, api_usage = self.current_token_stats()
 
             def fmt_tok(v: int) -> str:
-                if v < 1000:
-                    return str(v)
-                return f"{v/1000:.2f}k"
+                return self._fmt_header_metric(v, 'tok')
 
             # If we have no token stats yet for this thread, keep the
             # existing title so that we do not clear previously
@@ -61,7 +95,9 @@ class PanelsMixin:
             else:
                 title_parts: List[str] = ["Chat Messages"]
                 if have_ctx:
-                    title_parts.append(f"ctx≈{fmt_tok(int(ctx_tokens))}")
+                    tok_text = fmt_tok(int(ctx_tokens))
+                    if tok_text:
+                        title_parts.append(f"ctx {tok_text}")
                 cost_str = ""
                 if have_api:
                     ti = api_usage.get("total_input_tokens")
@@ -70,13 +106,21 @@ class PanelsMixin:
                     cached_in = api_usage.get("cached_input_tokens")
                     segs: List[str] = []
                     if isinstance(ti, int):
-                        segs.append(f"in≈{fmt_tok(ti)}")
+                        tok_text = fmt_tok(ti)
+                        if tok_text:
+                            segs.append(f"in {tok_text}")
                     if isinstance(to, int):
-                        segs.append(f"out≈{fmt_tok(to)}")
+                        tok_text = fmt_tok(to)
+                        if tok_text:
+                            segs.append(f"out {tok_text}")
                     if isinstance(cached_in, int) and cached_in > 0:
-                        segs.append(f"cached≈{fmt_tok(cached_in)}")
+                        tok_text = fmt_tok(cached_in)
+                        if tok_text:
+                            segs.append(f"cached {tok_text}")
                     if isinstance(cc, int):
-                        segs.append(f"calls={cc}")
+                        calls_text = self._fmt_header_metric(cc, 'calls')
+                        if calls_text:
+                            segs.append(calls_text)
                     if segs:
                         title_parts.append(" ".join(segs))
 
@@ -85,12 +129,12 @@ class PanelsMixin:
                         cu = api_usage.get('cost_usd') if isinstance(api_usage.get('cost_usd'), dict) else {}
                         total_cost = float(cu.get('total') or 0.0)
                         if total_cost > 0:
-                            cost_str = f"${total_cost:.4f}"
+                            cost_str = self._fmt_header_metric(total_cost, 'cost')
                     except Exception:
                         cost_str = ""
 
                 if cost_str:
-                    title_parts.append(f"cost≈{cost_str}")
+                    title_parts.append(cost_str)
 
                 tps_str = ""
                 try:
@@ -98,7 +142,7 @@ class PanelsMixin:
                 except Exception:
                     tps_str = ""
                 if tps_str:
-                    title_parts.append(f"tps≈{tps_str}")
+                    title_parts.append(tps_str)
                 self.chat_output.title = "  |  ".join(title_parts)
         except Exception:
             # Leave existing title unchanged on any error.
@@ -127,9 +171,17 @@ class PanelsMixin:
                 display = 'Bwrap'
             else:
                 display = provider
-            self.system_output.title = f"System  [green]Sandboxing[{display}][/green]"
+            sandbox_part = f"[green]Sandboxing[{display}][/green]"
         else:
-            self.system_output.title = "System  [red]Sandboxing[OFF][/red]"
+            sandbox_part = "[red]Sandboxing[OFF][/red]"
+
+        try:
+            from eggthreads import get_thread_auto_approval_status
+            auto_approval = bool(get_thread_auto_approval_status(self.db, self.current_thread))
+        except Exception:
+            auto_approval = False
+        auto_part = "[red]Autoapproval[On][/red]" if auto_approval else "[green]Autoapproval[Off][/green]"
+        self.system_output.title = f"System  {sandbox_part}  {auto_part}"
 
         # Keep the System panel intentionally compact so it doesn't dominate
         # the single-column layout.
@@ -206,9 +258,7 @@ class PanelsMixin:
             tps = None
         if not isinstance(tps, (int, float)) or tps <= 0:
             return ""
-        if float(tps) < 10:
-            return f"{float(tps):.1f}"
-        return f"{float(tps):.0f}"
+        return self._fmt_header_metric(tps, 'tps')
 
     def current_chat_header_tps(self) -> str:
         """Return header TPS, preserving the last relevant message TPS."""
@@ -232,9 +282,7 @@ class PanelsMixin:
                 continue
             if fv <= 0:
                 continue
-            if fv < 10:
-                return f"{fv:.1f}"
-            return f"{fv:.0f}"
+            return self._fmt_header_metric(fv, 'tps')
         return ""
 
     def render_group(self) -> Group:
@@ -294,15 +342,7 @@ class PanelsMixin:
         ts_str = fmt_ts(m.get('ts'))
 
         def fmt_tps(v: Any) -> str:
-            try:
-                fv = float(v)
-            except Exception:
-                return ""
-            if fv <= 0:
-                return ""
-            if fv < 10:
-                return f"{fv:.1f}"
-            return f"{fv:.0f}"
+            return self._fmt_header_metric(v, 'tps')
 
         msg_tps = fmt_tps(m.get('tps'))
 
@@ -361,7 +401,9 @@ class PanelsMixin:
                 title += f" [dim](model: {model_key})[/dim]"
             # Attach content token count if available
             if pm_tokens["content"]:
-                title += f" [dim](tok={pm_tokens['content']})[/dim]"
+                tok_text = self._fmt_header_metric(pm_tokens['content'], 'tok')
+                if tok_text:
+                    title += f" [dim]({tok_text})[/dim]"
             panel(Text(content, no_wrap=False, overflow='fold', style='green'), title, 'green')
             return
 
@@ -370,9 +412,11 @@ class PanelsMixin:
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
             if pm_tokens["content"]:
-                title += f" [dim](tok={pm_tokens['content']})[/dim]"
+                tok_text = self._fmt_header_metric(pm_tokens['content'], 'tok')
+                if tok_text:
+                    title += f" [dim]({tok_text})[/dim]"
             if msg_tps:
-                title += f" [dim](tps≈{msg_tps})[/dim]"
+                title += f" [dim]({msg_tps})[/dim]"
             # Prefer to show reasoning first if present
             reas = m.get('reasoning') or m.get('reasoning_content')
             if isinstance(reas, str) and reas.strip():
@@ -380,7 +424,9 @@ class PanelsMixin:
                 if model_key:
                     reason_title += f" [dim](model: {model_key})[/dim]"
                 if pm_tokens["reasoning"]:
-                    reason_title += f" [dim](tok={pm_tokens['reasoning']})[/dim]"
+                    tok_text = self._fmt_header_metric(pm_tokens['reasoning'], 'tok')
+                    if tok_text:
+                        reason_title += f" [dim]({tok_text})[/dim]"
                 panel(Text(reas, no_wrap=False, overflow='fold', style='magenta'), reason_title, 'magenta')
             if content:
                 if looks_markdown(content):
@@ -408,7 +454,9 @@ class PanelsMixin:
                 if model_key:
                     tc_title_parts.append(f"[dim](model: {model_key})[/dim]")
                 if pm_tokens["tool_calls"]:
-                    tc_title_parts.append(f"[dim](tok={pm_tokens['tool_calls']})[/dim]")
+                    tok_text = self._fmt_header_metric(pm_tokens['tool_calls'], 'tok')
+                    if tok_text:
+                        tc_title_parts.append(f"[dim]({tok_text})[/dim]")
                 if ts_str:
                     tc_title_parts.append(f"[dim]{ts_str}[/dim]")
                 if msg_id:
@@ -435,9 +483,11 @@ class PanelsMixin:
                 title += f" [dim](model: {model_key})[/dim]"
             # For tool messages, content tokens are the primary signal.
             if pm_tokens["content"]:
-                title += f" [dim](tok={pm_tokens['content']})[/dim]"
+                tok_text = self._fmt_header_metric(pm_tokens['content'], 'tok')
+                if tok_text:
+                    title += f" [dim]({tok_text})[/dim]"
             if msg_tps:
-                title += f" [dim](tps≈{msg_tps})[/dim]"
+                title += f" [dim]({msg_tps})[/dim]"
             panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             return
 

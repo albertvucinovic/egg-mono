@@ -132,14 +132,25 @@ class TestUpdatePanels:
 
         egg_app.update_panels()
 
-        assert "tps≈" in egg_app.chat_output.title
+        assert "6.0 tps" in egg_app.chat_output.title
 
         egg_app._live_state["stream_kind"] = "tool"
         monkeypatch.setattr(egg_app, "current_stream_tps", lambda: "")
         monkeypatch.setattr("egg.egg.panels.snapshot_messages", lambda db, tid: [{"role": "assistant", "tps": 4.2}])
         egg_app.update_panels()
 
-        assert "tps≈4.2" in egg_app.chat_output.title
+        assert "4.2 tps" in egg_app.chat_output.title
+
+    def test_system_title_shows_autoapproval_flag(self, egg_app, monkeypatch):
+        monkeypatch.setattr(
+            "eggthreads.get_thread_sandbox_status",
+            lambda db, tid: {'effective': False}
+        )
+        monkeypatch.setattr("eggthreads.get_thread_auto_approval_status", lambda db, tid: True)
+
+        egg_app.update_panels()
+
+        assert "Autoapproval[On]" in egg_app.system_output.title
 
 
 class TestRenderGroup:

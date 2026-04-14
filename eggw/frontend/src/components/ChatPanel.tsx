@@ -12,7 +12,7 @@ import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { fetchMessages } from "@/lib/api";
 import { useAppStore, Message } from "@/lib/store";
-import { formatStreamingTps } from "@/lib/tps";
+import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
 
 /**
@@ -85,6 +85,7 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
   const shellStyle: React.CSSProperties = { background: "var(--code-bg)", borderColor: "var(--panel-border)" };
 
   const messageTps = formatStreamingTps(message.tps);
+  const tokenText = formatTokenCount(message.tokens);
 
   return (
     <div
@@ -99,11 +100,11 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
         {message.model_key && (
           <span style={{ color: "var(--muted)" }}>({message.model_key})</span>
         )}
-        {message.tokens && message.tokens > 0 && (
-          <span style={{ color: "var(--muted)" }}>(tok={message.tokens.toLocaleString()})</span>
+        {tokenText && (
+          <span style={{ color: "var(--muted)" }}>({tokenText})</span>
         )}
         {messageTps && (
-          <span style={{ color: "var(--muted)" }}>(tps≈{messageTps})</span>
+          <span style={{ color: "var(--muted)" }}>({messageTps})</span>
         )}
         {message.timestamp && (
           <span className="font-mono" style={{ color: "var(--muted)" }}>
@@ -566,7 +567,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className={`px-3 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)", background: "var(--panel-bg)" }}>
-        <span>Chat Messages{formattedStreamingTps ? ` | tps≈${formattedStreamingTps}` : ""}</span>
+        <span>Chat Messages{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}</span>
       </div>
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
         {isLoading ? (

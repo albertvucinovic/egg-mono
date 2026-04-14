@@ -1257,6 +1257,38 @@ def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str], *, skip_runna
     return result
 
 
+def get_thread_auto_approval_status(db: ThreadsDB, thread_id: str) -> bool:
+    """Return whether global tool auto-approval is active for a thread."""
+    try:
+        cur = db.conn.execute(
+            """SELECT payload_json FROM events
+               WHERE thread_id=? AND type='tool_call.approval'
+               ORDER BY event_seq DESC""",
+            (thread_id,),
+        )
+    except Exception:
+        return False
+
+    for row in cur.fetchall():
+        try:
+            payload_json = row["payload_json"]
+        except Exception:
+            try:
+                payload_json = row[0]
+            except Exception:
+                payload_json = None
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+        except Exception:
+            payload = {}
+        decision = payload.get("decision") if isinstance(payload, dict) else None
+        if decision == "global_approval":
+            return True
+        if decision == "revoke_global_approval":
+            return False
+    return False
+
+
 # --------- Query helpers (expose common SQL as API) -------------------------
 def list_threads(db: ThreadsDB) -> list[ThreadRow]:
     """List all threads in the database.

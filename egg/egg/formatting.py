@@ -164,7 +164,7 @@ class FormattingMixin:
             try:
                 tps_val = m.get('tps')
                 if isinstance(tps_val, (int, float)) and tps_val > 0:
-                    tps_text = f" (tps≈{tps_val:.1f})" if float(tps_val) < 10 else f" (tps≈{tps_val:.0f})"
+                    tps_text = f" ({self._fmt_header_metric(tps_val, 'tps')})"
             except Exception:
                 tps_text = ""
             if role == 'assistant':
@@ -333,7 +333,7 @@ class FormattingMixin:
         parts: List[str] = [base]
         if ls.get('active_invoke'):
             live_tps = self.current_stream_tps()
-            live_tps_text = f" (tps≈{live_tps})" if live_tps else ""
+            live_tps_text = f" ({live_tps})" if live_tps else ""
             if ls.get('reason'):
                 parts.append(f"\n[Reasoning (streaming){live_tps_text}]\n{ls['reason']}")
             for pk in ls.get('tc_order') or []:
@@ -351,13 +351,12 @@ class FormattingMixin:
         head_parts.append(f"Thread {self.current_thread[-8:]} | Model: {self.current_model_for_thread(self.current_thread) or 'default'}")
 
         def fmt_tok(v: int) -> str:
-            # Compact k-style formatting for large numbers, e.g. 1234 -> "1.23k".
-            if v < 1000:
-                return str(v)
-            return f"{v/1000:.2f}k"
+            return self._fmt_header_metric(v, 'tok')
 
         if isinstance(ctx_tokens, int):
-            head_parts.append(f"ctx≈{fmt_tok(ctx_tokens)}")
+            tok_text = fmt_tok(ctx_tokens)
+            if tok_text:
+                head_parts.append(f"ctx {tok_text}")
 
         if isinstance(api_usage, dict) and api_usage:
             ti = api_usage.get("total_input_tokens")
@@ -365,11 +364,17 @@ class FormattingMixin:
             cc = api_usage.get("approx_call_count")
             pieces: List[str] = []
             if isinstance(ti, int):
-                pieces.append(f"in≈{fmt_tok(ti)}")
+                tok_text = fmt_tok(ti)
+                if tok_text:
+                    pieces.append(f"in {tok_text}")
             if isinstance(to, int):
-                pieces.append(f"out≈{fmt_tok(to)}")
+                tok_text = fmt_tok(to)
+                if tok_text:
+                    pieces.append(f"out {tok_text}")
             if isinstance(cc, int):
-                pieces.append(f"calls={cc}")
+                calls_text = self._fmt_header_metric(cc, 'calls')
+                if calls_text:
+                    pieces.append(calls_text)
             if pieces:
                 head_parts.append(" ".join(pieces))
 

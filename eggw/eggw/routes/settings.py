@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from eggthreads import (
     current_thread_model,
     approve_tool_calls_for_thread,
+    get_thread_auto_approval_status,
     get_thread_sandbox_status,
     get_thread_sandbox_config,
     set_thread_sandbox_config,
@@ -15,8 +16,6 @@ from eggthreads import (
 )
 
 from .. import core
-from ..commands.utility import get_auto_approval_status
-
 router = APIRouter(prefix="/api/threads", tags=["settings"])
 
 
@@ -31,7 +30,7 @@ async def get_thread_settings(thread_id: str):
         raise HTTPException(status_code=404, detail="Thread not found")
 
     return {
-        "auto_approval": get_auto_approval_status(thread_id),
+        "auto_approval": get_thread_auto_approval_status(core.db, thread_id),
         "model_key": current_thread_model(core.db, thread_id),
     }
 
@@ -131,7 +130,7 @@ async def set_auto_approval(thread_id: str, enabled: bool = True):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    current_state = get_auto_approval_status(thread_id)
+    current_state = get_thread_auto_approval_status(core.db, thread_id)
 
     # Only emit event if state is changing
     if current_state != enabled:

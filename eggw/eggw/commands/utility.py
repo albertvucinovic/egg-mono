@@ -10,6 +10,7 @@ from eggthreads import (
     total_token_stats,
     execute_bash_command,
     list_threads,
+    get_thread_auto_approval_status,
     set_context_limit,
     get_context_limit,
     get_thread_scheduling,
@@ -43,27 +44,7 @@ def get_auto_approval_status(thread_id: str) -> bool:
     """
     if not core.db:
         return False
-
-    # Scan events for global_approval/revoke_global_approval
-    cur = core.db.conn.execute(
-        """SELECT payload_json FROM events
-           WHERE thread_id=? AND type='tool_call.approval'
-           ORDER BY event_seq DESC""",
-        (thread_id,)
-    )
-
-    for row in cur.fetchall():
-        try:
-            payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
-            decision = payload.get("decision")
-            if decision == "global_approval":
-                return True
-            if decision == "revoke_global_approval":
-                return False
-        except:
-            continue
-
-    return False
+    return bool(get_thread_auto_approval_status(core.db, thread_id))
 
 
 async def cmd_toggle_auto_approval(thread_id: str) -> CommandResponse:
