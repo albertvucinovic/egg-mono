@@ -13,7 +13,7 @@ Features:
 
 from typing import List, Optional, Callable, Dict, Any
 import shutil
-import textwrap
+import unicodedata
 from rich.live import Live
 from rich.text import Text
 from rich.console import Console, Group
@@ -651,10 +651,52 @@ class LiveEditorBase:
         # distinguish paste from typed input.
         self._bracketed_paste_active: bool = False
         self._bracketed_paste_buffer: str = ""
-        # Some input stacks (notably readchar on POSIX) split ESC[200~ into
-        # two deliveries: "\x1b[200" and then "~". Track a pending marker
-        # prefix so we can join it.
-        self._bracketed_paste_marker_pending: str = ""
+        # Some input stacks (notably readchar on POSIX) split longer ANSI
+        # escape sequences across multiple deliveries. Track a pending prefix
+        # so we can reassemble it before interpreting the key.
+        self._ansi_pending: str = ""
+
+    def _ansi_seq_complete(self, seq: str) -> bool:
+        """Heuristic: consider an ANSI escape sequence complete."""
+        if not isinstance(seq, str) or not seq:
+            return False
+        last = seq[-1]
+        return last.isalpha() or last == "~"
+
+    def _ansi_seq_needs_more(self, key: str) -> bool:
+        """Return True if key looks like a partial ANSI escape sequence."""
+        if not isinstance(key, str) or not key:
+            return False
+        return (key.startswith("\x1b[") or key.startswith("\x1bO")) and not self._ansi_seq_complete(key)
+
+    def normalize_key(self, key: str) -> Optional[str]:
+        """Normalize raw terminal input into a stable logical key string.
+
+        Returns None when the key was buffered as part of an incomplete ANSI
+        sequence and the caller should wait for more input.
+        """
+        pending = self._ansi_pending
+        if isinstance(pending, str) and pending:
+            pending = pending + (key or "")
+            if self._ansi_seq_complete(pending):
+                self._ansi_pending = ""
+                key = pending
+            else:
+                self._ansi_pending = pending
+                return None
+        elif self._ansi_seq_needs_more(key):
+            self._ansi_pending = key
+            return None
+
+        # Alt+Enter is commonly encoded as ESC + Enter.
+        if key in ("\x1b\n", "\x1b\r"):
+            return "alt-enter"
+
+        # Common Shift+Enter encodings seen with CSI-u capable terminals.
+        if key in ("\x1b[13;2u", "\x1b[27;2;13~"):
+            return "shift-enter"
+
+        return key
 
     # ------------ Shared rendering ------------
     def _render(self) -> Text:
@@ -700,6 +742,10 @@ class LiveEditorBase:
         """Handle a key press and return False if should quit."""
         # Debug: uncomment to see what keys are being received
         # print(f"DEBUG: Key received: {repr(key)}")
+        key = self.normalize_key(key)
+        if key is None:
+            return True
+
         try:
             ctrl_c = readchar.key.CTRL_C
         except Exception:
@@ -714,33 +760,6 @@ class LiveEditorBase:
         PASTE_END = "\x1b[201~"
 
         if isinstance(key, str):
-            # Handle split marker prefixes as produced by readchar.readkey().
-            # Example: "\x1b[200" then "~".
-            if self._bracketed_paste_marker_pending:
-                if key.startswith("~"):
-                    marker = self._bracketed_paste_marker_pending + "~"
-                    rest = key[1:]
-                    self._bracketed_paste_marker_pending = ""
-                    if marker == PASTE_START:
-                        self._bracketed_paste_active = True
-                        self._bracketed_paste_buffer = ""
-                        if rest:
-                            return self._handle_key(rest)
-                        return True
-                    if marker == PASTE_END:
-                        # End paste and flush buffer.
-                        if self._bracketed_paste_buffer:
-                            self.editor.insert_text_block(self._bracketed_paste_buffer)
-                        self._bracketed_paste_active = False
-                        self._bracketed_paste_buffer = ""
-                        if rest:
-                            return self._handle_key(rest)
-                        return True
-                else:
-                    # Unexpected char after pending prefix: drop the prefix and
-                    # continue processing current key normally.
-                    self._bracketed_paste_marker_pending = ""
-
             # Enter bracketed paste mode (and optionally handle same-chunk end)
             if not self._bracketed_paste_active and PASTE_START in key:
                 _pre, _rest = key.split(PASTE_START, 1)
@@ -759,18 +778,9 @@ class LiveEditorBase:
                 self._bracketed_paste_buffer = _rest
                 return True
 
-            # Handle readchar-split start marker prefix
-            if not self._bracketed_paste_active and key == "\x1b[200":
-                self._bracketed_paste_marker_pending = key
-                return True
-
             # While in bracketed paste mode, treat everything as literal text
             # until we see PASTE_END.
             if self._bracketed_paste_active:
-                # Handle readchar-split end marker prefix
-                if key == "\x1b[201":
-                    self._bracketed_paste_marker_pending = key
-                    return True
                 if PASTE_END in key:
                     payload, trailing = key.split(PASTE_END, 1)
                     self._bracketed_paste_buffer += payload
@@ -806,6 +816,8 @@ class LiveEditorBase:
             self.editor.handle_key('backspace')
         elif key == getattr(readchar.key, 'DELETE', '\x1b[3~') or key == '\x1b[3~':
             self.editor.handle_key('delete')
+        elif key in ('alt-enter', 'shift-enter'):
+            self.editor.handle_key('enter')
         elif key in (getattr(readchar.key, 'ENTER', '\r'), '\r', '\n'):
             self.editor.handle_key('enter')
         elif key == getattr(readchar.key, 'TAB', '\t') or key == '\t':
@@ -982,12 +994,17 @@ class OutputPanel:
         #   - "wrap" (default): wrap to multiple visual lines
         #   - "crop": crop/clip each logical line to panel width
         line_wrap_mode: str = "wrap"
+        # Whether panel body content should be interpreted as Rich markup.
+        # Keep this enabled for system/status panels that intentionally emit
+        # markup, but disable it for plain-text chat transcripts so user/model
+        # text containing square brackets is rendered literally.
+        markup: bool = True
 
     def __init__(self, title: str = "Output", initial_height: int = 8, max_height: int = 20,
                  style: Optional['OutputPanel.PanelStyle'] = None, columns_hint: int = 1):
         """
         Initialize the output panel.
-        
+
         Args:
             title: Panel title
             initial_height: Initial panel height in lines
@@ -1000,10 +1017,17 @@ class OutputPanel:
         self.style = style or OutputPanel.PanelStyle()
         # Hint how many equal-width columns this panel shares row with (for width estimate)
         self.columns_hint = max(1, int(columns_hint or 1))
+        # Differential rendering: dirty flag and cached render
+        self._dirty: bool = True
+        self._cached_render: Optional[Panel] = None
+        self._last_term_cols: int = 0
+        self._last_title: str = title
         
     def set_content(self, content: str) -> None:
         """Set the content to display."""
-        self.content = content
+        if content != self.content:
+            self.content = content
+            self._dirty = True
         
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on content.
@@ -1040,12 +1064,97 @@ class OutputPanel:
             return getattr(rich_box, name, rich_box.SQUARE)
         return b or rich_box.SQUARE
 
+    @staticmethod
+    def _sanitize_display_line(text: str) -> str:
+        """Return a terminal-safe single logical line for rendering.
+
+        We preserve ordinary printable Unicode, tabs, and spaces, but replace
+        control characters and lone surrogate code points that frequently lead
+        to broken rendering or placeholder glyphs in terminals.
+        """
+        if not isinstance(text, str) or not text:
+            return text
+
+        out: List[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            cp = ord(ch)
+            # Recombine surrogate pairs that may have been split across
+            # streaming chunks and parsed separately.
+            if 0xD800 <= cp <= 0xDBFF:
+                if i + 1 < n:
+                    cp2 = ord(text[i + 1])
+                    if 0xDC00 <= cp2 <= 0xDFFF:
+                        combined = 0x10000 + ((cp - 0xD800) << 10) + (cp2 - 0xDC00)
+                        out.append(chr(combined))
+                        i += 2
+                        continue
+                out.append("\uFFFD")
+                i += 1
+                continue
+            if 0xDC00 <= cp <= 0xDFFF:
+                out.append("\uFFFD")
+                i += 1
+                continue
+            if ch == "\t":
+                out.append(ch)
+                i += 1
+                continue
+            cat = unicodedata.category(ch)
+            # Replace only true control chars (Cc) and surrogate code points
+            # (Cs). Keep format characters such as ZWJ so composed emoji and
+            # other legitimate text still render naturally.
+            if cat in ("Cc", "Cs"):
+                out.append("\uFFFD")
+            else:
+                out.append(ch)
+            i += 1
+        return "".join(out)
+
+    def _line_to_renderable_text(self, line: str) -> Text:
+        """Convert one logical line into a Rich Text renderable."""
+        safe_line = self._sanitize_display_line(line)
+        if not getattr(self.style, "markup", True):
+            return Text(safe_line)
+        try:
+            return Text.from_markup(safe_line)
+        except MarkupError:
+            return Text(safe_line)
+
+    def mark_dirty(self) -> None:
+        """Force the panel to re-render on the next render() call."""
+        self._dirty = True
+
+    def is_dirty(self) -> bool:
+        """Return True if the panel needs re-rendering."""
+        if self._dirty:
+            return True
+        # Title changed externally (e.g. egg updates token stats in the title)
+        if self.title != self._last_title:
+            return True
+        # Terminal resize invalidates the cache
+        try:
+            term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            term_cols = 100
+        if term_cols != self._last_term_cols:
+            return True
+        return False
+
     def render(self) -> Panel:
         """Render the panel, showing only the last lines that fit.
 
         Content is interpreted as Rich markup so callers can embed
         simple markup tags (e.g. ``[yellow]``) in panel bodies.
+
+        Uses cached output when content has not changed since the last
+        render, eliminating flicker from unconditional rebuilds.
         """
+        if not self.is_dirty() and self._cached_render is not None:
+            return self._cached_render
+
         height = self.calculate_height()
 
         # Create content text
@@ -1092,10 +1201,7 @@ class OutputPanel:
                     if line == "":
                         display_segments.append(Text())
                         continue
-                    try:
-                        rich_line = Text.from_markup(line)
-                    except MarkupError:
-                        rich_line = Text(line)
+                    rich_line = self._line_to_renderable_text(line)
                     # Explicitly crop to the available width so that
                     # long lines do not expand the column and break
                     # the overall layout.
@@ -1120,29 +1226,12 @@ class OutputPanel:
                     if line == "":
                         display_segments.append(Text())
                         continue
-                    try:
-                        rich_line = Text.from_markup(line)
-                        wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
-                        if not wrapped_segments:
-                            display_segments.append(Text())
-                        else:
-                            display_segments.extend(wrapped_segments)
-                    except MarkupError:
-                        # Fallback: use plain text wrapping if markup is
-                        # invalid; this will drop styling but keep layout.
-                        wrapped = textwrap.wrap(
-                            line,
-                            width=approx_width,
-                            replace_whitespace=False,
-                            drop_whitespace=False,
-                            break_long_words=True,
-                            break_on_hyphens=False,
-                        )
-                        if not wrapped:
-                            display_segments.append(Text())
-                        else:
-                            for wl in wrapped:
-                                display_segments.append(Text(wl))
+                    rich_line = self._line_to_renderable_text(line)
+                    wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
+                    if not wrapped_segments:
+                        display_segments.append(Text())
+                    else:
+                        display_segments.extend(wrapped_segments)
 
                 # Now render only the tail that fits
                 total_segments = len(display_segments)
@@ -1172,7 +1261,7 @@ class OutputPanel:
                 content_text.append(Text("No content"))
 
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
-        return Panel(
+        result = Panel(
             content_text,
             title=panel_title,
             title_align=self.style.title_align,
@@ -1180,6 +1269,15 @@ class OutputPanel:
             box=self._resolve_box(),
             height=height
         )
+        # Cache the result and clear the dirty flag
+        self._cached_render = result
+        self._dirty = False
+        self._last_title = self.title
+        try:
+            self._last_term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            self._last_term_cols = 0
+        return result
 
 
 class InputPanel:
@@ -1204,6 +1302,9 @@ class InputPanel:
         cursor_style: str = "black on white"
         line_num_style: str = "dim"
         current_line_num_style: str = "bold green"
+        # Whether to show the informational footer line inside the panel
+        # (e.g. key hints / counts).
+        show_footer: bool = True
 
     def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12,
                  style: Optional['InputPanel.PanelStyle'] = None,
@@ -1247,6 +1348,10 @@ class InputPanel:
         self._suggestion_scroll_top: int = 0
         # Horizontal scroll offset (columns) for long lines.
         self._hscroll_left: int = 0
+        # Differential rendering: cached render and state snapshot
+        self._cached_render: Optional[Panel] = None
+        self._last_snapshot: Optional[tuple] = None
+        self._last_term_cols: int = 0
         
     def calculate_height(self) -> int:
         """Calculate the optimal panel height based on editor content.
@@ -1269,8 +1374,11 @@ class InputPanel:
         except Exception:
             extra = 0
 
-        # 4 = line numbers + status line etc. (legacy sizing)
-        target_height = max(6, min(self.max_height, editor_lines + 4 + extra))
+        # 4 = line numbers + status line etc. (legacy sizing).
+        # The footer is optional, so use a slightly smaller baseline when it
+        # is disabled.
+        baseline = 4 if getattr(self.style, "show_footer", False) else 3
+        target_height = max(6, min(self.max_height, editor_lines + baseline + extra))
         self.current_height = float(target_height)
         return target_height
 
@@ -1350,6 +1458,7 @@ class InputPanel:
         self._scroll_top = 0
         self._suggestion_scroll_top = 0
         self._hscroll_left = 0
+        self._last_snapshot = None
     
     def increment_message_count(self) -> None:
         """Increment the message counter."""
@@ -1362,8 +1471,54 @@ class InputPanel:
             return getattr(rich_box, name, rich_box.SQUARE)
         return b or rich_box.SQUARE
 
+    def _take_snapshot(self) -> tuple:
+        """Capture the current state that affects rendering."""
+        ed = self.editor.editor
+        try:
+            comp_active = bool(getattr(ed, "_completion_active", False))
+            comp_items_len = len(getattr(ed, "_completion_items", []) or [])
+            comp_index = int(getattr(ed, "_completion_index", 0))
+        except Exception:
+            comp_active, comp_items_len, comp_index = False, 0, 0
+        return (
+            tuple(ed.lines),
+            ed.cursor.row,
+            ed.cursor.col,
+            comp_active,
+            comp_items_len,
+            comp_index,
+            self._scroll_top,
+            self._hscroll_left,
+            self._suggestion_scroll_top,
+            self.message_count,
+        )
+
+    def mark_dirty(self) -> None:
+        """Force the panel to re-render on the next render() call."""
+        self._last_snapshot = None
+
+    def is_dirty(self) -> bool:
+        """Return True if the panel needs re-rendering."""
+        if self._cached_render is None or self._last_snapshot is None:
+            return True
+        # Terminal resize invalidates the cache
+        try:
+            term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            term_cols = 100
+        if term_cols != self._last_term_cols:
+            return True
+        return self._take_snapshot() != self._last_snapshot
+
     def render(self) -> Panel:
-        """Render the input panel."""
+        """Render the input panel.
+
+        Uses cached output when editor state has not changed since the
+        last render, eliminating flicker from unconditional rebuilds.
+        """
+        if not self.is_dirty() and self._cached_render is not None:
+            return self._cached_render
+
         height = self.calculate_height()
         # Rich's Panel(height=...) includes the border lines. The renderable
         # content sits inside those borders.
@@ -1412,7 +1567,7 @@ class InputPanel:
         header_lines = len(rows)
 
         # Layout budgeting (within the inner content region)
-        status_lines = 1
+        status_lines = 1 if getattr(self.style, "show_footer", False) else 0
 
         # Header + editor + suggestions + status must fit in inner_height.
         available_body = inner_height - header_lines - status_lines
@@ -1497,26 +1652,33 @@ class InputPanel:
             # try to reuse an out-of-range offset.
             self._suggestion_scroll_top = 0
 
-        # -------- Status line --------
-        total_lines = len(lines)
-        showing_range = (
-            f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > editor_lines_budget else f"{total_lines}"
-        )
-        rows.append(
-            Text(
-                f"📝 Lines: {showing_range} | Messages sent: {self.message_count} | Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send",
-                style=self.style.status_style,
-                no_wrap=True,
+        # -------- Optional footer/status line --------
+        if getattr(self.style, "show_footer", False):
+            total_lines = len(lines)
+            showing_range = (
+                f"{viewport_start + 1}-{viewport_end}/{total_lines}" if total_lines > editor_lines_budget else f"{total_lines}"
             )
-        )
+            rows.append(
+                Text(
+                    (
+                        f"Lines: {showing_range} | Messages sent: {self.message_count} | "
+                        "Tab: suggest/accept | ↑/↓: navigate | Esc: cancel | Ctrl+D to send"
+                    ),
+                    style=self.style.status_style,
+                    no_wrap=True,
+                )
+            )
 
         # Final assembly: exactly inner_height rows.
         if len(rows) < inner_height:
             rows.extend(Text("", no_wrap=True) for _ in range(inner_height - len(rows)))
         elif len(rows) > inner_height:
-            # Prefer keeping the status line (last). Trim from the middle.
-            tail = rows[-1:]
-            rows = rows[: max(0, inner_height - 1)] + tail
+            # Prefer keeping the footer line (last) if present.
+            if getattr(self.style, "show_footer", False) and rows:
+                tail = rows[-1:]
+                rows = rows[: max(0, inner_height - 1)] + tail
+            else:
+                rows = rows[:inner_height]
 
         editor_content = Text(no_wrap=True)
         for i, row in enumerate(rows):
@@ -1525,7 +1687,7 @@ class InputPanel:
                 editor_content.append("\n")
 
         panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
-        return Panel(
+        result = Panel(
             editor_content,
             title=panel_title,
             title_align=self.style.title_align,
@@ -1533,6 +1695,249 @@ class InputPanel:
             box=self._resolve_box(),
             height=height
         )
+        # Cache the result and record the state snapshot
+        self._cached_render = result
+        self._last_snapshot = self._take_snapshot()
+        try:
+            self._last_term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        except Exception:
+            self._last_term_cols = 0
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Flicker-free differential renderer
+# ---------------------------------------------------------------------------
+
+import sys
+import io
+
+
+class DiffRenderer:
+    """Flicker-free terminal renderer using line-level diffing and synchronized output.
+
+    Replaces Rich's ``Live`` for SSH / tmux-friendly inline rendering.
+
+    Key techniques (inspired by pi-mono / pi-tui):
+      * **Synchronized output** (DEC private mode 2026) wraps every frame in
+        ``CSI ?2026h`` / ``CSI ?2026l`` so the terminal batches all writes
+        into a single atomic paint – no partial redraws visible to the user.
+      * **Line-level diffing** compares the ANSI-encoded output of each line
+        with the previous frame and only rewrites lines that actually changed.
+        This dramatically reduces bytes sent over SSH.
+      * **Single write** – every frame is accumulated into one Python string and
+        flushed with a single ``sys.stdout.write()`` call.
+
+    Usage::
+
+        from eggdisplay import DiffRenderer
+
+        renderer = DiffRenderer(console=my_console)
+        with renderer:
+            renderer.update(my_renderable)   # first frame
+            ...
+            renderer.update(my_renderable)   # subsequent frames (diffed)
+            renderer.print_above("[dim]status message[/dim]")  # above live region
+    """
+
+    # DEC synchronized output
+    _SYNC_START = "\x1b[?2026h"
+    _SYNC_END = "\x1b[?2026l"
+
+    def __init__(self, initial=None, *, console: Optional[Console] = None,
+                 refresh_per_second: int = 30, screen: bool = False):
+        self.console = console or Console()
+        self._initial = initial
+        self._prev_lines: List[str] = []
+        self._width: int = 0
+        self._color_system: Optional[str] = None
+
+    # -- context manager ----------------------------------------------------
+
+    def __enter__(self):
+        sys.stdout.write("\x1b[?25l")  # hide cursor
+        sys.stdout.flush()
+        try:
+            self._color_system = self.console.color_system
+        except Exception:
+            self._color_system = "truecolor"
+        if self._initial is not None:
+            self.update(self._initial)
+        return self
+
+    def __exit__(self, *_exc):
+        buf = ""
+        if self._prev_lines:
+            buf += "\n"  # move past live region
+        buf += "\x1b[?25h"  # show cursor
+        sys.stdout.write(buf)
+        sys.stdout.flush()
+        self._prev_lines = []
+
+    # -- public API ---------------------------------------------------------
+
+    def update(self, renderable) -> None:
+        """Render *renderable* with line-level diffing and synchronized output."""
+        new_lines, new_width = self._render_to_lines(renderable)
+
+        if not self._prev_lines or new_width != self._width:
+            self._full_render(new_lines)
+        else:
+            self._diff_render(new_lines)
+
+        self._prev_lines = new_lines
+        self._width = new_width
+
+    def print_above(self, *objects, **kwargs) -> None:
+        """Print Rich content above the live region (like ``console.print``).
+
+        Clears the live region, prints the content so it enters scrollback,
+        then re-renders the live region below – all inside one synchronized
+        output block so the operation is flicker-free.
+        """
+        # Render message to ANSI string
+        msg = self._rich_print_to_str(*objects, **kwargs)
+
+        n = len(self._prev_lines)
+        parts: List[str] = [self._SYNC_START]
+
+        # Move to top of live region and clear it
+        if n > 0:
+            parts.append(f"\x1b[{n}A\r")
+            for i in range(n):
+                parts.append("\x1b[2K")
+                if i < n - 1:
+                    parts.append("\n")
+            if n > 1:
+                parts.append(f"\x1b[{n - 1}A\r")
+            else:
+                parts.append("\r")
+
+        # Emit the message (enters scrollback)
+        parts.append(msg)
+        if msg and not msg.endswith("\n"):
+            parts.append("\n")
+
+        # Re-render live region
+        for line in self._prev_lines:
+            parts.append(f"\x1b[2K{line}\n")
+
+        parts.append(self._SYNC_END)
+        sys.stdout.write("".join(parts))
+        sys.stdout.flush()
+
+    # -- internal -----------------------------------------------------------
+
+    def _render_to_lines(self, renderable) -> tuple:
+        """Render a Rich renderable to a list of ANSI-encoded terminal lines."""
+        width = shutil.get_terminal_size(fallback=(100, 24)).columns
+        buf = io.StringIO()
+        c = Console(
+            file=buf,
+            width=width,
+            force_terminal=True,
+            color_system=self._color_system or "truecolor",
+        )
+        c.print(renderable, end="")
+        lines = buf.getvalue().split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        return lines, width
+
+    def _rich_print_to_str(self, *objects, **kwargs) -> str:
+        """Render a ``console.print()`` call to an ANSI string."""
+        width = self._width or shutil.get_terminal_size(fallback=(100, 24)).columns
+        buf = io.StringIO()
+        c = Console(
+            file=buf,
+            width=width,
+            force_terminal=True,
+            color_system=self._color_system or "truecolor",
+        )
+        c.print(*objects, **kwargs)
+        return buf.getvalue()
+
+    # -- rendering strategies -----------------------------------------------
+
+    def _full_render(self, lines: List[str]) -> None:
+        """Full render – write every line (used for first frame or resize)."""
+        old_n = len(self._prev_lines)
+        parts: List[str] = [self._SYNC_START]
+
+        # Move cursor to top of previous region
+        if old_n > 0:
+            parts.append(f"\x1b[{old_n}A\r")
+
+        # Write all new lines
+        for line in lines:
+            parts.append(f"\x1b[2K{line}\n")
+
+        # Clear leftover old lines
+        if old_n > len(lines):
+            for _ in range(old_n - len(lines)):
+                parts.append("\x1b[2K\n")
+            # Move back to end of new content
+            parts.append(f"\x1b[{old_n - len(lines)}A")
+
+        parts.append(self._SYNC_END)
+        sys.stdout.write("".join(parts))
+        sys.stdout.flush()
+
+    def _diff_render(self, new_lines: List[str]) -> None:
+        """Incremental render – only rewrite changed lines."""
+        old = self._prev_lines
+        old_n = len(old)
+        new_n = len(new_lines)
+
+        # Find first and last changed lines
+        first = last = -1
+        for i in range(max(old_n, new_n)):
+            o = old[i] if i < old_n else ""
+            n = new_lines[i] if i < new_n else ""
+            if o != n:
+                if first == -1:
+                    first = i
+                last = i
+
+        if first == -1:
+            return  # identical – nothing to write
+
+        parts: List[str] = [self._SYNC_START]
+
+        # Cursor is at row old_n (one past last line).
+        # Move up to row ``first``.
+        up = old_n - first
+        if up > 0:
+            parts.append(f"\x1b[{up}A\r")
+
+        # Rewrite lines first..last
+        for i in range(first, last + 1):
+            line = new_lines[i] if i < new_n else ""
+            parts.append(f"\x1b[2K{line}\n")
+        # Cursor is now at row last + 1
+
+        if old_n > new_n:
+            # Content shrank – clear any extra old lines below new content
+            clear_from = max(last + 1, new_n)
+            # Move to clear_from if cursor isn't there already
+            gap = clear_from - (last + 1)
+            if gap > 0:
+                parts.append(f"\x1b[{gap}B")
+            for _ in range(clear_from, old_n):
+                parts.append("\x1b[2K\n")
+            # Cursor is now at old_n; move back to new_n
+            back = old_n - new_n
+            if back > 0:
+                parts.append(f"\x1b[{back}A")
+        else:
+            # Move cursor to row new_n (end of new content)
+            forward = new_n - (last + 1)
+            if forward > 0:
+                parts.append(f"\x1b[{forward}B")
+
+        parts.append(self._SYNC_END)
+        sys.stdout.write("".join(parts))
+        sys.stdout.flush()
 
 
 # Inline-friendly layout helpers (don't claim full-screen like Layout)

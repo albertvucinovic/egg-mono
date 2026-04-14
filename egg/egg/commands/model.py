@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, List
 
 from eggthreads import create_snapshot, current_thread_model_info
+from eggllm.catalog import format_update_all_models_text
 
 from ..utils import MODELS_PATH, ALL_MODELS_PATH
 
@@ -72,23 +73,49 @@ class ModelCommandsMixin:
     def cmd_updateAllModels(self, arg: str) -> None:
         """Handle /updateAllModels command - refresh model catalog for a provider."""
         provider = (arg or '').strip()
-        if not provider:
-            self.log_system('Usage: /updateAllModels <provider>')
-        else:
-            try:
-                # Prefer to use the long-lived LLM client instance
-                # so that its in-memory AllModelsCatalog is updated
-                # and autocomplete (/model all:...<tab>) immediately
-                # sees the new models. If no client is available in
-                # this UI, fall back to a temporary one.
-                if self.llm_client is not None:
-                    res = self.llm_client.update_all_models(provider)
-                else:
-                    from eggllm import LLMClient
-                    if not LLMClient:
-                        raise RuntimeError('eggllm not available')
-                    llm_tmp = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
-                    res = llm_tmp.update_all_models(provider)
-                self.log_system("Update All Models:\n" + res)
-            except Exception as e:
-                self.log_system(f"Update All Models error: {e}")
+        try:
+            if not provider:
+                providers_config = {}
+                try:
+                    registry = getattr(self.llm_client, 'registry', None)
+                    providers_config = getattr(registry, 'providers_config', {}) or {}
+                except Exception:
+                    providers_config = {}
+
+                block = format_update_all_models_text(
+                    providers_config,
+                    all_models_path=ALL_MODELS_PATH,
+                )
+                self.log_system('Usage: /updateAllModels <provider> (see console for full details).')
+                self.console_print_block('Update All Models', block, border_style='blue')
+                return
+
+            # Use the long-lived LLM client instance so its in-memory
+            # catalog stays in sync with /model autocomplete. If the app
+            # does not have a client, surface that clearly instead of
+            # constructing an ad-hoc temporary client with potentially
+            # different initialization state.
+            llm = self.llm_client
+            if llm is None:
+                self.log_system('Update-all-models not available (llm client not initialized).')
+                return
+
+            res = llm.update_all_models(provider)
+            result_text = res if isinstance(res, str) else str(res)
+            block = format_update_all_models_text(
+                llm.registry.providers_config,
+                provider=provider,
+                result=result_text,
+                all_models_path=ALL_MODELS_PATH,
+            )
+            status = 'ok'
+            if result_text.startswith('Error:'):
+                status = 'error'
+            elif result_text.startswith('Warning:'):
+                status = 'warning'
+            border = 'green' if status == 'ok' else ('yellow' if status == 'warning' else 'red')
+            summary = 'Update-all-models result (see console for details).' if status == 'ok' else 'Update-all-models issue (see console for details).'
+            self.log_system(summary)
+            self.console_print_block('Update All Models', block, border_style=border)
+        except Exception as e:
+            self.log_system(f"Update All Models error: {e}")

@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.console import Console, Group
-from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
@@ -50,7 +49,7 @@ from eggthreads import (  # type: ignore
 from eggthreads.event_watcher import EventWatcher  # type: ignore
 
 # eggdisplay UI components
-from eggdisplay import OutputPanel, InputPanel, HStack, VStack  # type: ignore
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer  # type: ignore
 from .completion import get_autocomplete_items  # type: ignore
 
 # Local mixins and utilities
@@ -108,7 +107,8 @@ class EggDisplayApp(
       - HStack(ChatOutput, SystemOutput)
       - InputPanel
 
-    Use Ctrl+D to send, Ctrl+E to clear input, Ctrl+C to quit.
+    Use Enter/Ctrl+D to send. Use Shift+Enter or Alt+Enter for a newline.
+    Ctrl+E clears input, Ctrl+C quits.
     Commands start with '/'.
     """
 
@@ -167,7 +167,14 @@ class EggDisplayApp(
 
         # Panels
         # Single-column layout (system, children, chat, input)
-        self.chat_output = OutputPanel(title="Chat Messages", initial_height=12, max_height=12, columns_hint=1)
+        chat_style = OutputPanel.PanelStyle(markup=False)
+        self.chat_output = OutputPanel(
+            title="Chat Messages",
+            initial_height=12,
+            max_height=12,
+            columns_hint=1,
+            style=chat_style,
+        )
         # System panel: keep compact by default (~5 content lines).
         # OutputPanel height includes borders; with wrap-mode padding this
         # corresponds to ~5 content lines.
@@ -222,8 +229,21 @@ class EggDisplayApp(
         io_mode = os.environ.get("EGG_IO_MODE", "threaded").strip().lower()
         def _adapter(line: str, row: int, col: int):
             return get_autocomplete_items(line, col, self.db, lambda: self.current_thread, self.llm_client)
-        self.input_panel = InputPanel(title="Message Input", initial_height=8, max_height=12,
-                                      autocomplete_callback=_adapter, io_mode=io_mode)
+        # Input panel (no footer/status line; keep it visually clean).
+        try:
+            from eggdisplay import InputPanel as _InputPanel  # type: ignore
+            input_style = _InputPanel.PanelStyle(show_footer=False)
+        except Exception:
+            input_style = None
+
+        self.input_panel = InputPanel(
+            title="Message Input",
+            initial_height=8,
+            max_height=12,
+            autocomplete_callback=_adapter,
+            io_mode=io_mode,
+            style=input_style,
+        )
 
         # Panel visibility (single-column layout).
         # Users can toggle these at runtime via /togglePanel.
@@ -272,9 +292,10 @@ class EggDisplayApp(
         # ensure system log exists (double safety)
         if not hasattr(self, '_system_log'):
             self._system_log = []
-        # Input behavior: default to Enter inserts newline (toggle with
-        # /enterMode). Ctrl+D always sends.
-        self.enter_sends: bool = False
+        # Input behavior: Enter sends by default.
+        # Use Alt+Enter / Shift+Enter to insert a newline. Ctrl+D always sends.
+        # (/enterMode can still override this behaviour.)
+        self.enter_sends: bool = True
         # Track last printed event sequence per thread for console output
         self._last_printed_seq_by_thread: Dict[str, int] = {}
 
@@ -411,22 +432,29 @@ class EggDisplayApp(
         input_thread.start()
 
         try:
-            # Lower refresh rate to reduce CPU, and rely on EventWatcher
-            # / input changes to keep the UI responsive.
-            with Live(self.render_group(), refresh_per_second=10, screen=False, console=self.console) as live:
+            # DiffRenderer: flicker-free rendering via line-level diffing +
+            # synchronized output (CSI 2026h/l). Critical for SSH / tmux.
+            self._renderer = DiffRenderer(self.render_group(), console=self.console)
+            with self._renderer as renderer:
                 while self.running:
                     # Drain input queue
+                    had_input = False
                     try:
                         while True:
                             key = self.input_panel.editor.input_queue.get_nowait()
+                            had_input = True
                             if not self.handle_key(key):
                                 self.running = False
                                 break
                     except Exception:
                         pass
-                    # Update panels and live region
+                    # Update panels content (sets dirty flags on changes)
                     self.update_panels()
-                    live.update(self.render_group())
+                    # Only rebuild when something changed
+                    panels = [self.system_output, self.children_output,
+                              self.chat_output, self.approval_panel]
+                    if had_input or any(p.is_dirty() for p in panels) or self.input_panel.is_dirty():
+                        renderer.update(self.render_group())
 
                     # Optional: auto-redraw static view on terminal resize.
                     # We keep this low-overhead by only sampling terminal size

@@ -230,7 +230,17 @@ async def get_autocomplete(
 
             elif cmd == '/updateAllModels':
                 # Provider name suggestions
-                providers = ['openai', 'anthropic', 'google', 'deepseek', 'openrouter', 'xai']
+                try:
+                    if core.llm_client is not None:
+                        providers = sorted(core.llm_client.get_providers() or [])
+                    else:
+                        providers = sorted({
+                            cfg.get('provider')
+                            for cfg in core.models_config.values()
+                            if isinstance(cfg, dict) and cfg.get('provider')
+                        })
+                except Exception:
+                    providers = []
                 arg_lower = arg_tok.lower()
                 for p in providers:
                     if not arg_lower or arg_lower in p.lower():

@@ -3,6 +3,7 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y \
     git \
     bash \
+    w3m \
     && rm -rf /var/lib/apt/lists/*
 
 COPY bin/applypatch /usr/bin/applypatch

@@ -15,9 +15,8 @@ from typing import List, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from eggdisplay import OutputPanel, InputPanel, HStack, VStack  # noqa: E402
+from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
-from rich.live import Live  # noqa: E402
 from rich import box
 
 
@@ -27,6 +26,7 @@ class FinalChatDemoAsync:
     def __init__(self):
         self.console = Console()
         self.running = False
+        self._renderer: Optional[DiffRenderer] = None
 
         # Panels
         chat_output_style = OutputPanel.PanelStyle(border_style="red", box=box.MINIMAL, show_header=False)
@@ -160,7 +160,10 @@ class FinalChatDemoAsync:
                 self.system_messages.append(f"Sent {line_count}-line message")
                 self.input_panel.clear_text()
                 self.input_panel.increment_message_count()
-                self.console.print(f"[dim]📤 Sent {line_count}-line message[/dim]")
+                if self._renderer:
+                    self._renderer.print_above(f"[dim]📤 Sent {line_count}-line message[/dim]")
+                else:
+                    self.console.print(f"[dim]📤 Sent {line_count}-line message[/dim]")
             return True
 
         # Forward other keys to the editor engine
@@ -230,24 +233,27 @@ class FinalChatDemoAsync:
         input_task = asyncio.create_task(self._async_input_reader())
 
         try:
-            with Live(self._render_inline(), refresh_per_second=30, screen=False, console=self.console) as live:
+            self._renderer = DiffRenderer(self._render_inline(), console=self.console)
+            with self._renderer as renderer:
                 while self.running:
                     # Drain input queue
+                    had_input = False
                     try:
                         while True:
                             key = self.input_panel.editor.input_queue.get_nowait()
+                            had_input = True
                             if not self._handle_key(key):
                                 self.running = False
                                 break
                     except Exception:
                         pass
 
-                    # Update live region
-                    live.update(self._render_inline())
+                    # Only rebuild when something changed
+                    if had_input or any(p.is_dirty() for p in self.output_panels) or self.input_panel.is_dirty():
+                        renderer.update(self._render_inline())
                     try:
                         await asyncio.sleep(0.033)
                     except asyncio.CancelledError:
-                        # Graceful shutdown on cancellation (e.g., Ctrl+C)
                         break
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass

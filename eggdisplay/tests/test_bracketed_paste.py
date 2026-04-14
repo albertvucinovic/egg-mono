@@ -61,3 +61,26 @@ def test_bracketed_paste_readchar_split_markers_large_payload_not_truncated():
     ed._handle_key("~")
 
     assert ed.editor.get_text() == payload
+
+
+def test_normalize_key_reassembles_split_shift_enter_csi_u_sequence():
+    ed = RealTimeEditor(initial_text="")
+
+    assert ed.normalize_key("\x1b[13;") is None
+    assert ed.normalize_key("2u") == "shift-enter"
+
+
+def test_normalize_key_maps_alt_enter_to_logical_key():
+    ed = RealTimeEditor(initial_text="")
+
+    assert ed.normalize_key("\x1b\n") == "alt-enter"
+
+
+def test_handle_key_treats_logical_shift_enter_as_newline():
+    ed = RealTimeEditor(initial_text="hello")
+    ed.editor.cursor.row = 0
+    ed.editor.cursor.col = 5
+
+    ed._handle_key("shift-enter")
+
+    assert ed.editor.get_text() == "hello\n"

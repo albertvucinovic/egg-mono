@@ -174,6 +174,17 @@ class InputMixin:
                 self.input_panel._hscroll_left = 0
                 self.log_system(f'Pasted {len(content)} characters from clipboard.')
             return True
+        # Newline insertion shortcuts (independent of /enterMode):
+        #   - Shift+Enter
+        #   - Alt+Enter
+        # These are normalized by eggdisplay into logical key names.
+        if key in ('shift-enter', 'alt-enter'):
+            try:
+                self.input_panel.editor.editor.insert_newline()
+            except Exception:
+                pass
+            return True
+
         # Enter behavior depends on mode
         if key in (enter_key, '\r', '\n'):
             # If we have a pending approval prompt and Enter-sends mode

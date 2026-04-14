@@ -45,20 +45,6 @@ class ThreadCommandsMixin:
         """Handle /spawnChildThread command - spawn a child thread."""
         # Use the spawn_agent tool implementation from eggthreads so we
         # share the same semantics between UI (/spawn) and model tools.
-        def _latest_model_for_thread(tid: str) -> Optional[str]:
-            # Mirror current_model_for_thread so that spawned
-            # children inherit the same effective model as their
-            # parent thread.
-            try:
-                from eggthreads import current_thread_model  # type: ignore
-                return current_thread_model(self.db, tid)
-            except Exception:
-                th = self.db.get_thread(tid)
-                imk = th.initial_model_key if th and isinstance(th.initial_model_key, str) else None
-                return imk.strip() if imk and imk.strip() else None
-
-        cur_model = _latest_model_for_thread(self.current_thread)
-
         # Import ToolRegistry/create_default_tools in a local scope to
         # avoid circular imports at module import time.
         try:
@@ -74,8 +60,6 @@ class ThreadCommandsMixin:
                 'label': 'spawn',
                 'system_prompt': self.system_prompt,
             }
-            if cur_model:
-                args['initial_model_key'] = cur_model
             # When called directly from the UI, we do not rely on the
             # implicit _thread_id injection and pass parent id
             # explicitly.
@@ -112,20 +96,6 @@ class ThreadCommandsMixin:
         """Handle /spawnAutoApprovedChildThread command - spawn with auto-approval."""
         # Same as /spawn, but use spawn_agent_auto so the spawned
         # child has global tool auto-approval.
-        def _latest_model_for_thread(tid: str) -> Optional[str]:
-            # Mirror current_model_for_thread so that spawned
-            # children inherit the same effective model as their
-            # parent thread.
-            try:
-                from eggthreads import current_thread_model  # type: ignore
-                return current_thread_model(self.db, tid)
-            except Exception:
-                th = self.db.get_thread(tid)
-                imk = th.initial_model_key if th and isinstance(th.initial_model_key, str) else None
-                return imk.strip() if imk and imk.strip() else None
-
-        cur_model = _latest_model_for_thread(self.current_thread)
-
         try:
             from eggthreads.tools import create_default_tools  # type: ignore
             tools = create_default_tools()
@@ -135,8 +105,6 @@ class ThreadCommandsMixin:
                 'label': 'spawn_auto',
                 'system_prompt': self.system_prompt,
             }
-            if cur_model:
-                args['initial_model_key'] = cur_model
             res = tools.execute('spawn_agent_auto', args)
         except Exception as e:
             self.log_system(f"/spawn_auto error: {e}")

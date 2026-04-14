@@ -18,6 +18,7 @@ from .eggdisplay import (
     InputPanel,
     HStack,
     VStack,
+    DiffRenderer,
 )
 
 __all__ = [
@@ -29,5 +30,6 @@ __all__ = [
     'InputPanel',
     'HStack',
     'VStack',
+    'DiffRenderer',
 ]
 __version__ = "0.1.0"

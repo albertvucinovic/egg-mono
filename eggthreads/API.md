@@ -453,6 +453,25 @@ lease for the thread.
 
 Wait until no threads in the subtree are running or runnable for N checks.
 
+This is a coarse scheduler-oriented primitive. It only tells you that no
+thread in the subtree currently has an active stream or pending RA1/RA2/RA3
+work. It does **not** distinguish why a thread stopped running. For example, a
+thread waiting for tool output approval is considered non-running here.
+
+### `wait_thread_settled(db: 'ThreadsDB', thread_id: 'str', poll_sec: 'float' = 0.1, quiet_checks: 'int' = 3) -> 'str'`
+
+Wait until a single thread reaches a stable non-`"running"` coarse state.
+
+Returns one of the regular `thread_state()` values, typically:
+
+- `"waiting_user"`
+- `"waiting_tool_approval"`
+- `"waiting_output_approval"`
+- `"paused"`
+
+Use this when the caller needs to know whether a turn completed normally or
+stopped because the thread is blocked on approval/state cleanup.
+
 ---
 
 ## Model Configuration
@@ -988,6 +1007,7 @@ Returns a registry pre-populated with common tools:
 - spawn_agent_auto: Create auto-approved child threads
 - replace_between: File text replacement
 - search_tavily: Web search via Tavily API
+- fetch_tavily: Fetch and extract page content via Tavily
 - wait: Synchronize on child thread completion
 
 Returns:

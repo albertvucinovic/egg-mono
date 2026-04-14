@@ -48,25 +48,74 @@ echo "Using ports: backend=$BACKEND_PORT, frontend=$FRONTEND_PORT"
 export EGG_DB_PATH="$CALLER_CWD/.egg/threads.sqlite"
 export EGG_CWD="$CALLER_CWD"
 
+# Keep a handle to the real terminal stdout so log prefixing continues to
+# print there even when helper functions are called from command contexts.
+exec 3>&1
+
 # PIDs for cleanup
 BACKEND_PID=""
 FRONTEND_PID=""
+CLEANUP_RUNNING=0
+STARTED_PID=""
+
+# Start a long-running command in its own session so we can reliably
+# terminate the full process group on Ctrl+C. Output is prefixed
+# without turning the main command PID into a shell pipeline PID.
+start_prefixed() {
+    local prefix="$1"
+    shift
+
+    setsid "$@" > >(sed -u "s/^/[$prefix] /" >&3) 2>&1 &
+    STARTED_PID=$!
+}
+
+# Terminate a process group started by start_prefixed().
+terminate_group() {
+    local pid="${1:-}"
+    [ -n "$pid" ] || return 0
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        sleep 0.5
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
+
+    wait "$pid" 2>/dev/null || true
+}
 
 # Cleanup function
 cleanup() {
+    if [ "$CLEANUP_RUNNING" -eq 1 ]; then
+        return 0
+    fi
+    CLEANUP_RUNNING=1
+
     echo ""
     echo "Stopping eggw..."
-    if [ -n "$BACKEND_PID" ]; then
-        kill $BACKEND_PID 2>/dev/null || true
-    fi
-    if [ -n "$FRONTEND_PID" ]; then
-        kill $FRONTEND_PID 2>/dev/null || true
-    fi
-    # Kill any child processes
-    jobs -p | xargs -r kill 2>/dev/null || true
-    exit 0
+
+    terminate_group "$BACKEND_PID"
+    terminate_group "$FRONTEND_PID"
+
+    # Extra fallback for anything still attached to this shell.
+    jobs -pr | xargs -r kill 2>/dev/null || true
 }
-trap cleanup SIGINT SIGTERM EXIT
+
+on_sigint() {
+    cleanup
+    exit 130
+}
+
+on_sigterm() {
+    cleanup
+    exit 143
+}
+
+trap on_sigint SIGINT
+trap on_sigterm SIGTERM
+trap cleanup EXIT
 
 # Create venv and install monorepo packages on first run
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
@@ -95,8 +144,8 @@ fi
 # Start backend
 echo "Starting backend on port $BACKEND_PORT (HTTP/2)..."
 cd "$CALLER_CWD"
-PYTHONSAFEPATH=1 hypercorn eggw.main:app --bind 0.0.0.0:$BACKEND_PORT 2>&1 | sed 's/^/[backend] /' &
-BACKEND_PID=$!
+start_prefixed backend env PYTHONSAFEPATH=1 hypercorn eggw.main:app --bind 0.0.0.0:$BACKEND_PORT
+BACKEND_PID="$STARTED_PID"
 
 # Wait a moment for backend to start
 sleep 2
@@ -119,8 +168,8 @@ if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
 fi
 
 # Run from the actual frontend directory to avoid Turbopack workspace issues
-NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev -- -p $FRONTEND_PORT 2>&1 | sed 's/^/[frontend] /' &
-FRONTEND_PID=$!
+start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev -- -p $FRONTEND_PORT
+FRONTEND_PID="$STARTED_PID"
 
 # Wait a moment for frontend to start
 sleep 3

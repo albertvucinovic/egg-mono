@@ -72,10 +72,10 @@ class ToolRegistry:
         if thread_id and "parent_thread_id" not in args and "_thread_id" not in args:
             args["_thread_id"] = thread_id
 
-        # Similarly, propagate the calling thread's model key so tools can
-        # inherit it when the caller did not specify an explicit
-        # initial_model_key. We keep this under a reserved key so that a
-        # user-specified initial_model_key always wins.
+        # Similarly, propagate the calling thread's model key so other
+        # tools can inherit or inspect it when needed. Spawn tools no
+        # longer use this implicit override for model selection; child
+        # threads should inherit from their parent thread directly.
         init_m = context.get("initial_model_key")
         if init_m and "initial_model_key" not in args and "_initial_model_key" not in args:
             args["_initial_model_key"] = init_m
@@ -105,6 +105,7 @@ def create_default_tools() -> ToolRegistry:
     - spawn_agent_auto: Create auto-approved child threads
     - replace_between: File text replacement
     - search_tavily: Web search via Tavily API
+    - fetch_tavily: Fetch and extract page content via Tavily
     - wait: Synchronize on child thread completion
 
     Returns:
@@ -302,6 +303,32 @@ def create_default_tools() -> ToolRegistry:
         impl=_javascript,
     )
 
+    def _clean_optional_text(value: Any) -> str | None:
+        if isinstance(value, str):
+            value = value.strip()
+            if value:
+                return value
+        return None
+
+    def _spawn_parent_id(args: Dict[str, Any]) -> str:
+        # Direct/local callers provide parent_thread_id explicitly.
+        # Model-initiated calls inherit the current thread via _thread_id,
+        # which ToolRegistry.execute injects from runner context.
+        return (args.get('parent_thread_id') or args.get('_thread_id') or '').strip()
+
+    def _spawn_initial_model_key(args: Dict[str, Any]) -> str | None:
+        # The model-facing spawn tools no longer expose model selection.
+        # Model-initiated calls therefore inherit from the parent thread.
+        #
+        # However, direct/local callers that explicitly pass
+        # parent_thread_id (for example app commands or programmatic use)
+        # may still choose to override the model. This preserves the
+        # lower-level API/command behaviour while removing model choice
+        # from the model-visible tool schema.
+        if 'parent_thread_id' not in args:
+            return None
+        return _clean_optional_text(args.get('initial_model_key'))
+
     # spawn_agent: create a child thread under a given parent, mirroring
     # the behaviour of the /spawn UI command but in a UI-agnostic way.
     def _spawn_agent(args: Dict[str, Any]):
@@ -311,19 +338,14 @@ def create_default_tools() -> ToolRegistry:
         # Parent is either explicitly provided (for UI/user commands) or
         # inferred from the calling thread context (_thread_id injected by
         # ToolRegistry.execute when called from a runner).
-        parent_id = (args.get('parent_thread_id') or args.get('_thread_id') or '').strip()
+        parent_id = _spawn_parent_id(args)
         if not parent_id:
             return 'Error: parent_thread_id is required.'
 
         # Optional fields
         label = (args.get('label') or 'spawn').strip() or 'spawn'
         user_text = (args.get('context_text') or '').strip() or 'Spawned task'
-        # initial_model_key may be explicitly provided by the UI, or
-        # inherited from the calling thread via _initial_model_key
-        # injected by the runner context.
-        initial_model_key = (args.get('initial_model_key')
-                             or args.get('_initial_model_key')
-                             or '').strip() or None
+        initial_model_key = _spawn_initial_model_key(args)
         system_prompt = (args.get('system_prompt') or '').strip() or None
 
         db = ThreadsDB()
@@ -384,16 +406,6 @@ def create_default_tools() -> ToolRegistry:
         except Exception as e:
             return f"Error: created child {child} but failed to append user message: {e}"
 
-        # Mirror /spawn: if an initial_model_key was provided, record a
-        # model.switch event so downstream tools and UIs can resolve the
-        # effective model via current_thread_model().
-        if initial_model_key:
-            try:
-                from .api import set_thread_model
-                set_thread_model(db, child, initial_model_key, reason='spawn_agent initial model')
-            except Exception:
-                pass
-
         try:
             create_snapshot(db, child)
         except Exception:
@@ -420,7 +432,6 @@ def create_default_tools() -> ToolRegistry:
                 # the model never needs to provide its id explicitly.
                 "context_text": {"type": "string"},
                 "label": {"type": "string"},
-                "initial_model_key": {"type": "string"},
                 "system_prompt": {"type": "string"},
             },
             # Models must provide a short description of the sub-task.
@@ -438,15 +449,13 @@ def create_default_tools() -> ToolRegistry:
         from .db import ThreadsDB
         from .api import create_child_thread, append_message, create_snapshot
 
-        parent_id = (args.get('parent_thread_id') or args.get('_thread_id') or '').strip()
+        parent_id = _spawn_parent_id(args)
         if not parent_id:
             return 'Error: parent_thread_id is required.'
 
         label = (args.get('label') or 'spawn_auto').strip() or 'spawn_auto'
         user_text = (args.get('context_text') or '').strip() or 'Spawned task'
-        initial_model_key = (args.get('initial_model_key')
-                             or args.get('_initial_model_key')
-                             or '').strip() or None
+        initial_model_key = _spawn_initial_model_key(args)
         system_prompt = (args.get('system_prompt') or '').strip() or None
 
         db = ThreadsDB()
@@ -499,16 +508,6 @@ def create_default_tools() -> ToolRegistry:
         except Exception as e:
             return f"Error: created child {child} but failed to append user message: {e}"
 
-        # Model marker: if we know the initial model, record a
-        # model.switch event so tools and UIs can resolve the effective
-        # model via current_thread_model().
-        if initial_model_key:
-            try:
-                from .api import set_thread_model
-                set_thread_model(db, child, initial_model_key, reason='spawn_agent_auto initial model')
-            except Exception:
-                pass
-
         # Record a global auto-approval decision for this child thread so
         # it can execute tools without further per-call approvals.
         try:
@@ -547,7 +546,6 @@ def create_default_tools() -> ToolRegistry:
             "properties": {
                 "context_text": {"type": "string"},
                 "label": {"type": "string"},
-                "initial_model_key": {"type": "string"},
                 "system_prompt": {"type": "string"},
             },
             "required": ["context_text"],
@@ -628,6 +626,81 @@ def create_default_tools() -> ToolRegistry:
             "required": ["query"],
         },
         impl=_search_tavily,
+    )
+
+    # fetch_tavily: extract page content from a specific URL via
+    # Tavily's /extract endpoint. Keep the schema intentionally simple
+    # so it is easy for any LLM to use.
+    def _fetch_tavily(args: Dict[str, Any]):
+        import os as _os, requests as _requests
+
+        api_key = _os.environ.get('TAVILY_API_KEY')
+        if not api_key:
+            return 'Error: TAVILY_API_KEY not set in environment.'
+
+        url = str(args.get('url') or '').strip()
+        if not url:
+            return 'Error: "url" is required.'
+
+        body: Dict[str, Any] = {
+            'urls': [url],
+            # Markdown keeps structure while still remaining plain text.
+            'format': 'markdown',
+        }
+
+        try:
+            resp = _requests.post(
+                'https://api.tavily.com/extract',
+                json=body,
+                headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                return f"Error: Tavily API status {resp.status_code}: {resp.text[:400]}"
+
+            data = resp.json()
+            results = data.get('results') or []
+            failed_results = data.get('failed_results') or []
+
+            if results:
+                first = results[0] if isinstance(results[0], dict) else {}
+                result_url = str(first.get('url') or url).strip() or url
+                content = first.get('raw_content')
+                if not isinstance(content, str):
+                    content = ''
+                content = content.strip()
+                if content:
+                    return f"URL: {result_url}\n\n{content}"
+                return f"URL: {result_url}\n\n(no content)"
+
+            if failed_results:
+                first = failed_results[0]
+                if isinstance(first, dict):
+                    failed_url = str(first.get('url') or url).strip() or url
+                    reason = str(first.get('error') or first.get('reason') or 'fetch failed').strip()
+                    return f"Error: failed to fetch {failed_url}: {reason}"
+                s = str(first).strip()
+                if s:
+                    return f"Error: failed to fetch {url}: {s}"
+
+            return 'No results.'
+        except Exception as e:
+            return f"Error: Tavily request failed: {e}"
+
+    reg.register(
+        name='fetch_tavily',
+        description=(
+            'Fetch and extract readable markdown content from a URL using '
+            'Tavily. Use this when you already know the page URL.'
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch."},
+            },
+            "required": ["url"],
+        },
+        impl=_fetch_tavily,
     )
 
     # wait: synchronize on other threads and return their last assistant

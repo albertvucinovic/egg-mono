@@ -34,12 +34,17 @@ def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
     return None
 
 
-def validate_model_handle(model_handle: str, models_path: str = "models.json") -> bool:
-    """Check if a model handle exists in models.json.
+def validate_model_handle(model_handle: str, models_path: str = "models.json",
+                          all_models_path: str | None = None) -> bool:
+    """Check if a model handle exists in models.json or all-models.json catalog.
+
+    Supports both named models from models.json and catalog models using the
+    ``all:provider:model`` format (populated by ``/updateAllModels``).
 
     Args:
         model_handle: The model name/key to validate
         models_path: Path to models.json file
+        all_models_path: Path to all-models.json catalog file (optional)
 
     Returns:
         True if the model handle exists, False otherwise
@@ -52,7 +57,7 @@ def validate_model_handle(model_handle: str, models_path: str = "models.json") -
     if EGGLLM_AVAILABLE:
         try:
             models_config, providers_config = load_models_config(models_path)
-            catalog = AllModelsCatalog(None)
+            catalog = AllModelsCatalog(all_models_path)
             registry = ModelRegistry(models_config, providers_config, catalog)
             resolved = registry.resolve(model_handle)
             return resolved is not None
@@ -72,14 +77,26 @@ def validate_model_handle(model_handle: str, models_path: str = "models.json") -
             models = provider_data.get('models', {})
             if model_handle in models:
                 return True
+        # Fallback for all: prefix - if it starts with all:provider:model, accept it
+        # as long as the provider exists in models.json
+        if model_handle.startswith('all:'):
+            rest = model_handle[4:]
+            if ':' in rest:
+                prov = rest.split(':', 1)[0]
+                if prov in providers:
+                    return True
         return False
     except Exception:
         return False
 
 
-def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
+def _get_concrete_model_info(model_key: str, models_path: str = "models.json",
+                             all_models_path: str | None = None):
     """Return nested providers dict for a given model key.
-    
+
+    Supports both named models from models.json and catalog models using the
+    ``all:provider:model`` format.
+
     Raises ValueError if model_key not found or eggllm not available.
     """
     # First try eggllm if available
@@ -90,11 +107,11 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json"):
     except ImportError:
         # eggllm not available, fall back to direct parsing
         load_models_config = None
-    
+
     if load_models_config is not None:
         try:
             models_config, providers_config = load_models_config(models_path)
-            catalog = AllModelsCatalog(None)  # dummy catalog
+            catalog = AllModelsCatalog(all_models_path)
             registry = ModelRegistry(models_config, providers_config, catalog)
             if model_key not in models_config:
                 # try to resolve aliases
@@ -173,7 +190,7 @@ def _ulid_like() -> str:
 
 
 def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_key: Optional[str] = None,
-                       models_path: str = "models.json") -> str:
+                       models_path: str = "models.json", all_models_path: str | None = None) -> str:
     """Create a new root thread (top-level conversation).
 
     A root thread has no parent and serves as the entry point for a
@@ -186,6 +203,7 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
         initial_model_key: Model key to use for this thread. If None,
             defaults to the ``default_model`` from models.json.
         models_path: Path to models.json configuration file.
+        all_models_path: Path to all-models.json catalog file (optional).
 
     Returns:
         The new thread's unique ID (ULID format).
@@ -201,12 +219,13 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
 
     # Emit model.switch event with concrete_model_info if we have a model
     if effective_model_key:
-        set_thread_model(db, tid, effective_model_key, reason='initial', models_path=models_path)
+        set_thread_model(db, tid, effective_model_key, reason='initial', models_path=models_path,
+                         all_models_path=all_models_path)
     return tid
 
 
 def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None,
-                        models_path: str = "models.json") -> str:
+                        models_path: str = "models.json", all_models_path: str | None = None) -> str:
     """Create a child thread branching from a parent thread.
 
     Child threads inherit the parent's model configuration by default
@@ -220,6 +239,7 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
         initial_model_key: Model key to use for this thread. If None,
             inherits from the parent thread's current model.
         models_path: Path to models.json configuration file.
+        all_models_path: Path to all-models.json catalog file (optional).
 
     Returns:
         The new child thread's unique ID (ULID format).
@@ -233,7 +253,8 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     # Otherwise, inherit from parent's model.switch event (including concrete_model_info).
     if initial_model_key:
         # Explicit model specified - look it up from models_path
-        set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path)
+        set_thread_model(db, tid, initial_model_key, reason='initial', models_path=models_path,
+                         all_models_path=all_models_path)
     else:
         # Inherit from parent: copy parent's model.switch event with concrete_model_info
         parent_model = current_thread_model(db, parent_id)
@@ -699,6 +720,14 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
     2. After the last complete assistant message (with no pending tool calls)
     3. After the last user message that doesn't have keep_user_turn
 
+    A candidate is only valid if continuing from it would also remove any
+    still-unpublished tool calls. Since tool-call state is anchored to the
+    parent ``msg.create`` event, a continue point that comes *after* an
+    unpublished tool call's parent message is not actually safe: the
+    unpublished tool call would remain in the reconstructed state and can block
+    future RA1 turns. In that case we must choose an earlier point so the
+    parent message itself gets skipped by ``continue_thread``.
+
     Returns:
         The msg_id to continue from, or None if the thread should continue
         from the very beginning (no messages to skip).
@@ -733,14 +762,29 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
     # Build tool call states to understand pending work
     tc_states = build_tool_call_states(db, thread_id)
 
-    # Find messages with unpublished tool calls
+    # Find messages with unpublished tool calls.
+    #
+    # ``continue_thread`` only marks msg.create events after the continue point
+    # as skipped; it does not directly mutate tool_call.* events. Therefore a
+    # continue point is only safe if it lies *before* the parent message of any
+    # unpublished tool call, so that the skipped parent message removes the
+    # stale tool-call state from reconstruction.
     unpublished_tc_msg_ids = set()
+    earliest_unpublished_parent_seq: Optional[int] = None
     for tc in tc_states.values():
         if not tc.published:
             unpublished_tc_msg_ids.add(tc.parent_msg_id)
+            if earliest_unpublished_parent_seq is None or tc.parent_event_seq < earliest_unpublished_parent_seq:
+                earliest_unpublished_parent_seq = tc.parent_event_seq
 
     # Iterate backward to find a good continue point
     for msg_id, pj, event_seq in rows:
+        # If an unpublished tool call exists, the continue point must be before
+        # the earliest such parent message. Otherwise the stale tool-call state
+        # survives the continue and can keep the thread blocked in TC2-TC5.
+        if earliest_unpublished_parent_seq is not None and int(event_seq) >= earliest_unpublished_parent_seq:
+            continue
+
         # Skip already-skipped messages (check msg.edit events, not msg.create payload)
         if msg_id in skipped_msg_ids:
             continue
@@ -1420,7 +1464,8 @@ def resume_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> None:
 
 def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str = 'user',
                          concrete_model_info: Optional[Dict[str, Any]] = None,
-                         models_path: str = "models.json") -> None:
+                         models_path: str = "models.json",
+                         all_models_path: str | None = None) -> None:
     """Append a model.switch event to a thread.
 
     This is the authoritative record of model selection for a thread.
@@ -1438,7 +1483,8 @@ def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str 
     }
     if concrete_model_info is None:
         try:
-            concrete_model_info = _get_concrete_model_info(model_key, models_path)
+            concrete_model_info = _get_concrete_model_info(model_key, models_path,
+                                                           all_models_path=all_models_path)
         except Exception:
             concrete_model_info = {}
     if concrete_model_info:
@@ -1705,6 +1751,47 @@ async def wait_subtree_idle(db: ThreadsDB, root_id: str, poll_sec: float = 0.1, 
         await asyncio.sleep(poll_sec)
         # Refresh subtree in case new children were spawned
         subtree = collect_subtree(db, root_id)
+
+
+async def wait_thread_settled(db: ThreadsDB, thread_id: str, poll_sec: float = 0.1, quiet_checks: int = 3) -> str:
+    """Wait until a thread reaches a stable non-running state.
+
+    Unlike :func:`wait_subtree_idle`, which only answers whether a subtree has
+    any *running or runnable* work, this helper preserves the distinction
+    between different non-running states.  That matters for callers that need
+    to know whether a thread is genuinely waiting for user input or is blocked
+    on approval/state cleanup.
+
+    Returns one of the coarse :func:`eggthreads.tool_state.thread_state`
+    values, typically:
+
+    - ``"waiting_user"``
+    - ``"waiting_tool_approval"``
+    - ``"waiting_output_approval"``
+    - ``"paused"``
+
+    The state must remain non-``"running"`` for ``quiet_checks`` consecutive
+    polls before it is returned.
+    """
+    import asyncio
+    from .tool_state import thread_state as _thread_state
+
+    stable = 0
+    last_state = "running"
+    while True:
+        state = _thread_state(db, thread_id)
+        if state != "running":
+            if state == last_state:
+                stable += 1
+            else:
+                stable = 1
+                last_state = state
+            if stable >= quiet_checks:
+                return state
+        else:
+            stable = 0
+            last_state = state
+        await asyncio.sleep(poll_sec)
 
 def word_count_from_snapshot(db: ThreadsDB, thread_id: str) -> int:
     """Return the word count of all messages in the thread snapshot."""
