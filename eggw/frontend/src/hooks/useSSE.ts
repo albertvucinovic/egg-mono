@@ -14,6 +14,7 @@ export function useSSE(threadId: string | null) {
     appendToolCallArguments,
     setIsStreaming,
     setStreamingModelKey,
+    setStreamingKind,
     addSystemLog,
   } = useAppStore();
 
@@ -28,6 +29,7 @@ export function useSSE(threadId: string | null) {
     // Clear streaming state
     streamingBuffer.clear();
     setStreamingToolCalls({});
+    setStreamingKind(null);
     setIsStreaming(false);
 
     const es = createEventSource(threadId);
@@ -47,10 +49,12 @@ export function useSSE(threadId: string | null) {
       try {
         // Parse event data to get model_key
         let modelKey: string | null = null;
+        let streamKind: string | null = null;
         try {
           const data = JSON.parse(e.data);
           const payload = data.payload || {};
           modelKey = payload.model_key || null;
+          streamKind = payload.stream_kind || null;
         } catch {
           // Data might not be JSON, ignore
         }
@@ -58,6 +62,7 @@ export function useSSE(threadId: string | null) {
         streamingBuffer.clear();
         setStreamingToolCalls({});
         setStreamingModelKey(modelKey);
+        setStreamingKind(streamKind);
         setIsStreaming(true);
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
         addSystemLog(`Streaming started${modelKey ? ` (${modelKey})` : ""}`, "info");
@@ -103,6 +108,7 @@ export function useSSE(threadId: string | null) {
         streamingBuffer.clear();
         setStreamingToolCalls({});
         setStreamingModelKey(null);
+        setStreamingKind(null);
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
@@ -208,6 +214,7 @@ export function useSSE(threadId: string | null) {
     appendToolCallArguments,
     setIsStreaming,
     setStreamingModelKey,
+    setStreamingKind,
     addSystemLog,
     queryClient,
   ]);

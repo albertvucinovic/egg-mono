@@ -18,6 +18,7 @@ export interface Message {
   model_key?: string;
   timestamp?: string;  // ISO datetime string
   tokens?: number;     // Per-message token count
+  tps?: number;
 }
 
 export interface ToolCall {
@@ -85,6 +86,8 @@ interface AppState {
   setIsStreaming: (streaming: boolean) => void;
   streamingModelKey: string | null;
   setStreamingModelKey: (key: string | null) => void;
+  streamingKind: string | null;
+  setStreamingKind: (kind: string | null) => void;
 
   // Panel visibility
   panelVisibility: { chat: boolean; children: boolean; system: boolean };
@@ -118,6 +121,7 @@ export const useAppStore = create<AppState>((set) => ({
     streamingReasoningChunks: [],
     streamingToolCalls: {},
     streamingModelKey: null,
+    streamingKind: null,
     isStreaming: false,
   }),
 
@@ -201,6 +205,8 @@ export const useAppStore = create<AppState>((set) => ({
   setIsStreaming: (streaming) => set({ isStreaming: streaming }),
   streamingModelKey: null,
   setStreamingModelKey: (key) => set({ streamingModelKey: key }),
+  streamingKind: null,
+  setStreamingKind: (kind) => set({ streamingKind: kind }),
 
   // Panel visibility (sidebar hidden by default to maximize screen space)
   panelVisibility: { chat: true, children: true, system: false },

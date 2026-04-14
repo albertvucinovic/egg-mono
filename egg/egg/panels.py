@@ -83,6 +83,14 @@ class PanelsMixin:
 
                 if cost_str:
                     title_parts.append(f"cost≈{cost_str}")
+
+                tps_str = ""
+                try:
+                    tps_str = self.current_chat_header_tps()
+                except Exception:
+                    tps_str = ""
+                if tps_str:
+                    title_parts.append(f"tps≈{tps_str}")
                 self.chat_output.title = "  |  ".join(title_parts)
         except Exception:
             # Leave existing title unchanged on any error.
@@ -176,6 +184,51 @@ class PanelsMixin:
             # Empty content makes the panel effectively invisible
             self.approval_panel.set_content("")
 
+    def current_stream_tps(self) -> str:
+        """Return a compact live TPS string for the active LLM stream."""
+        ls = getattr(self, '_live_state', {}) or {}
+        if not ls.get('active_invoke'):
+            return ""
+        if ls.get('stream_kind') != 'llm':
+            return ""
+        try:
+            from eggthreads import live_llm_tps_for_invoke
+            tps = live_llm_tps_for_invoke(self.db, str(ls.get('active_invoke') or ''))
+        except Exception:
+            tps = None
+        if not isinstance(tps, (int, float)) or tps <= 0:
+            return ""
+        if float(tps) < 10:
+            return f"{float(tps):.1f}"
+        return f"{float(tps):.0f}"
+
+    def current_chat_header_tps(self) -> str:
+        """Return header TPS, preserving the last relevant message TPS."""
+        live_tps = self.current_stream_tps()
+        if live_tps:
+            return live_tps
+
+        try:
+            msgs = snapshot_messages(self.db, self.current_thread)
+        except Exception:
+            msgs = []
+        for m in reversed(msgs or []):
+            if not isinstance(m, dict):
+                continue
+            if m.get('role') not in ('assistant', 'tool'):
+                continue
+            tps = m.get('tps')
+            try:
+                fv = float(tps)
+            except Exception:
+                continue
+            if fv <= 0:
+                continue
+            if fv < 10:
+                return f"{fv:.1f}"
+            return f"{fv:.0f}"
+        return ""
+
     def render_group(self) -> Group:
         """Render the panel group for the live display."""
         # Single-column layout, top-to-bottom:
@@ -231,6 +284,19 @@ class PanelsMixin:
         model_key = (m.get('model_key') or '').strip()
         msg_id = m.get('msg_id') or ''
         ts_str = fmt_ts(m.get('ts'))
+
+        def fmt_tps(v: Any) -> str:
+            try:
+                fv = float(v)
+            except Exception:
+                return ""
+            if fv <= 0:
+                return ""
+            if fv < 10:
+                return f"{fv:.1f}"
+            return f"{fv:.0f}"
+
+        msg_tps = fmt_tps(m.get('tps'))
 
         # Best-effort lookup of per-message token stats from the
         # current thread snapshot so we can annotate box titles in the
@@ -297,6 +363,8 @@ class PanelsMixin:
                 title += f" [dim](model: {model_key})[/dim]"
             if pm_tokens["content"]:
                 title += f" [dim](tok={pm_tokens['content']})[/dim]"
+            if msg_tps:
+                title += f" [dim](tps≈{msg_tps})[/dim]"
             # Prefer to show reasoning first if present
             reas = m.get('reasoning') or m.get('reasoning_content')
             if isinstance(reas, str) and reas.strip():
@@ -360,6 +428,8 @@ class PanelsMixin:
             # For tool messages, content tokens are the primary signal.
             if pm_tokens["content"]:
                 title += f" [dim](tok={pm_tokens['content']})[/dim]"
+            if msg_tps:
+                title += f" [dim](tps≈{msg_tps})[/dim]"
             panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             return
 

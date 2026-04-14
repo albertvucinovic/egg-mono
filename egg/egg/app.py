@@ -259,6 +259,8 @@ class EggDisplayApp(
         # Streaming/watch state
         self._live_state: Dict[str, Any] = {
             "active_invoke": None,
+            "stream_kind": None,
+            "started_at": None,
             "content": "",
             "reason": "",
             "tools": {},  # name -> text

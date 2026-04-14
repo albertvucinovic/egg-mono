@@ -95,7 +95,11 @@ from .tool_state import (
 )
 
 from .token_count import (
+    count_text_tokens,
+    llm_message_tps_for_invoke,
+    live_llm_tps_for_invoke,
     snapshot_token_stats,
+    tool_message_tps_for_call,
     streaming_token_stats,
     total_token_stats,
 )
@@ -164,7 +168,7 @@ __all__ = [
     'get_thread_sandbox_config', 'set_thread_sandbox_config', 'set_subtree_sandbox_config', 'get_thread_sandbox_status',
     'ToolRegistry', 'create_default_tools',
     'create_llm_client',
-    'snapshot_token_stats', 'streaming_token_stats', 'total_token_stats', 'EventWatcher',
+    'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'streaming_token_stats', 'total_token_stats', 'EventWatcher',
     'enable_user_sandbox_control',
     'disable_user_sandbox_control',
     'is_user_sandbox_control_enabled',

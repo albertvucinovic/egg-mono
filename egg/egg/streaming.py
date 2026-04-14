@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from eggthreads import create_snapshot, EventWatcher, ThreadsDB
@@ -23,6 +25,19 @@ class StreamingMixin:
             self._watcher_db = ThreadsDB(db_path)
         return self._watcher_db
 
+    def _event_started_at_epoch(self, ts_value: Any) -> Optional[float]:
+        """Parse an event/open timestamp into epoch seconds."""
+        if not ts_value:
+            return None
+        s = str(ts_value)
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+                return float(dt.timestamp())
+            except Exception:
+                continue
+        return None
+
     async def start_watching_current(self):
         if self._watch_task is not None:
             try:
@@ -34,6 +49,8 @@ class StreamingMixin:
         # we wait for the new thread's events to arrive.
         self._live_state = {
             "active_invoke": None,
+            "stream_kind": None,
+            "started_at": None,
             "content": "",
             "reason": "",
             "tools": {},
@@ -73,6 +90,8 @@ class StreamingMixin:
             try:
                 self._live_state = {
                     "active_invoke": row_open["invoke_id"],
+                    "stream_kind": row_open["purpose"],
+                    "started_at": self._event_started_at_epoch(row_open["opened_at"]),
                     "content": "",
                     "reason": "",
                     "tools": {},
@@ -155,7 +174,36 @@ class StreamingMixin:
             return
         t = e["type"]
         if t == 'stream.open':
-            self._live_state = {"active_invoke": e["invoke_id"], "content": "", "reason": "", "tools": {}, "tc_text": {}, "tc_order": []}
+            started_at = self._event_started_at_epoch(e["ts"] if "ts" in e.keys() else None)
+            if started_at is None:
+                try:
+                    started_at = float(time.time())
+                except Exception:
+                    started_at = None
+            stream_kind = None
+            try:
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                sk = payload.get('stream_kind') or payload.get('purpose')
+                if isinstance(sk, str) and sk:
+                    stream_kind = sk
+            if not stream_kind:
+                try:
+                    stream_kind = e.get('purpose') if isinstance(e, dict) else None
+                except Exception:
+                    stream_kind = None
+            self._live_state = {
+                "active_invoke": e["invoke_id"],
+                "stream_kind": stream_kind,
+                "started_at": started_at,
+                "content": "",
+                "reason": "",
+                "tools": {},
+                "tc_text": {},
+                "tc_order": [],
+            }
             try:
                 inv = e.get("invoke_id") if isinstance(e, dict) else e["invoke_id"]
                 self.log_system(f"Streaming started (invoke {str(inv)[-6:]}).")
@@ -188,6 +236,8 @@ class StreamingMixin:
                     text_map[raw_key] = text_map.get(raw_key, '') + frag
         elif t == 'stream.close':
             self._live_state['active_invoke'] = None
+            self._live_state['stream_kind'] = None
+            self._live_state['started_at'] = None
             try:
                 create_snapshot(self.db, self.current_thread)
             except Exception:

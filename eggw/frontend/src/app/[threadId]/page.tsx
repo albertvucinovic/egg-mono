@@ -26,10 +26,12 @@ export default function ThreadPage() {
     setCurrentThreadId,
     addSystemLog,
     isStreaming,
+    streamingKind,
     setIsStreaming,
     setStreamingContent,
     setStreamingReasoning,
     setStreamingToolCalls,
+    setStreamingKind,
     panelVisibility,
     togglePanel,
     showBorders,
@@ -135,12 +137,12 @@ export default function ThreadPage() {
     },
   });
 
-  // Fetch token stats for cost display - poll during streaming
+  // Fetch token stats for cost display and live TPS while LLM text streams.
   const { data: tokenStats } = useQuery({
     queryKey: ["stats", threadId],
     queryFn: () => fetchTokenStats(threadId),
     enabled: !!threadId,
-    refetchInterval: isStreaming ? 5000 : false,
+    refetchInterval: isStreaming && streamingKind === "llm" ? 1000 : false,
   });
 
   // Connect to SSE for real-time streaming
@@ -161,6 +163,7 @@ export default function ThreadPage() {
           setStreamingContent("");
           setStreamingReasoning("");
           setStreamingToolCalls({});
+          setStreamingKind(null);
           setIsStreaming(false);
           // Refetch messages to get the saved partial content from backend
           queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
@@ -258,7 +261,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, router]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingKind, router]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
@@ -498,7 +501,7 @@ export default function ThreadPage() {
         {/* Center - Chat */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {panelVisibility.children && <ChildrenPanel showBorders={showBorders} />}
-          {panelVisibility.chat && <ChatPanel showBorders={showBorders} />}
+          {panelVisibility.chat && <ChatPanel showBorders={showBorders} streamingTps={tokenStats?.streaming_tps ?? null} />}
           <ApprovalPanel showBorders={showBorders} />
           <MessageInput showBorders={showBorders} />
         </div>

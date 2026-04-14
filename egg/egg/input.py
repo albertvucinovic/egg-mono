@@ -98,6 +98,8 @@ class InputMixin:
                 # Reset live streaming state so UI stops showing partial output
                 self._live_state = {
                     "active_invoke": None,
+                    "stream_kind": None,
+                    "started_at": None,
                     "content": "",
                     "reason": "",
                     "tools": {},

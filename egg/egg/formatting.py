@@ -160,13 +160,20 @@ class FormattingMixin:
             return "No messages yet."
         for m in msgs:
             role = m.get('role')
+            tps_text = ""
+            try:
+                tps_val = m.get('tps')
+                if isinstance(tps_val, (int, float)) and tps_val > 0:
+                    tps_text = f" (tps≈{tps_val:.1f})" if float(tps_val) < 10 else f" (tps≈{tps_val:.0f})"
+            except Exception:
+                tps_text = ""
             if role == 'assistant':
                 reas = (m.get('reasoning') or m.get('reasoning_content') or '').strip()
                 if reas:
-                    lines.append(f"[Reasoning]\n{reas}")
+                    lines.append(f"[Reasoning{tps_text}]\n{reas}")
                 content = (m.get('content') or '').strip()
                 if content:
-                    lines.append(f"[Assistant]\n{content}")
+                    lines.append(f"[Assistant{tps_text}]\n{content}")
                 # Final tool calls summary (if any)
                 tcs = m.get('tool_calls') or []
                 if isinstance(tcs, list) and tcs:
@@ -204,7 +211,7 @@ class FormattingMixin:
                     name = m.get('name') or 'tool'
                 content = (m.get('content') or '').strip()
                 if content:
-                    lines.append(f"[Tool: {name}]\n{content}")
+                    lines.append(f"[Tool: {name}{tps_text}]\n{content}")
             elif role == 'system':
                 content = (m.get('content') or '').strip()
                 if content:
@@ -325,8 +332,10 @@ class FormattingMixin:
         ls = self._live_state
         parts: List[str] = [base]
         if ls.get('active_invoke'):
+            live_tps = self.current_stream_tps()
+            live_tps_text = f" (tps≈{live_tps})" if live_tps else ""
             if ls.get('reason'):
-                parts.append(f"\n[Reasoning (streaming)]\n{ls['reason']}")
+                parts.append(f"\n[Reasoning (streaming){live_tps_text}]\n{ls['reason']}")
             for pk in ls.get('tc_order') or []:
                 delta = (ls.get('tc_text') or {}).get(pk, '')
                 if delta:
@@ -335,7 +344,7 @@ class FormattingMixin:
                 if txt:
                     parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
             if ls.get('content'):
-                parts.append(f"\n[Assistant (streaming)]\n{ls['content']}")
+                parts.append(f"\n[Assistant (streaming){live_tps_text}]\n{ls['content']}")
 
         # Build header with model and approximate token usage.
         head_parts: List[str] = []

@@ -37,6 +37,7 @@ Then open http://localhost:3000
 - Tool call approval UI
 - Model selection per thread
 - Token usage statistics
+- Live TPS in the Chat Messages header during LLM streaming
 - Dark theme
 
 ## API Endpoints

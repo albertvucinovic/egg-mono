@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from eggthreads import total_token_stats
+from eggthreads import live_llm_tps_for_invoke, total_token_stats
 
 from ..models import ThreadTokenStats
 from .. import core
@@ -33,6 +33,20 @@ async def get_token_stats(thread_id: str):
     reasoning_tokens = api_usage.get("total_reasoning_tokens", 0) or 0  # Subset of output
     cached_tokens = api_usage.get("cached_input_tokens", 0) or 0  # Total cached across all calls
 
+    streaming_tps = None
+    try:
+        row_open = core.db.current_open(thread_id)
+        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        if (
+            row_open is not None
+            and row_open["purpose"] == "llm"
+            and isinstance(row_open["lease_until"], str)
+            and row_open["lease_until"] > now_iso
+        ):
+            streaming_tps = live_llm_tps_for_invoke(core.db, str(row_open["invoke_id"]))
+    except Exception:
+        streaming_tps = None
+
     return ThreadTokenStats(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -41,4 +55,5 @@ async def get_token_stats(thread_id: str):
         total_tokens=input_tokens + output_tokens,  # reasoning is part of output
         cost_usd=cost_info.get("total") if cost_info else None,
         context_tokens=stats.get("context_tokens", 0) or 0,
+        streaming_tps=streaming_tps,
     )

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -100,6 +101,37 @@ class TestUpdatePanels:
         egg_app.update_panels()
 
         assert "Sandbox" in egg_app.system_output.title or "sandbox" in egg_app.system_output.title.lower()
+
+    def test_chat_title_includes_tps_only_for_llm_streams(self, egg_app, monkeypatch):
+        """Should add tps to title only while LLM output is streaming."""
+        monkeypatch.setattr(
+            egg_app,
+            "current_token_stats",
+            lambda: (1234, {"total_input_tokens": 100, "total_output_tokens": 20, "approx_call_count": 1}),
+        )
+        monkeypatch.setattr(egg_app, "current_stream_tps", lambda: "6.0")
+
+        egg_app._live_state = {
+            "active_invoke": "inv-1",
+            "stream_kind": "llm",
+            "started_at": time.time() - 2.0,
+            "content": "hello world",
+            "reason": "",
+            "tools": {},
+            "tc_text": {},
+            "tc_order": [],
+        }
+
+        egg_app.update_panels()
+
+        assert "tps≈" in egg_app.chat_output.title
+
+        egg_app._live_state["stream_kind"] = "tool"
+        monkeypatch.setattr(egg_app, "current_stream_tps", lambda: "")
+        monkeypatch.setattr("egg.egg.panels.snapshot_messages", lambda db, tid: [{"role": "assistant", "tps": 4.2}])
+        egg_app.update_panels()
+
+        assert "tps≈4.2" in egg_app.chat_output.title
 
 
 class TestRenderGroup:

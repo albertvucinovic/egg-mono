@@ -26,6 +26,7 @@ class MessageContent(BaseModel):
     tool_call_id: Optional[str] = None
     timestamp: Optional[datetime] = None
     tokens: Optional[int] = None
+    tps: Optional[float] = None
     model_key: Optional[str] = None
 
 
@@ -87,6 +88,7 @@ class ThreadTokenStats(BaseModel):
     total_tokens: int = 0
     cost_usd: Optional[float] = None
     context_tokens: int = 0
+    streaming_tps: Optional[float] = None
 
 
 class ModelInfo(BaseModel):

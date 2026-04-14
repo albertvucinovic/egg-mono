@@ -69,7 +69,9 @@ information.
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
+import time
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 
@@ -129,6 +131,190 @@ def _count_text_tokens(text: str) -> int:
         return len(enc.encode(text))
     except Exception:  # pragma: no cover - extremely defensive
         return max(1, len(text) // 4)
+
+
+def count_text_tokens(text: str) -> int:
+    """Public wrapper for the shared approximate text-token heuristic.
+
+    UIs use this to derive live metrics (for example tokens/second while an
+    LLM response is streaming) without duplicating token-counting logic.
+    """
+
+    return _count_text_tokens(text)
+
+
+def _event_ts_to_epoch(ts_value: Any) -> Optional[float]:
+    """Parse an event timestamp into epoch seconds."""
+    if not ts_value:
+        return None
+    s = str(ts_value)
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+            return float(dt.timestamp())
+        except Exception:
+            continue
+    return None
+
+
+def _tps_from_tokens(tokens: int, start_ts: Optional[float], end_ts: Optional[float] = None) -> Optional[float]:
+    """Return tokens/second for a token count and time interval."""
+    if tokens <= 0 or start_ts is None:
+        return None
+    if end_ts is None:
+        end_ts = time.time()
+    try:
+        elapsed = float(end_ts) - float(start_ts)
+    except Exception:
+        return None
+    if elapsed <= 0.25:
+        return None
+    return float(tokens) / float(elapsed)
+
+
+def llm_message_tps_for_invoke(
+    db: "ThreadsDB",
+    invoke_id: str,
+    *,
+    content: str = "",
+    reasoning: str = "",
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
+    end_ts: Optional[float] = None,
+) -> Optional[float]:
+    """Approximate TPS for a completed assistant message produced by an invoke."""
+    if not isinstance(invoke_id, str) or not invoke_id:
+        return None
+    msg = {
+        "role": "assistant",
+        "content": content or "",
+        "reasoning": reasoning or "",
+    }
+    if isinstance(tool_calls, list) and tool_calls:
+        msg["tool_calls"] = tool_calls
+    tokens = int(_tokens_for_message(msg, 0).total_tokens)
+    if tokens <= 0:
+        return None
+    try:
+        row = db.conn.execute(
+            "SELECT ts FROM events WHERE invoke_id=? AND type='stream.open' ORDER BY event_seq ASC LIMIT 1",
+            (invoke_id,),
+        ).fetchone()
+    except Exception:
+        row = None
+    start_ts = _event_ts_to_epoch(row[0]) if row is not None else None
+    return _tps_from_tokens(tokens, start_ts, end_ts=end_ts)
+
+
+def live_llm_tps_for_invoke(
+    db: "ThreadsDB",
+    invoke_id: str,
+    *,
+    end_ts: Optional[float] = None,
+) -> Optional[float]:
+    """Approximate live TPS for an in-progress LLM invoke."""
+    if not isinstance(invoke_id, str) or not invoke_id:
+        return None
+    try:
+        row = db.conn.execute(
+            "SELECT ts FROM events WHERE invoke_id=? AND type='stream.open' ORDER BY event_seq ASC LIMIT 1",
+            (invoke_id,),
+        ).fetchone()
+    except Exception:
+        row = None
+    start_ts = _event_ts_to_epoch(row[0]) if row is not None else None
+    if start_ts is None:
+        return None
+
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    tool_call_args: Dict[str, str] = {}
+    try:
+        cur = db.conn.execute(
+            "SELECT payload_json FROM events WHERE invoke_id=? AND type='stream.delta' ORDER BY event_seq ASC",
+            (invoke_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+
+    for (payload_json,) in rows:
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        txt = payload.get("text")
+        if isinstance(txt, str) and txt:
+            content_parts.append(txt)
+        rs = payload.get("reason")
+        if isinstance(rs, str) and rs:
+            reasoning_parts.append(rs)
+        tc = payload.get("tool_call")
+        if isinstance(tc, dict):
+            tcid = str(tc.get("id") or tc.get("name") or "")
+            delta = tc.get("arguments_delta") or tc.get("text")
+            if tcid and isinstance(delta, str) and delta:
+                tool_call_args[tcid] = tool_call_args.get(tcid, "") + delta
+
+    msg = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+        "reasoning": "".join(reasoning_parts),
+    }
+    if tool_call_args:
+        msg["tool_calls_delta"] = [
+            {"id": tcid, "function": {"arguments": args}}
+            for tcid, args in tool_call_args.items()
+        ]
+    tokens = int(_tokens_for_message(msg, 0).total_tokens)
+
+    return _tps_from_tokens(tokens, start_ts, end_ts=end_ts)
+
+
+def tool_message_tps_for_call(
+    db: "ThreadsDB",
+    thread_id: str,
+    tool_call_id: str,
+    *,
+    content: str = "",
+    end_ts: Optional[float] = None,
+) -> Optional[float]:
+    """Approximate TPS for a published tool message tied to one tool call."""
+    if not isinstance(thread_id, str) or not thread_id or not isinstance(tool_call_id, str) or not tool_call_id:
+        return None
+    tokens = int(count_text_tokens(content or ""))
+    if tokens <= 0:
+        return None
+
+    start_ts: Optional[float] = None
+    finish_ts: Optional[float] = None
+    try:
+        cur = db.conn.execute(
+            "SELECT type, ts, payload_json FROM events "
+            "WHERE thread_id=? AND type IN ('tool_call.execution_started', 'tool_call.finished') ORDER BY event_seq ASC",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+
+    for ev_type, ts_value, payload_json in rows:
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get("tool_call_id") != tool_call_id:
+            continue
+        epoch = _event_ts_to_epoch(ts_value)
+        if ev_type == "tool_call.execution_started" and start_ts is None:
+            start_ts = epoch
+        elif ev_type == "tool_call.finished":
+            finish_ts = epoch
+
+    if finish_ts is None:
+        finish_ts = end_ts
+    return _tps_from_tokens(tokens, start_ts, end_ts=finish_ts)
 
 
 @dataclass
@@ -962,6 +1148,10 @@ def _example_cost_cfg_note() -> str:
 
 
 __all__ = [
+    "count_text_tokens",
+    "llm_message_tps_for_invoke",
+    "live_llm_tps_for_invoke",
+    "tool_message_tps_for_call",
     "snapshot_token_stats",
     "streaming_token_stats",
     "total_token_stats",

@@ -90,6 +90,7 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
             model_key=msg.get("model_key"),
             timestamp=timestamp,
             tokens=total_tokens,
+            tps=float(msg.get("tps")) if isinstance(msg.get("tps"), (int, float)) and float(msg.get("tps")) > 0 else None,
         ))
 
     return messages

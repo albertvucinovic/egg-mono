@@ -12,6 +12,7 @@ import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { fetchMessages } from "@/lib/api";
 import { useAppStore, Message } from "@/lib/store";
+import { formatStreamingTps } from "@/lib/tps";
 import clsx from "clsx";
 
 /**
@@ -83,6 +84,8 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
 
   const shellStyle: React.CSSProperties = { background: "var(--code-bg)", borderColor: "var(--panel-border)" };
 
+  const messageTps = formatStreamingTps(message.tps);
+
   return (
     <div
       className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
@@ -98,6 +101,9 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
         )}
         {message.tokens && message.tokens > 0 && (
           <span style={{ color: "var(--muted)" }}>(tok={message.tokens.toLocaleString()})</span>
+        )}
+        {messageTps && (
+          <span style={{ color: "var(--muted)" }}>(tps≈{messageTps})</span>
         )}
         {message.timestamp && (
           <span className="font-mono" style={{ color: "var(--muted)" }}>
@@ -287,9 +293,10 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
 
 interface ChatPanelProps {
   showBorders?: boolean;
+  streamingTps?: number | null;
 }
 
-export function ChatPanel({ showBorders = true }: ChatPanelProps) {
+export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
@@ -303,6 +310,7 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     setMessages,
     streamingToolCalls,
     streamingModelKey,
+    streamingKind,
     isStreaming,
     scrollTrigger,
   } = useAppStore();
@@ -547,122 +555,135 @@ export function ChatPanel({ showBorders = true }: ChatPanelProps) {
     );
   }
 
+  const lastMessageWithTps = [...messages].reverse().find(
+    (msg) => (msg.role === "assistant" || msg.role === "tool") && typeof msg.tps === "number" && Number.isFinite(msg.tps) && (msg.tps || 0) > 0
+  );
+  const formattedStreamingTps =
+    isStreaming && streamingKind === "llm"
+      ? formatStreamingTps(streamingTps)
+      : formatStreamingTps(lastMessageWithTps?.tps ?? null);
+
   return (
-    <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
-      {isLoading ? (
-        <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
-      ) : isError ? (
-        <div className="text-center space-y-2">
-          <div style={{ color: "var(--error, #ef4444)" }}>Failed to load messages</div>
-          <button
-            onClick={() => refetch()}
-            className="px-3 py-1 rounded text-sm"
-            style={{ background: "var(--accent)", color: "var(--background)" }}
-          >
-            Retry
-          </button>
-        </div>
-      ) : messages.length === 0 ? (
-        <div className="text-center" style={{ color: "var(--muted)" }}>
-          No messages yet. Start a conversation!
-        </div>
-      ) : (
-        <>
-          {messages.map((msg, idx) => (
-            <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} />
-          ))}
-
-          {/* Streaming content */}
-          {isStreaming && (
-            <div
-              className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
-              style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
+    <div className="flex-1 flex flex-col overflow-hidden">
+      <div className={`px-3 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)", background: "var(--panel-bg)" }}>
+        <span>Chat Messages{formattedStreamingTps ? ` | tps≈${formattedStreamingTps}` : ""}</span>
+      </div>
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
+        {isLoading ? (
+          <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
+        ) : isError ? (
+          <div className="text-center space-y-2">
+            <div style={{ color: "var(--error, #ef4444)" }}>Failed to load messages</div>
+            <button
+              onClick={() => refetch()}
+              className="px-3 py-1 rounded text-sm"
+              style={{ background: "var(--accent)", color: "var(--background)" }}
             >
-              <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>Assistant</span>
-                {streamingModelKey && (
-                  <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
-                )}
-                <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
-              </div>
+              Retry
+            </button>
+          </div>
+        ) : messages.length === 0 ? (
+          <div className="text-center" style={{ color: "var(--muted)" }}>
+            No messages yet. Start a conversation!
+          </div>
+        ) : (
+          <>
+            {messages.map((msg, idx) => (
+              <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} />
+            ))}
 
-              {/* Streaming reasoning - direct DOM updates via ref */}
-              <details
-                open
-                className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-                style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
-                id="streaming-reasoning-container"
-              >
-                <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
-                  Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
-                </summary>
-                <div
-                  ref={streamingReasoningRef}
-                  className="mt-2 text-sm whitespace-pre-wrap"
-                  style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
-                />
-              </details>
-
-              {/* Streaming content - direct DOM updates via ref for O(1) performance */}
+            {/* Streaming content */}
+            {isStreaming && (
               <div
-                ref={streamingContentRef}
-                className="text-sm"
-                style={{
-                  color: "var(--assistant-msg-text, var(--foreground))",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                }}
-              />
-
-              {/* Streaming tool calls */}
-              {Object.keys(streamingToolCalls).length > 0 && (
-                <div className="mt-2 space-y-2">
-                  {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
-                    const isBash = tc.name === "bash";
-                    let parsedArgs: any = tc.arguments;
-                    try {
-                      parsedArgs = JSON.parse(tc.arguments);
-                    } catch {
-                      // Keep as string
-                    }
-                    const script = isBash && parsedArgs?.script;
-
-                    return (
-                      <details
-                        key={tcId}
-                        open
-                        className={`rounded ${showBorders ? 'border' : ''}`}
-                        style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
-                      >
-                        <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                          <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
-                          <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-                            {tcId.slice(-8)}
-                          </span>
-                          <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
-                        </summary>
-                        <div className="px-2 pb-2">
-                          {isBash && script ? (
-                            <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-                              $ {script}
-                            </pre>
-                          ) : (
-                            <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                              {tc.arguments || "..."}
-                            </pre>
-                          )}
-                        </div>
-                      </details>
-                    );
-                  })}
+                className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
+                style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
+              >
+                <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+                  <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>Assistant</span>
+                  {streamingModelKey && (
+                    <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
+                  )}
+                  <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
                 </div>
-              )}
-            </div>
-          )}
-        </>
-      )}
-      {/* Scroll anchor for auto-scroll */}
-      <div ref={bottomRef} />
+
+                {/* Streaming reasoning - direct DOM updates via ref */}
+                <details
+                  open
+                  className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
+                  style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
+                  id="streaming-reasoning-container"
+                >
+                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+                    Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
+                  </summary>
+                  <div
+                    ref={streamingReasoningRef}
+                    className="mt-2 text-sm whitespace-pre-wrap"
+                    style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
+                  />
+                </details>
+
+                {/* Streaming content - direct DOM updates via ref for O(1) performance */}
+                <div
+                  ref={streamingContentRef}
+                  className="text-sm"
+                  style={{
+                    color: "var(--assistant-msg-text, var(--foreground))",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }}
+                />
+
+                {/* Streaming tool calls */}
+                {Object.keys(streamingToolCalls).length > 0 && (
+                  <div className="mt-2 space-y-2">
+                    {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
+                      const isBash = tc.name === "bash";
+                      let parsedArgs: any = tc.arguments;
+                      try {
+                        parsedArgs = JSON.parse(tc.arguments);
+                      } catch {
+                        // Keep as string
+                      }
+                      const script = isBash && parsedArgs?.script;
+
+                      return (
+                        <details
+                          key={tcId}
+                          open
+                          className={`rounded ${showBorders ? 'border' : ''}`}
+                          style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
+                        >
+                          <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
+                            <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
+                            <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                              {tcId.slice(-8)}
+                            </span>
+                            <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
+                          </summary>
+                          <div className="px-2 pb-2">
+                            {isBash && script ? (
+                              <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
+                                $ {script}
+                              </pre>
+                            ) : (
+                              <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                                {tc.arguments || "..."}
+                              </pre>
+                            )}
+                          </div>
+                        </details>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
+        {/* Scroll anchor for auto-scroll */}
+        <div ref={bottomRef} />
+      </div>
     </div>
   );
 }

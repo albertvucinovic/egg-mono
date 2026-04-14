@@ -61,14 +61,14 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     enabled: !!currentThreadId && currentThreadData?.has_children,
   });
 
-  const { isStreaming } = useAppStore();
+  const { isStreaming, streamingKind } = useAppStore();
 
-  // Fetch token stats for current thread - poll during streaming for live updates
+  // Fetch token stats for current thread - poll only during LLM streaming.
   const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ["stats", currentThreadId],
     queryFn: () => fetchTokenStats(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: isStreaming ? 5000 : false, // Poll every 5s during streaming (reduced to minimize backend load)
+    refetchInterval: isStreaming && streamingKind === "llm" ? 1000 : false,
   });
 
   // Navigate to thread helper
@@ -190,6 +190,12 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
                 <span className="text-right" style={{ color: "var(--tool-msg-border)" }}>{(stats.cached_tokens || 0).toLocaleString()}</span>
                 <span>Context:</span>
                 <span className="text-right">{(stats.context_tokens || 0).toLocaleString()}</span>
+                {isStreaming && streamingKind === "llm" && typeof stats.streaming_tps === "number" && Number.isFinite(stats.streaming_tps) && stats.streaming_tps > 0 && (
+                  <>
+                    <span>TPS:</span>
+                    <span className="text-right">{stats.streaming_tps < 10 ? stats.streaming_tps.toFixed(1) : Math.round(stats.streaming_tps)}</span>
+                  </>
+                )}
                 <span className="font-medium">Total:</span>
                 <span className="text-right font-medium">{(stats.total_tokens || 0).toLocaleString()}</span>
                 <span className="font-medium" style={{ color: "var(--reasoning-border)" }}>Cost:</span>

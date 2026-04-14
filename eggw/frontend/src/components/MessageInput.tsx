@@ -30,6 +30,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     setStreamingContent,
     setStreamingReasoning,
     setStreamingToolCalls,
+    setStreamingKind,
     addSystemLog,
     addMessage,
     setTheme,
@@ -71,6 +72,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
       setStreamingContent("");
       setStreamingReasoning("");
       setStreamingToolCalls({});
+      setStreamingKind(null);
       setIsStreaming(false);
       // Refetch messages to get the saved partial content from backend
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
