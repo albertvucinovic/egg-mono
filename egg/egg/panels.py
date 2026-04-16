@@ -20,16 +20,21 @@ from .utils import snapshot_messages, looks_markdown
 class PanelsMixin:
     """Mixin providing panel management methods for EggDisplayApp."""
 
+    def _fmt_compact_count(self, value: Any) -> str:
+        """Format a compact positive integer count without a unit suffix."""
+        try:
+            iv = int(value)
+        except Exception:
+            return ""
+        if iv <= 0:
+            return ""
+        return f"{iv}" if iv < 1000 else f"{iv/1000:.2f}k"
+
     def _fmt_header_metric(self, value: Any, label: str) -> str:
         """Format a compact header metric as '<value> <label>'."""
         if label == 'tok':
-            try:
-                iv = int(value)
-            except Exception:
-                return ""
-            if iv <= 0:
-                return ""
-            return f"{iv} tok" if iv < 1000 else f"{iv/1000:.2f}k tok"
+            compact = self._fmt_compact_count(value)
+            return f"{compact} tok" if compact else ""
         if label == 'tps':
             try:
                 fv = float(value)
@@ -83,7 +88,7 @@ class PanelsMixin:
             ctx_tokens, api_usage = self.current_token_stats()
 
             def fmt_tok(v: int) -> str:
-                return self._fmt_header_metric(v, 'tok')
+                return self._fmt_compact_count(v)
 
             # If we have no token stats yet for this thread, keep the
             # existing title so that we do not clear previously
@@ -427,6 +432,8 @@ class PanelsMixin:
                     tok_text = self._fmt_header_metric(pm_tokens['reasoning'], 'tok')
                     if tok_text:
                         reason_title += f" [dim]({tok_text})[/dim]"
+                if msg_tps:
+                    reason_title += f" [dim]({msg_tps})[/dim]"
                 panel(Text(reas, no_wrap=False, overflow='fold', style='magenta'), reason_title, 'magenta')
             if content:
                 if looks_markdown(content):
@@ -457,6 +464,8 @@ class PanelsMixin:
                     tok_text = self._fmt_header_metric(pm_tokens['tool_calls'], 'tok')
                     if tok_text:
                         tc_title_parts.append(f"[dim]({tok_text})[/dim]")
+                if msg_tps:
+                    tc_title_parts.append(f"[dim]({msg_tps})[/dim]")
                 if ts_str:
                     tc_title_parts.append(f"[dim]{ts_str}[/dim]")
                 if msg_id:

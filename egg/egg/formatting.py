@@ -351,7 +351,7 @@ class FormattingMixin:
         head_parts.append(f"Thread {self.current_thread[-8:]} | Model: {self.current_model_for_thread(self.current_thread) or 'default'}")
 
         def fmt_tok(v: int) -> str:
-            return self._fmt_header_metric(v, 'tok')
+            return self._fmt_compact_count(v)
 
         if isinstance(ctx_tokens, int):
             tok_text = fmt_tok(ctx_tokens)
