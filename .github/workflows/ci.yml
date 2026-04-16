@@ -124,3 +124,23 @@ jobs:
           pip install -e ./eggflow
           pip install -e ./egg[dev]
       - run: pytest egg/tests -q
+
+  test-eggw:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.eggw == 'true' || needs.detect-changes.outputs.eggthreads == 'true' || needs.detect-changes.outputs.eggllm == 'true' || needs.detect-changes.outputs.eggconfig == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: |
+          pip install -e ./eggllm
+          pip install -e ./eggconfig
+          pip install -e ./eggthreads
+          pip install -e ./eggw
+          pip install pytest
+      - run: pytest eggw/tests -q

@@ -1,9 +1,6 @@
 """Tests for panels.py PanelsMixin."""
 from __future__ import annotations
 
-import json
-import time
-
 import pytest
 
 
@@ -110,37 +107,6 @@ class TestUpdatePanels:
 
         assert "Sandbox" in egg_app.system_output.title or "sandbox" in egg_app.system_output.title.lower()
 
-    def test_chat_title_includes_tps_only_for_llm_streams(self, egg_app, monkeypatch):
-        """Should add tps to title only while LLM output is streaming."""
-        monkeypatch.setattr(
-            egg_app,
-            "current_token_stats",
-            lambda: (1234, {"total_input_tokens": 100, "total_output_tokens": 20, "approx_call_count": 1}),
-        )
-        monkeypatch.setattr(egg_app, "current_stream_tps", lambda: "6.0")
-
-        egg_app._live_state = {
-            "active_invoke": "inv-1",
-            "stream_kind": "llm",
-            "started_at": time.time() - 2.0,
-            "content": "hello world",
-            "reason": "",
-            "tools": {},
-            "tc_text": {},
-            "tc_order": [],
-        }
-
-        egg_app.update_panels()
-
-        assert "6.0 tps" in egg_app.chat_output.title
-
-        egg_app._live_state["stream_kind"] = "tool"
-        monkeypatch.setattr(egg_app, "current_stream_tps", lambda: "")
-        monkeypatch.setattr("egg.egg.panels.snapshot_messages", lambda db, tid: [{"role": "assistant", "tps": 4.2}])
-        egg_app.update_panels()
-
-        assert "4.2 tps" in egg_app.chat_output.title
-
     def test_system_title_shows_autoapproval_flag(self, egg_app, monkeypatch):
         monkeypatch.setattr(
             "eggthreads.get_thread_sandbox_status",
@@ -243,6 +209,16 @@ class TestLogSystem:
 class TestConsolePrintMessage:
     """Tests for console_print_message()."""
 
+    @staticmethod
+    def _collect_panel_titles(printed):
+        titles = []
+        for args, _kwargs in printed:
+            for arg in args:
+                title = getattr(arg, "title", None)
+                if title is not None:
+                    titles.append(str(title))
+        return titles
+
     def test_prints_user_message(self, egg_app, monkeypatch):
         """Should print user message with green style."""
         printed = []
@@ -302,6 +278,25 @@ class TestConsolePrintMessage:
         # Should print multiple panels (reasoning + content)
         assert len(printed) >= 2
 
+    def test_prints_tps_in_reasoning_and_assistant_titles(self, egg_app, monkeypatch):
+        """Reasoning and assistant panels should show TPS when present."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.console_print_message({
+            'role': 'assistant',
+            'content': 'Answer',
+            'reasoning': 'Let me think...',
+            'tps': 4.2,
+        })
+
+        titles = self._collect_panel_titles(printed)
+        reasoning_titles = [t for t in titles if 'Reasoning' in t]
+        assistant_titles = [t for t in titles if 'Assistant' in t]
+
+        assert any('4.2 tps' in t for t in reasoning_titles)
+        assert any('4.2 tps' in t for t in assistant_titles)
+
     def test_prints_tool_calls_if_present(self, egg_app, monkeypatch):
         """Should print tool calls if present."""
         printed = []
@@ -314,6 +309,35 @@ class TestConsolePrintMessage:
         })
 
         assert len(printed) >= 1
+
+    def test_prints_tps_in_tool_calls_title(self, egg_app, monkeypatch):
+        """Tool calls panel should show TPS when present on the assistant message."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.console_print_message({
+            'role': 'assistant',
+            'content': '',
+            'tps': 5.5,
+            'tool_calls': [{'function': {'name': 'bash', 'arguments': {'cmd': 'ls'}}}],
+        })
+
+        titles = self._collect_panel_titles(printed)
+        tool_call_titles = [t for t in titles if 'Tool Calls' in t]
+
+        assert any('5.5 tps' in t for t in tool_call_titles)
+
+    def test_prints_tps_in_tool_message_title(self, egg_app, monkeypatch):
+        """Tool message panel should show TPS when present."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.console_print_message({'role': 'tool', 'name': 'bash', 'content': 'output', 'tps': 3.0})
+
+        titles = self._collect_panel_titles(printed)
+        tool_titles = [t for t in titles if 'bash' in t]
+
+        assert any('3.0 tps' in t for t in tool_titles)
 
     def test_uses_markdown_for_markdown_content(self, egg_app, monkeypatch):
         """Should use Markdown rendering for markdown content."""
