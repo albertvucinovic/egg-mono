@@ -157,6 +157,32 @@ def _event_ts_to_epoch(ts_value: Any) -> Optional[float]:
     return None
 
 
+def _first_delta_ts(db: "ThreadsDB", invoke_id: str) -> Optional[float]:
+    """Timestamp of the first stream.delta carrying content for an invoke.
+
+    Why: starting TPS at stream.open includes unknown prompt-processing time.
+    Starting at the first token-bearing delta isolates generation speed.
+    """
+    try:
+        cur = db.conn.execute(
+            "SELECT ts, payload_json FROM events WHERE invoke_id=? AND type='stream.delta' ORDER BY event_seq ASC",
+            (invoke_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for ts_value, payload_json in rows:
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("text") or payload.get("reason") or payload.get("tool_call") or payload.get("tool"):
+            return _event_ts_to_epoch(ts_value)
+    return None
+
+
 def _tps_from_tokens(tokens: int, start_ts: Optional[float], end_ts: Optional[float] = None) -> Optional[float]:
     """Return tokens/second for a token count and time interval."""
     if tokens <= 0 or start_ts is None:
@@ -194,14 +220,7 @@ def llm_message_tps_for_invoke(
     tokens = int(_tokens_for_message(msg, 0).total_tokens)
     if tokens <= 0:
         return None
-    try:
-        row = db.conn.execute(
-            "SELECT ts FROM events WHERE invoke_id=? AND type='stream.open' ORDER BY event_seq ASC LIMIT 1",
-            (invoke_id,),
-        ).fetchone()
-    except Exception:
-        row = None
-    start_ts = _event_ts_to_epoch(row[0]) if row is not None else None
+    start_ts = _first_delta_ts(db, invoke_id)
     return _tps_from_tokens(tokens, start_ts, end_ts=end_ts)
 
 
@@ -214,14 +233,7 @@ def live_llm_tps_for_invoke(
     """Approximate live TPS for an in-progress LLM invoke."""
     if not isinstance(invoke_id, str) or not invoke_id:
         return None
-    try:
-        row = db.conn.execute(
-            "SELECT ts FROM events WHERE invoke_id=? AND type='stream.open' ORDER BY event_seq ASC LIMIT 1",
-            (invoke_id,),
-        ).fetchone()
-    except Exception:
-        row = None
-    start_ts = _event_ts_to_epoch(row[0]) if row is not None else None
+    start_ts = _first_delta_ts(db, invoke_id)
     if start_ts is None:
         return None
 
