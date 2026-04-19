@@ -20,28 +20,20 @@ class TestUpdatePanels:
 
         assert len(set_content_calls) >= 1
 
-    def test_updates_system_output_content(self, egg_app, monkeypatch):
-        """Should update system_output with status lines."""
-        set_content_calls = []
-        original_set_content = egg_app.system_output.set_content
-        def mock_set_content(text):
-            set_content_calls.append(text)
-            original_set_content(text)
-        monkeypatch.setattr(egg_app.system_output, "set_content", mock_set_content)
-
+    def test_system_output_body_is_empty(self, egg_app):
+        """System panel body is empty — status lives in the title line."""
         egg_app.update_panels()
 
-        assert len(set_content_calls) >= 1
-        # Should contain current thread info
-        assert any(egg_app.current_thread[-8:] in call for call in set_content_calls)
+        assert egg_app.system_output.content == ""
 
-    def test_system_output_shows_paste_shortcut(self, egg_app):
-        """System panel should advertise the paste shortcut."""
+    def test_system_output_title_shows_status(self, egg_app):
+        """System panel title carries sandbox and auto-approval status."""
         egg_app.update_panels()
 
-        content = egg_app.system_output.content
-        assert content is not None
-        assert "Paste: Ctrl+P" in content
+        title = egg_app.system_output.title
+        assert title.startswith("System")
+        assert "Sandboxing" in title
+        assert "Autoapproval" in title
 
     def test_updates_children_output(self, egg_app, monkeypatch):
         """Should update children_output with tree view."""
