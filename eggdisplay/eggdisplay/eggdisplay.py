@@ -1043,11 +1043,12 @@ class OutputPanel:
         # Count logical lines in content
         content_lines = self.content.count('\n') + 1
 
-        # For crop-mode panels we want one row per logical line, plus
-        # header, but no extra padding; for wrapped panels we keep the
-        # previous behaviour.
+        # For crop-mode panels we want one row per logical line plus two
+        # border rows (Rich Panel default padding is 0 vertical) — no
+        # extra slack, since no internal header is rendered. Wrapped
+        # panels keep the previous, looser allowance.
         if getattr(self.style, "line_wrap_mode", "wrap") == "crop":
-            total_lines_needed = content_lines + (4 if self.style.show_header else 1)
+            total_lines_needed = content_lines + 2
         else:
             total_lines_needed = content_lines + 4
         target_height = max(1, min(self.max_height, total_lines_needed))

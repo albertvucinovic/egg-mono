@@ -186,33 +186,15 @@ class PanelsMixin:
         except Exception:
             auto_approval = False
         auto_part = "[red]Autoapproval[On][/red]" if auto_approval else "[green]Autoapproval[Off][/green]"
-        self.system_output.title = f"System  {sandbox_part}  {auto_part}"
+        stream_part = self._current_stream_header_part()
+        title = f"System  {sandbox_part}  {auto_part}"
+        if stream_part:
+            title = f"{title}  {stream_part}"
+        self.system_output.title = title
 
-        # Keep the System panel intentionally compact so it doesn't dominate
-        # the single-column layout.
-        status_lines = [
-            f"Current: {self.current_thread[-8:]} | Roots with schedulers: {len(self.active_schedulers)}",
-            "Send: Enter/Ctrl+D | New line: Shift+Enter/Alt+Enter | Paste: Ctrl+P | Clear: Ctrl+E | Quit: Ctrl+C",
-            "Commands: /help  |  Display: /togglePanel chat|children|system",
-        ]
-
-        # Show only a couple of recent system log entries, and only their
-        # first line (multi-line logs belong in the console output).
-        tail_lines: List[str] = []
-        try:
-            recent = (self._system_log or [])[-2:]
-            for msg in recent:
-                if not isinstance(msg, str) or not msg:
-                    continue
-                first = msg.splitlines()[0].rstrip()
-                # Indicate truncation if the message had more lines.
-                if msg.count('\n'):
-                    first = first + " …"
-                tail_lines.append(first)
-        except Exception:
-            tail_lines = []
-
-        self.system_output.set_content("\n".join(status_lines + tail_lines))
+        # System panel is intentionally only the header line: status
+        # (sandbox, auto-approval) lives in the title border, body is empty.
+        self.system_output.set_content("")
 
         # Children panel: refresh at most once every 2 seconds
         try:
@@ -248,6 +230,42 @@ class PanelsMixin:
         else:
             # Empty content makes the panel effectively invisible
             self.approval_panel.set_content("")
+
+    def _current_stream_header_part(self) -> str:
+        """Return a compact live-streaming suffix for the System title.
+
+        Empty when nothing is streaming. For LLM streams, appends live
+        TPS when available. For tool streams, appends the active tool
+        name (best-effort) so users see what's running.
+        """
+        ls = getattr(self, '_live_state', {}) or {}
+        invoke = ls.get('active_invoke')
+        if not invoke:
+            return ""
+        kind = ls.get('stream_kind') or 'stream'
+        if kind == 'llm':
+            tps_str = ""
+            try:
+                from eggthreads import live_llm_tps_for_invoke
+                tps = live_llm_tps_for_invoke(self.db, str(invoke))
+            except Exception:
+                tps = None
+            if isinstance(tps, (int, float)) and tps > 0:
+                tps_str = self._fmt_header_metric(tps, 'tps')
+            inner = f"llm {tps_str}" if tps_str else "llm"
+        elif kind == 'tool':
+            tool_name = ""
+            tools = ls.get('tools') if isinstance(ls.get('tools'), dict) else {}
+            if tools:
+                try:
+                    tool_name = next(iter(tools.keys())) or ""
+                except Exception:
+                    tool_name = ""
+            inner = f"tool {tool_name}" if tool_name else "tool"
+        else:
+            inner = str(kind)
+        # Escape inner brackets so Rich doesn't try to parse them as markup.
+        return f"[yellow]Streaming\\[{inner}][/yellow]"
 
     def current_stream_tps(self) -> str:
         """Return a compact live TPS string for the active LLM stream."""
