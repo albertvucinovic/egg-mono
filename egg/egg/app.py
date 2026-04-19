@@ -170,8 +170,8 @@ class EggDisplayApp(
         chat_style = OutputPanel.PanelStyle(markup=False)
         self.chat_output = OutputPanel(
             title="Chat Messages",
-            initial_height=12,
-            max_height=12,
+            initial_height=5,
+            max_height=5,
             columns_hint=1,
             style=chat_style,
         )
