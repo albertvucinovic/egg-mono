@@ -692,6 +692,21 @@
           "model_name": "step-3.5-flash"
         }
       }
+    },
+    "egg-toolbox": {
+      "api_base": "http://127.0.0.1:8765/v1/chat/completions",
+      "api_key_env": "EGG_TOOLBOX_API_KEY",
+      "models": {
+        "Qwen2.5 0.5B (egg-toolbox+tinygrad)": {
+          "model_name": "qwen2.5-0.5b-instruct-q4_0",
+          "max_tokens": 32768
+        },
+        "Qwen3 8B (egg-toolbox+tinygrad)": {
+          "model_name": "Qwen_Qwen3-8B-Q4_0.gguf",
+          "max_tokens": 32768
+        }
+
+      }
     }
   },
   "default_model": "openai 120b Local"
