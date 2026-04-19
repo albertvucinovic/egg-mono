@@ -703,7 +703,11 @@
         },
         "Qwen3 8B (egg-toolbox+tinygrad)": {
           "model_name": "Qwen_Qwen3-8B-Q4_0.gguf",
-          "max_tokens": 32768
+          "max_tokens": 32768,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          }
         }
 
       }
