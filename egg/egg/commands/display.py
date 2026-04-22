@@ -32,6 +32,44 @@ class DisplayCommandsMixin:
         except Exception as e:
             self.log_system(f'/redraw error: {e}')
 
+    def cmd_displayMode(self, arg: str) -> None:
+        """Handle /displayMode <full-screen|inline> - switch rendering mode.
+
+        full-screen: alt-screen TUI with in-app scroll (PageUp/PageDown,
+            mouse wheel) and streaming rendered into the "static" area
+            above the live region.
+        inline: HEAD-style rendering with the terminal's native
+            scrollback, smallest possible screen updates, and native
+            mouse selection/scroll. Streaming shows inside the Chat
+            Messages panel body.
+        """
+        which = (arg or '').strip().lower().replace('_', '-')
+        aliases = {
+            'full-screen': False,
+            'fullscreen': False,
+            'full': False,
+            'tui': False,
+            'altscreen': False,
+            'alt-screen': False,
+            'inline': True,
+            'classic': True,
+            'head': True,
+            'legacy': True,
+        }
+        if which not in aliases:
+            cur = 'inline' if getattr(self, '_display_is_inline', False) else 'full-screen'
+            self.log_system(f"Usage: /displayMode (full-screen|inline)   (current: {cur})")
+            return
+        want_inline = aliases[which]
+        if bool(getattr(self, '_display_is_inline', False)) == want_inline:
+            cur = 'inline' if want_inline else 'full-screen'
+            self.log_system(f"Display mode already {cur}.")
+            return
+        self._display_is_inline = want_inline
+        self._pending_mode_change = True
+        new_mode = 'inline' if want_inline else 'full-screen'
+        self.log_system(f"Display mode switching to {new_mode}…")
+
     def cmd_toggleBorders(self, arg: str) -> None:
         """Handle /toggleBorders command - toggle borders on all panels except Message Input."""
         self._borders_visible = not getattr(self, '_borders_visible', True)

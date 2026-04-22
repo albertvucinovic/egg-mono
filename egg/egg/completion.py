@@ -572,6 +572,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 '/togglePanel',
                 '/toggleBorders',
                 '/redraw',
+                '/displayMode',
                 '/login', '/logout', '/authStatus',
             ]
             return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
@@ -730,6 +731,15 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
 
         if cmd == '/togglePanel':
             opts = ['chat', 'children', 'system']
+            atok = (arg_tok or '').lower()
+            if atok:
+                pref = [o for o in opts if o.startswith(atok)]
+                cont = [o for o in opts if atok in o and o not in pref]
+                opts = pref + cont
+            return _mk_items(opts, arg_tok)
+
+        if cmd == '/displayMode':
+            opts = ['full-screen', 'inline']
             atok = (arg_tok or '').lower()
             if atok:
                 pref = [o for o in opts if o.startswith(atok)]

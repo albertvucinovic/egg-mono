@@ -17,6 +17,21 @@ class InputMixin:
         Returns True if the key was handled and the app should continue,
         False if the app should exit.
         """
+        # Assemble multi-part ANSI escape sequences (e.g. long SGR mouse
+        # reports) so downstream checks always see complete keys. The
+        # editor wrapper's normalize_key is stateful and idempotent on
+        # already-complete keys, so routing through it here does not
+        # break the eventual _handle_key call that also invokes it.
+        try:
+            ed_wrapper = self.input_panel.editor
+            if hasattr(ed_wrapper, 'normalize_key'):
+                normalized = ed_wrapper.normalize_key(key)
+                if normalized is None:
+                    return True  # still accumulating — wait for next byte
+                key = normalized
+        except Exception:
+            pass
+
         # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits
         try:
             import readchar  # type: ignore
@@ -31,6 +46,60 @@ class InputMixin:
             ctrl_e = '\x05'
             ctrl_p = '\x10'
             enter_key = '\r'
+
+        # In-app scrolling (since alt-screen disables native terminal
+        # scrollback). PageUp / PageDown / End address the renderer's
+        # scrollback model, sliding the history view above the live region.
+        # Mouse wheel events (SGR: "\x1b[<button;col;rowM|m") also map here.
+        if isinstance(key, str):
+            renderer = getattr(self, '_renderer', None)
+            if renderer is not None and hasattr(renderer, 'scroll'):
+                # PageUp: \x1b[5~ (most terminals). PageDown: \x1b[6~.
+                # End: \x1b[F, \x1b[4~, or \x1bOF depending on terminal.
+                if key in ('\x1b[5~', '\x1b[5;2~'):
+                    try:
+                        import shutil as _shutil
+                        step = max(1, _shutil.get_terminal_size(fallback=(100, 24)).lines // 2)
+                    except Exception:
+                        step = 5
+                    renderer.scroll(step)
+                    return True
+                if key in ('\x1b[6~', '\x1b[6;2~'):
+                    try:
+                        import shutil as _shutil
+                        step = max(1, _shutil.get_terminal_size(fallback=(100, 24)).lines // 2)
+                    except Exception:
+                        step = 5
+                    renderer.scroll(-step)
+                    return True
+                if key in ('\x1b[F', '\x1b[4~', '\x1bOF') and hasattr(renderer, 'scroll_to_bottom'):
+                    renderer.scroll_to_bottom()
+                    return True
+
+                # SGR mouse events: "\x1b[<button;col;row" + ("M" = press, "m" = release).
+                # Wheel buttons: 64 = up, 65 = down (modifier bits may be set).
+                if key.startswith('\x1b[<') and (key.endswith('M') or key.endswith('m')):
+                    try:
+                        body = key[3:-1]
+                        fields = body.split(';')
+                        if len(fields) >= 3:
+                            button = int(fields[0])
+                            # Wheel: button >= 64, bit 1 = horizontal (skip).
+                            if 64 <= button < 96 and (button & 2) == 0:
+                                # Only react to the press (capital "M");
+                                # some terminals emit a release too.
+                                if key.endswith('M'):
+                                    is_down = bool(button & 1)
+                                    # Shift/ctrl modifier bits boost the scroll step.
+                                    fast = bool(button & (4 | 16))
+                                    step = 10 if fast else 3
+                                    renderer.scroll(-step if is_down else step)
+                                return True
+                            # Non-wheel mouse events: swallow so they don't
+                            # reach the editor as garbage keystrokes.
+                            return True
+                    except Exception:
+                        return True
         # Esc handling: log and forward a logical 'escape' to the editor.
         # Some terminals send a single ESC ('\x1b'), others double ('\x1b\x1b').
         try:

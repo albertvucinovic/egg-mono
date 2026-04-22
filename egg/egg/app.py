@@ -165,16 +165,19 @@ class EggDisplayApp(
         self.active_schedulers: Dict[str, Dict[str, Any]] = {}
         self.start_scheduler(self.current_thread)
 
+        # Display mode: "inline" (HEAD-style, native terminal scroll, tiny
+        # diffs, stream goes into Chat Messages panel) or "full" (alt-screen
+        # TUI, stream-as-static, in-app scroll with mouse wheel). Selected
+        # initially via EGG_DISPLAY_MODE env var (default "full"); can be
+        # changed at runtime with the /displayMode command, which sets
+        # _pending_mode_change and the main loop rebuilds accordingly.
+        _mode = os.environ.get('EGG_DISPLAY_MODE', '').strip().lower()
+        self._display_is_inline = _mode in ('inline', 'classic', 'head', 'legacy')
+        self._pending_mode_change: bool = False
+
         # Panels
         # Single-column layout (system, children, chat, input)
-        chat_style = OutputPanel.PanelStyle(markup=False)
-        self.chat_output = OutputPanel(
-            title="Chat Messages",
-            initial_height=5,
-            max_height=5,
-            columns_hint=1,
-            style=chat_style,
-        )
+        self._build_chat_output_for_mode()
         # System panel: keep compact by default (~5 content lines).
         # OutputPanel height includes borders; with wrap-mode padding this
         # corresponds to ~5 content lines.
@@ -303,6 +306,50 @@ class EggDisplayApp(
         self._pending_prompt: Dict[str, Any] = {}
         # Last time we refreshed the children tree panel (sec since epoch)
         self._last_children_refresh: float = time.time()
+
+    def _build_chat_output_for_mode(self) -> None:
+        """(Re)construct the Chat Messages panel for the current display mode.
+
+        Called once in __init__ and again whenever /displayMode flips
+        the mode at runtime so the panel dimensions and body behavior
+        match the new rendering model.
+        """
+        chat_style = OutputPanel.PanelStyle(markup=False)
+        if self._display_is_inline:
+            # Inline mode: streaming preview and recent history render
+            # inside the Chat Messages panel body (HEAD behavior).
+            self.chat_output = OutputPanel(
+                title="Chat Messages",
+                initial_height=5,
+                max_height=5,
+                columns_hint=1,
+                style=chat_style,
+            )
+        else:
+            # Full-screen mode: panel body stays empty (streaming and
+            # past messages render into DiffRenderer's static window
+            # above the live region). Panel collapses to its title bar.
+            self.chat_output = OutputPanel(
+                title="Chat Messages",
+                initial_height=2,
+                max_height=2,
+                columns_hint=1,
+                style=chat_style,
+            )
+            try:
+                self.chat_output.style.show_header = False
+            except Exception:
+                pass
+        # Apply whatever border style is currently in effect.
+        try:
+            from rich import box as rich_box
+            if getattr(self, '_borders_visible', False):
+                original = getattr(self, '_original_box_styles', {})
+                self.chat_output.style.box = original.get('chat', rich_box.SQUARE)
+            else:
+                self.chat_output.style.box = rich_box.MINIMAL
+        except Exception:
+            pass
 
         # Log any global sandbox availability warning.
         try:
@@ -434,59 +481,92 @@ class EggDisplayApp(
         try:
             # DiffRenderer: flicker-free rendering via line-level diffing +
             # synchronized output (CSI 2026h/l). Critical for SSH / tmux.
-            self._renderer = DiffRenderer(self.render_group(), console=self.console)
-            with self._renderer as renderer:
-                while self.running:
-                    # Drain input queue
-                    had_input = False
-                    try:
-                        while True:
-                            key = self.input_panel.editor.input_queue.get_nowait()
-                            had_input = True
-                            if not self.handle_key(key):
-                                self.running = False
-                                break
-                    except Exception:
-                        pass
-                    # Update panels content (sets dirty flags on changes)
-                    self.update_panels()
-                    # Only rebuild when something changed
-                    panels = [self.system_output, self.children_output,
-                              self.chat_output, self.approval_panel]
-                    if had_input or any(p.is_dirty() for p in panels) or self.input_panel.is_dirty():
-                        renderer.update(self.render_group())
-
-                    # Optional: auto-redraw static view on terminal resize.
-                    # We keep this low-overhead by only sampling terminal size
-                    # and debouncing redraw to happen after resizing settles.
-                    if self._auto_redraw_on_resize:
+            # Wrapped in an outer loop so /displayMode can teardown the
+            # renderer, rebuild for the new mode, and re-enter.
+            while self.running:
+                self._build_chat_output_for_mode()
+                mode_name = 'inline' if self._display_is_inline else 'full'
+                self._renderer = DiffRenderer(
+                    self.render_group(), console=self.console, mode=mode_name,
+                )
+                with self._renderer as renderer:
+                    # In full-screen mode the alt-screen starts blank, so
+                    # populate the scrollback model with recent history.
+                    # In inline mode the pre-loop prints are already in
+                    # the terminal's real scrollback, but on a mode switch
+                    # we reprint anyway so behaviour is consistent.
+                    if not self._display_is_inline or self._pending_mode_change:
                         try:
-                            import shutil as _shutil
-
-                            sz = _shutil.get_terminal_size(fallback=(100, 24))
-                            cur_sz = (int(sz.columns), int(sz.lines))
-                            if self._last_term_size is None:
-                                self._last_term_size = cur_sz
-                            elif cur_sz != self._last_term_size:
-                                self._last_term_size = cur_sz
-                                self._resize_dirty_since = time.time()
-                            else:
-                                if self._resize_dirty_since is not None and (time.time() - self._resize_dirty_since) > 0.75:
-                                    self._resize_dirty_since = None
-                                    # Don't do expensive redraw while actively streaming.
-                                    try:
-                                        row_open = self.db.current_open(self.current_thread)
-                                    except Exception:
-                                        row_open = None
-                                    if row_open is None:
-                                        self.redraw_static_view(reason='resize')
+                            self.print_static_view_current(heading=None)
                         except Exception:
                             pass
-
+                    # If a stream is in flight (mode switch mid-stream),
+                    # replay the accumulated _live_state into the new
+                    # renderer so the in-flight preview doesn't disappear.
+                    # Inline mode displays it automatically via
+                    # compose_chat_panel_text; full-screen needs us to
+                    # seed its stream buffer here.
                     try:
-                        await asyncio.sleep(0.1)
-                    except asyncio.CancelledError:
-                        break
+                        self._replay_stream_to_renderer()
+                    except Exception:
+                        pass
+                    self._pending_mode_change = False
+                    while self.running and not self._pending_mode_change:
+                        # Drain input queue
+                        had_input = False
+                        try:
+                            while True:
+                                key = self.input_panel.editor.input_queue.get_nowait()
+                                had_input = True
+                                if not self.handle_key(key):
+                                    self.running = False
+                                    break
+                        except Exception:
+                            pass
+                        # Update panels content (sets dirty flags on changes)
+                        self.update_panels()
+                        # Only rebuild when something changed
+                        panels = [self.system_output, self.children_output,
+                                  self.chat_output, self.approval_panel]
+                        if had_input or any(p.is_dirty() for p in panels) or self.input_panel.is_dirty():
+                            renderer.update(self.render_group())
+
+                        # Optional: auto-redraw static view on terminal resize.
+                        # We keep this low-overhead by only sampling terminal size
+                        # and debouncing redraw to happen after resizing settles.
+                        if self._auto_redraw_on_resize:
+                            try:
+                                import shutil as _shutil
+
+                                sz = _shutil.get_terminal_size(fallback=(100, 24))
+                                cur_sz = (int(sz.columns), int(sz.lines))
+                                if self._last_term_size is None:
+                                    self._last_term_size = cur_sz
+                                elif cur_sz != self._last_term_size:
+                                    self._last_term_size = cur_sz
+                                    self._resize_dirty_since = time.time()
+                                else:
+                                    if self._resize_dirty_since is not None and (time.time() - self._resize_dirty_since) > 0.75:
+                                        self._resize_dirty_since = None
+                                        # Don't do expensive redraw while actively streaming.
+                                        try:
+                                            row_open = self.db.current_open(self.current_thread)
+                                        except Exception:
+                                            row_open = None
+                                        if row_open is None:
+                                            self.redraw_static_view(reason='resize')
+                            except Exception:
+                                pass
+
+                        try:
+                            await asyncio.sleep(0.1)
+                        except asyncio.CancelledError:
+                            break
+                # Exited the with block. If the inner loop set
+                # _pending_mode_change, loop and rebuild the renderer.
+                # Otherwise the user asked to quit; break the outer loop.
+                if not self._pending_mode_change:
+                    break
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:

@@ -19,6 +19,8 @@ from .eggdisplay import (
     HStack,
     VStack,
     DiffRenderer,
+    InlineDiffRenderer,
+    FullScreenDiffRenderer,
 )
 
 __all__ = [
@@ -31,5 +33,7 @@ __all__ = [
     'HStack',
     'VStack',
     'DiffRenderer',
+    'InlineDiffRenderer',
+    'FullScreenDiffRenderer',
 ]
 __version__ = "0.1.0"

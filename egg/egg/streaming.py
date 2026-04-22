@@ -10,6 +10,16 @@ from typing import Any, Dict, Optional
 from eggthreads import create_snapshot, EventWatcher, ThreadsDB
 
 
+# Per-source style for streaming content. Used by both the live delta
+# dispatcher (``ingest_event_for_live``) and the replay path
+# (``_replay_stream_to_renderer``) so styling decisions for each kind
+# of provider output live in exactly one place.
+STREAM_STYLE_TEXT: Optional[str] = None           # assistant content: plain
+STREAM_STYLE_REASON: Optional[str] = "dim magenta"
+STREAM_STYLE_TOOL_OUTPUT: Optional[str] = "yellow"
+STREAM_STYLE_TOOL_CALL_ARGS: Optional[str] = "dim yellow"
+
+
 class StreamingMixin:
     """Mixin providing async streaming/watching methods for EggDisplayApp."""
 
@@ -209,6 +219,7 @@ class StreamingMixin:
                 self.log_system(f"Streaming started (invoke {str(inv)[-6:]}).")
             except Exception:
                 pass
+            self._stream_begin_on_renderer(stream_kind)
         elif t == 'stream.delta':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
@@ -217,13 +228,19 @@ class StreamingMixin:
             txt = payload.get('text') or payload.get('content') or payload.get('delta')
             if isinstance(txt, str) and txt:
                 self._live_state['content'] = (self._live_state.get('content') or '') + txt
-            if isinstance(payload.get('reason'), str):
-                self._live_state['reason'] = (self._live_state.get('reason') or '') + payload.get('reason', '')
+                self._stream_append_on_renderer(txt, style=STREAM_STYLE_TEXT)
+            rs = payload.get('reason')
+            if isinstance(rs, str) and rs:
+                self._live_state['reason'] = (self._live_state.get('reason') or '') + rs
+                self._stream_append_on_renderer(rs, style=STREAM_STYLE_REASON)
             tl = payload.get('tool')
             if isinstance(tl, dict):
                 name = tl.get('name') or 'tool'
+                tout = tl.get('text') or ''
                 self._live_state.setdefault('tools', {})
-                self._live_state['tools'][name] = self._live_state['tools'].get(name, '') + (tl.get('text') or '')
+                self._live_state['tools'][name] = self._live_state['tools'].get(name, '') + tout
+                if tout:
+                    self._stream_append_on_renderer(tout, style=STREAM_STYLE_TOOL_OUTPUT)
             tcd = payload.get('tool_call')
             if isinstance(tcd, dict):
                 raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
@@ -234,6 +251,7 @@ class StreamingMixin:
                     if raw_key not in order:
                         order.append(raw_key)
                     text_map[raw_key] = text_map.get(raw_key, '') + frag
+                    self._stream_append_on_renderer(frag, style=STREAM_STYLE_TOOL_CALL_ARGS)
         elif t == 'stream.close':
             self._live_state['active_invoke'] = None
             self._live_state['stream_kind'] = None
@@ -242,4 +260,78 @@ class StreamingMixin:
                 create_snapshot(self.db, self.current_thread)
             except Exception:
                 pass
+            self._stream_end_on_renderer()
             self.log_system('Streaming finished.')
+
+    def _stream_begin_on_renderer(self, stream_kind: Optional[str]) -> None:
+        renderer = getattr(self, '_renderer', None)
+        if renderer is None or not hasattr(renderer, 'stream_begin'):
+            return
+        try:
+            renderer.stream_begin()
+            kind = (stream_kind or 'stream').lower()
+            if kind == 'llm':
+                header = "[dim cyan]── Assistant (streaming) ──[/dim cyan]\n"
+            elif kind == 'tool':
+                header = "[dim yellow]── Tool (streaming) ──[/dim yellow]\n"
+            else:
+                header = f"[dim]── {kind} (streaming) ──[/dim]\n"
+            renderer.stream_append(header)
+        except Exception:
+            pass
+
+    def _stream_append_on_renderer(self, text: str, *, style: Optional[str]) -> None:
+        renderer = getattr(self, '_renderer', None)
+        if renderer is None or not hasattr(renderer, 'stream_append'):
+            return
+        # Escape Rich-markup brackets in raw provider content so it renders
+        # literally (we don't know whether the provider's text happens to
+        # look like markup tags).
+        escaped = (text or "").replace('[', '\\[')
+        payload = f"[{style}]{escaped}[/{style}]" if style else escaped
+        try:
+            renderer.stream_append(payload)
+        except Exception:
+            pass
+
+    def _stream_end_on_renderer(self) -> None:
+        renderer = getattr(self, '_renderer', None)
+        if renderer is None or not hasattr(renderer, 'stream_end'):
+            return
+        try:
+            renderer.stream_end()
+        except Exception:
+            pass
+
+    def _replay_stream_to_renderer(self) -> None:
+        """Re-seed the renderer's stream buffer from accumulated _live_state.
+
+        Used after a display-mode switch mid-stream: the new renderer
+        has an empty stream buffer but ``_live_state`` still holds the
+        content that has been accumulated so far. Re-emitting it lets
+        the in-flight preview pick up seamlessly on the new surface.
+
+        No-op when no stream is active, or when the renderer doesn't
+        support the stream API (inline mode — compose_chat_panel_text
+        reads ``_live_state`` directly and shows it in the chat panel).
+        """
+        ls = getattr(self, '_live_state', None) or {}
+        if not ls.get('active_invoke'):
+            return
+        renderer = getattr(self, '_renderer', None)
+        if renderer is None or not hasattr(renderer, 'stream_begin'):
+            return
+        self._stream_begin_on_renderer(ls.get('stream_kind'))
+        reason = ls.get('reason') or ''
+        if isinstance(reason, str) and reason:
+            self._stream_append_on_renderer(reason, style=STREAM_STYLE_REASON)
+        content = ls.get('content') or ''
+        if isinstance(content, str) and content:
+            self._stream_append_on_renderer(content, style=STREAM_STYLE_TEXT)
+        for name, txt in (ls.get('tools') or {}).items():
+            if isinstance(txt, str) and txt:
+                self._stream_append_on_renderer(txt, style=STREAM_STYLE_TOOL_OUTPUT)
+        for k in ls.get('tc_order') or []:
+            t = (ls.get('tc_text') or {}).get(k, '')
+            if isinstance(t, str) and t:
+                self._stream_append_on_renderer(t, style=STREAM_STYLE_TOOL_CALL_ARGS)

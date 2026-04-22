@@ -24,18 +24,30 @@ class TestMessageSubmissionWorkflow:
         messages = snapshot_messages(egg_app.db, egg_app.current_thread)
         assert len(messages) >= 1
 
-    def test_message_appears_in_chat_panel(self, egg_app, monkeypatch):
-        """Submitted message should appear in chat panel."""
+    def test_message_renders_via_console_print(self, egg_app, monkeypatch):
+        """Submitted message should be emitted via console_print_message.
+
+        Messages render into the DiffRenderer's static window above the
+        live region, not into the Chat Messages panel body (which is
+        now a title-only metrics bar).
+        """
         from eggthreads import append_message, create_snapshot
+
+        printed = []
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: printed.append(m))
 
         append_message(egg_app.db, egg_app.current_thread, "user", "Test message for chat")
         create_snapshot(egg_app.db, egg_app.current_thread)
 
-        # Update panels and check chat content
-        egg_app.update_panels()
+        egg_app.print_static_view_current()
 
-        chat_content = egg_app.chat_output.content or ""
-        assert "Test message for chat" in chat_content
+        assert any(
+            isinstance(m, dict) and m.get("content") == "Test message for chat"
+            for m in printed
+        )
+        # Chat panel body stays empty — streaming and history live in scrollback.
+        egg_app.update_panels()
+        assert (egg_app.chat_output.content or "") == ""
 
 
 class TestToolApprovalWorkflow:

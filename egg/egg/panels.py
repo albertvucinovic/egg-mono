@@ -80,9 +80,15 @@ class PanelsMixin:
 
     def update_panels(self) -> None:
         """Update all UI panels with current state."""
-        # Update Chat Messages panel content and title with aggregate
-        # token statistics derived from the current snapshot.
-        self.chat_output.set_content(self.compose_chat_panel_text())
+        # In inline mode the Chat Messages panel body mirrors the
+        # conversation + streaming (HEAD behaviour). In full-screen
+        # mode the same content lives in the DiffRenderer's static
+        # window above the live region so the panel body stays empty
+        # (title-only metrics bar).
+        if getattr(self, "_display_is_inline", False):
+            self.chat_output.set_content(self.compose_chat_panel_text())
+        else:
+            self.chat_output.set_content("")
 
         try:
             ctx_tokens, api_usage = self.current_token_stats()
@@ -593,16 +599,23 @@ class PanelsMixin:
 
     def redraw_static_view(self, *, reason: str = '') -> None:
         """Clear terminal and reprint static transcript for current thread."""
-        try:
-            # Clear the terminal so Rich can rewrap content at the new width.
-            self.console.clear()
-        except Exception:
-            pass
-        # Reset DiffRenderer state after terminal clear so it does a full
-        # re-render on the next update() instead of diffing against stale lines.
+        # Redraw is uniform across modes: clear the renderer's scrollback
+        # model (full-screen only; inline uses the terminal's real
+        # archive which we preserve), then invalidate the diff baseline
+        # so the next paint redraws everything. Invalidate on the inline
+        # renderer also wipes the current viewport (leaving the archive
+        # intact), equivalent to HEAD's console.clear() + _prev_lines reset.
         renderer = getattr(self, '_renderer', None)
         if renderer is not None:
-            renderer._prev_lines = []
+            if hasattr(renderer, 'clear_scrollback'):
+                renderer.clear_scrollback()
+            if hasattr(renderer, 'invalidate'):
+                renderer.invalidate()
+        else:
+            try:
+                self.console.clear()
+            except Exception:
+                pass
         self.print_banner()
         heading = f"Redraw: {reason}\nSwitched to thread: {self.current_thread}" if reason else f"Switched to thread: {self.current_thread}"
         self.print_static_view_current(heading=heading)

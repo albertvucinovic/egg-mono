@@ -36,6 +36,9 @@ Commands:
     /togglePanel (chat|children|system)
     /toggleBorders
     /redraw
+    /displayMode (full-screen|inline) — full-screen uses alt-screen with
+      in-app scrolling + streaming-as-static; inline uses the terminal's
+      native scrollback (HEAD behavior, smallest diff, shell-integrated).
   Auth (ChatGPT OAuth):
     /login, /logout, /authStatus
   Other:
