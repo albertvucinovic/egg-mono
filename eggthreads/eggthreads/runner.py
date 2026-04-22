@@ -2292,7 +2292,16 @@ class SubtreeScheduler:
             self.llm = LLMClient(models_path=models_path or 'models.json', all_models_path=all_models_path or 'all-models.json')
         else:
             self.llm = None
-        print(f"LLMClient type: {type(self.llm)} module: {type(self.llm).__module__} has astream_chat: {hasattr(self.llm, 'astream_chat')}")
+        # Debug print — skip when stdout is a real terminal so interactive
+        # TUIs (e.g. egg) don't see it above the live region. Piped /
+        # captured runs (CLI logs, pytest) still get the diagnostic.
+        import sys as _sys
+        try:
+            _is_tty = bool(_sys.stdout.isatty())
+        except Exception:
+            _is_tty = False
+        if not _is_tty:
+            print(f"LLMClient type: {type(self.llm)} module: {type(self.llm).__module__} has astream_chat: {hasattr(self.llm, 'astream_chat')}")
         self.owner = owner or os.environ.get("USER") or "scheduler"
         self.cfg = config or RunnerConfig()
         self.tools = tools or create_default_tools()
@@ -2321,7 +2330,19 @@ class SubtreeScheduler:
         from .api import is_thread_runnable, get_thread_scheduling
 
         if _no_api_calls_mode(self.cfg):
-            print("[NO_API_CALLS] Read-only mode: RA1/RA2 disabled, only user commands allowed")
+            # This banner fires inside run_forever, which under an interactive
+            # TUI (e.g. egg) runs after the renderer has taken over stdout —
+            # a raw print there corrupts the viewport. Skip the print when
+            # stdout is a real terminal; emit it only when output is piped
+            # or captured (CLI / pytest capsys), which is when the message
+            # is actually useful to see.
+            import sys as _sys
+            try:
+                _is_tty = bool(_sys.stdout.isatty())
+            except Exception:
+                _is_tty = False
+            if not _is_tty:
+                print("[NO_API_CALLS] Read-only mode: RA1/RA2 disabled, only user commands allowed")
 
         sem = asyncio.Semaphore(self.cfg.max_concurrent_threads)
 

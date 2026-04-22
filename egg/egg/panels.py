@@ -192,8 +192,18 @@ class PanelsMixin:
         except Exception:
             auto_approval = False
         auto_part = "[red]Autoapproval[On][/red]" if auto_approval else "[green]Autoapproval[Off][/green]"
+        # NO_API_CALLS read-only mode: shown in the header only when active
+        # (following the Streaming-indicator convention — no clutter when off).
+        try:
+            import os as _os
+            no_api = _os.environ.get('NO_API_CALLS', '').strip().lower() in ('1', 'true', 'yes')
+        except Exception:
+            no_api = False
+        no_api_part = "[red]ReadOnly\\[NO_API_CALLS][/red]" if no_api else ""
         stream_part = self._current_stream_header_part()
         title = f"System  {sandbox_part}  {auto_part}"
+        if no_api_part:
+            title = f"{title}  {no_api_part}"
         if stream_part:
             title = f"{title}  {stream_part}"
         self.system_output.title = title
