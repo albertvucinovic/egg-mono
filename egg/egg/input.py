@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from eggthreads import interrupt_thread
 
@@ -13,8 +13,19 @@ from .utils import read_clipboard
 # as a standalone Esc press. If the next byte(s) arrive within this window
 # and look like a CSI or SS3 continuation (``[`` or ``O``), we merge them
 # so downstream code sees the full escape sequence (mouse reports, arrow
-# keys, etc.) rather than a bare Esc followed by stray text.
-_ESC_DEBOUNCE_SEC = 0.05
+# keys, etc.) rather than a bare Esc followed by stray text. Widened to
+# 200 ms to cover slower split deliveries — on busy async loops readchar
+# occasionally stretches the gap between the ESC byte and its tail.
+_ESC_DEBOUNCE_SEC = 0.20
+
+# Regex matching the printable body of an SGR mouse report stripped of
+# its ``\x1b[<`` prefix (``<button;col;row[Mm]``). We use it as a
+# belt-and-braces matcher for cases where the ESC has already been
+# flushed before the tail arrived — without this the tail would leak
+# into the editor as typed text.
+import re as _re
+_ORPHAN_SGR_MOUSE_RE = _re.compile(r"^\[<-?\d+;-?\d+;-?\d+[Mm]$")
+del _re
 
 
 class InputMixin:
@@ -117,10 +128,19 @@ class InputMixin:
 
                 # SGR mouse events: "\x1b[<button;col;row" + ("M" = press, "m" = release).
                 # Wheel buttons: 64 = up, 65 = down (modifier bits may be set).
+                # Accept the orphaned tail form ``[<...M|m`` too — when
+                # readchar's split delivery outran the ESC debounce, the
+                # ``\x1b`` has already been flushed and only the tail
+                # reaches us; still a mouse event, should not leak into
+                # the editor.
+                body_src: Optional[str] = None
                 if key.startswith('\x1b[<') and (key.endswith('M') or key.endswith('m')):
+                    body_src = key[3:-1]
+                elif _ORPHAN_SGR_MOUSE_RE.match(key):
+                    body_src = key[2:-1]
+                if body_src is not None:
                     try:
-                        body = key[3:-1]
-                        fields = body.split(';')
+                        fields = body_src.split(';')
                         if len(fields) >= 3:
                             button = int(fields[0])
                             # Wheel: button >= 64, bit 1 = horizontal (skip).
