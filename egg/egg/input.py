@@ -1,11 +1,20 @@
 """Input handling mixin for the egg application."""
 from __future__ import annotations
 
+import time
 from typing import Any, Dict
 
 from eggthreads import interrupt_thread
 
 from .utils import read_clipboard
+
+
+# How long a bare ESC is held in the input pipeline before it's dispatched
+# as a standalone Esc press. If the next byte(s) arrive within this window
+# and look like a CSI or SS3 continuation (``[`` or ``O``), we merge them
+# so downstream code sees the full escape sequence (mouse reports, arrow
+# keys, etc.) rather than a bare Esc followed by stray text.
+_ESC_DEBOUNCE_SEC = 0.05
 
 
 class InputMixin:
@@ -17,6 +26,27 @@ class InputMixin:
         Returns True if the key was handled and the app should continue,
         False if the app should exit.
         """
+        now = time.monotonic()
+
+        # ESC re-attachment: readchar can split a long escape sequence
+        # (notably SGR mouse reports like ``\x1b[<64;10;5M``) between
+        # successive readkey() calls — delivering the ESC alone and the
+        # rest as continuation bytes. If we recently buffered a bare ESC
+        # and this key looks like a CSI/SS3 tail, merge them so
+        # normalize_key / the mouse parser see the full sequence.
+        if getattr(self, '_pending_esc', False):
+            pending_age = now - float(getattr(self, '_pending_esc_time', 0) or 0)
+            if isinstance(key, str) and key and key[0] in ('[', 'O') and pending_age < _ESC_DEBOUNCE_SEC:
+                key = '\x1b' + key
+                self._pending_esc = False
+                self._pending_esc_time = 0.0
+            else:
+                # Not a continuation — dispatch the deferred Esc first,
+                # then process this key as normal.
+                self._pending_esc = False
+                self._pending_esc_time = 0.0
+                self._dispatch_bare_esc()
+
         # Assemble multi-part ANSI escape sequences (e.g. long SGR mouse
         # reports) so downstream checks always see complete keys. The
         # editor wrapper's normalize_key is stateful and idempotent on
@@ -31,6 +61,15 @@ class InputMixin:
                 key = normalized
         except Exception:
             pass
+
+        # Defer a bare ESC to give the rest of a split escape sequence a
+        # chance to arrive before we fire the "Esc press" action. The
+        # main loop calls flush_pending_esc_if_stale() after each input
+        # drain to complete standalone Esc presses that see no follow-up.
+        if isinstance(key, str) and key == '\x1b':
+            self._pending_esc = True
+            self._pending_esc_time = now
+            return True
 
         # Ctrl+D sends, Ctrl+E clears input, Ctrl+C exits
         try:
@@ -100,32 +139,12 @@ class InputMixin:
                             return True
                     except Exception:
                         return True
-        # Esc handling: log and forward a logical 'escape' to the editor.
-        # Some terminals send a single ESC ('\x1b'), others double ('\x1b\x1b').
-        try:
-            esc = getattr(readchar.key, 'ESC', '\x1b')  # type: ignore[name-defined]
-        except Exception:
-            esc = '\x1b'
-        esc2 = esc + esc
-        if isinstance(key, str) and (key == esc or key == esc2):
-            try:
-                self.log_system(f"Esc-like key received: {repr(key)}")
-            except Exception:
-                pass
-            try:
-                ed = self.input_panel.editor.editor
-                # Ask the editor to handle a logical escape first
-                ed.handle_key('escape')
-                # Then forcefully clear any active completion popup in case
-                # the terminal sent a non-standard ESC sequence.
-                if hasattr(ed, '_completion_active'):
-                    ed._completion_active = False
-                if hasattr(ed, '_completion_items'):
-                    ed._completion_items = []
-                if hasattr(ed, '_completion_index'):
-                    ed._completion_index = 0
-            except Exception:
-                pass
+        # Double-Esc (``\x1b\x1b``) sent by some terminals as a logical
+        # escape press. Bare single-Esc is deferred above via the
+        # _pending_esc debounce path (its dispatch eventually goes
+        # through _dispatch_bare_esc() too).
+        if isinstance(key, str) and key == '\x1b\x1b':
+            self._dispatch_bare_esc()
             return True
         # Ctrl+C: interrupt/cancel first, quit only when idle with empty input
         if key == ctrl_c or key == '\x03':
@@ -284,3 +303,38 @@ class InputMixin:
                 return True
         # delegate to editor engine
         return self.input_panel.editor._handle_key(key)
+
+    def _dispatch_bare_esc(self) -> None:
+        """Run the actions that should fire on a standalone Esc press."""
+        try:
+            self.log_system(f"Esc-like key received: {repr(chr(0x1b))}")
+        except Exception:
+            pass
+        try:
+            ed = self.input_panel.editor.editor
+            ed.handle_key('escape')
+            if hasattr(ed, '_completion_active'):
+                ed._completion_active = False
+            if hasattr(ed, '_completion_items'):
+                ed._completion_items = []
+            if hasattr(ed, '_completion_index'):
+                ed._completion_index = 0
+        except Exception:
+            pass
+
+    def flush_pending_esc_if_stale(self) -> None:
+        """Flush a deferred bare ESC once the debounce window has elapsed.
+
+        Called from the main loop after draining the input queue. If a
+        bare ESC has been sitting long enough that no CSI/SS3 tail is
+        coming, we conclude it was a standalone Esc press and dispatch
+        it now.
+        """
+        if not getattr(self, '_pending_esc', False):
+            return
+        age = time.monotonic() - float(getattr(self, '_pending_esc_time', 0) or 0)
+        if age < _ESC_DEBOUNCE_SEC:
+            return
+        self._pending_esc = False
+        self._pending_esc_time = 0.0
+        self._dispatch_bare_esc()

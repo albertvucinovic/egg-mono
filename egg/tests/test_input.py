@@ -305,15 +305,24 @@ class TestHandleKeyEsc:
     """Tests for Escape key handling."""
 
     def test_esc_clears_completion_popup(self, egg_app, monkeypatch):
-        """Esc should clear active completion state."""
-        # Set up completion state
+        """Esc should clear active completion state.
+
+        Bare ESC is deferred by the debounce (so split escape sequences
+        like SGR mouse reports can re-attach), so the test advances
+        _pending_esc_time past the debounce window and explicitly
+        invokes the stale-flush that the main loop would normally run.
+        """
         egg_app.input_panel.editor.editor._completion_active = True
         egg_app.input_panel.editor.editor._completion_items = ["item1", "item2"]
         egg_app.input_panel.editor.editor._completion_index = 1
 
-        result = egg_app.handle_key('\x1b')  # Esc
-
+        result = egg_app.handle_key('\x1b')
         assert result is True
+
+        # Simulate the debounce window elapsing then a main-loop flush.
+        egg_app._pending_esc_time -= 1.0
+        egg_app.flush_pending_esc_if_stale()
+
         assert egg_app.input_panel.editor.editor._completion_active is False
         assert egg_app.input_panel.editor.editor._completion_items == []
         assert egg_app.input_panel.editor.editor._completion_index == 0

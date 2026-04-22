@@ -523,6 +523,14 @@ class EggDisplayApp(
                                     break
                         except Exception:
                             pass
+                        # A bare ESC is held briefly so split escape
+                        # sequences (e.g. SGR mouse reports delivered
+                        # across multiple readkey calls) can re-attach;
+                        # flush any that have aged past the debounce.
+                        try:
+                            self.flush_pending_esc_if_stale()
+                        except Exception:
+                            pass
                         # Update panels content (sets dirty flags on changes)
                         self.update_panels()
                         # Only rebuild when something changed
