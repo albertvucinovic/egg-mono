@@ -234,11 +234,16 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     _ALT_EXIT = "\x1b[?1049l"
 
     # Mouse tracking (enables wheel-scroll events in alt-screen, where the
-    # terminal's native scrollback is gone). Reported in SGR extended format
-    # (?1006) so coords can exceed 223. User can hold Shift to bypass and
-    # use native text selection in most terminals.
-    _MOUSE_ENABLE = "\x1b[?1000;1002;1006h"
-    _MOUSE_DISABLE = "\x1b[?1000;1002;1006l"
+    # terminal's native scrollback is gone). ?1000 = basic button events
+    # (covers wheel, which xterm reports as press with button 64/65);
+    # ?1006 = SGR extended format so coords can exceed 223. We
+    # deliberately do NOT enable ?1002 (drag/motion-while-held) — it
+    # bursts many events that raise the probability of readchar split
+    # delivery and we don't consume motion events anyway. Shift-click
+    # still bypasses mouse tracking in most terminals for native
+    # text selection.
+    _MOUSE_ENABLE = "\x1b[?1000;1006h"
+    _MOUSE_DISABLE = "\x1b[?1000;1006l"
 
     # Cap on retained scrollback rows, to keep memory bounded over long sessions.
     _SCROLLBACK_CAP = 10000
