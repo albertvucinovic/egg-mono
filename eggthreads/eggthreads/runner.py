@@ -39,6 +39,191 @@ def _now_plus(ttl_sec: int) -> str:
     return (datetime.utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
 
 
+# Thresholds above which a tool output is considered "long" and should
+# be stashed to disk with a preview sent to the LLM instead of the full
+# content. Matches the existing "prompt the user" thresholds so
+# behaviour is continuous with prior versions.
+LONG_OUTPUT_LINE_THRESHOLD = 800
+LONG_OUTPUT_CHAR_THRESHOLD = 100_000
+
+# Size of the preview that gets embedded in the tool message when
+# the full output is stashed to disk.
+PREVIEW_MAX_LINES = 200
+PREVIEW_MAX_CHARS = 8000
+
+
+def stash_tool_output_and_build_preview(
+    db,
+    thread_id: str,
+    tool_call_id: str,
+    full_output: str,
+    *,
+    max_lines: int = PREVIEW_MAX_LINES,
+    max_chars: int = PREVIEW_MAX_CHARS,
+) -> tuple:
+    """Persist *full_output* to disk and return ``(preview, saved_path)``.
+
+    The file is created under the *thread's own working directory*
+    (``<thread_wd>/.egg_outputs/``) rather than the shared project
+    ``.egg/`` so that subthreads with restricted (subdirectory)
+    sandboxes don't see each other's stashed outputs through their own
+    workspace. Each thread's stash lives in the same filesystem scope
+    as the thread's sandbox — Docker / srt subdir-binds isolate it
+    naturally; bwrap still exposes the whole host ``/`` read-only (a
+    pre-existing property of the bwrap provider), but at least the
+    feature doesn't add new cross-thread disclosure by default.
+
+    The returned *preview* contains at most *max_lines*/*max_chars* of
+    the output followed by a note that references the saved file via
+    its workspace-relative path (e.g. ``.egg_outputs/abc.txt``), which
+    resolves identically inside and outside the sandbox.
+
+    Returns ``(preview, "")`` if the file could not be written — the
+    preview will still be returned so the caller can proceed.
+    """
+    if not isinstance(full_output, str):
+        full_output = str(full_output or "")
+
+    # Resolve the stash directory: the thread's own working directory
+    # (so subthreads with subdir sandboxes get their own scope). Fall
+    # back to the db directory if thread wd can't be resolved.
+    saved_path = ""  # absolute host path (for runner diagnostics)
+    relative_path = ""  # workspace-relative path (for the LLM)
+    try:
+        from pathlib import Path as _Path
+        workspace: Optional[_Path] = None
+        try:
+            # Import lazily to avoid a circular dependency at module load.
+            from .api import get_thread_working_directory as _get_wd
+            workspace = _Path(_get_wd(db, thread_id)).resolve()
+        except Exception:
+            workspace = None
+        if workspace is None or not workspace.exists():
+            db_path = getattr(db, "path", "") or ""
+            if db_path:
+                workspace = _Path(db_path).resolve().parent.parent
+            else:
+                workspace = _Path.cwd().resolve()
+        out_dir = workspace / ".egg_outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tid_suffix = str(thread_id or "thread")[-8:]
+        tcid_suffix = str(tool_call_id or "tc")[-8:]
+        ts = int(time.time())
+        rand = os.urandom(4).hex()
+        path = out_dir / f"{tid_suffix}_{tcid_suffix}_{ts}_{rand}.txt"
+        path.write_text(full_output, encoding="utf-8")
+        # Restrict to owner-readable so even in bwrap the file is less
+        # casually visible to other users on a multi-user host. Does
+        # not protect against a sandboxed process running as the same
+        # uid — that's a bwrap-level concern.
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+        saved_path = str(path)
+        try:
+            relative_path = str(path.relative_to(workspace))
+        except ValueError:
+            # Fallback: file isn't under the workspace — emit the absolute
+            # path and hope the reader is on the same filesystem.
+            relative_path = saved_path
+    except Exception:
+        saved_path = ""
+        relative_path = ""
+
+    lines = full_output.splitlines()
+    line_count = len(lines)
+    char_count = len(full_output)
+
+    preview = full_output
+    if line_count > max_lines:
+        preview = "\n".join(lines[:max_lines])
+    if len(preview) > max_chars:
+        preview = preview[:max_chars]
+
+    if preview != full_output:
+        preview = preview.rstrip()
+        if relative_path:
+            preview += (
+                f"\n\n[Preview only — first {min(line_count, max_lines)} lines / "
+                f"{min(char_count, max_chars)} chars of {line_count} lines, "
+                f"{char_count} chars total. Full output saved (workspace-relative) "
+                f"to: {relative_path}. Read this file from the workspace root "
+                "(e.g. with cat/head/tail) if you need the complete content — "
+                "the path resolves identically inside or outside any sandbox.]"
+            )
+        else:
+            preview += (
+                f"\n\n[Output truncated for preview ({line_count} lines, "
+                f"{char_count} chars); full output could not be saved to disk.]"
+            )
+
+    return preview, saved_path
+
+
+def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_output: str) -> None:
+    """Emit a ``tool_call.output_approval`` event for a finished tool call.
+
+    No-op if an explicit decision already exists (e.g. user-cancelled
+    via Ctrl+C). Small outputs are approved as ``whole``; large outputs
+    are stashed to disk via :func:`stash_tool_output_and_build_preview`
+    and approved as ``partial`` with a preview+file-path note so the
+    LLM can retrieve the full content on demand.
+    """
+    try:
+        from .tool_state import build_tool_call_states
+        states_now = build_tool_call_states(db, thread_id)
+        existing = states_now.get(str(tool_call_id))
+        has_decision = bool(getattr(existing, "output_decision", None))
+    except Exception:
+        has_decision = False
+    if has_decision:
+        return
+
+    if not isinstance(full_output, str):
+        full_output = str(full_output or "")
+
+    line_count = len(full_output.splitlines())
+    char_count = len(full_output)
+    is_long = (
+        line_count > LONG_OUTPUT_LINE_THRESHOLD
+        or char_count > LONG_OUTPUT_CHAR_THRESHOLD
+    )
+
+    if is_long:
+        preview, saved = stash_tool_output_and_build_preview(
+            db, thread_id, tool_call_id, full_output,
+        )
+        decision = "partial"
+        reason = (
+            f"Auto: output too long ({line_count} lines, {char_count} chars) — "
+            f"stashed to {saved}" if saved else
+            f"Auto: output too long ({line_count} lines, {char_count} chars); "
+            "stash failed, sending preview only"
+        )
+    else:
+        preview = full_output
+        decision = "whole"
+        reason = "Auto: output below size thresholds"
+
+    try:
+        db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="tool_call.output_approval",
+            msg_id=None,
+            invoke_id=None,
+            payload={
+                "tool_call_id": tool_call_id,
+                "decision": decision,
+                "reason": reason,
+                "preview": preview,
+            },
+        )
+    except Exception:
+        pass
+
+
 def _no_api_calls_mode(cfg: Optional['RunnerConfig'] = None) -> bool:
     """Check if NO_API_CALLS mode is enabled (read-only viewing mode).
 
@@ -1570,35 +1755,14 @@ class ThreadRunner:
             },
         )
 
-        # Auto output-approval for small outputs, unless the UI (e.g.
-        # Ctrl+C) already recorded an explicit decision for this
-        # tool_call.
+        # Auto output-approval: small outputs get decision='whole' and
+        # go through verbatim; long outputs are stashed to disk and get
+        # decision='partial' with a preview that references the saved
+        # file so the LLM can fetch the full content on demand. A UI
+        # cancellation (Ctrl+C) that already recorded an explicit
+        # decision is respected.
         try:
-            lines = full_result.splitlines() if isinstance(full_result, str) else []
-            line_count = len(lines)
-            char_count = len(full_result) if isinstance(full_result, str) else 0
-            is_long = line_count > 800 or char_count > 100000
-            try:
-                from .tool_state import build_tool_call_states
-                states_now = build_tool_call_states(self.db, self.thread_id)
-                existing = states_now.get(str(tc.tool_call_id))
-                has_decision = bool(getattr(existing, 'output_decision', None))
-            except Exception:
-                has_decision = False
-            if not is_long and not has_decision:
-                self.db.append_event(
-                    event_id=_os.urandom(10).hex(),
-                    thread_id=self.thread_id,
-                    type_='tool_call.output_approval',
-                    msg_id=None,
-                    invoke_id=None,
-                    payload={
-                        'tool_call_id': tc.tool_call_id,
-                        'decision': 'whole',
-                        'reason': 'Auto: output below size thresholds',
-                        'preview': full_result,
-                    },
-                )
+            _emit_auto_output_approval(self.db, self.thread_id, tc.tool_call_id, full_result)
         except Exception:
             pass
 
@@ -1796,45 +1960,15 @@ class ThreadRunner:
                         'output': full_result,
                     },
                 )
-                # Auto output-approval for small outputs (chat.sh style):
-                # - if output is not excessively long in lines or characters,
-                #   mark it as decision="whole" so the UI does not need to
-                #   prompt the user and the runner can publish it on the next
-                #   pass. Large outputs will remain in TC4 and require an
-                #   explicit tool_call.output_approval from the UI.
+                # Auto output-approval: small outputs get decision='whole'
+                # and go through verbatim; long outputs are stashed to
+                # disk and get decision='partial' with a preview that
+                # references the saved file so the LLM can fetch the
+                # full content on demand. A UI cancellation (Ctrl+C)
+                # that already recorded an explicit decision is respected.
                 try:
-                    lines = full_result.splitlines() if isinstance(full_result, str) else []
-                    line_count = len(lines)
-                    char_count = len(full_result) if isinstance(full_result, str) else 0
-                    is_long = line_count > 800 or char_count > 100000
-                    # If a user/output decision already exists for this tool
-                    # call (e.g. Ctrl+C marked it as "omit"), do not
-                    # override it with an automatic "whole" approval.
-                    try:
-                        from .tool_state import build_tool_call_states
-                        states_now = build_tool_call_states(self.db, self.thread_id)
-                        existing = states_now.get(str(tc.tool_call_id))
-                        has_decision = bool(getattr(existing, 'output_decision', None))
-                    except Exception:
-                        has_decision = False
-                    if not is_long and not has_decision:
-                        self.db.append_event(
-                            event_id=os.urandom(10).hex(),
-                            thread_id=self.thread_id,
-                            type_='tool_call.output_approval',
-                            msg_id=None,
-                            invoke_id=None,
-                            payload={
-                                'tool_call_id': tc.tool_call_id,
-                                'decision': 'whole',
-                                'reason': 'Auto: output below size thresholds',
-                                'preview': full_result,
-                            },
-                        )
+                    _emit_auto_output_approval(self.db, self.thread_id, tc.tool_call_id, full_result)
                 except Exception:
-                    # Best-effort only; on any error the call will remain
-                    # in TC4 and the UI can still request explicit output
-                    # approval from the user.
                     pass
 
             # Output approval done (TC5) -> publish final tool message based on

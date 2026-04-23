@@ -192,7 +192,18 @@ class ApprovalMixin:
                     if decision == 'whole':
                         preview = full
                     elif decision == 'partial':
-                        preview = shorten_output_preview(full)
+                        # Stash the full output to disk and build a
+                        # preview that references the saved file —
+                        # same behaviour as the runner's auto-resolve
+                        # path, so user-initiated 'n' choices preserve
+                        # the complete output too.
+                        try:
+                            from eggthreads.runner import stash_tool_output_and_build_preview
+                            preview, _saved = stash_tool_output_and_build_preview(
+                                self.db, self.current_thread, tcid, full,
+                            )
+                        except Exception:
+                            preview = shorten_output_preview(full)
                     else:
                         preview = "Output omitted."
                     self.db.append_event(
