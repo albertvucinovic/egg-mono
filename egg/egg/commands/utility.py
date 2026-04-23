@@ -1,14 +1,78 @@
 """Utility command mixins for the egg application."""
 from __future__ import annotations
 
+import shutil
+import subprocess
+import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..utils import COMMANDS_TEXT, read_clipboard
+from ..utils import COMMANDS_TEXT, ROOT, read_clipboard
 from eggthreads import set_context_limit, get_context_limit, get_thread_scheduling, set_thread_scheduling, UNSET, parse_args
 
 
+def _find_searxng_dir() -> Optional[Path]:
+    """Locate the SearXNG docker-compose directory.
+
+    The canonical location is the eggthreads.web.searxng package
+    (``eggthreads/eggthreads/web/searxng/``), shipped alongside the
+    ``SearxngBackend`` implementation. We resolve it via the package's
+    ``__file__`` so it works whether eggthreads is installed editable
+    or from a wheel with package-data.
+    """
+    try:
+        import eggthreads.web.searxng as _pkg
+        pkg_dir = Path(_pkg.__file__).resolve().parent
+    except Exception:
+        pkg_dir = None
+
+    if pkg_dir is not None and (pkg_dir / "docker-compose.yml").is_file():
+        return pkg_dir
+
+    # Fallback for older checkouts: walk upward from the egg package dir
+    # looking for any searxng/ dir containing docker-compose.yml.
+    candidates: List[Path] = []
+    here = ROOT
+    for _ in range(5):
+        candidates.append(here / "searxng")
+        candidates.append(here / "eggthreads" / "eggthreads" / "web" / "searxng")
+        if here.parent == here:
+            break
+        here = here.parent
+    seen: set[Path] = set()
+    for c in candidates:
+        c = c.resolve()
+        if c in seen:
+            continue
+        seen.add(c)
+        if (c / "docker-compose.yml").is_file():
+            return c
+    return None
+
+
+def _resolve_compose_cmd() -> Optional[List[str]]:
+    """Return the argv prefix for docker compose, preferring v2 plugin.
+
+    Returns None if neither form is installed.
+    """
+    if shutil.which("docker"):
+        try:
+            probe = subprocess.run(
+                ["docker", "compose", "version"],
+                capture_output=True,
+                timeout=5,
+            )
+            if probe.returncode == 0:
+                return ["docker", "compose"]
+        except Exception:
+            pass
+    if shutil.which("docker-compose"):
+        return ["docker-compose"]
+    return None
+
+
 class UtilityCommandsMixin:
-    """Mixin providing utility commands: /help, /cost, /paste, /quit, /enterMode."""
+    """Mixin providing utility commands: /help, /cost, /paste, /quit, /enterMode, /startSearxng."""
 
     def cmd_help(self, arg: str) -> None:
         """Handle /help command - show available commands."""
@@ -315,3 +379,160 @@ class UtilityCommandsMixin:
             messages.append(f"API timeout set to {timeout_str}")
 
         self.log_system(f"Thread {target_thread[-8:]}: {', '.join(messages)}")
+
+    def _run_searxng_compose(
+        self,
+        compose_args: List[str],
+        *,
+        action: str,
+        starting_msg: str,
+        success_summary: str,
+        timeout_sec: int = 600,
+    ) -> None:
+        """Shared helper for /startSearxng and /stopSearxng.
+
+        Runs ``<compose> <compose_args...>`` in the ``searxng/`` directory
+        on a background thread, surfacing output both as a concise System
+        log line and a full console block (like /help).
+        """
+        searxng_dir = _find_searxng_dir()
+        if searxng_dir is None:
+            msg = (
+                "could not locate searxng/docker-compose.yml "
+                "(expected a 'searxng/' dir near the egg-mono root)."
+            )
+            self.log_system(f"SearXNG {action}: {msg}")
+            try:
+                self.console_print_block(
+                    f"SearXNG {action}", msg, border_style="red"
+                )
+            except Exception:
+                pass
+            return
+
+        compose = _resolve_compose_cmd()
+        if compose is None:
+            msg = (
+                "neither 'docker compose' nor 'docker-compose' is on PATH. "
+                "Install Docker Engine + compose, then re-run the command."
+            )
+            self.log_system(f"SearXNG {action}: {msg}")
+            try:
+                self.console_print_block(
+                    f"SearXNG {action}", msg, border_style="red"
+                )
+            except Exception:
+                pass
+            return
+
+        argv = compose + compose_args
+        self.log_system(
+            f"SearXNG {action}: {starting_msg} (running `{' '.join(argv)}` "
+            f"in {searxng_dir}; see console for output)"
+        )
+
+        def _runner() -> None:
+            try:
+                proc = subprocess.run(
+                    argv,
+                    cwd=str(searxng_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                )
+            except subprocess.TimeoutExpired:
+                try:
+                    self.log_system(
+                        f"SearXNG {action}: timed out after {timeout_sec}s."
+                    )
+                    self.console_print_block(
+                        f"SearXNG {action}",
+                        f"Timed out after {timeout_sec}s running `{' '.join(argv)}`.",
+                        border_style="red",
+                    )
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                try:
+                    self.log_system(f"SearXNG {action}: failed to launch: {e}")
+                    self.console_print_block(
+                        f"SearXNG {action}",
+                        f"Failed to launch `{' '.join(argv)}`:\n{e}",
+                        border_style="red",
+                    )
+                except Exception:
+                    pass
+                return
+
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            combined_parts: List[str] = []
+            if stdout:
+                combined_parts.append(stdout)
+            if stderr:
+                combined_parts.append(stderr)
+            combined = "\n".join(combined_parts) or "(no output)"
+            # Cap very long output so the console block stays readable.
+            if len(combined) > 4000:
+                combined = combined[:4000] + "\n... (truncated)"
+
+            if proc.returncode == 0:
+                try:
+                    self.log_system(f"SearXNG {action}: done. {success_summary}")
+                    self.console_print_block(
+                        f"SearXNG {action}",
+                        f"{success_summary}\n\n$ {' '.join(argv)}\n{combined}",
+                        border_style="green",
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.log_system(
+                        f"SearXNG {action}: failed (exit {proc.returncode}). See console."
+                    )
+                    self.console_print_block(
+                        f"SearXNG {action}",
+                        f"Exit code: {proc.returncode}\n$ {' '.join(argv)}\n{combined}",
+                        border_style="red",
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=_runner, name=f"searxng-{action}", daemon=True).start()
+
+    def cmd_startSearxng(self, arg: str) -> None:
+        """Handle /startSearxng - start the SearXNG docker service in the background.
+
+        Runs ``docker compose up -d`` inside the repo's ``searxng/`` dir
+        so the ``web_search`` / ``fetch_url`` tools have a local backend
+        to talk to. The first run may pull the image (~200 MB).
+        """
+        self._run_searxng_compose(
+            ["up", "-d"],
+            action="start",
+            starting_msg="starting container (first run may pull the image)",
+            success_summary=(
+                "Container up at http://localhost:8888. "
+                "web_search / fetch_url will now use SearXNG."
+            ),
+            timeout_sec=600,
+        )
+
+    def cmd_stopSearxng(self, arg: str) -> None:
+        """Handle /stopSearxng - stop the SearXNG docker service.
+
+        Runs ``docker compose down`` inside the repo's ``searxng/`` dir.
+        """
+        self._run_searxng_compose(
+            ["down"],
+            action="stop",
+            starting_msg="stopping container",
+            success_summary=(
+                "Container stopped. web_search / fetch_url will now fail "
+                "until you /startSearxng again or switch backends "
+                "(EGG_WEB_BACKEND=tavily)."
+            ),
+            timeout_sec=120,
+        )

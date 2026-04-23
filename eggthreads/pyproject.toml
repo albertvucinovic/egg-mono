@@ -8,6 +8,8 @@ dependencies = [
   "rich",
   "uvloop; platform_system != 'Windows'",
   "eggllm>=0.1.0",
+  "requests",
+  "trafilatura",
 ]
 
 [project.optional-dependencies]
@@ -18,5 +20,8 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["eggthreads"]
+include = ["eggthreads", "eggthreads.*"]
 exclude = ["temp*"]
+
+[tool.setuptools.package-data]
+"eggthreads.web.searxng" = ["docker-compose.yml", "settings.yml", "README.md"]

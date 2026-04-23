@@ -41,6 +41,9 @@ Commands:
       native scrollback (HEAD behavior, smallest diff, shell-integrated).
   Auth (ChatGPT OAuth):
     /login, /logout, /authStatus
+  Web search backend:
+    /startSearxng — start the local SearXNG docker container (used by web_search / fetch_url)
+    /stopSearxng — stop the local SearXNG docker container
   Other:
     /enterMode <send|newline>, /cost, /paste, /quit
     /setContextLimit [limit]

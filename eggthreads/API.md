@@ -1006,8 +1006,8 @@ Returns a registry pre-populated with common tools:
 - spawn_agent: Create child threads for delegation
 - spawn_agent_auto: Create auto-approved child threads
 - replace_between: File text replacement
-- search_tavily: Web search via Tavily API
-- fetch_tavily: Fetch and extract page content via Tavily
+- web_search: Web search via the configured backend (SearXNG by default)
+- fetch_url: Fetch and extract readable markdown for a URL
 - wait: Synchronize on child thread completion
 
 Returns:

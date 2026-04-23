@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from eggthreads.tools import create_default_tools
+from eggthreads.web import WebBackendError
+from eggthreads.web.tavily import TavilyBackend
 
 
 class _MockResponse:
@@ -22,23 +24,30 @@ def tools():
     return create_default_tools()
 
 
-def test_fetch_tavily_requires_api_key(monkeypatch, tools):
+@pytest.fixture(autouse=True)
+def _force_tavily_backend(monkeypatch):
+    # The web_search / fetch_url tools dispatch through the currently
+    # selected WebBackend; pin it to Tavily for this file.
+    monkeypatch.setenv('EGG_WEB_BACKEND', 'tavily')
+
+
+def test_fetch_url_requires_api_key(monkeypatch, tools):
     monkeypatch.delenv('TAVILY_API_KEY', raising=False)
 
-    result = tools.execute('fetch_tavily', {'url': 'https://example.com'})
+    result = tools.execute('fetch_url', {'url': 'https://example.com'})
 
     assert 'TAVILY_API_KEY' in result
 
 
-def test_fetch_tavily_requires_url(monkeypatch, tools):
+def test_fetch_url_requires_url(monkeypatch, tools):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
-    result = tools.execute('fetch_tavily', {})
+    result = tools.execute('fetch_url', {})
 
     assert '"url" is required' in result
 
 
-def test_fetch_tavily_uses_simple_markdown_request(monkeypatch, tools):
+def test_tavily_backend_uses_simple_markdown_request(monkeypatch, tools):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
     calls = []
@@ -63,7 +72,7 @@ def test_fetch_tavily_uses_simple_markdown_request(monkeypatch, tools):
     import requests
     monkeypatch.setattr(requests, 'post', mock_post)
 
-    result = tools.execute('fetch_tavily', {'url': 'https://example.com'})
+    result = tools.execute('fetch_url', {'url': 'https://example.com'})
 
     assert len(calls) == 1
     call = calls[0]
@@ -80,7 +89,7 @@ def test_fetch_tavily_uses_simple_markdown_request(monkeypatch, tools):
     assert 'Body text' in result
 
 
-def test_fetch_tavily_formats_failed_result(monkeypatch, tools):
+def test_tavily_backend_formats_failed_result(monkeypatch, tools):
     monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
 
     def mock_post(url, json=None, headers=None, timeout=None):
@@ -97,18 +106,52 @@ def test_fetch_tavily_formats_failed_result(monkeypatch, tools):
     import requests
     monkeypatch.setattr(requests, 'post', mock_post)
 
-    result = tools.execute('fetch_tavily', {'url': 'https://bad.example.com'})
+    result = tools.execute('fetch_url', {'url': 'https://bad.example.com'})
 
     assert 'failed to fetch https://bad.example.com: timeout' in result
 
 
-def test_fetch_tavily_is_exposed_in_tool_spec(tools):
+def test_fetch_url_is_exposed_in_tool_spec(tools):
     specs = tools.tools_spec()
     by_name = {spec['function']['name']: spec for spec in specs}
 
-    assert 'fetch_tavily' in by_name
-    props = by_name['fetch_tavily']['function']['parameters']['properties']
+    assert 'fetch_url' in by_name
+    props = by_name['fetch_url']['function']['parameters']['properties']
     assert props == {
         'url': {'type': 'string', 'description': 'URL to fetch.'},
     }
-    assert by_name['fetch_tavily']['function']['parameters']['required'] == ['url']
+    assert by_name['fetch_url']['function']['parameters']['required'] == ['url']
+
+
+def test_tavily_tool_aliases_are_gone(tools):
+    """The historical search_tavily / fetch_tavily aliases were removed
+    once the pluggable backend landed."""
+    names = {spec['function']['name'] for spec in tools.tools_spec()}
+    assert 'search_tavily' not in names
+    assert 'fetch_tavily' not in names
+
+
+def test_tavily_backend_search_parses_results(monkeypatch):
+    monkeypatch.setenv('TAVILY_API_KEY', 'tvly-test')
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        assert url == 'https://api.tavily.com/search'
+        return _MockResponse(200, {
+            'results': [
+                {'title': 'A', 'url': 'https://a.example', 'content': 'x'},
+                {'title': 'B', 'url': 'https://b.example', 'content': 'y'},
+            ]
+        })
+
+    import requests
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    results = TavilyBackend().search('hello', max_results=2)
+    assert [r.url for r in results] == ['https://a.example', 'https://b.example']
+
+
+def test_tavily_backend_search_missing_key_raises():
+    import os
+    os.environ.pop('TAVILY_API_KEY', None)
+    with pytest.raises(WebBackendError):
+        TavilyBackend(api_key='').search('x')

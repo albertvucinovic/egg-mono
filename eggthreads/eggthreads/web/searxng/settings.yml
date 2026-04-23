@@ -1,0 +1,28 @@
+# SearXNG settings for egg-mono's web_search / fetch_url tools.
+# The key change from the distributed defaults is enabling the `json`
+# response format so eggthreads can consume the /search endpoint
+# programmatically.
+
+use_default_settings: true
+
+general:
+  instance_name: "egg-searxng"
+
+server:
+  # 32-byte secret; change in production
+  secret_key: "0b1b5b51d4c7a660d1db3659c36f5fc0fc1df36935d5d8d218f3615e639fa2ae"
+  limiter: false
+  image_proxy: true
+  bind_address: "0.0.0.0"
+  port: 8080
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+  default_theme: simple

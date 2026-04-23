@@ -104,8 +104,8 @@ def create_default_tools() -> ToolRegistry:
     - spawn_agent: Create child threads for delegation
     - spawn_agent_auto: Create auto-approved child threads
     - replace_between: File text replacement
-    - search_tavily: Web search via Tavily API
-    - fetch_tavily: Fetch and extract page content via Tavily
+    - web_search: Web search via the configured backend (SearXNG by default)
+    - fetch_url: Fetch and extract readable markdown for a URL
     - wait: Synchronize on child thread completion
 
     Returns:
@@ -589,118 +589,68 @@ def create_default_tools() -> ToolRegistry:
         impl=_replace_between,
     )
 
-    # search_tavily (simple wrapper; requires TAVILY_API_KEY env var)
-    def _search_tavily(args: Dict[str, Any]):
-        import os as _os, requests as _requests
-        query = args.get('query', '')
-        api_key = _os.environ.get('TAVILY_API_KEY')
-        if not api_key:
-            return 'Error: TAVILY_API_KEY not set in environment.'
+    # web_search / fetch_url (+ tavily aliases) backed by a pluggable
+    # WebBackend. Default backend is SearXNG; override with
+    # EGG_WEB_BACKEND=tavily to use Tavily's API instead.
+    from .web import WebBackendError, get_backend as _get_web_backend
+
+    def _web_search(args: Dict[str, Any]):
+        query = str(args.get('query') or '').strip()
+        if not query:
+            return 'Error: "query" is required.'
         try:
-            resp = _requests.post(
-                'https://api.tavily.com/search',
-                json={'query': query, 'max_results': 5, 'include_answer': False, 'search_depth': 'basic'},
-                headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                return f"Error: Tavily API status {resp.status_code}: {resp.text[:400]}"
-            data = resp.json()
-            results = data.get('results') or data.get('data') or []
-            lines = []
-            for r in results[:5]:
-                title = (r.get('title') or '').strip()
-                url = (r.get('url') or r.get('link') or '').strip()
-                if title or url:
-                    lines.append(f"- {title}  {url}")
-            return "\n".join(lines) or "No results."
+            backend = _get_web_backend()
+            results = backend.search(query, max_results=5)
+        except WebBackendError as e:
+            return f"Error: {e}"
         except Exception as e:
-            return f"Error: Tavily request failed: {e}"
+            return f"Error: web_search failed: {e}"
+        if not results:
+            return "No results."
+        return "\n".join(f"- {r.title}  {r.url}" for r in results if r.title or r.url)
 
-    reg.register(
-        name='search_tavily',
-        description='Perform a web search (using Tavily) and return up to 5 results with titles and URLs.',
-        parameters_schema={
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-        },
-        impl=_search_tavily,
-    )
-
-    # fetch_tavily: extract page content from a specific URL via
-    # Tavily's /extract endpoint. Keep the schema intentionally simple
-    # so it is easy for any LLM to use.
-    def _fetch_tavily(args: Dict[str, Any]):
-        import os as _os, requests as _requests
-
-        api_key = _os.environ.get('TAVILY_API_KEY')
-        if not api_key:
-            return 'Error: TAVILY_API_KEY not set in environment.'
-
+    def _fetch_url(args: Dict[str, Any]):
         url = str(args.get('url') or '').strip()
         if not url:
             return 'Error: "url" is required.'
-
-        body: Dict[str, Any] = {
-            'urls': [url],
-            # Markdown keeps structure while still remaining plain text.
-            'format': 'markdown',
-        }
-
         try:
-            resp = _requests.post(
-                'https://api.tavily.com/extract',
-                json=body,
-                headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                return f"Error: Tavily API status {resp.status_code}: {resp.text[:400]}"
-
-            data = resp.json()
-            results = data.get('results') or []
-            failed_results = data.get('failed_results') or []
-
-            if results:
-                first = results[0] if isinstance(results[0], dict) else {}
-                result_url = str(first.get('url') or url).strip() or url
-                content = first.get('raw_content')
-                if not isinstance(content, str):
-                    content = ''
-                content = content.strip()
-                if content:
-                    return f"URL: {result_url}\n\n{content}"
-                return f"URL: {result_url}\n\n(no content)"
-
-            if failed_results:
-                first = failed_results[0]
-                if isinstance(first, dict):
-                    failed_url = str(first.get('url') or url).strip() or url
-                    reason = str(first.get('error') or first.get('reason') or 'fetch failed').strip()
-                    return f"Error: failed to fetch {failed_url}: {reason}"
-                s = str(first).strip()
-                if s:
-                    return f"Error: failed to fetch {url}: {s}"
-
-            return 'No results.'
+            backend = _get_web_backend()
+            return backend.fetch(url)
+        except WebBackendError as e:
+            return f"Error: {e}"
         except Exception as e:
-            return f"Error: Tavily request failed: {e}"
+            return f"Error: fetch_url failed: {e}"
+
+    _search_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    }
+    _fetch_schema = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "URL to fetch."},
+        },
+        "required": ["url"],
+    }
 
     reg.register(
-        name='fetch_tavily',
+        name='web_search',
         description=(
-            'Fetch and extract readable markdown content from a URL using '
-            'Tavily. Use this when you already know the page URL.'
+            'Perform a web search and return up to 5 results with titles and URLs. '
+            'Backend is selected via EGG_WEB_BACKEND (default: searxng).'
         ),
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "URL to fetch."},
-            },
-            "required": ["url"],
-        },
-        impl=_fetch_tavily,
+        parameters_schema=_search_schema,
+        impl=_web_search,
+    )
+    reg.register(
+        name='fetch_url',
+        description=(
+            'Fetch and extract readable markdown from a URL. Use this when you '
+            'already know the page URL.'
+        ),
+        parameters_schema=_fetch_schema,
+        impl=_fetch_url,
     )
 
     # wait: synchronize on other threads and return their last assistant
