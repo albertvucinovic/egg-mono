@@ -589,25 +589,56 @@ def create_default_tools() -> ToolRegistry:
         impl=_replace_between,
     )
 
-    # web_search / fetch_url (+ tavily aliases) backed by a pluggable
-    # WebBackend. Default backend is SearXNG; override with
-    # EGG_WEB_BACKEND=tavily to use Tavily's API instead.
+    # web_search / fetch_url backed by a pluggable WebBackend.
+    # Default backend is SearXNG; override with EGG_WEB_BACKEND=tavily
+    # to use Tavily's API instead.
     from .web import WebBackendError, get_backend as _get_web_backend
+
+    # Default result count: 10 (roughly SearXNG's natural "one page"
+    # once engines are deduplicated). Override per-process via
+    # EGG_WEB_MAX_RESULTS, or per-call via the tool's max_results arg.
+    _WEB_RESULTS_CAP = 25
+
+    def _resolve_max_results(args: Dict[str, Any]) -> int:
+        raw = args.get('max_results')
+        if raw is None:
+            raw = os.environ.get('EGG_WEB_MAX_RESULTS')
+        try:
+            n = int(raw) if raw is not None and str(raw).strip() != '' else 10
+        except (TypeError, ValueError):
+            n = 10
+        if n < 1:
+            n = 1
+        if n > _WEB_RESULTS_CAP:
+            n = _WEB_RESULTS_CAP
+        return n
 
     def _web_search(args: Dict[str, Any]):
         query = str(args.get('query') or '').strip()
         if not query:
             return 'Error: "query" is required.'
+        n = _resolve_max_results(args)
         try:
             backend = _get_web_backend()
-            results = backend.search(query, max_results=5)
+            results = backend.search(query, max_results=n)
         except WebBackendError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error: web_search failed: {e}"
         if not results:
             return "No results."
-        return "\n".join(f"- {r.title}  {r.url}" for r in results if r.title or r.url)
+        lines = []
+        for r in results:
+            if not (r.title or r.url):
+                continue
+            snippet = (r.snippet or '').strip().replace('\n', ' ')
+            if len(snippet) > 200:
+                snippet = snippet[:200].rstrip() + '…'
+            if snippet:
+                lines.append(f"- {r.title}  {r.url}\n    {snippet}")
+            else:
+                lines.append(f"- {r.title}  {r.url}")
+        return "\n".join(lines)
 
     def _fetch_url(args: Dict[str, Any]):
         url = str(args.get('url') or '').strip()
@@ -623,7 +654,18 @@ def create_default_tools() -> ToolRegistry:
 
     _search_schema = {
         "type": "object",
-        "properties": {"query": {"type": "string"}},
+        "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "max_results": {
+                "type": "integer",
+                "description": (
+                    "Maximum number of results to return "
+                    f"(default 10, max {_WEB_RESULTS_CAP})."
+                ),
+                "minimum": 1,
+                "maximum": _WEB_RESULTS_CAP,
+            },
+        },
         "required": ["query"],
     }
     _fetch_schema = {
@@ -637,7 +679,8 @@ def create_default_tools() -> ToolRegistry:
     reg.register(
         name='web_search',
         description=(
-            'Perform a web search and return up to 5 results with titles and URLs. '
+            'Perform a web search and return results with titles, URLs, and short snippets. '
+            f'Defaults to 10 results (cap {_WEB_RESULTS_CAP}); pass max_results to adjust. '
             'Backend is selected via EGG_WEB_BACKEND (default: searxng).'
         ),
         parameters_schema=_search_schema,

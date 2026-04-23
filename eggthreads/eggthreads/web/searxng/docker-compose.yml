@@ -1,10 +1,22 @@
 version: "3.8"
 
 services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: egg-searxng-valkey
+    command: valkey-server --save "" --appendonly no --loglevel warning
+    restart: unless-stopped
+    networks:
+      - searxng
+    tmpfs:
+      - /data
+
   searxng:
     image: searxng/searxng:latest
     container_name: egg-searxng
     restart: unless-stopped
+    depends_on:
+      - valkey
     ports:
       - "127.0.0.1:8888:8080"
     volumes:
@@ -12,5 +24,11 @@ services:
     environment:
       - SEARXNG_BASE_URL=http://localhost:8888/
       - INSTANCE_NAME=egg-searxng
+      - SEARXNG_REDIS_URL=valkey://valkey:6379/0
       - UWSGI_WORKERS=2
       - UWSGI_THREADS=4
+    networks:
+      - searxng
+
+networks:
+  searxng:

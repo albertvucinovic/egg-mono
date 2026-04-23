@@ -1,7 +1,14 @@
 # SearXNG settings for egg-mono's web_search / fetch_url tools.
-# The key change from the distributed defaults is enabling the `json`
-# response format so eggthreads can consume the /search endpoint
-# programmatically.
+#
+# Two changes vs the distributed defaults:
+#   1. Enable the `json` response format so eggthreads can consume
+#      /search programmatically.
+#   2. Disable engines that aggressively fight scraping (Google, Bing,
+#      Yahoo) and lean on engines that either provide official APIs or
+#      tolerate metasearch traffic (DuckDuckGo, Brave, Qwant, Startpage,
+#      Mojeek). This avoids collateral CAPTCHAs on the same public IP
+#      that the user's personal browser uses.
+# See eggthreads/eggthreads/web/searxng/README.md for rationale.
 
 use_default_settings: true
 
@@ -11,10 +18,19 @@ general:
 server:
   # 32-byte secret; change in production
   secret_key: "0b1b5b51d4c7a660d1db3659c36f5fc0fc1df36935d5d8d218f3615e639fa2ae"
-  limiter: false
+  # Limiter = circuit-breaker against agent-loop bursts. Returns HTTP
+  # 429 to the caller when request rate looks bot-like, instead of
+  # letting the query storm reach upstream engines and trip their
+  # CAPTCHAs on our shared IP. Requires the valkey container in
+  # docker-compose.yml; per-request overhead is ~1-3 ms.
+  limiter: true
   image_proxy: true
   bind_address: "0.0.0.0"
   port: 8080
+
+# Valkey backend for the limiter (Redis-compatible fork).
+valkey:
+  url: valkey://valkey:6379/0
 
 search:
   safe_search: 0
@@ -26,3 +42,61 @@ search:
 ui:
   static_use_hash: true
   default_theme: simple
+
+# Engine tuning. We override individual engines from the default set
+# rather than replacing the list wholesale — any engine not listed
+# here keeps its distributed default.
+engines:
+  # --- Disabled: aggressive anti-scraping, known to CAPTCHA-block the
+  # shared home IP which then hits the user's personal browser too. ---
+  - name: google
+    disabled: true
+  - name: google news
+    disabled: true
+  - name: google images
+    disabled: true
+  - name: google videos
+    disabled: true
+  - name: google scholar
+    disabled: true
+  - name: bing
+    disabled: true
+  - name: bing news
+    disabled: true
+  - name: bing images
+    disabled: true
+  - name: bing videos
+    disabled: true
+  - name: yahoo
+    disabled: true
+
+  # --- Preferred general-web engines: privacy-positioned, tolerant of
+  # metasearch, or have official APIs. Explicitly enabled in case a
+  # future SearXNG default flips them off. ---
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: mojeek
+    disabled: false
+
+  # --- Specialty engines worth having enabled for code / research
+  # queries. These are open by charter and never a blocking risk. ---
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: hackernews
+    disabled: false
+  - name: reddit
+    disabled: false

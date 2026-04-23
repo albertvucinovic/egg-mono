@@ -151,3 +151,70 @@ def test_web_search_error_reaches_tool_layer(monkeypatch, tools):
     out = tools.execute('web_search', {'query': 'x'})
     assert 'Error:' in out
     assert '/startSearxng' in out
+
+
+def _mock_n_results(monkeypatch, n: int):
+    def mock_get(url, params=None, headers=None, timeout=None):
+        return _MockResponse(200, {
+            'results': [
+                {
+                    'title': f'Title {i}',
+                    'url': f'https://a{i}.example',
+                    'content': f'Snippet {i}',
+                }
+                for i in range(n)
+            ]
+        })
+    import requests
+    monkeypatch.setattr(requests, 'get', mock_get)
+
+
+def test_web_search_defaults_to_ten(monkeypatch, tools):
+    """Default should be 10 results when neither arg nor env var is set."""
+    monkeypatch.delenv('EGG_WEB_MAX_RESULTS', raising=False)
+    _mock_n_results(monkeypatch, 25)
+    out = tools.execute('web_search', {'query': 'x'})
+    assert out.count('\n- ') + 1 == 10  # 10 result lines
+
+
+def test_web_search_honours_explicit_max_results(monkeypatch, tools):
+    _mock_n_results(monkeypatch, 20)
+    out = tools.execute('web_search', {'query': 'x', 'max_results': 3})
+    assert out.count('\n- ') + 1 == 3
+
+
+def test_web_search_honours_env_default(monkeypatch, tools):
+    monkeypatch.setenv('EGG_WEB_MAX_RESULTS', '7')
+    _mock_n_results(monkeypatch, 20)
+    out = tools.execute('web_search', {'query': 'x'})
+    assert out.count('\n- ') + 1 == 7
+
+
+def test_web_search_caps_absurd_values(monkeypatch, tools):
+    """Values above the cap are clamped; garbage values fall back to 10."""
+    _mock_n_results(monkeypatch, 100)
+    out = tools.execute('web_search', {'query': 'x', 'max_results': 9999})
+    # Count must be at most _WEB_RESULTS_CAP (25) but exactly 25 here
+    # because the mock supplies 100 raw results.
+    assert out.count('\n- ') + 1 == 25
+
+    monkeypatch.setenv('EGG_WEB_MAX_RESULTS', 'not-a-number')
+    out = tools.execute('web_search', {'query': 'x'})
+    assert out.count('\n- ') + 1 == 10  # fell back to default
+
+
+def test_web_search_includes_snippet(monkeypatch, tools):
+    _mock_n_results(monkeypatch, 3)
+    out = tools.execute('web_search', {'query': 'x', 'max_results': 3})
+    # Snippet text should appear indented under each result.
+    assert 'Snippet 0' in out and 'Snippet 2' in out
+    assert 'https://a1.example' in out
+
+
+def test_web_search_schema_advertises_max_results(tools):
+    spec = next(s for s in tools.tools_spec() if s['function']['name'] == 'web_search')
+    props = spec['function']['parameters']['properties']
+    assert 'max_results' in props
+    assert props['max_results']['type'] == 'integer'
+    assert props['max_results']['minimum'] == 1
+    assert props['max_results']['maximum'] >= 20
