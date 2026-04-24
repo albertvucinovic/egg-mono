@@ -589,6 +589,82 @@
             "cache_prompt": 0.0028,
             "output_tokens": 0.042
           }
+        },
+        "deepseek-v4-pro high": {
+          "model_name": "deepseek-v4-pro",
+          "max_tokens": 1000000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "parameters": {
+            "reasoning_effort": "high",
+            "thinking": {
+              "type": "enabled"
+            }
+          },
+          "cost": {
+            "input_tokens": 1.74,
+            "cache_prompt": 0.145,
+            "output_tokens": 3.48
+          }
+        },
+        "deepseek-v4-pro max": {
+          "model_name": "deepseek-v4-pro",
+          "max_tokens": 1000000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "parameters": {
+            "reasoning_effort": "max",
+            "thinking": {
+              "type": "enabled"
+            }
+          },
+          "cost": {
+            "input_tokens": 1.74,
+            "cache_prompt": 0.145,
+            "output_tokens": 3.48
+          }
+        },
+        "deepseek-v4-flash high": {
+          "model_name": "deepseek-v4-flash",
+          "max_tokens": 1000000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "parameters": {
+            "reasoning_effort": "high",
+            "thinking": {
+              "type": "enabled"
+            }
+          },
+          "cost": {
+            "input_tokens": 0.14,
+            "cache_prompt": 0.028,
+            "output_tokens": 0.28
+          }
+        },
+        "deepseek-v4-flash max": {
+          "model_name": "deepseek-v4-flash",
+          "max_tokens": 1000000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "parameters": {
+            "reasoning_effort": "max",
+            "thinking": {
+              "type": "enabled"
+            }
+          },
+          "cost": {
+            "input_tokens": 0.14,
+            "cache_prompt": 0.028,
+            "output_tokens": 0.28
+          }
         }
       }
     },
