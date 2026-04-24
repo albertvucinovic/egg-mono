@@ -24,6 +24,7 @@ from .tool_state import (
 )
 from .tools_config import get_thread_tools_config
 from .tool_call_id import normalize_tool_call_id
+from .terminal_safety import sanitize_terminal_text
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -2256,7 +2257,7 @@ class ThreadRunner:
         if not isinstance(text, str) or not text:
             return text
 
-        cleaned = text
+        cleaned = sanitize_terminal_text(text)
 
         # 2) Secret detection and masking (best-effort, optional dep).
         if not mask_secrets:

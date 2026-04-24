@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..utils import COMMANDS_TEXT, ROOT, read_clipboard
-from eggthreads import set_context_limit, get_context_limit, get_thread_scheduling, set_thread_scheduling, UNSET, parse_args
+from eggthreads import (
+    set_context_limit,
+    get_context_limit,
+    get_thread_scheduling,
+    set_thread_scheduling,
+    UNSET,
+    parse_args,
+    sanitize_terminal_text,
+)
 
 
 def _find_searxng_dir() -> Optional[Path]:
@@ -94,7 +102,8 @@ class UtilityCommandsMixin:
         elif content == '':
             self.log_system('Clipboard is empty.')
         else:
-            self.input_panel.editor.editor.set_text(content)
+            safe_content = sanitize_terminal_text(content)
+            self.input_panel.editor.editor.set_text(safe_content)
             # Move cursor to start of pasted text so user sees beginning
             self.input_panel.editor.editor.cursor.row = 0
             self.input_panel.editor.editor.cursor.col = 0
@@ -102,7 +111,7 @@ class UtilityCommandsMixin:
             # Reset scroll positions to show from start
             self.input_panel._scroll_top = 0
             self.input_panel._hscroll_left = 0
-            self.log_system(f'Pasted {len(content)} characters from clipboard.')
+            self.log_system(f'Pasted {len(safe_content)} characters from clipboard.')
 
     def cmd_quit(self, arg: str) -> None:
         """Handle /quit command - exit the application."""

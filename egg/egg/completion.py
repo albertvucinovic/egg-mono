@@ -5,7 +5,23 @@ from typing import Any, Iterable, List, Dict, Optional
 
 import re
 
-from prompt_toolkit.completion import Completer, Completion
+try:
+    from prompt_toolkit.completion import Completer, Completion
+except Exception:  # pragma: no cover - exercised when optional dep missing
+    class Completion:  # type: ignore[no-redef]
+        """Small fallback matching the prompt_toolkit attributes we use."""
+
+        def __init__(self, text: str, start_position: int = 0, display: Any = None, display_meta: Any = None):
+            self.text = text
+            self.start_position = start_position
+            self.display = display if display is not None else text
+            self.display_meta = display_meta
+
+    class Completer:  # type: ignore[no-redef]
+        """Fallback base so Egg can run without prompt_toolkit installed."""
+
+        def get_completions(self, document, complete_event):
+            return iter(())
 
 # Import eggthreads API helpers. The eggthreads package is a declared
 # dependency, so this import should succeed at runtime.

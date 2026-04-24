@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, List
 
+from .terminal_safety import looks_like_terminal_control_text, sanitize_terminal_text
+
 
 class ToolRegistry:
     """Simple registry for OpenAI function-call compatible tools.
@@ -158,7 +160,7 @@ def create_default_tools() -> ToolRegistry:
 
         # Use Popen for interruptible execution
         start_time = _time.time()
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
         try:
             while proc.poll() is None:
                 # Check for cancellation (e.g., Ctrl+C in UI)
@@ -172,17 +174,21 @@ def create_default_tools() -> ToolRegistry:
                     proc.wait()
                     return f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds"
                 _time.sleep(0.1)  # Poll interval
-            stdout, stderr = proc.communicate()
+            stdout_bytes, stderr_bytes = proc.communicate()
         except Exception as e:
             proc.kill()
             proc.wait()
             return f"--- ERROR ---\n{e}"
 
         out = ''
+        stdout = stdout_bytes.decode(errors='replace') if isinstance(stdout_bytes, (bytes, bytearray)) else (stdout_bytes or "")
+        stderr = stderr_bytes.decode(errors='replace') if isinstance(stderr_bytes, (bytes, bytearray)) else (stderr_bytes or "")
         if stdout:
-            out += f"--- STDOUT ---\n{stdout.strip()}\n"
+            body = sanitize_terminal_text(stdout.strip()) if looks_like_terminal_control_text(stdout) else stdout.strip()
+            out += f"--- STDOUT ---\n{body}\n"
         if stderr:
-            out += f"--- STDERR ---\n{stderr.strip()}\n"
+            body = sanitize_terminal_text(stderr.strip()) if looks_like_terminal_control_text(stderr) else stderr.strip()
+            out += f"--- STDERR ---\n{body}\n"
         return out.strip() or "--- The command executed successfully and produced no output ---"
 
     reg.register(
@@ -246,7 +252,7 @@ def create_default_tools() -> ToolRegistry:
 
         # Use Popen for interruptible execution
         start_time = _time.time()
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd)
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
         try:
             while proc.poll() is None:
                 # Check for cancellation (e.g., Ctrl+C in UI)
@@ -260,17 +266,21 @@ def create_default_tools() -> ToolRegistry:
                     proc.wait()
                     return f"--- TIMEOUT ---\nScript timed out after {timeout} seconds"
                 _time.sleep(0.1)  # Poll interval
-            stdout, stderr = proc.communicate()
+            stdout_bytes, stderr_bytes = proc.communicate()
         except Exception as e:
             proc.kill()
             proc.wait()
             return f"--- ERROR ---\n{e}"
 
         out = ''
+        stdout = stdout_bytes.decode(errors='replace') if isinstance(stdout_bytes, (bytes, bytearray)) else (stdout_bytes or "")
+        stderr = stderr_bytes.decode(errors='replace') if isinstance(stderr_bytes, (bytes, bytearray)) else (stderr_bytes or "")
         if stdout:
-            out += f"--- STDOUT ---\n{stdout.strip()}\n"
+            body = sanitize_terminal_text(stdout.strip()) if looks_like_terminal_control_text(stdout) else stdout.strip()
+            out += f"--- STDOUT ---\n{body}\n"
         if stderr:
-            out += f"--- STDERR ---\n{stderr.strip()}\n"
+            body = sanitize_terminal_text(stderr.strip()) if looks_like_terminal_control_text(stderr) else stderr.strip()
+            out += f"--- STDERR ---\n{body}\n"
         return out.strip() or "--- The script executed successfully and produced no output ---"
 
     reg.register(

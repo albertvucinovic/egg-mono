@@ -28,6 +28,18 @@ class TestCmdPaste:
 
         assert egg_app.input_panel.get_text() == "pasted content"
 
+    def test_sanitizes_clipboard_terminal_controls(self, egg_app, monkeypatch):
+        """Should not store terminal-control sequences from clipboard."""
+        import egg.commands.utility as util_mod
+        monkeypatch.setattr(util_mod, "read_clipboard", lambda: "a\x1b[2Jb\r\x08c")
+
+        egg_app.cmd_paste("")
+
+        text = egg_app.input_panel.editor.editor.get_text()
+        assert "\x1b" not in text
+        assert "\r" not in text
+        assert "\x08" not in text
+
     def test_handles_empty_clipboard(self, egg_app, monkeypatch):
         """Should handle empty clipboard gracefully."""
         import egg.commands.utility as util_mod

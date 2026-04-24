@@ -179,6 +179,18 @@ class TestHandleKeyCtrlP:
         assert result is True
         assert egg_app.input_panel.get_text() == "clipboard content"
 
+    def test_ctrl_p_sanitizes_clipboard_terminal_controls(self, egg_app, monkeypatch):
+        """Ctrl+P should not store terminal-control sequences from clipboard."""
+        monkeypatch.setattr("egg.input.read_clipboard", lambda: "a\x1b[2Jb\r\x08c")
+
+        result = egg_app.handle_key('\x10')
+
+        assert result is True
+        text = egg_app.input_panel.editor.editor.get_text()
+        assert "\x1b" not in text
+        assert "\r" not in text
+        assert "\x08" not in text
+
     def test_ctrl_p_logs_error_on_clipboard_failure(self, egg_app, monkeypatch):
         """Ctrl+P should log error when clipboard read fails."""
         monkeypatch.setattr("egg.input.read_clipboard", lambda: None)
@@ -335,6 +347,23 @@ class TestHandleKeyEsc:
 
         assert result is True
         assert egg_app.input_panel.editor.editor._completion_active is False
+
+
+class TestBracketedPasteThroughAppInput:
+    """Regression tests for bracketed paste before app-level Enter handling."""
+
+    def test_multiline_bracketed_paste_preserves_newlines_and_does_not_submit(self, egg_app, monkeypatch):
+        submitted = []
+        monkeypatch.setattr(egg_app, "on_submit", lambda t: submitted.append(t) or True)
+
+        assert egg_app.handle_key("\x1b[200~") is True
+        assert egg_app.handle_key("hello") is True
+        assert egg_app.handle_key("\n") is True
+        assert egg_app.handle_key("world") is True
+        assert egg_app.handle_key("\x1b[201~") is True
+
+        assert submitted == []
+        assert egg_app.input_panel.editor.editor.get_text() == "hello\nworld"
 
 
 class TestHandleKeyDelegation:

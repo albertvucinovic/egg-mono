@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from eggthreads import interrupt_thread
 
 from .utils import read_clipboard
+from eggthreads import sanitize_terminal_text
 
 
 # How long a bare ESC is held in the input pipeline before it's dispatched
@@ -72,6 +73,19 @@ class InputMixin:
                 key = normalized
         except Exception:
             pass
+
+        # Bracketed paste must be handled before Enter/Ctrl shortcuts. In the
+        # real app input flows through this mixin first, so a paste payload
+        # delivered as separate chunks (especially a literal "\n") would
+        # otherwise be interpreted as submit/newline instead of text.
+        if isinstance(key, str):
+            try:
+                ed_wrapper = self.input_panel.editor
+                paste_active = bool(getattr(ed_wrapper, '_bracketed_paste_active', False))
+                if paste_active or '\x1b[200~' in key or '\x1b[201~' in key:
+                    return bool(ed_wrapper._handle_key(key))
+            except Exception:
+                pass
 
         # Defer a bare ESC to give the rest of a split escape sequence a
         # chance to arrive before we fire the "Esc press" action. The
@@ -272,7 +286,8 @@ class InputMixin:
             elif content == '':
                 self.log_system('Clipboard is empty.')
             else:
-                self.input_panel.editor.editor.set_text(content)
+                safe_content = sanitize_terminal_text(content)
+                self.input_panel.editor.editor.set_text(safe_content)
                 # Move cursor to start of pasted text so user sees beginning
                 self.input_panel.editor.editor.cursor.row = 0
                 self.input_panel.editor.editor.cursor.col = 0
@@ -280,7 +295,7 @@ class InputMixin:
                 # Reset scroll positions to show from start
                 self.input_panel._scroll_top = 0
                 self.input_panel._hscroll_left = 0
-                self.log_system(f'Pasted {len(content)} characters from clipboard.')
+                self.log_system(f'Pasted {len(safe_content)} characters from clipboard.')
             return True
         # Newline insertion shortcuts (independent of /enterMode):
         #   - Shift+Enter

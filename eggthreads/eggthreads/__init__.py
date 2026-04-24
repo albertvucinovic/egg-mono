@@ -25,6 +25,7 @@ See API.md for comprehensive documentation.
 """
 from .db import ThreadsDB  # type: ignore
 from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig, set_default_tool_timeout, get_default_tool_timeout  # type: ignore
+from .terminal_safety import sanitize_terminal_text  # type: ignore
 from .snapshot import SnapshotBuilder  # type: ignore
 from .api import (
     validate_model_handle,
@@ -154,7 +155,7 @@ __all__ = [
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
     # Thread diagnosis
-    'ThreadDiagnosis', 'diagnose_thread',
+    'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text',
     # Thread scheduling API
     'UNSET', 'ThreadSchedulingSettings', 'get_thread_scheduling', 'set_thread_scheduling',
     # Argument parser

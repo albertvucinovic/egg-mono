@@ -84,3 +84,27 @@ def test_handle_key_treats_logical_shift_enter_as_newline():
     ed._handle_key("shift-enter")
 
     assert ed.editor.get_text() == "hello\n"
+
+
+def test_bracketed_paste_strips_terminal_control_sequences():
+    ed = RealTimeEditor(initial_text="")
+
+    ed._handle_key(f"{PASTE_START}hello\x1b[2J\x1b]52;c;AAAA\x07world\r!{PASTE_END}")
+
+    text = ed.editor.get_text()
+    assert "hello" in text and "world" in text
+    assert "\x1b[2J" not in text
+    assert "\x1b]52" not in text
+    assert "\r" not in text
+
+
+def test_plain_multichar_paste_strips_terminal_control_sequences():
+    ed = RealTimeEditor(initial_text="")
+
+    ed._handle_key("hello\x1b[31mred\x1b[0m\x08!")
+
+    text = ed.editor.get_text()
+    assert text.startswith("hellored")
+    assert "\x1b[31m" not in text
+    assert "\x1b[0m" not in text
+    assert "\x08" not in text

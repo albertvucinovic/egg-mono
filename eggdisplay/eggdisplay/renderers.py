@@ -18,6 +18,7 @@ Two renderer implementations with a common entry point:
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import sys
 from typing import List, Optional
@@ -30,6 +31,23 @@ class _DiffRendererBase:
 
     _SYNC_START = "\x1b[?2026h"
     _SYNC_END = "\x1b[?2026l"
+    _BRACKETED_PASTE_ENABLE = "\x1b[?2004h"
+    _BRACKETED_PASTE_DISABLE = "\x1b[?2004l"
+
+    # Safety filter for renderable output. Rich's own styling is emitted as
+    # SGR (``CSI ... m``) sequences; user / tool / model text can also contain
+    # arbitrary terminal control sequences. If those reach stdout in the
+    # full-screen renderer, things like ``ESC[2J`` or ``ESC[H`` can clear or
+    # move inside our canvas and corrupt the display. Keep SGR styling, strip
+    # everything else that can affect terminal state.
+    _ANSI_ESCAPE_RE = re.compile(
+        r"\x1b\[[0-?]*[ -/]*[@-~]"        # CSI
+        r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+        r"|\x1b[P_^][^\x1b]*(?:\x1b\\)"  # DCS / PM / APC
+        r"|\x1b[()][0-9A-Za-z]"            # charset selection
+        r"|\x1b."                          # any other ESC + final
+    )
+    _CSI_SGR_RE = re.compile(r"\x1b\[[0-?]*[ -/]*m")
 
     def __init__(self, *, console: Optional[Console] = None):
         self.console = console or Console()
@@ -51,7 +69,8 @@ class _DiffRendererBase:
             color_system=self._color_system or "truecolor",
         )
         c.print(renderable, end="")
-        lines = buf.getvalue().split("\n")
+        safe = self._sanitize_rendered_ansi(buf.getvalue())
+        lines = safe.split("\n")
         if lines and lines[-1] == "":
             lines.pop()
         return lines, width
@@ -66,7 +85,59 @@ class _DiffRendererBase:
             color_system=self._color_system or "truecolor",
         )
         c.print(*objects, **kwargs)
-        return buf.getvalue()
+        return self._sanitize_rendered_ansi(buf.getvalue())
+
+    @classmethod
+    def _sanitize_rendered_ansi(cls, text: str) -> str:
+        """Strip terminal-state-changing controls from rendered output.
+
+        Rich renderables legitimately contain SGR color/style escape sequences,
+        so this is intentionally *not* a blanket ANSI stripper. It preserves
+        ``CSI ... m`` and ordinary text/newlines/tabs, while removing complete
+        cursor movement, clears, OSC clipboard/title controls, alternate-screen
+        toggles, bracketed-paste toggles, mouse toggles, plus lone ESC/C0
+        controls from untrusted content. Malformed OSC emitted through Rich's
+        Text path is degraded by dropping only the introducer, because Rich may
+        already have stripped the terminator before we see it.
+        """
+        if not isinstance(text, str) or not text:
+            return text
+
+        out: List[str] = []
+        last = 0
+        for match in cls._ANSI_ESCAPE_RE.finditer(text):
+            if match.start() > last:
+                out.append(cls._sanitize_c0(text[last:match.start()]))
+            seq = match.group(0)
+            if cls._CSI_SGR_RE.fullmatch(seq):
+                out.append(seq)
+            # else: drop unsafe terminal control sequence completely.
+            last = match.end()
+        if last < len(text):
+            out.append(cls._sanitize_c0(text[last:]))
+        return "".join(out)
+
+    @staticmethod
+    def _sanitize_c0(text: str) -> str:
+        if not text:
+            return text
+        out: List[str] = []
+        for ch in text:
+            cp = ord(ch)
+            if ch in ("\n", "\t"):
+                out.append(ch)
+            elif ch == "\r":
+                out.append("\n")
+            elif cp == 0x7F or cp < 0x20 or 0x80 <= cp <= 0x9F:
+                # Do not let BS, BEL, DEL, or C1 controls affect the terminal.
+                # Use a visible replacement so content isn't silently joined
+                # in surprising ways.
+                out.append("\uFFFD")
+            elif 0xD800 <= cp <= 0xDFFF:
+                out.append("\uFFFD")
+            else:
+                out.append(ch)
+        return "".join(out)
 
 
 class InlineDiffRenderer(_DiffRendererBase):
@@ -89,7 +160,7 @@ class InlineDiffRenderer(_DiffRendererBase):
         self._width: int = 0
 
     def __enter__(self):
-        sys.stdout.write("\x1b[?25l")
+        sys.stdout.write(self._BRACKETED_PASTE_ENABLE + "\x1b[?25l")
         sys.stdout.flush()
         try:
             self._color_system = self.console.color_system
@@ -103,7 +174,7 @@ class InlineDiffRenderer(_DiffRendererBase):
         buf = ""
         if self._prev_lines:
             buf += "\n"
-        buf += "\x1b[?25h"
+        buf += self._BRACKETED_PASTE_DISABLE + "\x1b[?25h"
         sys.stdout.write(buf)
         sys.stdout.flush()
         self._prev_lines = []
@@ -293,6 +364,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         if self._alt_screen:
             out += self._ALT_ENTER
             out += self._MOUSE_ENABLE
+        out += self._BRACKETED_PASTE_ENABLE
         out += "\x1b[?25l"  # hide cursor
         sys.stdout.write(out)
         sys.stdout.flush()
@@ -305,7 +377,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         return self
 
     def __exit__(self, *_exc):
-        out = "\x1b[?25h"  # show cursor
+        out = self._BRACKETED_PASTE_DISABLE + "\x1b[?25h"  # show cursor
         if self._alt_screen:
             out += self._MOUSE_DISABLE
             out += self._ALT_EXIT

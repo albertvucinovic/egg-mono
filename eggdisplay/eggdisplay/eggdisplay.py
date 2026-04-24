@@ -14,6 +14,7 @@ Features:
 from typing import List, Optional, Callable, Dict, Any
 import shutil
 import unicodedata
+import re
 from rich.live import Live
 from rich.text import Text
 from rich.console import Console, Group
@@ -639,6 +640,14 @@ class LiveEditorBase:
     """Base for real-time editors sharing rendering, key handling, and I/O hooks."""
 
     LABEL: str = "Real-time Text Editor"
+    _CSI_FINAL_BYTES = set("@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~")
+    _CONTROL_SEQUENCE_RE = re.compile(
+        r"\x1b\[[0-?]*[ -/]*[@-~]"        # CSI
+        r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+        r"|\x1b[P_^][^\x1b]*(?:\x1b\\)"  # DCS / PM / APC
+        r"|\x1b[()][0-9A-Za-z]"            # charset selection
+        r"|\x1b."                          # any other ESC + final
+    )
 
     def __init__(self, initial_text: str = "", width: int = 80, height: int = 24,
                  autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
@@ -660,14 +669,41 @@ class LiveEditorBase:
         """Heuristic: consider an ANSI escape sequence complete."""
         if not isinstance(seq, str) or not seq:
             return False
-        last = seq[-1]
-        return last.isalpha() or last == "~"
+        if seq.startswith("\x1b["):
+            return len(seq) >= 3 and seq[-1] in self._CSI_FINAL_BYTES
+        if seq.startswith("\x1bO"):
+            return len(seq) >= 3 and seq[-1] in self._CSI_FINAL_BYTES
+        return True
 
     def _ansi_seq_needs_more(self, key: str) -> bool:
         """Return True if key looks like a partial ANSI escape sequence."""
         if not isinstance(key, str) or not key:
             return False
         return (key.startswith("\x1b[") or key.startswith("\x1bO")) and not self._ansi_seq_complete(key)
+
+    def _strip_unsafe_control_sequences(self, text: str) -> str:
+        """Remove terminal control sequences from plain paste chunks.
+
+        When bracketed paste mode is unavailable or a terminal sends a paste as
+        a raw multi-character string, payloads can contain ANSI sequences (for
+        example copied colored output, OSC clipboard/title controls, or clear
+        screen escapes). Those should be inserted as text only after removing
+        controls so they cannot later corrupt the display when rendered.
+        """
+        if not isinstance(text, str) or not text:
+            return text
+        text = self._CONTROL_SEQUENCE_RE.sub("", text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        out: List[str] = []
+        for ch in text:
+            cp = ord(ch)
+            if ch in ("\n", "\t"):
+                out.append(ch)
+            elif cp == 0x7F or cp < 0x20 or 0x80 <= cp <= 0x9F:
+                out.append("\uFFFD")
+            else:
+                out.append(ch)
+        return "".join(out)
 
     def normalize_key(self, key: str) -> Optional[str]:
         """Normalize raw terminal input into a stable logical key string.
@@ -767,7 +803,7 @@ class LiveEditorBase:
                 if PASTE_END in _rest:
                     payload, trailing = _rest.split(PASTE_END, 1)
                     if payload:
-                        self.editor.insert_text_block(payload)
+                        self.editor.insert_text_block(self._strip_unsafe_control_sequences(payload))
                     # If there is trailing data in the same key chunk, feed it
                     # back into the normal handler.
                     if trailing:
@@ -785,7 +821,7 @@ class LiveEditorBase:
                     payload, trailing = key.split(PASTE_END, 1)
                     self._bracketed_paste_buffer += payload
                     if self._bracketed_paste_buffer:
-                        self.editor.insert_text_block(self._bracketed_paste_buffer)
+                        self.editor.insert_text_block(self._strip_unsafe_control_sequences(self._bracketed_paste_buffer))
                     self._bracketed_paste_active = False
                     self._bracketed_paste_buffer = ""
                     if trailing:
@@ -826,7 +862,7 @@ class LiveEditorBase:
             # Treat multi-character printable input as a paste. Some terminal
             # configurations (and some remote shells) deliver paste chunks as
             # multi-character strings.
-            self.editor.insert_text_block(key)
+            self.editor.insert_text_block(self._strip_unsafe_control_sequences(key))
         elif isinstance(key, str) and len(key) == 1 and key.isprintable():
             self.editor.handle_key(key)
         # Unknown escape sequences are ignored
