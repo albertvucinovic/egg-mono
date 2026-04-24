@@ -228,6 +228,19 @@
             "cached_input": 0,
             "output_tokens": 0
           }
+        },
+        "Pro: GPT-5.5 xhigh": {
+          "model_name": "gpt-5.5",
+          "max_tokens": 400000,
+          "api_type": "responses",
+          "parameters": {
+            "reasoning_effort": "xhigh"
+          },
+          "cost": {
+            "input_tokens": 0,
+            "cached_input": 0,
+            "output_tokens": 0
+          }
         }
       }
     },
@@ -386,6 +399,19 @@
         },
         "Qwen3.5 27B": {
           "model_name": "Qwen3.5-27B-UD-Q8_K_XL.unsloth.gguf",
+          "max_tokens": 260000,
+          "options": {
+            "thinking_content_policy": "send all",
+            "thinking_content_key": "reasoning_content"
+          },
+          "cost": {
+            "input_tokens": 0.01,
+            "cached_input": 0.005,
+            "output_tokens": 0.03
+          }
+        },
+        "Qwen3.6 27B": {
+          "model_name": "Qwen3.6-27B-UD-Q8_K_XL.unsloth.gguf",
           "max_tokens": 260000,
           "options": {
             "thinking_content_policy": "send all",
