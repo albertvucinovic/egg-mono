@@ -5,7 +5,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 try:
@@ -31,13 +31,22 @@ from .terminal_safety import sanitize_terminal_text
 ISO = "%Y-%m-%d %H:%M:%S"
 
 
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now with naive formatting compatibility."""
+    return datetime.now(timezone.utc)
+
+
+def _utcnow_iso() -> str:
+    return _utcnow().strftime(ISO)
+
+
 class ContextLimitExceeded(Exception):
     """Raised when a thread's context exceeds the configured limit."""
     pass
 
 
 def _now_plus(ttl_sec: int) -> str:
-    return (datetime.utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
+    return (_utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
 
 
 # Thresholds above which a tool output is considered "long" and should
@@ -511,7 +520,7 @@ class ThreadRunner:
             still_owner = bool(
                 row
                 and row['invoke_id'] == invoke_id
-                and row['lease_until'] > datetime.utcnow().strftime(ISO)
+                and row['lease_until'] > _utcnow_iso()
             )
         except Exception:
             still_owner = False
@@ -858,7 +867,7 @@ class ThreadRunner:
             if os.environ.get('EGGTHREADS_RECORD_PROVIDER'):
                 traces_dir = Path('.egg/traces')
                 traces_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.utcnow().strftime('%Y%m%dT%H%M%S')
+                ts = _utcnow().strftime('%Y%m%dT%H%M%S')
                 rec_path = traces_dir / f"trace_{self.thread_id}_{ts}.jsonl"
                 recorder = open(rec_path, 'a', encoding='utf-8')
         except Exception:
@@ -2454,7 +2463,7 @@ class SubtreeScheduler:
             # Respect waiting_until: only include children that are not waiting or waiting_until <= now
             out.append(t)
             cur = self.db.conn.execute("SELECT child_id, waiting_until FROM children WHERE parent_id=?", (t,))
-            now_iso = datetime.utcnow().strftime(ISO)
+            now_iso = _utcnow_iso()
             for row in cur.fetchall():
                 wu = row["waiting_until"]
                 if wu is None or wu <= now_iso:
@@ -2596,7 +2605,7 @@ class SubtreeScheduler:
                     row = self.db.current_open(tid)
                     if row:
                         lease_until = row['lease_until']
-                        now_iso = datetime.utcnow().strftime(ISO)
+                        now_iso = _utcnow_iso()
                         if lease_until and lease_until > now_iso:
                             continue  # Another process has the lease
                 except Exception:

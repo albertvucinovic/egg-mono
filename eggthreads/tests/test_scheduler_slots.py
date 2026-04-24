@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Set, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,13 @@ from eggthreads.runner import SubtreeScheduler
 
 
 import uuid
+
+
+ISO_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _make_db(tmp_path) -> ThreadsDB:
@@ -641,9 +649,7 @@ class TestSchedulerIntegration:
 
         # Set waiting_until to far future
         # Note: runner.py uses ISO = "%Y-%m-%d %H:%M:%S" format
-        from datetime import datetime, timedelta
-        ISO_FORMAT = "%Y-%m-%d %H:%M:%S"
-        future_time = (datetime.utcnow() + timedelta(hours=1)).strftime(ISO_FORMAT)
+        future_time = (_utcnow() + timedelta(hours=1)).strftime(ISO_FORMAT)
         db.conn.execute(
             "UPDATE children SET waiting_until = ? WHERE child_id = ?",
             (future_time, child)
@@ -662,7 +668,7 @@ class TestSchedulerIntegration:
         assert child not in subtree, "Child with future waiting_until should NOT be in subtree"
 
         # Set waiting_until to past
-        past_time = (datetime.utcnow() - timedelta(hours=1)).strftime(ISO_FORMAT)
+        past_time = (_utcnow() - timedelta(hours=1)).strftime(ISO_FORMAT)
         db.conn.execute(
             "UPDATE children SET waiting_until = ? WHERE child_id = ?",
             (past_time, child)

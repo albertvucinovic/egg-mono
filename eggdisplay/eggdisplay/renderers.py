@@ -24,6 +24,7 @@ import sys
 from typing import List, Optional
 
 from rich.console import Console
+from rich.cells import split_graphemes
 
 
 class _DiffRendererBase:
@@ -501,31 +502,82 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         """Split the in-flight stream buffer into terminal-width visual rows."""
         if not self._stream_buffer or width <= 0:
             return []
+
+        def _sgr_is_reset(seq: str) -> bool:
+            if not self._CSI_SGR_RE.fullmatch(seq):
+                return False
+            params = seq[2:-1]
+            if not params:
+                return True
+            try:
+                return any(int(p or "0") == 0 for p in params.split(";"))
+            except Exception:
+                return False
+
+        def append_text_by_cells(text: str, current: str, col: int, active_sgr: str) -> tuple[List[str], str, int]:
+            """Append plain text to the current row, splitting by terminal cells.
+
+            Rich gives us ANSI-rendered strings, so we can't hand the whole
+            stream buffer back to Rich for wrapping. Instead, split non-ANSI
+            runs into grapheme clusters with Rich's own cell-width logic and
+            keep ANSI sequences zero-width. This fixes wide CJK/emoji and
+            combining marks, while preserving style escape sequences in the
+            row strings the renderer writes.
+            """
+            emitted: List[str] = []
+            if not text:
+                return emitted, current, col
+            try:
+                spans, _total_width = split_graphemes(text)
+            except Exception:
+                spans = [(i, i + 1, 1) for i in range(len(text))]
+            for start, end, cells in spans:
+                cluster = text[start:end]
+                cells = max(0, int(cells or 0))
+                if cells > 0 and col > 0 and col + cells > width:
+                    emitted.append(current + ("\x1b[0m" if active_sgr else ""))
+                    current = active_sgr
+                    col = 0
+                current += cluster
+                col += cells
+                if col >= width:
+                    emitted.append(current + ("\x1b[0m" if active_sgr else ""))
+                    current = active_sgr
+                    col = 0
+            return emitted, current, col
+
         rows: List[str] = []
+        active_sgr = ""
         for logical in self._stream_buffer.split("\n"):
-            if logical == "":
-                rows.append("")
-                continue
-            # Walk the string, advancing `col` only for printable characters.
-            current = ""
+            start_rows_len = len(rows)
+            current = active_sgr
             col = 0
+            if logical == "":
+                rows.append(current + ("\x1b[0m" if active_sgr else ""))
+                continue
             i = 0
             n = len(logical)
             while i < n:
                 if logical[i] == "\x1b":
                     m = self._ANSI_RE.match(logical, i)
                     if m is not None:
-                        current += m.group()
+                        seq = m.group()
+                        current += seq
+                        if self._CSI_SGR_RE.fullmatch(seq):
+                            if _sgr_is_reset(seq):
+                                active_sgr = ""
+                            else:
+                                active_sgr += seq
                         i = m.end()
                         continue
-                current += logical[i]
-                col += 1
-                i += 1
-                if col >= width:
-                    rows.append(current)
-                    current = ""
-                    col = 0
-            if current or not rows or rows[-1] != "":
+                next_ansi = logical.find("\x1b", i)
+                end = next_ansi if next_ansi != -1 else n
+                emitted, current, col = append_text_by_cells(logical[i:end], current, col, active_sgr)
+                rows.extend(emitted)
+                i = end
+            if col > 0 or (len(rows) == start_rows_len and current):
+                if active_sgr:
+                    current += "\x1b[0m"
                 rows.append(current)
         return rows
 

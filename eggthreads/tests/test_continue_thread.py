@@ -8,7 +8,7 @@ These tests verify that crash recovery works correctly:
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,10 @@ from eggthreads import (
 )
 from eggthreads.api import list_active_threads, collect_subtree
 from eggthreads.tool_state import discover_runner_actionable, _last_stream_close_seq
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _make_temp_db(tmp_path) -> tuple[ThreadsDB, Path]:
@@ -50,7 +54,7 @@ class TestLeaseExpiration:
         append_message(db, tid, "user", "Hello")
 
         # Simulate a stale lease (expired 1 minute ago)
-        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        expired_time = (_utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "stale-invoke", expired_time, "crashed-process", "llm"),
@@ -68,7 +72,7 @@ class TestLeaseExpiration:
         append_message(db, tid, "user", "Hello")
 
         # Simulate an active lease (expires in 1 minute)
-        active_time = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        active_time = (_utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "active-invoke", active_time, "running-process", "llm"),
@@ -86,7 +90,7 @@ class TestLeaseExpiration:
         append_message(db, tid, "user", "Hello")
 
         # Add expired lease
-        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        expired_time = (_utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "stale-invoke", expired_time, "crashed-process", "llm"),
@@ -100,7 +104,7 @@ class TestLeaseExpiration:
         tid = create_root_thread(db, name="test")
 
         # Add expired lease
-        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        expired_time = (_utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "stale-invoke", expired_time, "crashed-process", "llm"),
@@ -397,14 +401,14 @@ class TestLeaseTakeover:
         tid = create_root_thread(db, name="test")
 
         # Simulate an expired lease (expired 1 minute ago)
-        expired_time = (datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        expired_time = (_utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "old-invoke", expired_time, "crashed-process", "llm"),
         )
 
         # try_open_stream should take over the expired lease
-        new_lease = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        new_lease = (_utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         result = db.try_open_stream(tid, "new-invoke", new_lease, owner="new-process", purpose="llm")
         assert result is True
 
@@ -420,14 +424,14 @@ class TestLeaseTakeover:
         tid = create_root_thread(db, name="test")
 
         # Simulate an active lease (expires in 1 minute)
-        active_time = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        active_time = (_utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         db.conn.execute(
             "INSERT INTO open_streams (thread_id, invoke_id, lease_until, owner, purpose) VALUES (?, ?, ?, ?, ?)",
             (tid, "active-invoke", active_time, "running-process", "llm"),
         )
 
         # try_open_stream should fail
-        new_lease = (datetime.utcnow() + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+        new_lease = (_utcnow() + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
         result = db.try_open_stream(tid, "new-invoke", new_lease, owner="new-process", purpose="llm")
         assert result is False
 
@@ -445,7 +449,7 @@ class TestLeaseTakeover:
         assert db.current_open(tid) is None
 
         # try_open_stream should insert a new lease
-        new_lease = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        new_lease = (_utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         result = db.try_open_stream(tid, "new-invoke", new_lease, owner="new-process", purpose="llm")
         assert result is True
 

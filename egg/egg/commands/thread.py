@@ -25,6 +25,26 @@ from eggthreads import (
 from ..utils import MODELS_PATH, get_subtree as _get_subtree
 
 
+def _schedule_coro(coro_factory) -> None:
+    """Create and schedule a coroutine only after a loop is available."""
+    try:
+        loop = asyncio.get_running_loop()
+        coro = coro_factory()
+        try:
+            task = loop.create_task(coro)
+            if task is None:
+                # Unit tests often monkeypatch create_task with a no-op. Close
+                # the coroutine so Python doesn't emit "never awaited" warnings.
+                coro.close()
+        except Exception:
+            try:
+                coro.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 class ThreadCommandsMixin:
     """Mixin providing thread management commands."""
 
@@ -37,7 +57,7 @@ class ThreadCommandsMixin:
         create_snapshot(self.db, new_root)
         self.ensure_scheduler_for(new_root)
         self.current_thread = new_root
-        asyncio.get_running_loop().create_task(self.start_watching_current())
+        _schedule_coro(self.start_watching_current)
         self.log_system(f"Created new root thread: {new_root[-8:]}")
         self.print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
 
@@ -194,7 +214,7 @@ class ThreadCommandsMixin:
         pid = get_parent(self.db, self.current_thread)
         if pid:
             self.current_thread = pid
-            asyncio.get_running_loop().create_task(self.start_watching_current())
+            _schedule_coro(self.start_watching_current)
             self.log_system('Moved to parent thread')
             self.print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
         else:
@@ -238,7 +258,7 @@ class ThreadCommandsMixin:
                 new_tid = matches[0]
                 self.ensure_scheduler_for(new_tid)
                 self.current_thread = new_tid
-                asyncio.get_running_loop().create_task(self.start_watching_current())
+                _schedule_coro(self.start_watching_current)
                 self.log_system(f"Switched to thread: {new_tid[-8:]}")
                 self.print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
 
@@ -330,7 +350,7 @@ class ThreadCommandsMixin:
         self.log_system(f"Duplicated thread to new root: {new_tid[-8:]}")
         # Switch to the duplicate so the user can inspect/continue it.
         self.current_thread = new_tid
-        asyncio.get_running_loop().create_task(self.start_watching_current())
+        _schedule_coro(self.start_watching_current)
         self.print_static_view_current(heading=f"Switched to duplicated thread: {self.current_thread}")
 
     def cmd_continue(self, arg: str) -> None:

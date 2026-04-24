@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .db import ThreadsDB, ThreadRow
@@ -32,6 +33,11 @@ def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _utcnow_iso() -> str:
+    """SQLite-compatible current UTC timestamp string."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def validate_model_handle(model_handle: str, models_path: str = "models.json",
@@ -867,9 +873,8 @@ def is_thread_continuable(db: ThreadsDB, thread_id: str) -> bool:
     try:
         row = db.current_open(thread_id)
         if row:
-            from datetime import datetime
             lease_until = row['lease_until']
-            now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            now_iso = _utcnow_iso()
             if lease_until and lease_until > now_iso:
                 return False  # Thread is running (lease still valid)
             # Lease has expired - thread not actually running
@@ -911,9 +916,8 @@ def continue_thread(
     try:
         row = db.current_open(thread_id)
         if row:
-            from datetime import datetime
             lease_until = row['lease_until']
-            now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            now_iso = _utcnow_iso()
             # Only block if the lease hasn't expired yet
             if lease_until and lease_until > now_iso:
                 return ContinueResult(
@@ -1187,8 +1191,6 @@ def get_thread_status(db: ThreadsDB, thread_id: str) -> str:
     This function properly checks lease expiration, unlike the static
     'status' column in the threads table which can become stale after crashes.
     """
-    from datetime import datetime
-
     # Check for active (non-expired) lease
     try:
         row_open = db.current_open(thread_id)
@@ -1196,7 +1198,7 @@ def get_thread_status(db: ThreadsDB, thread_id: str) -> str:
             # sqlite3.Row uses [] access, not .get()
             lease_until = row_open['lease_until']
             if lease_until:
-                now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                now_iso = _utcnow_iso()
                 if lease_until > now_iso:
                     return "streaming"
     except Exception:
@@ -1222,7 +1224,6 @@ def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str], *, skip_runna
         skip_runnability: When True, skip the expensive per-thread
             runnability checks.  Streaming detection still works.
     """
-    from datetime import datetime
     from .tool_state import discover_runner_actionable_cached
 
     result: dict[str, str] = {tid: "idle" for tid in thread_ids}
@@ -1230,7 +1231,7 @@ def get_thread_statuses_bulk(db: ThreadsDB, thread_ids: list[str], *, skip_runna
     # Batch query: find all threads with active (non-expired) leases
     streaming_set: set[str] = set()
     try:
-        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = _utcnow_iso()
         cur = db.conn.execute(
             "SELECT thread_id FROM open_streams WHERE lease_until > ?",
             (now_iso,)
@@ -1749,7 +1750,6 @@ def collect_subtree(db: ThreadsDB, root_id: str) -> list[str]:
 
 def list_active_threads(db: ThreadsDB, subtree: list[str]) -> list[str]:
     """Return list of thread_ids that are currently running or runnable."""
-    from datetime import datetime
     active: list[str] = []
     for tid in subtree:
         is_running = False
@@ -1758,7 +1758,7 @@ def list_active_threads(db: ThreadsDB, subtree: list[str]) -> list[str]:
             if row_open:
                 # Only consider thread running if lease hasn't expired
                 lease_until = row_open['lease_until']
-                now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                now_iso = _utcnow_iso()
                 if lease_until and lease_until > now_iso:
                     is_running = True
         except Exception:

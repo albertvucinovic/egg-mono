@@ -5,4 +5,6 @@ description = "Development workspace for the egg ecosystem"
 requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
+# The monorepo tests use asyncio.run(...) explicitly rather than pytest-asyncio
+# markers. Keeping no asyncio_mode avoids noisy "unknown config option"
+# warnings in minimal environments where pytest-asyncio is not installed.
