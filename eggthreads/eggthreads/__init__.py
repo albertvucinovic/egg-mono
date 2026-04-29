@@ -141,6 +141,23 @@ from .sandbox import (
     is_user_sandbox_control_enabled,
 )
 
+from .session import (
+    RuntimeThreadConfig,
+    SessionConfig,
+    SessionStatus,
+    get_thread_session_config,
+    get_thread_session_status,
+    set_thread_session_config,
+    enable_thread_session,
+    disable_thread_session,
+    append_session_lifecycle_event,
+    execute_python_repl,
+    runtime_thread_label,
+    append_runtime_config,
+    find_runtime_thread,
+    get_or_create_runtime_thread,
+)
+
 from .tools import ToolRegistry, create_default_tools
 
 from .llm import create_llm_client
@@ -187,5 +204,11 @@ __all__ = [
     'enable_user_sandbox_control',
     'disable_user_sandbox_control',
     'is_user_sandbox_control_enabled',
+    'RuntimeThreadConfig', 'SessionConfig', 'SessionStatus',
+    'get_thread_session_config', 'get_thread_session_status', 'set_thread_session_config',
+    'enable_thread_session', 'disable_thread_session', 'append_session_lifecycle_event',
+    'execute_python_repl',
+    'runtime_thread_label', 'append_runtime_config',
+    'find_runtime_thread', 'get_or_create_runtime_thread',
 ]
 from .event_watcher import EventWatcher

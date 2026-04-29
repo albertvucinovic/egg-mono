@@ -50,27 +50,27 @@ Legend:
 
 ## Phase 4: Runtime child threads
 
-- [ ] Add `eggthreads/session.py` skeleton.
-- [ ] Add runtime config event helpers.
-- [ ] Add `get_or_create_runtime_thread(...)`.
-- [ ] Runtime thread messages/config defaults (`no_api`, no LLM tools).
-- [ ] Tests for runtime child creation/reuse/tree placement.
+- [x] Add `eggthreads/session.py` skeleton.
+- [x] Add runtime config event helpers.
+- [x] Add `get_or_create_runtime_thread(...)`.
+- [x] Runtime thread messages/config defaults (`no_api`, no LLM tools).
+- [x] Tests for runtime child creation/reuse/tree placement.
 
 ## Phase 5: Session config and lifecycle
 
-- [ ] Add `SessionConfig` resolver for `session.config` events.
-- [ ] Add fake/in-memory session provider for tests.
+- [x] Add `SessionConfig` resolver for `session.config` events.
+- [x] Add fake/in-memory session provider for tests.
 - [ ] Add Docker session provider skeleton.
-- [ ] Add lifecycle events.
-- [ ] Tests for config resolution and lifecycle events.
+- [x] Add lifecycle events.
+- [x] Tests for config resolution and lifecycle events.
 
 ## Phase 6: Python REPL MVP
 
-- [ ] Add `python_repl` tool.
+- [x] Add `python_repl` tool.
 - [ ] Add eval token registry / bridge skeleton.
-- [ ] Add fake Python REPL provider for tests.
+- [x] Add fake Python REPL provider for tests.
 - [ ] Programmatic `eggtools` calls enqueue RA3 on runtime thread.
-- [ ] Tests for Python state persistence and tool call enqueue/wait.
+- [~] Tests for Python state persistence (tool call enqueue/wait pending bridge).
 
 ## Phase 7+: Later phases
 

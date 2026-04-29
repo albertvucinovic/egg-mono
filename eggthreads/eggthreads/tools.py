@@ -296,6 +296,36 @@ def create_default_tools() -> ToolRegistry:
         impl=_python,
     )
 
+    def _python_repl(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .session import execute_python_repl
+
+        thread_id = (args.get('_thread_id') or '').strip()
+        if not thread_id:
+            return 'Error: python_repl requires thread context.'
+        code = args.get('code', '')
+        repl_name = (args.get('repl_name') or 'default').strip() or 'default'
+        runtime_name = (args.get('runtime_name') or 'default').strip() or 'default'
+        try:
+            return execute_python_repl(ThreadsDB(), thread_id, str(code), repl_name=repl_name, runtime_name=runtime_name)
+        except Exception as e:
+            return f"Error: python_repl failed: {e}"
+
+    reg.register(
+        name='python_repl',
+        description='Execute Python code in this thread\'s persistent Python REPL session.',
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Python code to execute in the persistent REPL."},
+                "repl_name": {"type": "string", "description": "Optional REPL channel name (default: default)."},
+                "runtime_name": {"type": "string", "description": "Optional runtime child thread name (default: default)."},
+            },
+            "required": ["code"],
+        },
+        impl=_python_repl,
+    )
+
     # javascript (placeholder for remote-debugging execution; here we only echo input)
     def _javascript(args: Dict[str, Any]):
         script = args.get('script', '')
