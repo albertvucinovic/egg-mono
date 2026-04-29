@@ -46,7 +46,7 @@ Legend:
 - [x] Add helper to classify RA as `llm` or `tool`.
 - [x] Update `SubtreeScheduler.run_forever` so only RA1 consumes LLM slots.
 - [x] Ensure tool-running threads are still considered running/leased.
-- [~] Tests for scheduler resource classification (direct occupied-slot integration still pending).
+- [x] Tests for scheduler resource classification.
 
 ## Phase 4: Runtime child threads
 
@@ -77,5 +77,5 @@ Legend:
 - [ ] Bash REPL.
 - [ ] Docker `egg-sessiond`.
 - [ ] `eggtools.py` and `eggtool` in container.
-- [ ] Spawn capability attenuation and session sharing.
+- [x] Spawn capability attenuation and session sharing.
 - [ ] TUI/Web session commands.

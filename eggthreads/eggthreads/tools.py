@@ -384,6 +384,67 @@ def create_default_tools() -> ToolRegistry:
             return None
         return _clean_optional_text(args.get('initial_model_key'))
 
+    def _tool_names_from_arg(value: Any) -> list[str]:
+        if isinstance(value, str):
+            # Accept comma/whitespace separated strings for local callers.
+            import re as _re
+            return [p for p in _re.split(r'[\s,]+', value) if p]
+        if isinstance(value, (list, tuple, set)):
+            return [str(v).strip() for v in value if isinstance(v, (str, int)) and str(v).strip()]
+        return []
+
+    def _clean_bool_arg(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'on')
+        return bool(value)
+
+    def _apply_spawn_child_configuration(args: Dict[str, Any], parent_id: str, child: str) -> None:
+        """Apply attenuated tool/session config requested by spawn args."""
+
+        from .db import ThreadsDB
+        from .tools_config import get_thread_tools_config, set_thread_tool_allowlist, disable_tool_for_thread
+        from .session import get_thread_session_config, set_thread_session_config
+
+        db = ThreadsDB()
+
+        # Tool capability attenuation: requested child allowlist is
+        # intersected with the parent's effective capabilities.  If no
+        # explicit child allowlist was requested, inherit any explicit
+        # parent allowlist by value so descendants cannot silently widen it.
+        parent_cfg = get_thread_tools_config(db, parent_id)
+        requested_allowed = _tool_names_from_arg(args.get('allowed_tools'))
+        if requested_allowed:
+            allowed = sorted({name for name in requested_allowed if parent_cfg.is_tool_allowed(name)})
+            set_thread_tool_allowlist(db, child, allowed)
+        elif parent_cfg.allowed_tools is not None:
+            inherited = sorted({name for name in parent_cfg.allowed_tools if parent_cfg.is_tool_allowed(name)})
+            set_thread_tool_allowlist(db, child, inherited)
+
+        for name in _tool_names_from_arg(args.get('disabled_tools')):
+            disable_tool_for_thread(db, child, name)
+
+        # Optional explicit session sharing.  If share_session is omitted,
+        # honour the parent's share_with_children_default policy.
+        parent_session = get_thread_session_config(db, parent_id)
+        share_arg = args.get('share_session')
+        share_requested = _clean_bool_arg(share_arg) if share_arg is not None else bool(parent_session.share_with_children_default)
+        if share_requested and parent_session.enabled and parent_session.session_id:
+            set_thread_session_config(
+                db,
+                child,
+                enabled=True,
+                provider=parent_session.provider,
+                image=parent_session.image,
+                share='session',
+                session_id=parent_session.session_id,
+                owner_thread_id=parent_session.owner_thread_id or parent_id,
+                workspace=parent_session.workspace,
+                share_with_children_default=parent_session.share_with_children_default,
+                reason='spawn_agent share_session',
+            )
+
     # spawn_agent: create a child thread under a given parent, mirroring
     # the behaviour of the /spawn UI command but in a UI-agnostic way.
     def _spawn_agent(args: Dict[str, Any]):
@@ -448,6 +509,14 @@ def create_default_tools() -> ToolRegistry:
         # Sandbox configuration inheritance is handled by
         # eggthreads.api.create_child_thread.
 
+        try:
+            _apply_spawn_child_configuration(args, parent_id, child)
+        except Exception:
+            # Child creation should not fail solely because optional
+            # attenuation/session propagation failed.  The conservative
+            # defaults still apply through normal thread inheritance.
+            pass
+
         # Seed the child with the resolved system prompt.
         try:
             append_message(db, child, 'system', system_prompt)
@@ -488,6 +557,9 @@ def create_default_tools() -> ToolRegistry:
                 "context_text": {"type": "string"},
                 "label": {"type": "string"},
                 "system_prompt": {"type": "string"},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                "disabled_tools": {"type": "array", "items": {"type": "string"}},
+                "share_session": {"type": "boolean"},
             },
             # Models must provide a short description of the sub-task.
             "required": ["context_text"],
@@ -553,6 +625,11 @@ def create_default_tools() -> ToolRegistry:
         # Sandbox configuration inheritance is handled by
         # eggthreads.api.create_child_thread.
 
+        try:
+            _apply_spawn_child_configuration(args, parent_id, child)
+        except Exception:
+            pass
+
         # Seed system prompt and user text
         try:
             append_message(db, child, 'system', system_prompt)
@@ -602,6 +679,9 @@ def create_default_tools() -> ToolRegistry:
                 "context_text": {"type": "string"},
                 "label": {"type": "string"},
                 "system_prompt": {"type": "string"},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                "disabled_tools": {"type": "array", "items": {"type": "string"}},
+                "share_session": {"type": "boolean"},
             },
             "required": ["context_text"],
         },

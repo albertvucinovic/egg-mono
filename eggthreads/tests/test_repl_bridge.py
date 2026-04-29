@@ -102,3 +102,34 @@ def test_repl_bridge_denies_non_allowlisted_tool(tmp_path):
             raise AssertionError("Expected ReplBridgeError")
     finally:
         ts.dispose_eval_context(ctx.token)
+
+
+def test_python_repl_spawn_agent_creates_child_under_runtime_and_attenuates_tools(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    ts.append_message(db, parent, "system", "system")
+    ts.enable_thread_session(db, parent, provider="memory")
+    runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
+    ts.set_thread_tools_enabled(db, runtime, True)
+    ts.set_thread_tool_allowlist(db, runtime, ["spawn_agent", "wait", "web_search"])
+
+    out = ts.execute_python_repl(
+        db,
+        parent,
+        "from eggtools import spawn_agent\nprint(spawn_agent('child task', label='from-repl', allowed_tools=['web_search', 'bash']))",
+        drive_runtime_tools=True,
+        bridge_timeout_sec=5,
+    )
+
+    # Extract the spawned thread id from the printed output.
+    lines = [line.strip() for line in out.splitlines() if line.strip() and not line.startswith('---')]
+    child = lines[-1]
+    assert child in ts.list_children_ids(db, runtime)
+    assert child not in ts.list_children_ids(db, parent)
+
+    child_cfg = ts.get_thread_tools_config(db, child)
+    assert child_cfg.allowed_tools == {"web_search"}
+    assert child_cfg.is_tool_allowed("web_search")
+    assert not child_cfg.is_tool_allowed("bash")
