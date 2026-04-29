@@ -24,7 +24,7 @@ Quick start::
 See API.md for comprehensive documentation.
 """
 from .db import ThreadsDB  # type: ignore
-from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig, set_default_tool_timeout, get_default_tool_timeout  # type: ignore
+from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig, set_default_tool_timeout, get_default_tool_timeout, runner_actionable_resource_class  # type: ignore
 from .terminal_safety import sanitize_terminal_text  # type: ignore
 from .snapshot import SnapshotBuilder  # type: ignore
 from .api import (
@@ -64,12 +64,18 @@ from .api import (
     word_count_from_events,
     set_subtree_working_directory,
     approve_tool_calls_for_thread,
+    ToolCallResult,
+    ThreadWaitResult,
+    enqueue_user_tool_call,
     execute_bash_command,
     execute_bash_command_hidden,
     get_user_command_result,
+    wait_for_tool_call_result,
     wait_for_user_command_result,
+    wait_for_tool_call_result_async,
     wait_for_user_command_result_async,
     execute_bash_command_async,
+    wait_for_threads,
     # Context limit API
     set_context_limit,
     get_context_limit,
@@ -112,6 +118,8 @@ from .tools_config import (
     set_thread_tools_enabled,
     disable_tool_for_thread,
     enable_tool_for_thread,
+    set_thread_tool_allowlist,
+    clear_thread_tool_allowlist,
     set_subtree_tools_enabled,
     disable_tool_for_subtree,
     enable_tool_for_subtree,
@@ -147,9 +155,12 @@ __all__ = [
     'word_count_from_snapshot', 'word_count_from_events',
     'set_subtree_working_directory',
     'approve_tool_calls_for_thread',
+    'ToolCallResult', 'ThreadWaitResult', 'enqueue_user_tool_call',
     'execute_bash_command', 'execute_bash_command_hidden', 'get_user_command_result', 'wait_for_user_command_result',
+    'wait_for_tool_call_result', 'wait_for_tool_call_result_async',
     'wait_for_user_command_result_async',
     'execute_bash_command_async',
+    'wait_for_threads',
     # Context limit API
     'set_context_limit', 'get_context_limit',
     # Continue thread API
@@ -161,8 +172,9 @@ __all__ = [
     # Argument parser
     'parse_args', 'ParsedArgs',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
-    'discover_runner_actionable',
+    'discover_runner_actionable', 'runner_actionable_resource_class',
     'ToolsConfig', 'get_thread_tools_config', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',
+    'set_thread_tool_allowlist', 'clear_thread_tool_allowlist',
     'set_subtree_tools_enabled', 'disable_tool_for_subtree', 'enable_tool_for_subtree',
     'set_thread_allow_raw_tool_output',
     'wrap_argv_for_sandbox', 'wrap_argv_for_sandbox_with_config',

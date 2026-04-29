@@ -1509,3 +1509,38 @@ class TestContextLimit:
                 assert len(error_events) > 0, "Global limit should be used as fallback"
 
         asyncio.run(test())
+
+
+def test_runner_actionable_resource_class_distinguishes_llm_and_tool(tmp_path):
+    """RA1 consumes LLM slots; RA2/RA3 are tool resource class."""
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+
+    _make_thread_runnable(db, root)
+    ra1 = ts.discover_runner_actionable(db, root)
+    assert ra1 is not None
+    assert ra1.kind == "RA1_llm"
+    assert ts.runner_actionable_resource_class(ra1) == "llm"
+
+    child = ts.create_child_thread(db, root, name="tool-child")
+    tcid = ts.enqueue_user_tool_call(
+        db,
+        child,
+        "bash",
+        {"script": "echo hi"},
+        hidden=True,
+        auto_approve=True,
+    )
+    ra3 = ts.discover_runner_actionable(db, child)
+    assert ra3 is not None
+    assert ra3.kind == "RA3_tools_user"
+    assert ts.runner_actionable_resource_class(ra3) == "tool"
+
+
+def test_runner_config_llm_concurrency_alias():
+    cfg = RunnerConfig(max_concurrent_threads=7)
+    assert cfg.effective_max_concurrent_llm_threads == 7
+
+    cfg2 = RunnerConfig(max_concurrent_threads=7, max_concurrent_llm_threads=3)
+    assert cfg2.effective_max_concurrent_llm_threads == 3
+    assert cfg2.max_concurrent_tool_threads is None

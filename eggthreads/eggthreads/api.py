@@ -1966,6 +1966,100 @@ def approve_tool_calls_for_thread(db, thread_id, decision='all-in-turn', reason=
         payload=payload,
     )
 
+
+@dataclass
+class ToolCallResult:
+    """Result of waiting for a specific tool call to publish (TC6)."""
+
+    thread_id: str
+    tool_call_id: str
+    state: str
+    content: Optional[str]
+    finished_reason: Optional[str] = None
+    output_decision: Optional[str] = None
+    timed_out: bool = False
+
+
+@dataclass
+class ThreadWaitResult:
+    """Structured result for waiting on a thread to finish."""
+
+    thread_id: str
+    finished: bool
+    state: str
+    last_assistant_message: str = ""
+    short_recap: Optional[str] = None
+
+
+def enqueue_user_tool_call(
+    db: ThreadsDB,
+    thread_id: str,
+    name: str,
+    arguments: Any,
+    *,
+    content: Optional[str] = None,
+    hidden: bool = True,
+    keep_user_turn: bool = True,
+    origin: str = "user_command",
+    auto_approve: bool = True,
+    approval_reason: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    tool_call_id: Optional[str] = None,
+) -> str:
+    """Enqueue a generic user-originated tool call (RA3).
+
+    This is the common representation used by user commands and, later,
+    REPL bridge calls: a ``msg.create`` with ``role='user'`` and a
+    single OpenAI-style ``tool_calls`` entry, optionally followed by an
+    automatic ``tool_call.approval`` event.
+    """
+
+    import json as _json
+
+    tool_name = (name or "").strip()
+    if not tool_name:
+        raise ValueError("tool name is required")
+
+    tc_id = tool_call_id or _ulid_like()
+    if isinstance(arguments, str):
+        args_json = arguments
+    else:
+        args_json = _json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
+
+    tool_call = {
+        'id': tc_id,
+        'type': 'function',
+        'function': {
+            'name': tool_name,
+            'arguments': args_json,
+        },
+    }
+
+    payload_extra: Dict[str, Any] = {
+        'tool_calls': [tool_call],
+        'keep_user_turn': bool(keep_user_turn),
+        'origin': origin,
+    }
+    if hidden:
+        payload_extra['no_api'] = True
+    if extra:
+        payload_extra.update(dict(extra))
+
+    msg_content = content if content is not None else f"{origin}: {tool_name}"
+    append_message(db, thread_id, 'user', msg_content, extra=payload_extra)
+
+    if auto_approve:
+        approve_tool_calls_for_thread(
+            db,
+            thread_id,
+            decision='granted',
+            reason=approval_reason or f'Auto-approved {origin} tool call',
+            tool_call_id=tc_id,
+        )
+
+    return tc_id
+
+
 def execute_bash_command(db: ThreadsDB, thread_id: str, script: str, hidden: bool = False) -> str:
     """Execute a bash command as a user tool call (RA3).
 
@@ -1984,29 +2078,20 @@ def execute_bash_command(db: ThreadsDB, thread_id: str, script: str, hidden: boo
         The tool_call_id of the created tool call, which can be used to later
         retrieve the result via get_user_command_result.
     """
-    import os
-    tool_call_id = _ulid_like()
-    tool_call = {
-        'id': tool_call_id,
-        'type': 'function',
-        'function': {
-            'name': 'bash',
-            'arguments': json.dumps({'script': script}, ensure_ascii=False),
-        },
-    }
-    extra = {
-        'tool_calls': [tool_call],
-        'keep_user_turn': True,
-        'user_command_type': '$$' if hidden else '$',
-    }
-    if hidden:
-        extra['no_api'] = True
     prefix = '$$ ' if hidden else '$ '
-    append_message(db, thread_id, 'user', f"{prefix}{script}", extra=extra)
-    approve_tool_calls_for_thread(db, thread_id, decision='granted',
-                                  reason='Auto-approved as user-initiated bash command',
-                                  tool_call_id=tool_call_id)
-    return tool_call_id
+    return enqueue_user_tool_call(
+        db,
+        thread_id,
+        'bash',
+        {'script': script},
+        content=f"{prefix}{script}",
+        hidden=hidden,
+        keep_user_turn=True,
+        origin='user_command',
+        auto_approve=True,
+        approval_reason='Auto-approved as user-initiated bash command',
+        extra={'user_command_type': '$$' if hidden else '$'},
+    )
 
 
 def execute_bash_command_hidden(db: ThreadsDB, thread_id: str, script: str) -> str:
@@ -2044,6 +2129,60 @@ def get_user_command_result(db: ThreadsDB, thread_id: str, tool_call_id: str) ->
     return None
 
 
+def _tool_call_result_now(db: ThreadsDB, thread_id: str, tool_call_id: str, *, timed_out: bool = False) -> ToolCallResult:
+    """Build a ToolCallResult from current event-derived state."""
+
+    from .tool_state import build_tool_call_states
+
+    states = build_tool_call_states(db, thread_id)
+    tc = states.get(tool_call_id)
+    content = get_user_command_result(db, thread_id, tool_call_id)
+    return ToolCallResult(
+        thread_id=thread_id,
+        tool_call_id=tool_call_id,
+        state=tc.state if tc is not None else "unknown",
+        content=content,
+        finished_reason=tc.finished_reason if tc is not None else None,
+        output_decision=tc.output_decision if tc is not None else None,
+        timed_out=timed_out,
+    )
+
+
+def wait_for_tool_call_result(
+    db: ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+    *,
+    timeout_sec: Optional[float] = 30.0,
+    poll_interval: float = 0.1,
+) -> ToolCallResult:
+    """Wait for a specific tool call to reach TC6 and return details.
+
+    The wait condition is derived entirely from persisted events, making
+    it suitable as the event-log-backed "callback" used by REPL bridges.
+    """
+
+    import time
+    from .tool_state import build_tool_call_states
+
+    start = time.time()
+    while True:
+        states = build_tool_call_states(db, thread_id)
+        tc = states.get(tool_call_id)
+        if tc is not None and tc.published:
+            return _tool_call_result_now(db, thread_id, tool_call_id)
+        if timeout_sec is not None and (time.time() - start) >= timeout_sec:
+            return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
+        try:
+            if timeout_sec is not None:
+                remaining = max(0.0, float(timeout_sec) - (time.time() - start))
+                time.sleep(min(float(poll_interval), remaining))
+            else:
+                time.sleep(float(poll_interval))
+        except Exception:
+            time.sleep(0.1)
+
+
 def wait_for_user_command_result(db: ThreadsDB, thread_id: str, tool_call_id: str,
                                  timeout_sec: float = 30.0, poll_interval: float = 0.1) -> Optional[str]:
     """Wait for a user command tool call to finish and return its result.
@@ -2062,31 +2201,54 @@ def wait_for_user_command_result(db: ThreadsDB, thread_id: str, tool_call_id: st
     Returns:
         The content string of the tool message, or None on timeout.
     """
-    import time
-    from .tool_state import build_tool_call_states
-    start = time.time()
-    while time.time() - start < timeout_sec:
-        states = build_tool_call_states(db, thread_id)
-        tc = states.get(tool_call_id)
-        if tc is not None and tc.published:
-            return get_user_command_result(db, thread_id, tool_call_id)
-        time.sleep(poll_interval)
-    return None
+    result = wait_for_tool_call_result(
+        db,
+        thread_id,
+        tool_call_id,
+        timeout_sec=timeout_sec,
+        poll_interval=poll_interval,
+    )
+    return result.content if not result.timed_out else None
 
 async def wait_for_user_command_result_async(db: ThreadsDB, thread_id: str, tool_call_id: str,
                                              timeout_sec: float = 30.0, poll_interval: float = 0.1) -> Optional[str]:
     """Async version of wait_for_user_command_result."""
+    result = await wait_for_tool_call_result_async(
+        db,
+        thread_id,
+        tool_call_id,
+        timeout_sec=timeout_sec,
+        poll_interval=poll_interval,
+    )
+    return result.content if not result.timed_out else None
+
+
+async def wait_for_tool_call_result_async(
+    db: ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+    *,
+    timeout_sec: Optional[float] = 30.0,
+    poll_interval: float = 0.1,
+) -> ToolCallResult:
+    """Async event-log-backed wait for a specific tool call to publish."""
+
     import asyncio
     from .tool_state import build_tool_call_states
     loop = asyncio.get_running_loop()
     start = loop.time()
-    while loop.time() - start < timeout_sec:
+    while True:
         states = build_tool_call_states(db, thread_id)
         tc = states.get(tool_call_id)
         if tc is not None and tc.published:
-            return get_user_command_result(db, thread_id, tool_call_id)
-        await asyncio.sleep(poll_interval)
-    return None
+            return _tool_call_result_now(db, thread_id, tool_call_id)
+        if timeout_sec is not None and (loop.time() - start) >= timeout_sec:
+            return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
+        if timeout_sec is not None:
+            remaining = max(0.0, float(timeout_sec) - (loop.time() - start))
+            await asyncio.sleep(min(float(poll_interval), remaining))
+        else:
+            await asyncio.sleep(float(poll_interval))
 
 
 async def execute_bash_command_async(db: ThreadsDB, thread_id: str, script: str, hidden: bool = False,
@@ -2100,6 +2262,100 @@ async def execute_bash_command_async(db: ThreadsDB, thread_id: str, script: str,
     return await wait_for_user_command_result_async(db, thread_id, tool_call_id,
                                                     timeout_sec=timeout_sec,
                                                     poll_interval=poll_interval)
+
+
+def _last_assistant_content_from_snapshot(db: ThreadsDB, thread_id: str) -> str:
+    """Return the last assistant message content from a thread snapshot."""
+
+    row = db.get_thread(thread_id)
+    if not row or not row.snapshot_json:
+        return ''
+    try:
+        snap = json.loads(row.snapshot_json)
+    except Exception:
+        return ''
+    msgs = snap.get('messages', []) or []
+    for m in reversed(msgs):
+        try:
+            if m.get('role') == 'assistant' and isinstance(m.get('content'), str):
+                return m.get('content') or ''
+        except Exception:
+            continue
+    return ''
+
+
+def wait_for_threads(
+    db: ThreadsDB,
+    thread_ids: List[str],
+    *,
+    timeout_sec: Optional[float] = None,
+    poll_interval: float = 0.2,
+) -> Dict[str, ThreadWaitResult]:
+    """Wait for threads to reach ``waiting_user`` and return structured results.
+
+    This is the shared implementation behind the human-readable ``wait`` tool
+    and the future REPL bridge's programmatic ``eggtools.wait`` wrapper.
+    """
+
+    import time
+    from .tool_state import thread_state
+
+    clean_ids = [str(t) for t in (thread_ids or []) if isinstance(t, (str, int))]
+    start = time.time()
+    finished: Dict[str, bool] = {tid: False for tid in clean_ids}
+    results: Dict[str, ThreadWaitResult] = {}
+
+    while True:
+        all_done = True
+        for tid in clean_ids:
+            if finished.get(tid):
+                continue
+            try:
+                st = thread_state(db, tid)
+            except Exception:
+                st = 'unknown'
+            if st == 'waiting_user':
+                row = db.get_thread(tid)
+                results[tid] = ThreadWaitResult(
+                    thread_id=tid,
+                    finished=True,
+                    state=st,
+                    last_assistant_message=_last_assistant_content_from_snapshot(db, tid),
+                    short_recap=(row.short_recap if row else None),
+                )
+                finished[tid] = True
+            else:
+                all_done = False
+        if all_done:
+            break
+        if timeout_sec is not None and (time.time() - start) >= timeout_sec:
+            break
+        try:
+            if timeout_sec is not None:
+                remaining = max(0.0, float(timeout_sec) - (time.time() - start))
+                time.sleep(min(float(poll_interval), remaining))
+            else:
+                time.sleep(float(poll_interval))
+        except Exception:
+            time.sleep(0.2)
+
+    # Fill in unfinished entries with their current state.
+    for tid in clean_ids:
+        if tid in results:
+            continue
+        try:
+            st = thread_state(db, tid)
+        except Exception:
+            st = 'unknown'
+        row = db.get_thread(tid)
+        results[tid] = ThreadWaitResult(
+            thread_id=tid,
+            finished=False,
+            state=st,
+            last_assistant_message=_last_assistant_content_from_snapshot(db, tid),
+            short_recap=(row.short_recap if row else None),
+        )
+    return results
 
 def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_dir: str, reason: str = "user") -> None:
     """Apply working directory configuration to all threads in a subtree."""

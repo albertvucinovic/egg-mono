@@ -49,6 +49,17 @@ def _now_plus(ttl_sec: int) -> str:
     return (_utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
 
 
+def runner_actionable_resource_class(ra: Optional[RunnerActionable]) -> str:
+    """Return scheduler resource class for a RunnerActionable.
+
+    RA1 performs LLM/provider work and consumes the scarce LLM slot pool.
+    RA2/RA3 are tool work: they are still real running thread work with a
+    lease, but they do not consume LLM concurrency slots.
+    """
+
+    return "llm" if ra is not None and ra.kind == "RA1_llm" else "tool"
+
+
 # Thresholds above which a tool output is considered "long" and should
 # be stashed to disk with a preview sent to the LLM instead of the full
 # content. Matches the existing "prompt the user" thresholds so
@@ -281,6 +292,14 @@ class RunnerConfig:
     lease_ttl_sec: int = 10
     heartbeat_sec: float = 1.0
     max_concurrent_threads: int = 4
+    # Explicit RLM scheduling model: only RA1/LLM work consumes scarce
+    # LLM slots.  ``max_concurrent_threads`` remains as the backwards-
+    # compatible default for this field when it is left unset.
+    max_concurrent_llm_threads: Optional[int] = None
+    # Optional cap for concurrently running tool turns (RA2/RA3).  None
+    # means tool turns do not consume a global scheduler slot; they are
+    # still per-thread leased/running/interruptible.
+    max_concurrent_tool_threads: Optional[int] = None
     # Sticky scheduling options
     sticky_scheduling: bool = False  # opt-in to slot reservation
     sticky_idle_threshold_sec: float = 5.0  # idle time before losing reserved slot
@@ -296,6 +315,10 @@ class RunnerConfig:
     # Global context limit: None = no limit, >0 = max tokens before LLM call is rejected
     # Per-thread settings (via thread.context_limit events) override this
     context_limit: Optional[int] = None
+
+    @property
+    def effective_max_concurrent_llm_threads(self) -> int:
+        return int(self.max_concurrent_llm_threads or self.max_concurrent_threads)
 
 
 class ThreadRunner:
@@ -901,12 +924,11 @@ class ThreadRunner:
             # Filter out disabled tool names from the spec before
             # exposing them to the LLM.
             enabled_specs = []
-            disabled_set = {n.lower() for n in tools_cfg.disabled_tools}
             for spec in tools_spec:
                 try:
                     fn = (spec or {}).get('function') or {}
-                    name = str(fn.get('name') or '').lower()
-                    if name and name in disabled_set:
+                    name = str(fn.get('name') or '')
+                    if name and not tools_cfg.is_tool_allowed(name):
                         continue
                     enabled_specs.append(spec)
                 except Exception:
@@ -1819,14 +1841,14 @@ class ThreadRunner:
 
             # Approved, not yet executed -> execution_started -> finished
             if tc.state == 'TC2.1':
-                # Respect per-thread disabled tools: instead of
+                # Respect per-thread tool capabilities: instead of
                 # executing the tool, immediately mark it finished with
-                # a synthetic "disabled" output. This applies equally
+                # a synthetic "not allowed" output. This applies equally
                 # to assistant- and user-originated calls.
-                if tc.name in tools_cfg.disabled_tools:
+                if not tools_cfg.is_tool_allowed(tc.name):
                     import os as _os
                     disabled_msg = (
-                        f"Tool '{tc.name}' is disabled for this thread and "
+                        f"Tool '{tc.name}' is not allowed for this thread and "
                         "was not executed."
                     )
                     self.db.append_event(
@@ -1853,7 +1875,7 @@ class ThreadRunner:
                         payload={
                             'tool_call_id': tc.tool_call_id,
                             'decision': 'whole',
-                            'reason': 'Auto: tool disabled for this thread',
+                            'reason': 'Auto: tool not allowed for this thread',
                             'preview': disabled_msg,
                         },
                     )
@@ -2488,10 +2510,11 @@ class SubtreeScheduler:
             if not _is_tty:
                 print("[NO_API_CALLS] Read-only mode: RA1/RA2 disabled, only user commands allowed")
 
-        sem = asyncio.Semaphore(self.cfg.max_concurrent_threads)
-
-        # Track currently running threads to avoid creating duplicate tasks
-        running_threads: Set[str] = set()
+        # Track currently running threads to avoid creating duplicate tasks.
+        # Values are scheduler resource classes: "llm" or "tool".  Tool
+        # turns are still running/leased, but only "llm" consumes the
+        # scarce provider concurrency budget.
+        running_threads: Dict[str, str] = {}
 
         # Cheap per-thread event watermark to short-circuit expensive
         # runnable checks when a thread's event log has not changed
@@ -2502,28 +2525,27 @@ class SubtreeScheduler:
         last_run_end: Dict[str, float] = {}  # thread_id -> monotonic time when last run ended
         reserved_slots: Set[str] = set()     # threads with reserved slots (recently ran, within threshold)
 
-        async def drive(tid: str):
+        async def drive(tid: str, resource_class: str):
             try:
-                async with sem:
-                    runner = ThreadRunner(
-                        self.db,
-                        tid,
-                        llm=self.llm,
-                        owner=self.owner,
-                        purpose="assistant_stream",
-                        config=self.cfg,
-                        tools=self.tools,
-                    )
-                    try:
-                        await runner.run_once()
-                    except Exception:
-                        # Clear cache to force re-check on next iteration
-                        last_checked_seq.pop(tid, None)
+                runner = ThreadRunner(
+                    self.db,
+                    tid,
+                    llm=self.llm,
+                    owner=self.owner,
+                    purpose="assistant_stream",
+                    config=self.cfg,
+                    tools=self.tools,
+                )
+                try:
+                    await runner.run_once()
+                except Exception:
+                    # Clear cache to force re-check on next iteration
+                    last_checked_seq.pop(tid, None)
             finally:
                 # Remove from running set when done
-                running_threads.discard(tid)
+                running_threads.pop(tid, None)
                 # Reserve slot (actual idle check happens in scheduling loop)
-                if self.cfg.sticky_scheduling:
+                if self.cfg.sticky_scheduling and resource_class == "llm":
                     reserved_slots.add(tid)
 
         while True:
@@ -2566,14 +2588,25 @@ class SubtreeScheduler:
             # Apply priority sorting
             all_threads = _sort_by_priority(all_threads, self.cfg.priority_mode, self.db)
 
-            # Calculate available slots for scheduling
-            # We only create tasks up to max_concurrent to respect priority order
-            # (the semaphore doesn't preserve priority when multiple tasks wait)
-            available_slots = self.cfg.max_concurrent_threads - len(running_threads)
+            # Calculate available LLM/tool slots for scheduling.  Tool work
+            # does not consume LLM slots; an optional separate tool cap can
+            # be configured for backpressure, but defaults to unlimited.
+            running_llm = sum(1 for kind in running_threads.values() if kind == "llm")
+            running_tool = sum(1 for kind in running_threads.values() if kind == "tool")
+            active_reserved_llm = sum(
+                1 for tid in reserved_slots
+                if tid not in running_threads
+            ) if self.cfg.sticky_scheduling else 0
+            llm_slots_used = running_llm + active_reserved_llm
+            available_llm_slots = self.cfg.effective_max_concurrent_llm_threads - llm_slots_used
+            if self.cfg.max_concurrent_tool_threads is None:
+                available_tool_slots: Optional[int] = None
+            else:
+                available_tool_slots = int(self.cfg.max_concurrent_tool_threads) - running_tool
 
             # First pass: find runnable threads in priority order
             # We check all threads but only schedule up to available_slots
-            runnable_candidates: List[str] = []
+            runnable_candidates: List[tuple[str, RunnerActionable, str]] = []
             # Track max_seq for threads we check - only update last_checked_seq
             # for threads that are NOT runnable (truly idle) or that we schedule
             checked_seqs: Dict[str, int] = {}
@@ -2611,34 +2644,42 @@ class SubtreeScheduler:
                 except Exception:
                     pass  # On error, proceed with normal check
 
-                if is_thread_runnable(self.db, tid):
-                    runnable_candidates.append(tid)
+                ra = discover_runner_actionable_cached(self.db, tid)
+                if ra is not None:
+                    runnable_candidates.append((tid, ra, runner_actionable_resource_class(ra)))
                 else:
                     # Thread is NOT runnable - mark as checked so we skip it
                     # until its events change
                     last_checked_seq[tid] = checked_seqs[tid]
 
-            # Second pass: schedule runnable threads up to available slots
+            # Second pass: schedule runnable threads.  Only RA1/LLM work
+            # consumes available_llm_slots; RA2/RA3 tool work is scheduled
+            # independently (unless an explicit tool cap is configured).
             # (candidates are already in priority order from all_threads)
-            for tid in runnable_candidates:
-                if available_slots <= 0:
-                    break
+            for tid, _ra, resource_class in runnable_candidates:
+                if resource_class == "llm" and available_llm_slots <= 0:
+                    continue
+                if resource_class == "tool" and available_tool_slots is not None and available_tool_slots <= 0:
+                    continue
 
                 # Check if we can schedule this thread (sticky scheduling)
-                if self.cfg.sticky_scheduling:
+                if self.cfg.sticky_scheduling and resource_class == "llm":
                     is_reserved = tid in reserved_slots
-                    active_reserved = reserved_slots - running_threads
-                    used_slots = len(running_threads) + len(active_reserved)
+                    active_reserved = reserved_slots - set(running_threads.keys())
+                    used_slots = running_llm + len(active_reserved)
 
-                    if not is_reserved and used_slots >= self.cfg.max_concurrent_threads:
-                        continue  # No slots for non-reserved threads
+                    if not is_reserved and used_slots >= self.cfg.effective_max_concurrent_llm_threads:
+                        continue  # No LLM slots for non-reserved threads
 
                     reserved_slots.add(tid)
                     last_run_end.pop(tid, None)  # Clear idle timer when scheduled
 
-                running_threads.add(tid)
-                asyncio.create_task(drive(tid))
-                available_slots -= 1
+                running_threads[tid] = resource_class
+                asyncio.create_task(drive(tid, resource_class))
+                if resource_class == "llm":
+                    available_llm_slots -= 1
+                elif available_tool_slots is not None:
+                    available_tool_slots -= 1
 
             await asyncio.sleep(poll_sec)
 

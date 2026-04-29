@@ -32,7 +32,7 @@ Callers should use the helpers in this module rather than emitting
 """
 
 from dataclasses import dataclass, field
-from typing import Set, List
+from typing import Optional, Set, List
 
 from .db import ThreadsDB
 
@@ -66,6 +66,26 @@ class ToolsConfig:
     disabled_tools: Set[str] = field(default_factory=set)
     has_explicit_config: bool = False
     allow_raw_tool_output: bool = True
+    allowed_tools: Optional[Set[str]] = None
+
+    def is_tool_allowed(self, name: str) -> bool:
+        """Return True if *name* may be exposed/executed in this thread.
+
+        ``allowed_tools=None`` means "all registered tools are potentially
+        allowed".  ``disabled_tools`` is always applied last so an explicit
+        disable wins over an allowlist entry.
+        """
+
+        if not isinstance(name, str) or not name.strip():
+            return False
+        key = name.strip().lower()
+        disabled = {n.lower() for n in self.disabled_tools}
+        if key in disabled:
+            return False
+        if self.allowed_tools is None:
+            return True
+        allowed = {n.lower() for n in self.allowed_tools}
+        return key in allowed
 
 
 def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
@@ -105,6 +125,18 @@ def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
             except Exception:
                 pass
             cfg.has_explicit_config = True
+        if "allow_only" in payload:
+            allow_only = payload.get("allow_only")
+            if allow_only is None:
+                cfg.allowed_tools = None
+                cfg.has_explicit_config = True
+            elif isinstance(allow_only, (list, tuple)):
+                allowed: Set[str] = set()
+                for name in allow_only:
+                    if isinstance(name, str) and name.strip():
+                        allowed.add(name.strip())
+                cfg.allowed_tools = allowed
+                cfg.has_explicit_config = True
         # Apply incremental enables/disables for tool names
         disable = payload.get("disable") or []
         if isinstance(disable, (list, tuple)):
@@ -185,6 +217,26 @@ def enable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
     if not isinstance(name, str) or not name.strip():
         return
     _append_tools_config_event(db, thread_id, {"enable": [name.strip()]})
+
+
+def set_thread_tool_allowlist(db: ThreadsDB, thread_id: str, names: List[str] | Set[str]) -> None:
+    """Restrict a thread to exactly the given tool names.
+
+    The allowlist controls both LLM tool exposure and RA2/RA3 execution.
+    Existing disabled tools remain disabled; i.e. disables still override
+    allowlist membership.
+    """
+
+    if not isinstance(names, (list, tuple, set)):
+        names = []
+    clean = sorted({n.strip() for n in names if isinstance(n, str) and n.strip()})
+    _append_tools_config_event(db, thread_id, {"allow_only": clean})
+
+
+def clear_thread_tool_allowlist(db: ThreadsDB, thread_id: str) -> None:
+    """Clear any explicit allowlist, returning to all-tools-minus-disabled."""
+
+    _append_tools_config_event(db, thread_id, {"allow_only": None})
 
 
 # -------- Subtree helpers -------------------------------------------------
