@@ -238,7 +238,64 @@ def get_thread_session_status(db: ThreadsDB, thread_id: str) -> SessionStatus:
 _MEMORY_PYTHON_REPLS: Dict[tuple[str, str], Dict[str, Any]] = {}
 
 
-def _execute_python_memory(session_id: str, repl_name: str, code: str) -> str:
+def _make_eggtools_module(eval_token: str):
+    """Create an in-memory eggtools module bound to an eval token."""
+
+    import types
+    from . import repl_bridge
+
+    mod = types.ModuleType("eggtools")
+
+    def tool(name: str, **kwargs: Any) -> str:
+        return repl_bridge.call_tool(eval_token, name, kwargs)
+
+    def spawn_agent(context_text: str, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        args["context_text"] = context_text
+        return repl_bridge.call_tool(eval_token, "spawn_agent", args)
+
+    def spawn_agent_auto(context_text: str, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        args["context_text"] = context_text
+        return repl_bridge.call_tool(eval_token, "spawn_agent_auto", args)
+
+    def wait(thread_ids: list[str], **kwargs: Any) -> str:
+        args = dict(kwargs)
+        args["thread_ids"] = thread_ids
+        return repl_bridge.call_tool(eval_token, "wait", args)
+
+    def web_search(query: str, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        args["query"] = query
+        return repl_bridge.call_tool(eval_token, "web_search", args)
+
+    def fetch_url(url: str, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        args["url"] = url
+        return repl_bridge.call_tool(eval_token, "fetch_url", args)
+
+    def bash(script: str, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        args["script"] = script
+        return repl_bridge.call_tool(eval_token, "bash", args)
+
+    def python(script: str, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        args["script"] = script
+        return repl_bridge.call_tool(eval_token, "python", args)
+
+    mod.tool = tool
+    mod.spawn_agent = spawn_agent
+    mod.spawn_agent_auto = spawn_agent_auto
+    mod.wait = wait
+    mod.web_search = web_search
+    mod.fetch_url = fetch_url
+    mod.bash = bash
+    mod.python = python
+    return mod
+
+
+def _execute_python_memory(session_id: str, repl_name: str, code: str, *, eval_token: Optional[str] = None) -> str:
     """Execute Python in a persistent in-process namespace.
 
     This provider exists to let the RLM bridge/runtime-thread semantics be
@@ -249,10 +306,16 @@ def _execute_python_memory(session_id: str, repl_name: str, code: str) -> str:
     import ast
     import contextlib
     import io
+    import sys
     import traceback
 
     key = (session_id, repl_name)
     globs = _MEMORY_PYTHON_REPLS.setdefault(key, {"__name__": "__egg_repl__"})
+    old_eggtools = sys.modules.get("eggtools")
+    if eval_token:
+        eggtools_mod = _make_eggtools_module(eval_token)
+        sys.modules["eggtools"] = eggtools_mod
+        globs["eggtools"] = eggtools_mod
     stdout = io.StringIO()
     stderr = io.StringIO()
     try:
@@ -270,6 +333,12 @@ def _execute_python_memory(session_id: str, repl_name: str, code: str) -> str:
                 exec(compile(tree, "<egg-python-repl>", "exec"), globs, globs)
     except Exception:
         traceback.print_exc(file=stderr)
+    finally:
+        if eval_token:
+            if old_eggtools is not None:
+                sys.modules["eggtools"] = old_eggtools
+            else:
+                sys.modules.pop("eggtools", None)
 
     out = ""
     stdout_text = stdout.getvalue().strip()
@@ -288,6 +357,8 @@ def execute_python_repl(
     *,
     repl_name: str = "default",
     runtime_name: str = "default",
+    bridge_timeout_sec: Optional[float] = 30.0,
+    drive_runtime_tools: bool = False,
 ) -> str:
     """Execute Python code in the caller's persistent runtime session.
 
@@ -322,7 +393,20 @@ def execute_python_repl(
     )
 
     if cfg.provider == "memory":
-        return _execute_python_memory(cfg.session_id, repl_name, code)
+        from .repl_bridge import create_eval_context, dispose_eval_context
+
+        ctx = create_eval_context(
+            db,
+            caller_thread_id=caller_thread_id,
+            runtime_thread_id=runtime_thread_id,
+            session_id=cfg.session_id,
+            bridge_timeout_sec=bridge_timeout_sec,
+            drive_runtime_tools=drive_runtime_tools,
+        )
+        try:
+            return _execute_python_memory(cfg.session_id, repl_name, code, eval_token=ctx.token)
+        finally:
+            dispose_eval_context(ctx.token)
     if cfg.provider == "docker":
         return "Error: Docker session provider is not implemented yet."
     return f"Error: unknown session provider: {cfg.provider}"

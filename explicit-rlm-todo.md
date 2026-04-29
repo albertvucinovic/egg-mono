@@ -67,10 +67,10 @@ Legend:
 ## Phase 6: Python REPL MVP
 
 - [x] Add `python_repl` tool.
-- [ ] Add eval token registry / bridge skeleton.
+- [x] Add eval token registry / bridge skeleton.
 - [x] Add fake Python REPL provider for tests.
-- [ ] Programmatic `eggtools` calls enqueue RA3 on runtime thread.
-- [~] Tests for Python state persistence (tool call enqueue/wait pending bridge).
+- [x] Programmatic `eggtools` calls enqueue RA3 on runtime thread.
+- [x] Tests for Python state persistence and tool call enqueue/wait.
 
 ## Phase 7+: Later phases
 

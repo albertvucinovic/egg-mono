@@ -157,6 +157,15 @@ from .session import (
     find_runtime_thread,
     get_or_create_runtime_thread,
 )
+from .repl_bridge import (
+    EvalContext,
+    ReplBridgeError,
+    ReplToolTimeout,
+    create_eval_context,
+    resolve_eval_context,
+    dispose_eval_context,
+    call_tool as repl_bridge_call_tool,
+)
 
 from .tools import ToolRegistry, create_default_tools
 
@@ -210,5 +219,8 @@ __all__ = [
     'execute_python_repl',
     'runtime_thread_label', 'append_runtime_config',
     'find_runtime_thread', 'get_or_create_runtime_thread',
+    'EvalContext', 'ReplBridgeError', 'ReplToolTimeout',
+    'create_eval_context', 'resolve_eval_context', 'dispose_eval_context',
+    'repl_bridge_call_tool',
 ]
 from .event_watcher import EventWatcher

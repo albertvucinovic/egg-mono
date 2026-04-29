@@ -307,7 +307,20 @@ def create_default_tools() -> ToolRegistry:
         repl_name = (args.get('repl_name') or 'default').strip() or 'default'
         runtime_name = (args.get('runtime_name') or 'default').strip() or 'default'
         try:
-            return execute_python_repl(ThreadsDB(), thread_id, str(code), repl_name=repl_name, runtime_name=runtime_name)
+            bridge_timeout_sec = float(args.get('bridge_timeout_sec')) if args.get('bridge_timeout_sec') is not None else None
+        except Exception:
+            bridge_timeout_sec = 30.0
+        drive_runtime_tools = bool(args.get('drive_runtime_tools', False))
+        try:
+            return execute_python_repl(
+                ThreadsDB(),
+                thread_id,
+                str(code),
+                repl_name=repl_name,
+                runtime_name=runtime_name,
+                bridge_timeout_sec=bridge_timeout_sec,
+                drive_runtime_tools=drive_runtime_tools,
+            )
         except Exception as e:
             return f"Error: python_repl failed: {e}"
 
@@ -320,6 +333,8 @@ def create_default_tools() -> ToolRegistry:
                 "code": {"type": "string", "description": "Python code to execute in the persistent REPL."},
                 "repl_name": {"type": "string", "description": "Optional REPL channel name (default: default)."},
                 "runtime_name": {"type": "string", "description": "Optional runtime child thread name (default: default)."},
+                "bridge_timeout_sec": {"type": "number", "description": "Seconds to wait for programmatic eggtools calls from this eval."},
+                "drive_runtime_tools": {"type": "boolean", "description": "Testing/headless mode: directly drive runtime thread tool calls instead of relying on an active subtree scheduler."},
             },
             "required": ["code"],
         },
