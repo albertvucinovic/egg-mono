@@ -19,13 +19,71 @@ from eggthreads import sanitize_terminal_text
 # occasionally stretches the gap between the ESC byte and its tail.
 _ESC_DEBOUNCE_SEC = 0.20
 
-# Regex matching the printable body of an SGR mouse report stripped of
-# its ``\x1b[<`` prefix (``<button;col;row[Mm]``). We use it as a
-# belt-and-braces matcher for cases where the ESC has already been
-# flushed before the tail arrived — without this the tail would leak
-# into the editor as typed text.
+# SGR mouse reports have shape ``\x1b[<button;col;row(M|m)``. readchar's
+# split delivery can sever any combination of the leading bytes
+# (``\x1b``, ``[``, ``<``) across multiple readkey() calls, and the
+# numeric body itself can arrive in pieces. Each ORPHAN tail shape —
+# ``\x1b``-stripped (``[<…``), ``\x1b[``-stripped (``<…``), or
+# ``\x1b[<``-stripped (naked digits) — must be recognised so it does
+# not leak into the editor as typed text. The intact ``\x1b[<…``
+# form is handled by ``normalize_key`` in the editor wrapper, which
+# already buffers incomplete CSI sequences via ``_ansi_pending``;
+# duplicating that here would race with it, so the absorber below
+# deliberately does NOT match ``\x1b[<…`` prefixes.
 import re as _re
-_ORPHAN_SGR_MOUSE_RE = _re.compile(r"^\[<-?\d+;-?\d+;-?\d+[Mm]$")
+
+_MOUSE_PREFIXES = ("[<", "<")
+_MOUSE_BODY_FULL_RE = _re.compile(r"^-?\d+;-?\d+;-?\d+[Mm]$")
+# Partial body: any prefix of "<digits>;<digits>;<digits>" that could
+# still grow into a full report. Empty body is also accepted (the input
+# may be just the prefix bytes ``\x1b[<`` / ``[<`` / ``<``).
+_MOUSE_BODY_PARTIAL_RE = _re.compile(r"^-?\d*(?:;-?\d*){0,2}$")
+
+# Window after a bare-ESC dispatch during which we treat naked-digit
+# fragments (no ``[<`` or ``<`` prefix) as suspected orphan mouse tails
+# rather than user typing. Outside this window, naked-digit fragments
+# fall through to the editor as before.
+_ORPHAN_MOUSE_WINDOW_SEC = 0.30
+
+
+def _strip_mouse_prefix(s: str) -> tuple:
+    """Return (prefix, body) where prefix is one of the recognised mouse
+    prefixes (``\x1b[<`` / ``[<`` / ``<``) or ``""`` if none, and body is
+    the remainder. Longest prefix wins.
+    """
+    for p in _MOUSE_PREFIXES:
+        if s.startswith(p):
+            return p, s[len(p):]
+    return "", s
+
+
+def _classify_mouse_fragment(s: str, *, allow_bare: bool) -> str:
+    """Classify ``s`` as an SGR mouse fragment.
+
+    Returns one of ``"full"`` (a complete mouse report at any
+    prefix-strip level — discard), ``"partial"`` (could still grow
+    into a full report — buffer), or ``"none"`` (not a mouse fragment).
+
+    ``allow_bare`` controls whether naked-digit tails (no ``[<`` or
+    ``<`` prefix) are eligible. They are only trusted as mouse fragments
+    inside the post-ESC suspicion window, otherwise they are very likely
+    user input and must be passed through.
+    """
+    if not s:
+        return "none"
+    prefix, body = _strip_mouse_prefix(s)
+    if prefix == "" and not allow_bare:
+        return "none"
+    if _MOUSE_BODY_FULL_RE.match(body):
+        return "full"
+    if body == "":
+        # We have only the prefix bytes — definitely a partial.
+        return "partial" if prefix else "none"
+    if _MOUSE_BODY_PARTIAL_RE.match(body):
+        return "partial"
+    return "none"
+
+
 del _re
 
 
@@ -54,9 +112,13 @@ class InputMixin:
                 self._pending_esc_time = 0.0
             else:
                 # Not a continuation — dispatch the deferred Esc first,
-                # then process this key as normal.
+                # then process this key as normal. Open a suspicion
+                # window so any orphan SGR mouse tail that arrives next
+                # (with ``\x1b[<`` already gone) is recognised even
+                # without an identifying prefix.
                 self._pending_esc = False
                 self._pending_esc_time = 0.0
+                self._open_orphan_mouse_window(now)
                 self._dispatch_bare_esc()
 
         # Assemble multi-part ANSI escape sequences (e.g. long SGR mouse
@@ -64,6 +126,11 @@ class InputMixin:
         # editor wrapper's normalize_key is stateful and idempotent on
         # already-complete keys, so routing through it here does not
         # break the eventual _handle_key call that also invokes it.
+        # Run BEFORE the orphan-mouse absorber so that intact
+        # ``\x1b[<…M`` fragmented across reads is reassembled by the
+        # editor's ``_ansi_pending`` path, leaving the absorber to
+        # handle only the orphan tail shapes (``[<…`` / ``<…`` / naked
+        # digits) that no longer carry a CSI introducer.
         try:
             ed_wrapper = self.input_panel.editor
             if hasattr(ed_wrapper, 'normalize_key'):
@@ -73,6 +140,18 @@ class InputMixin:
                 key = normalized
         except Exception:
             pass
+
+        # Orphan SGR mouse fragment absorber. Handles tails where the
+        # ``\x1b[<`` introducer has been (partially) stripped by split
+        # delivery. ``None`` means the key was buffered as an in-flight
+        # partial; otherwise the (possibly canonicalised) key continues
+        # through the rest of handle_key, where the wheel-scroll handler
+        # interprets the full form.
+        if isinstance(key, str):
+            absorbed = self._absorb_orphan_mouse(key, now)
+            if absorbed is None:
+                return True
+            key = absorbed
 
         # Bracketed paste must be handled before Enter/Ctrl shortcuts. In the
         # real app input flows through this mixin first, so a paste payload
@@ -142,19 +221,12 @@ class InputMixin:
 
                 # SGR mouse events: "\x1b[<button;col;row" + ("M" = press, "m" = release).
                 # Wheel buttons: 64 = up, 65 = down (modifier bits may be set).
-                # Accept the orphaned tail form ``[<...M|m`` too — when
-                # readchar's split delivery outran the ESC debounce, the
-                # ``\x1b`` has already been flushed and only the tail
-                # reaches us; still a mouse event, should not leak into
-                # the editor.
-                body_src: Optional[str] = None
+                # Orphan tails (any prefix-strip level / split bodies)
+                # are absorbed by the assembler above; here we only
+                # interpret the *intact* sequence to drive scrolling.
                 if key.startswith('\x1b[<') and (key.endswith('M') or key.endswith('m')):
-                    body_src = key[3:-1]
-                elif _ORPHAN_SGR_MOUSE_RE.match(key):
-                    body_src = key[2:-1]
-                if body_src is not None:
                     try:
-                        fields = body_src.split(';')
+                        fields = key[3:-1].split(';')
                         if len(fields) >= 3:
                             button = int(fields[0])
                             # Wheel: button >= 64, bit 1 = horizontal (skip).
@@ -367,9 +439,106 @@ class InputMixin:
         """
         if not getattr(self, '_pending_esc', False):
             return
-        age = time.monotonic() - float(getattr(self, '_pending_esc_time', 0) or 0)
+        now = time.monotonic()
+        age = now - float(getattr(self, '_pending_esc_time', 0) or 0)
         if age < _ESC_DEBOUNCE_SEC:
             return
         self._pending_esc = False
         self._pending_esc_time = 0.0
+        # Open the orphan-mouse suspicion window: this is precisely the
+        # case where readchar split a long mouse report and the body is
+        # about to arrive without an identifying prefix.
+        self._open_orphan_mouse_window(now)
         self._dispatch_bare_esc()
+
+    def _open_orphan_mouse_window(self, now: float) -> None:
+        """Mark that we just dispatched a bare ESC under suspicious
+        circumstances (debounce timeout / non-CSI follow-up). Within the
+        window, naked-digit fragments are treated as orphan SGR mouse
+        tails rather than user typing.
+        """
+        until = float(getattr(self, '_orphan_mouse_until', 0.0) or 0.0)
+        new_until = now + _ORPHAN_MOUSE_WINDOW_SEC
+        if new_until > until:
+            self._orphan_mouse_until = new_until
+
+    def _absorb_orphan_mouse(self, key: str, now: float) -> Optional[str]:
+        """Attempt to absorb ``key`` as part of an orphan SGR mouse fragment.
+
+        Returns:
+            ``None`` if the key was buffered as an in-flight partial.
+            A string to continue processing in ``handle_key`` — either
+            ``key`` unchanged, the canonical ``\x1b[<…M`` form (when an
+            orphan completion has been re-prefixed so the wheel-scroll
+            handler can interpret it), or ``buf + key`` when a buffered
+            fragment turned out not to be a mouse event after all.
+        """
+        buf = getattr(self, '_orphan_mouse_buf', '') or ''
+        until = float(getattr(self, '_orphan_mouse_until', 0.0) or 0.0)
+        # Naked-digit fragments are ambiguous (could be user input). We
+        # only trust them as mouse tails inside the post-ESC suspicion
+        # window, OR when we are already mid-buffer for a mouse fragment
+        # (so the chain stays consistent regardless of timing slop).
+        allow_bare = now < until or bool(buf)
+
+        def _normalise(s: str) -> str:
+            prefix, body = _strip_mouse_prefix(s)
+            return ('\x1b[<' + body) if prefix != '\x1b[<' else s
+
+        if buf:
+            candidate = buf + key
+            cls = _classify_mouse_fragment(candidate, allow_bare=allow_bare)
+            if cls == 'full':
+                self._orphan_mouse_buf = ''
+                self._orphan_mouse_until = 0.0
+                # Hand a canonical sequence back so the wheel-scroll
+                # handler can still drive scrolling on orphan completions.
+                return _normalise(candidate)
+            if cls == 'partial':
+                self._orphan_mouse_buf = candidate
+                # Refresh the window so subsequent chunks get the same
+                # benefit-of-the-doubt as the leading fragment.
+                self._orphan_mouse_until = now + _ORPHAN_MOUSE_WINDOW_SEC
+                return None
+            # Doesn't extend a mouse fragment. Flush the buffer as text
+            # and let the current key be processed normally.
+            self._orphan_mouse_buf = ''
+            self._orphan_mouse_until = 0.0
+            return buf + key
+
+        cls = _classify_mouse_fragment(key, allow_bare=allow_bare)
+        if cls == 'full':
+            return _normalise(key)
+        if cls == 'partial':
+            self._orphan_mouse_buf = key
+            self._orphan_mouse_until = now + _ORPHAN_MOUSE_WINDOW_SEC
+            return None
+        return key
+
+    def flush_pending_orphan_mouse_if_stale(self) -> None:
+        """Drain the orphan-mouse buffer if its window has elapsed.
+
+        Mirrors ``flush_pending_esc_if_stale``: called from the main
+        loop after draining the input queue. A buffer that has aged out
+        is either silently discarded (if it has the unmistakable shape
+        of a truncated mouse fragment — leading prefix or embedded
+        ``;``) or flushed to the editor as plain text (best-effort
+        recovery for ambiguous content).
+        """
+        buf = getattr(self, '_orphan_mouse_buf', '') or ''
+        if not buf:
+            return
+        until = float(getattr(self, '_orphan_mouse_until', 0.0) or 0.0)
+        if time.monotonic() < until:
+            return
+        prefix, body = _strip_mouse_prefix(buf)
+        self._orphan_mouse_buf = ''
+        self._orphan_mouse_until = 0.0
+        if prefix or ';' in body:
+            # Looks like a truncated mouse fragment whose terminator was
+            # lost. Drop silently rather than typing garbage.
+            return
+        try:
+            self.input_panel.editor._handle_key(buf)
+        except Exception:
+            pass

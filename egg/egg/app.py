@@ -531,6 +531,14 @@ class EggDisplayApp(
                             self.flush_pending_esc_if_stale()
                         except Exception:
                             pass
+                        # Drain stale orphan-mouse fragments so a
+                        # truncated SGR mouse report (terminator lost
+                        # to readchar split delivery) does not stay
+                        # buffered forever.
+                        try:
+                            self.flush_pending_orphan_mouse_if_stale()
+                        except Exception:
+                            pass
                         # Update panels content (sets dirty flags on changes)
                         self.update_panels()
                         # Only rebuild when something changed
