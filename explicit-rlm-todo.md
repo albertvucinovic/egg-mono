@@ -60,7 +60,7 @@ Legend:
 
 - [x] Add `SessionConfig` resolver for `session.config` events.
 - [x] Add fake/in-memory session provider for tests.
-- [ ] Add Docker session provider skeleton.
+- [x] Add Docker session provider skeleton.
 - [x] Add lifecycle events.
 - [x] Tests for config resolution and lifecycle events.
 
@@ -75,6 +75,7 @@ Legend:
 ## Phase 7+: Later phases
 
 - [ ] Bash REPL.
+- [ ] Explicit REPL channel sharing policy/API (`share_repl`) beyond memory provider.
 - [ ] Docker `egg-sessiond`.
 - [ ] `eggtools.py` and `eggtool` in container.
 - [x] Spawn capability attenuation and session sharing.

@@ -97,3 +97,47 @@ def test_session_lifecycle_event(tmp_path):
     assert payload["action"] == "started"
     assert payload["session_id"] == sid
     assert payload["container_name"] == "egg-rlm-test"
+
+
+def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    sid = ts.enable_thread_session(db, tid, provider="docker", image="egg-rlm-session")
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+
+    status = ts.get_thread_session_status(db, tid)
+    assert status.enabled is True
+    assert status.provider == "docker"
+    assert status.status == "available"
+    assert status.session_id == sid
+    assert status.container_name is not None
+    assert status.container_name.startswith("egg-rlm-")
+
+    status2 = ts.get_or_start_docker_session(db, tid)
+    assert status2.container_name == status.container_name
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='session.lifecycle' ORDER BY event_seq DESC LIMIT 1",
+        (tid,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["action"] == "docker_skeleton_ready"
+    assert payload["container_name"] == status.container_name
+
+
+def test_docker_session_status_unavailable(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.enable_thread_session(db, tid, provider="docker")
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: False)
+
+    status = ts.get_thread_session_status(db, tid)
+    assert status.status == "unavailable"
+    assert status.container_name is not None
+
+    ts.get_or_start_docker_session(db, tid)
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='session.lifecycle' ORDER BY event_seq DESC LIMIT 1",
+        (tid,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["action"] == "docker_unavailable"

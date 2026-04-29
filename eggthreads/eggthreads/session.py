@@ -52,6 +52,7 @@ class SessionStatus:
     session_id: Optional[str]
     status: str
     message: str = ""
+    container_name: Optional[str] = None
 
 
 def _clean_runtime_part(value: Any, default: str) -> str:
@@ -102,6 +103,27 @@ def _session_id_for_thread(thread_id: str) -> str:
 
     safe = ''.join(ch for ch in str(thread_id) if ch.isalnum())
     return f"sess_{safe}" if safe else f"sess_{os.urandom(5).hex()}"
+
+
+def docker_session_container_name(db: ThreadsDB, session_id: str) -> str:
+    """Return deterministic Docker container name for a session id."""
+
+    import hashlib
+
+    db_hash = hashlib.sha256(str(db.path).encode("utf-8")).hexdigest()[:12]
+    safe_session = ''.join(ch.lower() if ch.isalnum() else '-' for ch in str(session_id))
+    return f"egg-rlm-{db_hash}-{safe_session[:48]}"
+
+
+def docker_session_available() -> bool:
+    """Return True if Docker CLI/daemon appear available."""
+
+    import subprocess
+    try:
+        subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=5)
+        return True
+    except Exception:
+        return False
 
 
 def get_thread_session_config(db: ThreadsDB, thread_id: str) -> SessionConfig:
@@ -227,8 +249,47 @@ def get_thread_session_status(db: ThreadsDB, thread_id: str) -> SessionStatus:
     if cfg.provider == "memory":
         return SessionStatus(True, cfg.provider, cfg.session_id, "available", "In-memory test session provider")
     if cfg.provider == "docker":
-        return SessionStatus(True, cfg.provider, cfg.session_id, "unimplemented", "Docker session provider is not implemented yet")
+        name = docker_session_container_name(db, cfg.session_id or _session_id_for_thread(thread_id))
+        if not docker_session_available():
+            return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", "Docker is not available", name)
+        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "Docker session provider skeleton is available", name)
     return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", f"Unknown session provider: {cfg.provider}")
+
+
+def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
+    """Skeleton for persistent Docker session start/reattach.
+
+    This establishes deterministic naming/status/lifecycle events without yet
+    implementing the full `egg-sessiond` protocol.  It is deliberately safe:
+    if Docker is unavailable, no container command is attempted.
+    """
+
+    cfg = get_thread_session_config(db, thread_id)
+    if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
+        return get_thread_session_status(db, thread_id)
+    status = get_thread_session_status(db, thread_id)
+    if status.status != "available" or not status.container_name:
+        append_session_lifecycle_event(
+            db,
+            thread_id,
+            action="docker_unavailable",
+            session_id=cfg.session_id,
+            payload={"message": status.message},
+        )
+        return status
+
+    append_session_lifecycle_event(
+        db,
+        thread_id,
+        action="docker_skeleton_ready",
+        session_id=cfg.session_id,
+        payload={
+            "container_name": status.container_name,
+            "image": cfg.image,
+            "workspace": cfg.workspace,
+        },
+    )
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +636,9 @@ __all__ = [
     "SessionStatus",
     "get_thread_session_config",
     "get_thread_session_status",
+    "docker_session_container_name",
+    "docker_session_available",
+    "get_or_start_docker_session",
     "set_thread_session_config",
     "enable_thread_session",
     "disable_thread_session",

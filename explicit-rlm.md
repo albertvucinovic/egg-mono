@@ -1445,6 +1445,20 @@ Recommendation for MVP:
 
 - Use separate runtime threads by language/name to keep transcripts clear.
 
+### 20.1.1 Should REPL channels be shareable?
+
+Session sharing and REPL sharing should remain distinct.  The default remains:
+
+```text
+share Docker/container session: optional
+share interpreter/REPL channel: no
+```
+
+However, an explicit future option such as `share_repl=True` can allow advanced
+workflows where parent/child runtime threads intentionally use the same Python
+or Bash interpreter channel.  This must be opt-in because it creates stronger
+coupling, possible blocking interactions, and shared mutable language state.
+
 ### 20.2 Should runtime threads be hidden/collapsed by default?
 
 Runtime threads may be noisy. But they are valuable for audit.
