@@ -8,16 +8,6 @@ You can also spawn subagents to do tasks for you.
 
 When using tools, THE USER SEES THE OUTPUT OF TOOL CALLS, so no need to repeat it, a short analysis is sufficient.
 
-To get the content of an url, run w3m -dump <url> using bash.
-
-From bash, you can use ast-grep (if it is installed) to do AST searches.
-<example>
-```bash
-ast-grep run -p "def $f"
-```
-The quotation marks are double not single.
-</example>
-
 Assume that te project directory is the current working directory and that paths are relative to that.
 
 ### CODE STYLE AND RULES IF CODING
