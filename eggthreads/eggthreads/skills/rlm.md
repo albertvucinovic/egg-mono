@@ -216,6 +216,63 @@ answer = llm_query(
 print(answer)
 ```
 
+### 6. Long-horizon manager/worker loop
+
+Use this pattern when a task needs iterative guidance, explicit state, budgets,
+and exit conditions. Keep the manager state in `python_repl`; let workers keep
+their own conversation context; guide workers with `send_message_to_child` only
+after they have settled.
+
+```python
+from eggtools import spawn_agent_auto, send_message_to_child, wait
+
+manager_state = {
+    "iteration": 0,
+    "max_iterations": 4,
+    "workers": {},
+    "open_questions": [
+        "Inspect the parser and identify likely failure modes.",
+        "Inspect tests and identify missing coverage.",
+    ],
+    "findings": [],
+}
+
+for question in manager_state["open_questions"]:
+    tid = spawn_agent_auto(
+        question,
+        label="worker",
+        allowed_tools=["bash", "python", "python_repl", "web_search", "fetch_url"],
+    )
+    manager_state["workers"][tid] = {"question": question, "status": "started"}
+
+result_text = wait(list(manager_state["workers"]), timeout_sec=900)
+manager_state["findings"].append(result_text)
+
+# If a worker needs follow-up, reuse its thread context instead of spawning a
+# replacement. The child must be idle/waiting before guidance is sent.
+worker_id = next(iter(manager_state["workers"]))
+send_message_to_child(
+    worker_id,
+    "Please refine your answer: focus only on root causes that are supported by tests or code evidence.",
+)
+followup = wait([worker_id], timeout_sec=600)
+manager_state["findings"].append(followup)
+```
+
+For long loops, always keep explicit budgets and stop reasons:
+
+```python
+def should_stop(state):
+    if state["iteration"] >= state["max_iterations"]:
+        return True, "iteration budget exhausted"
+    if not state.get("open_questions"):
+        return True, "no open questions remain"
+    return False, "continue"
+```
+
+Report periodic checkpoints to the user: what workers did, what remains open,
+what the next iteration will do, and why the loop should continue or stop.
+
 ## Heuristics
 
 - Use Python for exact filtering, counting, parsing, joining, sorting, and
@@ -228,3 +285,6 @@ print(answer)
 - Print bounded previews with `preview()`.
 - Mention important persistent variables to the user when they may matter later.
 - Do not store secrets in REPL variables unless necessary for the task.
+- For manager/worker loops, use explicit budgets, exit conditions, and user
+  checkpoints. Prefer a few reusable worker threads over constantly spawning
+  replacements when the worker's prior context is valuable.

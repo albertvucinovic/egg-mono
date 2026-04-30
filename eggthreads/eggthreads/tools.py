@@ -908,6 +908,50 @@ def create_default_tools() -> ToolRegistry:
         local_only=False,
     )
 
+    def _send_message_to_child(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .api import send_message_to_child_thread
+
+        manager_id = (args.get('_thread_id') or args.get('manager_thread_id') or '').strip()
+        child_id = (args.get('child_thread_id') or args.get('thread_id') or '').strip()
+        message = str(args.get('message') or args.get('context_text') or '')
+        wait_raw = args.get('require_idle')
+        require_idle = True if wait_raw is None else _clean_bool_arg(wait_raw)
+        try:
+            msg_id = send_message_to_child_thread(
+                ThreadsDB(),
+                manager_id,
+                child_id,
+                message,
+                require_idle=require_idle,
+            )
+        except Exception as e:
+            return f"Error: {e}"
+        return f"Sent message {msg_id[-8:]} to child thread {child_id[-8:]}. Use wait to read its response."
+
+    reg.register(
+        name='send_message_to_child',
+        description=(
+            'Append a normal user message to a child or descendant thread so it can continue from its existing context. '
+            'Use this for manager/worker guidance loops after a child has produced an initial response. '
+            'The target must be a descendant of the calling thread. This tool does not wait; call wait afterwards.'
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "child_thread_id": {"type": "string", "description": "Target child or descendant thread id."},
+                "message": {"type": "string", "description": "Guidance/user message to append to the target thread."},
+                "require_idle": {
+                    "type": "boolean",
+                    "description": "When true (default), refuse to message a running/runnable child.",
+                },
+            },
+            "required": ["child_thread_id", "message"],
+        },
+        impl=_send_message_to_child,
+        local_only=False,
+    )
+
     # replace_between
     def _replace_between(args: Dict[str, Any]):
         file_path = args.get('file_path', '')

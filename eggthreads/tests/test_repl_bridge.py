@@ -202,3 +202,33 @@ def test_python_repl_wait_observes_child_result_under_scheduler(tmp_path, monkey
     assert "Thread " in out
     assert "Last assistant message:\nchild done" in out
     assert "(no assistant content found)" not in out
+
+
+def test_python_repl_can_send_message_to_child(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    ts.append_message(db, parent, "system", "system")
+    ts.enable_thread_session(db, parent, provider="memory")
+    runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
+    ts.set_thread_tools_enabled(db, runtime, True)
+    ts.set_thread_tool_allowlist(db, runtime, ["spawn_agent", "send_message_to_child"])
+
+    out = ts.execute_python_repl(
+        db,
+        parent,
+        "from eggtools import spawn_agent, send_message_to_child\n"
+        "child = spawn_agent('initial task', label='worker', allowed_tools=[])\n"
+        "print(send_message_to_child(child, 'please refine', require_idle=False))",
+        drive_runtime_tools=True,
+        bridge_timeout_sec=5,
+    )
+
+    assert "Sent message" in out
+    children = ts.list_children_ids(db, runtime)
+    assert len(children) == 1
+    worker = children[0]
+    messages = json.loads(db.get_thread(worker).snapshot_json)["messages"]
+    assert messages[-1]["content"] == "please refine"
+    assert messages[-1]["from_thread_id"] == runtime

@@ -1748,6 +1748,74 @@ def collect_subtree(db: ThreadsDB, root_id: str) -> list[str]:
     return out
 
 
+def is_descendant_thread(db: ThreadsDB, ancestor_id: str, thread_id: str) -> bool:
+    """Return True if ``thread_id`` is a strict descendant of ``ancestor_id``."""
+
+    if not ancestor_id or not thread_id or ancestor_id == thread_id:
+        return False
+    current = thread_id
+    seen: set[str] = set()
+    for _ in range(2048):
+        if current in seen:
+            return False
+        seen.add(current)
+        parent = get_parent(db, current)
+        if parent is None:
+            return False
+        if parent == ancestor_id:
+            return True
+        current = parent
+    return False
+
+
+def send_message_to_child_thread(
+    db: ThreadsDB,
+    manager_thread_id: str,
+    child_thread_id: str,
+    message: str,
+    *,
+    require_idle: bool = True,
+) -> str:
+    """Append a normal user message from a manager to a descendant thread.
+
+    This is intentionally a small primitive: it does not wait for the child,
+    grant tools, alter scheduling, or implement a manager framework.  The target
+    must be a descendant of the manager thread so managers cannot steer
+    unrelated threads.
+    """
+
+    manager = (manager_thread_id or "").strip()
+    child = (child_thread_id or "").strip()
+    text = str(message or "")
+    if not manager:
+        raise ValueError("manager_thread_id is required")
+    if not child:
+        raise ValueError("child_thread_id is required")
+    if not text.strip():
+        raise ValueError("message is required")
+    if db.get_thread(manager) is None:
+        raise ValueError(f"manager thread not found: {manager}")
+    if db.get_thread(child) is None:
+        raise ValueError(f"child thread not found: {child}")
+    if not is_descendant_thread(db, manager, child):
+        raise ValueError("target thread must be a child or descendant of the calling thread")
+    status = get_thread_status(db, child)
+    if require_idle and status != "idle":
+        raise ValueError(f"target thread is not idle (status={status}); wait for it before sending guidance")
+    msg_id = append_message(
+        db,
+        child,
+        "user",
+        text,
+        extra={
+            "origin": "manager_message",
+            "from_thread_id": manager,
+        },
+    )
+    create_snapshot(db, child)
+    return msg_id
+
+
 def list_active_threads(db: ThreadsDB, subtree: list[str]) -> list[str]:
     """Return list of thread_ids that are currently running or runnable."""
     active: list[str] = []

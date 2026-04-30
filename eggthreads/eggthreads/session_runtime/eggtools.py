@@ -87,6 +87,12 @@ def spawn_agent_auto(context_text: str, **kwargs: Any) -> str:
     return tool("spawn_agent_auto", **kwargs)
 
 
+def send_message_to_child(child_thread_id: str, message: str, **kwargs: Any) -> str:
+    kwargs["child_thread_id"] = child_thread_id
+    kwargs["message"] = message
+    return tool("send_message_to_child", **kwargs)
+
+
 def wait(thread_ids: Any, **kwargs: Any) -> str:
     if isinstance(thread_ids, (str, int)):
         thread_ids = [str(thread_ids)]
