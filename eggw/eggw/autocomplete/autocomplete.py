@@ -279,6 +279,15 @@ async def get_autocomplete(
                             "replace": len(arg_tok),
                         })
 
+            elif cmd == '/sessionCleanup':
+                for opt in ['stopped', 'all', 'older_than=1h', 'older_than=1d']:
+                    if not arg_tok or arg_tok.lower() in opt.lower():
+                        suggestions.append({
+                            "display": opt,
+                            "insert": opt,
+                            "replace": len(arg_tok),
+                        })
+
             elif cmd == '/theme':
                 # Theme name suggestions
                 arg_lower = arg_tok.lower()

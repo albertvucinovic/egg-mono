@@ -33,6 +33,7 @@ from .session import (
     cmd_session_off,
     cmd_session_stop,
     cmd_session_reset,
+    cmd_session_cleanup,
     cmd_python_repl,
     cmd_bash_repl,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "cmd_session_off",
     "cmd_session_stop",
     "cmd_session_reset",
+    "cmd_session_cleanup",
     "cmd_python_repl",
     "cmd_bash_repl",
     # Utility commands
@@ -190,6 +192,8 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_session_stop(thread_id, command_arg)
         elif command_name == "sessionReset":
             return await cmd_session_reset(thread_id, command_arg)
+        elif command_name == "sessionCleanup":
+            return await cmd_session_cleanup(thread_id, command_arg)
         elif command_name == "pythonRepl":
             return await cmd_python_repl(thread_id, command_arg)
         elif command_name == "bashRepl":

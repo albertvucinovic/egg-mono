@@ -140,7 +140,8 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
     tid = ts.create_root_thread(db, name="root")
     sid = ts.enable_thread_session(db, tid, provider="docker", image="egg-rlm-session")
     monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
-    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *a, **k: None)
+    start_calls = []
+    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *a, **k: start_calls.append((a, k)))
 
     status = ts.get_thread_session_status(db, tid)
     assert status.enabled is True
@@ -152,6 +153,7 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
 
     status2 = ts.get_or_start_docker_session(db, tid)
     assert status2.container_name == status.container_name
+    assert start_calls
     row = db.conn.execute(
         "SELECT payload_json FROM events WHERE thread_id=? AND type='session.lifecycle' ORDER BY event_seq DESC LIMIT 1",
         (tid,),
@@ -159,6 +161,55 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
     payload = json.loads(row[0])
     assert payload["action"] in ("docker_started", "docker_skeleton_ready")
     assert payload["container_name"] == status.container_name
+
+
+def test_docker_session_mount_dir_uses_thread_working_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    workdir = tmp_path / "thread-work"
+    ts.set_thread_working_directory(db, tid, str(workdir))
+    sid = ts.enable_thread_session(db, tid, provider="docker")
+    cfg = ts.get_thread_session_config(db, tid)
+
+    assert ts.docker_session_mount_dir(db, tid, cfg) == workdir.resolve()
+    assert sid
+
+
+def test_start_docker_container_masks_egg_and_outputs(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    sid = ts.enable_thread_session(db, tid, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, tid)
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    calls = []
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_inspect_running", lambda name: None)
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(ts.eggthreads.session.subprocess, "run", fake_run)
+
+    ts.eggthreads.session._start_docker_container(db, tid, cfg, "egg-test", bridge, runtime)
+
+    argv = calls[-1]
+    joined = "\n".join(argv)
+    assert f"{tmp_path.resolve()}:/workspace" in joined
+    assert ":/workspace/.egg:ro" in joined
+    assert ":/workspace/.egg_outputs:ro" in joined
+    assert f"egg.db_hash={ts.docker_session_db_hash(db)}" in joined
+    assert sid
 
 
 def test_docker_session_status_unavailable(monkeypatch, tmp_path):

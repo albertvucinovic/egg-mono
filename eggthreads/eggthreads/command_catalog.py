@@ -11,6 +11,7 @@ SESSION_COMMAND_COMPLETIONS: List[str] = [
     '/sessionOff',
     '/sessionStop',
     '/sessionReset',
+    '/sessionCleanup',
     '/pythonRepl',
     '/bashRepl',
 ]

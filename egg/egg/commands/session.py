@@ -119,6 +119,33 @@ class SessionCommandsMixin:
         except Exception as e:
             self.log_system(f"/sessionReset error: {e}")
 
+    def cmd_sessionCleanup(self, arg: str) -> None:
+        parsed = parse_args(arg or "")
+        mode = (parsed.positional_or(0, "stopped") or "stopped").strip().lower()
+        stopped_only = mode not in ("all", "force")
+        older_than = parsed.get("older_than") or parsed.get("olderThan")
+        try:
+            from eggthreads import cleanup_docker_sessions
+            from eggthreads.session import _parse_duration_seconds  # type: ignore
+
+            removed = cleanup_docker_sessions(
+                self.db,
+                stopped_only=stopped_only,
+                older_than_sec=_parse_duration_seconds(older_than),
+            )
+            if not removed:
+                self.log_system("No matching Docker RLM session containers to clean up.")
+                return
+            lines = []
+            for item in removed:
+                status = "removed" if item.get("removed") else f"error: {item.get('error', 'unknown')}"
+                lines.append(f"{item.get('name')}: {status}")
+            text = "\n".join(lines)
+            self.log_system(f"Session cleanup processed {len(removed)} container(s) (see console for details).")
+            self.console_print_block("Session Cleanup", text, border_style="magenta")
+        except Exception as e:
+            self.log_system(f"/sessionCleanup error: {e}")
+
     def cmd_pythonRepl(self, arg: str) -> None:
         code = arg or ""
         if not code.strip():

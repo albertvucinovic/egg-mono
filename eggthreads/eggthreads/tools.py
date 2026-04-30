@@ -610,6 +610,7 @@ def create_default_tools() -> ToolRegistry:
                 session_id=parent_session.session_id,
                 owner_thread_id=parent_session.owner_thread_id or parent_id,
                 workspace=parent_session.workspace,
+                network=parent_session.network,
                 share_with_children_default=parent_session.share_with_children_default,
                 share_repl=_clean_bool_arg(args.get('share_repl')) if args.get('share_repl') is not None else parent_session.share_repl,
                 reason='spawn_agent share_session',

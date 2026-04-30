@@ -11,6 +11,7 @@ from eggthreads import (
     find_runtime_thread,
     stop_thread_session,
     reset_thread_session,
+    cleanup_docker_sessions,
     execute_python_repl,
     execute_bash_repl,
 )
@@ -161,6 +162,27 @@ async def cmd_session_reset(thread_id: str, arg: str) -> CommandResponse:
         return CommandResponse(success=True, message=f"Session reset: {msg}", data={"resets": resets})
     except Exception as e:
         return CommandResponse(success=False, message=f"/sessionReset error: {e}")
+
+
+async def cmd_session_cleanup(thread_id: str, arg: str) -> CommandResponse:
+    parsed = parse_args(arg or "")
+    mode = (parsed.positional_or(0, "stopped") or "stopped").strip().lower()
+    stopped_only = mode not in ("all", "force")
+    older_than = parsed.get("older_than") or parsed.get("olderThan")
+    try:
+        from eggthreads.session import _parse_duration_seconds  # type: ignore
+
+        removed = cleanup_docker_sessions(
+            core.db,
+            stopped_only=stopped_only,
+            older_than_sec=_parse_duration_seconds(older_than),
+        )
+        if not removed:
+            return CommandResponse(success=True, message="No matching Docker RLM session containers to clean up.", data={"removed": []})
+        lines = [f"{item.get('name')}: {'removed' if item.get('removed') else 'error'}" for item in removed]
+        return CommandResponse(success=True, message="\n".join(lines), data={"removed": removed})
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/sessionCleanup error: {e}")
 
 
 async def cmd_python_repl(thread_id: str, code: str) -> CommandResponse:

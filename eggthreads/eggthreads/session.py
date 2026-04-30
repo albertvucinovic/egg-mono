@@ -14,7 +14,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .db import ThreadsDB
 
@@ -42,6 +42,7 @@ class SessionConfig:
     session_id: Optional[str] = None
     owner_thread_id: Optional[str] = None
     workspace: str = "/workspace"
+    network: str = "none"
     share_with_children_default: bool = False
     share_repl: bool = False
     source: str = "default"
@@ -67,6 +68,11 @@ class DockerSessionHandle:
     container_name: str
     bridge_dir: str
     runtime_dir: str
+    mount_dir: str
+    workspace: str
+
+
+_DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-v1"
 
 
 def _clean_runtime_part(value: Any, default: str) -> str:
@@ -156,6 +162,14 @@ def docker_session_container_name(db: ThreadsDB, session_id: str) -> str:
     return f"egg-rlm-{db_hash}-{safe_session[:48]}"
 
 
+def docker_session_db_hash(db: ThreadsDB) -> str:
+    """Return the stable db hash used in Docker session labels/names."""
+
+    import hashlib
+
+    return hashlib.sha256(str(db.path).encode("utf-8")).hexdigest()[:12]
+
+
 def docker_session_available() -> bool:
     """Return True if Docker CLI/daemon appear available."""
 
@@ -182,6 +196,164 @@ def _session_runtime_dir(session_id: str) -> Path:
     path = _bridge_root() / safe / "runtime"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _session_mask_dir(session_id: str, name: str) -> Path:
+    safe_session = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in session_id)
+    safe_name = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in name)
+    path = _bridge_root() / safe_session / "masks" / safe_name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _is_relative_to(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _session_mount_thread_id(db: ThreadsDB, runtime_thread_id: str, cfg: SessionConfig) -> str:
+    """Choose which thread's working directory defines a session mount."""
+
+    if cfg.share == "session" and cfg.owner_thread_id:
+        # A shared Docker session has fixed container mounts. Reuse the
+        # owner's working-directory scope so child runtimes do not silently
+        # widen an already-running container by requesting a broader mount.
+        return cfg.owner_thread_id
+    return runtime_thread_id
+
+
+def docker_session_mount_dir(db: ThreadsDB, runtime_thread_id: str, cfg: SessionConfig) -> Path:
+    """Return the host directory mounted as the session workspace."""
+
+    try:
+        from .api import _ensure_thread_working_directory
+
+        mount_tid = _session_mount_thread_id(db, runtime_thread_id, cfg)
+        return _ensure_thread_working_directory(db, mount_tid).resolve()
+    except Exception:
+        return Path.cwd().resolve()
+
+
+def _docker_existing_mount_policy(container_name: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "-f", "{{ index .Config.Labels \"egg.mount_policy\" }}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    value = (proc.stdout or "").strip()
+    return value or None
+
+
+def _docker_container_created_at(container_name: str) -> Optional[float]:
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Created}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        from datetime import datetime
+
+        normalized = raw.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).timestamp()
+    except Exception:
+        return None
+
+
+def list_docker_session_containers(db: ThreadsDB) -> List[Dict[str, Any]]:
+    """List Docker containers belonging to this Egg database."""
+
+    db_hash = docker_session_db_hash(db)
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "ps", "-a",
+                "--filter", "label=egg.kind=rlm-session",
+                "--filter", f"label=egg.db_hash={db_hash}",
+                "--format", "{{.Names}}\t{{.Status}}\t{{.ID}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if not parts or not parts[0]:
+            continue
+        name = parts[0]
+        status = parts[1] if len(parts) > 1 else ""
+        cid = parts[2] if len(parts) > 2 else ""
+        out.append({
+            "name": name,
+            "status": status,
+            "id": cid,
+            "running": _docker_inspect_running(name) is True,
+            "created_at": _docker_container_created_at(name),
+            "mount_policy": _docker_existing_mount_policy(name),
+        })
+    return out
+
+
+def cleanup_docker_sessions(
+    db: ThreadsDB,
+    *,
+    stopped_only: bool = True,
+    older_than_sec: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Remove Docker RLM session containers for this database.
+
+    Selection is label-based (`egg.kind=rlm-session` and this DB hash) so it
+    does not touch unrelated containers.  By default only stopped containers
+    are removed.
+    """
+
+    now = time.time()
+    removed: List[Dict[str, Any]] = []
+    for info in list_docker_session_containers(db):
+        if stopped_only and info.get("running"):
+            continue
+        created = info.get("created_at")
+        if older_than_sec is not None and isinstance(created, (int, float)):
+            if now - float(created) < float(older_than_sec):
+                continue
+        name = str(info.get("name") or "")
+        if not name:
+            continue
+        try:
+            proc = subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, timeout=20)
+            ok = proc.returncode == 0
+            error = (proc.stderr or proc.stdout or "").strip()
+        except Exception as e:
+            ok = False
+            error = str(e)
+        item = dict(info)
+        item["removed"] = ok
+        if error and not ok:
+            item["error"] = error
+        removed.append(item)
+    return removed
 
 
 def repl_channel_name(runtime_thread_id: str, repl_name: str = "default", *, share_repl: bool = False) -> str:
@@ -232,23 +404,47 @@ def _docker_inspect_running(container_name: str) -> Optional[bool]:
     return proc.stdout.strip().lower() == "true"
 
 
-def _start_docker_container(cfg: SessionConfig, container_name: str, bridge_dir: Path, runtime_dir: Path) -> None:
+def _start_docker_container(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    cfg: SessionConfig,
+    container_name: str,
+    bridge_dir: Path,
+    runtime_dir: Path,
+) -> None:
     existing_running = _docker_inspect_running(container_name)
     if existing_running is True:
         return
     if existing_running is False:
+        policy = _docker_existing_mount_policy(container_name)
+        if policy and policy != _DOCKER_MOUNT_POLICY:
+            raise RuntimeError(
+                f"Existing Docker session container {container_name!r} uses old mount policy {policy!r}; "
+                "run /sessionReset or remove the container to recreate it safely."
+            )
         subprocess.run(["docker", "start", container_name], capture_output=True, check=True, timeout=20)
         return
 
     workspace = cfg.workspace or "/workspace"
+    network = cfg.network or "none"
+    mount_dir = docker_session_mount_dir(db, runtime_thread_id, cfg)
+    mask_egg_dir = _session_mask_dir(cfg.session_id or container_name, "egg")
+    mask_outputs_dir = _session_mask_dir(cfg.session_id or container_name, "egg_outputs")
     cmd = [
         "docker", "run", "-d", "--init",
         "--name", container_name,
+        "--network", network,
         "--label", "egg.kind=rlm-session",
         "--label", f"egg.session_id={cfg.session_id}",
+        "--label", f"egg.owner_thread_id={cfg.owner_thread_id or runtime_thread_id}",
+        "--label", f"egg.runtime_thread_id={runtime_thread_id}",
+        "--label", f"egg.db_hash={docker_session_db_hash(db)}",
+        "--label", f"egg.mount_policy={_DOCKER_MOUNT_POLICY}",
         "-v", f"{bridge_dir}:/egg-bridge",
         "-v", f"{runtime_dir}:/egg-runtime:ro",
-        "-v", f"{Path.cwd().resolve()}:{workspace}",
+        "-v", f"{mount_dir}:{workspace}",
+        "-v", f"{mask_egg_dir}:{workspace.rstrip('/')}/.egg:ro",
+        "-v", f"{mask_outputs_dir}:{workspace.rstrip('/')}/.egg_outputs:ro",
         "-w", workspace,
         cfg.image,
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
@@ -269,6 +465,7 @@ def get_thread_session_config(db: ThreadsDB, thread_id: str) -> SessionConfig:
     image = _clean_runtime_part(payload.get("image"), "egg-rlm-session")
     share = _clean_runtime_part(payload.get("share"), "private")
     workspace = _clean_runtime_part(payload.get("workspace"), "/workspace")
+    network = _clean_runtime_part(payload.get("network"), "none")
     session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
     owner_thread_id = payload.get("owner_thread_id") if isinstance(payload.get("owner_thread_id"), str) else source_tid
     if enabled and not session_id:
@@ -281,6 +478,7 @@ def get_thread_session_config(db: ThreadsDB, thread_id: str) -> SessionConfig:
         session_id=session_id,
         owner_thread_id=owner_thread_id,
         workspace=workspace,
+        network=network,
         share_with_children_default=bool(payload.get("share_with_children_default", False)),
         share_repl=bool(payload.get("share_repl", False)),
         source=f"event:{source_tid}",
@@ -299,6 +497,7 @@ def set_thread_session_config(
     session_id: Optional[str] = None,
     owner_thread_id: Optional[str] = None,
     workspace: str = "/workspace",
+    network: str = "none",
     share_with_children_default: bool = False,
     share_repl: bool = False,
     reason: str = "user",
@@ -312,6 +511,7 @@ def set_thread_session_config(
         "image": _clean_runtime_part(image, "egg-rlm-session"),
         "share": _clean_runtime_part(share, "private"),
         "workspace": _clean_runtime_part(workspace, "/workspace"),
+        "network": _clean_runtime_part(network, "none"),
         "share_with_children_default": bool(share_with_children_default),
         "share_repl": bool(share_repl),
         "reason": reason,
@@ -352,6 +552,33 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _parse_duration_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    mult = 1.0
+    if text.endswith("ms"):
+        mult = 0.001
+        text = text[:-2]
+    elif text.endswith("s"):
+        text = text[:-1]
+    elif text.endswith("m"):
+        mult = 60.0
+        text = text[:-1]
+    elif text.endswith("h"):
+        mult = 3600.0
+        text = text[:-1]
+    elif text.endswith("d"):
+        mult = 86400.0
+        text = text[:-1]
+    try:
+        return float(text) * mult
+    except Exception:
+        return None
+
+
 def ensure_thread_session_for_repl(
     db: ThreadsDB,
     runtime_thread_id: str,
@@ -377,6 +604,7 @@ def ensure_thread_session_for_repl(
     provider = _clean_runtime_part(os.environ.get("EGG_RLM_SESSION_PROVIDER"), "docker")
     image = _clean_runtime_part(os.environ.get("EGG_RLM_SESSION_IMAGE"), "egg-rlm-session")
     workspace = _clean_runtime_part(os.environ.get("EGG_RLM_SESSION_WORKSPACE"), "/workspace")
+    network = _clean_runtime_part(os.environ.get("EGG_RLM_SESSION_NETWORK"), "none")
     set_thread_session_config(
         db,
         runtime_thread_id,
@@ -386,6 +614,7 @@ def ensure_thread_session_for_repl(
         share="private",
         owner_thread_id=runtime_thread_id,
         workspace=workspace,
+        network=network,
         share_repl=_env_bool("EGG_RLM_SHARE_REPL", False),
         reason=f"auto:{reason}:{language}",
     )
@@ -473,9 +702,10 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
 
     bridge_dir = _session_bridge_dir(cfg.session_id)
     runtime_dir = _session_runtime_dir(cfg.session_id)
+    mount_dir = docker_session_mount_dir(db, thread_id, cfg)
     _write_runtime_files(runtime_dir)
     try:
-        _start_docker_container(cfg, status.container_name, bridge_dir, runtime_dir)
+        _start_docker_container(db, thread_id, cfg, status.container_name, bridge_dir, runtime_dir)
         action = "reattached" if status.status == "stopped" else "docker_started"
     except Exception as e:
         append_session_lifecycle_event(
@@ -496,6 +726,8 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
             "container_name": status.container_name,
             "image": cfg.image,
             "workspace": cfg.workspace,
+            "mount_dir": str(mount_dir),
+            "mount_policy": _DOCKER_MOUNT_POLICY,
             "bridge_dir": str(bridge_dir),
             "runtime_dir": str(runtime_dir),
         },
@@ -515,6 +747,8 @@ def get_or_start_docker_session_handle(db: ThreadsDB, thread_id: str) -> DockerS
         container_name=status.container_name,
         bridge_dir=str(_session_bridge_dir(cfg.session_id)),
         runtime_dir=str(_session_runtime_dir(cfg.session_id)),
+        mount_dir=str(docker_session_mount_dir(db, thread_id, cfg)),
+        workspace=cfg.workspace,
     )
 
 
@@ -924,6 +1158,7 @@ def reset_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user")
         session_id=new_session_id,
         owner_thread_id=cfg.owner_thread_id or thread_id,
         workspace=cfg.workspace,
+                network=cfg.network,
         share_with_children_default=cfg.share_with_children_default,
         share_repl=cfg.share_repl,
         reason=f"reset:{reason}",
@@ -1387,7 +1622,11 @@ __all__ = [
     "get_thread_session_config",
     "get_thread_session_status",
     "docker_session_container_name",
+    "docker_session_db_hash",
     "docker_session_available",
+    "docker_session_mount_dir",
+    "list_docker_session_containers",
+    "cleanup_docker_sessions",
     "get_or_start_docker_session",
     "get_or_start_docker_session_handle",
     "set_thread_session_config",

@@ -273,6 +273,7 @@ Persistent REPL Sessions:
   /sessionOff                    - Disable session config
   /sessionStop [python|bash|all] - Stop session runtime
   /sessionReset [python|bash|all]- Reset session state
+  /sessionCleanup [stopped|all]  - Remove Docker session containers
   /pythonRepl <code>             - Execute persistent Python REPL code
   /bashRepl <script>             - Execute persistent Bash REPL script
 
