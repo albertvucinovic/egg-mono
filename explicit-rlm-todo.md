@@ -74,9 +74,9 @@ Legend:
 
 ## Phase 7+: Later phases
 
-- [ ] Bash REPL.
+- [x] Bash REPL.
 - [ ] Explicit REPL channel sharing policy/API (`share_repl`) beyond memory provider.
 - [~] Docker `egg-sessiond` (Python eval + file bridge implemented; hardening pending).
-- [~] `eggtools.py` and `eggtool` in container (`eggtools.py` implemented; CLI pending).
+- [x] `eggtools.py` and `eggtool` in container.
 - [x] Spawn capability attenuation and session sharing.
 - [ ] TUI/Web session commands.

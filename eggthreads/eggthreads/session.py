@@ -158,13 +158,18 @@ def _session_runtime_dir(session_id: str) -> Path:
 def _write_runtime_files(runtime_dir: Path) -> None:
     from importlib import resources
 
-    for name in ("eggtools.py", "sessiond.py"):
+    for name in ("eggtools.py", "sessiond.py", "eggtool"):
         try:
             data = resources.files("eggthreads.session_runtime").joinpath(name).read_text(encoding="utf-8")
         except Exception:
             src = Path(__file__).resolve().parent / "session_runtime" / name
             data = src.read_text(encoding="utf-8")
         (runtime_dir / name).write_text(data, encoding="utf-8")
+        if name == "eggtool":
+            try:
+                os.chmod(runtime_dir / name, 0o755)
+            except Exception:
+                pass
 
 
 def _docker_inspect_running(container_name: str) -> Optional[bool]:
@@ -477,6 +482,47 @@ def _execute_python_docker(
             return f"Error: Docker Python REPL failed: {payload.get('error') or 'unknown error'}"
         if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
             return "Error: Docker Python REPL timed out."
+
+
+def _execute_bash_docker(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    script: str,
+    *,
+    repl_name: str,
+    eval_token: str,
+    timeout_sec: Optional[float],
+) -> str:
+    handle = get_or_start_docker_session_handle(db, runtime_thread_id)
+    bridge_dir = Path(handle.bridge_dir)
+    req_id = os.urandom(8).hex()
+    req_path = bridge_dir / f"eval_{req_id}.req.json"
+    res_path = bridge_dir / f"eval_{req_id}.res.json"
+    _atomic_write_json(req_path, {
+        "id": req_id,
+        "language": "bash",
+        "script": script,
+        "repl_name": repl_name,
+        "token": eval_token,
+        "timeout_sec": timeout_sec,
+    })
+    start = time.time()
+    while True:
+        _service_tool_requests(bridge_dir)
+        if res_path.exists():
+            try:
+                payload = json.loads(res_path.read_text(encoding="utf-8"))
+            finally:
+                try:
+                    res_path.unlink()
+                except Exception:
+                    pass
+            if payload.get("ok"):
+                return str(payload.get("output") or "")
+            return f"Error: Docker Bash REPL failed: {payload.get('error') or 'unknown error'}"
+        if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
+            return "Error: Docker Bash REPL timed out."
+        time.sleep(0.05)
         time.sleep(0.05)
 
 
@@ -485,6 +531,7 @@ def _execute_python_docker(
 # ---------------------------------------------------------------------------
 
 _MEMORY_PYTHON_REPLS: Dict[tuple[str, str], Dict[str, Any]] = {}
+_MEMORY_BASH_ENVS: Dict[tuple[str, str], Dict[str, str]] = {}
 
 
 def _make_eggtools_module(eval_token: str):
@@ -599,6 +646,43 @@ def _execute_python_memory(session_id: str, repl_name: str, code: str, *, eval_t
     return out.strip() or "--- The Python REPL executed successfully and produced no output ---"
 
 
+def _execute_bash_memory(session_id: str, repl_name: str, script: str, *, eval_token: Optional[str] = None, timeout_sec: Optional[float] = None) -> str:
+    """Small persistent Bash provider for tests/dev using host bash."""
+
+    env_key = (session_id, repl_name)
+    persistent = _MEMORY_BASH_ENVS.setdefault(env_key, {})
+    env = os.environ.copy()
+    env.update(persistent)
+    if eval_token:
+        env["EGG_EVAL_TOKEN"] = eval_token
+    marker = f"__EGG_ENV_{os.urandom(6).hex()}__"
+    wrapped = f"{script or ''}\nprintf '\\n{marker}\\n'\nenv\n"
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", wrapped],
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return f"--- TIMEOUT ---\nBash REPL timed out after {timeout_sec} seconds"
+    stdout = proc.stdout or ""
+    user_out, _, env_dump = stdout.partition(f"\n{marker}\n")
+    for line in env_dump.splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k and "\x00" not in k:
+            persistent[k] = v
+    out = ""
+    if user_out.strip():
+        out += f"--- STDOUT ---\n{user_out.strip()}\n"
+    if proc.stderr and proc.stderr.strip():
+        out += f"--- STDERR ---\n{proc.stderr.strip()}\n"
+    return out.strip() or "--- The Bash REPL executed successfully and produced no output ---"
+
+
 def execute_python_repl(
     db: ThreadsDB,
     caller_thread_id: str,
@@ -679,6 +763,67 @@ def execute_python_repl(
         finally:
             dispose_eval_context(ctx.token)
     return f"Error: unknown session provider: {cfg.provider}"
+
+
+def execute_bash_repl(
+    db: ThreadsDB,
+    caller_thread_id: str,
+    script: str,
+    *,
+    repl_name: str = "default",
+    runtime_name: str = "default",
+    bridge_timeout_sec: Optional[float] = 30.0,
+    drive_runtime_tools: bool = False,
+) -> str:
+    """Execute Bash in the caller's persistent runtime session."""
+
+    runtime_thread_id = get_or_create_runtime_thread(
+        db,
+        caller_thread_id,
+        language="bash",
+        name=runtime_name,
+        reason="bash_repl",
+    )
+    cfg = get_thread_session_config(db, runtime_thread_id)
+    if not cfg.enabled or not cfg.session_id:
+        return (
+            "Error: persistent session is not enabled for this thread. "
+            "Call enable_thread_session(..., provider='memory') for tests or provider='docker'."
+        )
+
+    append_session_lifecycle_event(
+        db,
+        runtime_thread_id,
+        action="bash_eval",
+        session_id=cfg.session_id,
+        payload={"provider": cfg.provider, "repl_name": repl_name},
+    )
+
+    from .repl_bridge import create_eval_context, dispose_eval_context
+
+    ctx = create_eval_context(
+        db,
+        caller_thread_id=caller_thread_id,
+        runtime_thread_id=runtime_thread_id,
+        session_id=cfg.session_id,
+        bridge_timeout_sec=bridge_timeout_sec,
+        drive_runtime_tools=drive_runtime_tools,
+    )
+    try:
+        if cfg.provider == "memory":
+            return _execute_bash_memory(cfg.session_id, repl_name, script, eval_token=ctx.token, timeout_sec=bridge_timeout_sec)
+        if cfg.provider == "docker":
+            return _execute_bash_docker(
+                db,
+                runtime_thread_id,
+                script,
+                repl_name=repl_name,
+                eval_token=ctx.token,
+                timeout_sec=bridge_timeout_sec,
+            )
+        return f"Error: unknown session provider: {cfg.provider}"
+    finally:
+        dispose_eval_context(ctx.token)
 
 
 def runtime_thread_label(*, language: str = "python", name: str = "default") -> str:
@@ -853,6 +998,7 @@ __all__ = [
     "disable_thread_session",
     "append_session_lifecycle_event",
     "execute_python_repl",
+    "execute_bash_repl",
     "runtime_thread_label",
     "append_runtime_config",
     "find_runtime_thread",

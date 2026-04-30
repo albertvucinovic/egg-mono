@@ -8,6 +8,8 @@ import contextlib
 import io
 import json
 import os
+import select
+import subprocess
 import sys
 import time
 import traceback
@@ -17,6 +19,7 @@ from typing import Any, Dict
 
 
 PY_REPLS: Dict[str, Dict[str, Any]] = {}
+BASH_REPLS: Dict[str, subprocess.Popen] = {}
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -34,6 +37,11 @@ def format_output(stdout_text: str, stderr_text: str) -> str:
     if stderr_text:
         out += f"--- STDERR ---\n{stderr_text}\n"
     return out.strip() or "--- The Python REPL executed successfully and produced no output ---"
+
+
+def format_bash_output(output_text: str) -> str:
+    output_text = (output_text or "").strip()
+    return f"--- STDOUT ---\n{output_text}" if output_text else "--- The Bash REPL executed successfully and produced no output ---"
 
 
 def execute_python(code: str, repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) -> str:
@@ -72,6 +80,63 @@ def execute_python(code: str, repl_name: str, bridge_dir: Path, token: str, runt
     return format_output(stdout.getvalue(), stderr.getvalue())
 
 
+def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) -> subprocess.Popen:
+    proc = BASH_REPLS.get(repl_name)
+    if proc is not None and proc.poll() is None:
+        return proc
+    env = os.environ.copy()
+    env["EGG_BRIDGE_DIR"] = str(bridge_dir)
+    env["EGG_EVAL_TOKEN"] = token
+    env["PATH"] = f"{runtime_dir}:{env.get('PATH', '')}"
+    proc = subprocess.Popen(
+        ["bash", "--noprofile", "--norc"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    BASH_REPLS[repl_name] = proc
+    return proc
+
+
+def execute_bash(script: str, repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path, timeout_sec: float | None = None) -> str:
+    repl_name = repl_name or "default"
+    proc = _bash_proc(repl_name, bridge_dir, token, runtime_dir)
+    if proc.stdin is None or proc.stdout is None:
+        raise RuntimeError("Bash REPL pipes are not available")
+    sentinel = f"__EGG_DONE_{uuid.uuid4().hex}__"
+    # Update per-eval bridge token/path inside the persistent shell.
+    prelude = (
+        f"export EGG_BRIDGE_DIR={json.dumps(str(bridge_dir))}\n"
+        f"export EGG_EVAL_TOKEN={json.dumps(token)}\n"
+        f"export PATH={json.dumps(str(runtime_dir) + ':' + os.environ.get('PATH', ''))}\n"
+    )
+    proc.stdin.write(prelude)
+    proc.stdin.write(script or "")
+    proc.stdin.write(f"\n__egg_status=$?; printf '\\n{sentinel}:%s\\n' \"$__egg_status\"\n")
+    proc.stdin.flush()
+
+    start = time.time()
+    lines: list[str] = []
+    while True:
+        if timeout_sec is not None and (time.time() - start) >= timeout_sec:
+            proc.kill()
+            BASH_REPLS.pop(repl_name, None)
+            return f"--- TIMEOUT ---\nBash REPL timed out after {timeout_sec} seconds"
+        ready, _, _ = select.select([proc.stdout], [], [], 0.05)
+        if not ready:
+            continue
+        line = proc.stdout.readline()
+        if line == "" and proc.poll() is not None:
+            BASH_REPLS.pop(repl_name, None)
+            return format_bash_output("".join(lines))
+        if line.startswith(sentinel + ":"):
+            return format_bash_output("".join(lines))
+        lines.append(line)
+
+
 def claim(path: Path) -> Path | None:
     claimed = path.with_suffix(path.suffix + ".processing")
     try:
@@ -91,15 +156,26 @@ def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) ->
     res_path = bridge_dir / f"eval_{req_id}.res.json"
     try:
         payload = json.loads(claimed.read_text(encoding="utf-8"))
-        if payload.get("language", "python") != "python":
+        language = str(payload.get("language") or "python")
+        if language == "python":
+            output = execute_python(
+                str(payload.get("code") or ""),
+                str(payload.get("repl_name") or "default"),
+                bridge_dir,
+                str(payload.get("token") or ""),
+                runtime_dir,
+            )
+        elif language == "bash":
+            output = execute_bash(
+                str(payload.get("code") or payload.get("script") or ""),
+                str(payload.get("repl_name") or "default"),
+                bridge_dir,
+                str(payload.get("token") or ""),
+                runtime_dir,
+                payload.get("timeout_sec"),
+            )
+        else:
             raise ValueError(f"Unsupported language: {payload.get('language')}")
-        output = execute_python(
-            str(payload.get("code") or ""),
-            str(payload.get("repl_name") or "default"),
-            bridge_dir,
-            str(payload.get("token") or ""),
-            runtime_dir,
-        )
         atomic_write_json(res_path, {"ok": True, "output": output})
     except Exception as e:
         atomic_write_json(res_path, {"ok": False, "error": f"{type(e).__name__}: {e}"})

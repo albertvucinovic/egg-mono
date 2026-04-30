@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+
+import eggtools
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("Usage: eggtool <tool_name> [json_args]", file=sys.stderr)
+        return 2
+    name = sys.argv[1]
+    if len(sys.argv) >= 3:
+        try:
+            args = json.loads(sys.argv[2])
+        except Exception as e:
+            print(f"Invalid JSON args: {e}", file=sys.stderr)
+            return 2
+        if not isinstance(args, dict):
+            print("JSON args must be an object", file=sys.stderr)
+            return 2
+    else:
+        args = {}
+    try:
+        print(eggtools.tool(name, **args))
+        return 0
+    except Exception as e:
+        print(f"eggtool error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

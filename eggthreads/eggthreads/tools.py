@@ -341,6 +341,51 @@ def create_default_tools() -> ToolRegistry:
         impl=_python_repl,
     )
 
+    def _bash_repl(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .session import execute_bash_repl
+
+        thread_id = (args.get('_thread_id') or '').strip()
+        if not thread_id:
+            return 'Error: bash_repl requires thread context.'
+        script = args.get('script', '')
+        repl_name = (args.get('repl_name') or 'default').strip() or 'default'
+        runtime_name = (args.get('runtime_name') or 'default').strip() or 'default'
+        try:
+            bridge_timeout_sec = float(args.get('bridge_timeout_sec')) if args.get('bridge_timeout_sec') is not None else None
+        except Exception:
+            bridge_timeout_sec = 30.0
+        drive_runtime_tools = bool(args.get('drive_runtime_tools', False))
+        try:
+            return execute_bash_repl(
+                ThreadsDB(),
+                thread_id,
+                str(script),
+                repl_name=repl_name,
+                runtime_name=runtime_name,
+                bridge_timeout_sec=bridge_timeout_sec,
+                drive_runtime_tools=drive_runtime_tools,
+            )
+        except Exception as e:
+            return f"Error: bash_repl failed: {e}"
+
+    reg.register(
+        name='bash_repl',
+        description='Execute Bash code in this thread\'s persistent Bash REPL session.',
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "script": {"type": "string", "description": "Bash script to execute in the persistent REPL."},
+                "repl_name": {"type": "string", "description": "Optional REPL channel name (default: default)."},
+                "runtime_name": {"type": "string", "description": "Optional runtime child thread name (default: default)."},
+                "bridge_timeout_sec": {"type": "number", "description": "Seconds to wait for this eval/programmatic eggtool calls."},
+                "drive_runtime_tools": {"type": "boolean", "description": "Testing/headless mode: directly drive runtime thread tool calls."},
+            },
+            "required": ["script"],
+        },
+        impl=_bash_repl,
+    )
+
     # javascript (placeholder for remote-debugging execution; here we only echo input)
     def _javascript(args: Dict[str, Any]):
         script = args.get('script', '')
