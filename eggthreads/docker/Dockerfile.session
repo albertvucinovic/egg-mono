@@ -1,0 +1,38 @@
+# Persistent explicit-RLM session image for eggthreads.
+#
+# The host mounts the current workspace at /workspace, a bridge directory at
+# /egg-bridge, and session runtime files at /egg-runtime.  The container starts
+# /egg-runtime/sessiond.py, which exposes persistent Python/Bash REPL channels
+# and uses /egg-runtime/eggtools.py + eggtool for host-mediated Egg tool calls.
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    EGG_BRIDGE_DIR=/egg-bridge
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    git \
+    jq \
+    curl \
+    ca-certificates \
+    w3m \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Common Python packages useful in coding/data-analysis REPL sessions.  Keep this
+# intentionally modest; users can extend this image for heavier workloads.
+RUN pip install \
+    requests \
+    rich \
+    numpy \
+    scipy \
+    pandas \
+    pytest
+
+WORKDIR /workspace
+
+# The host normally overrides runtime files by mounting /egg-runtime read-only.
+# Keeping CMD pointed at that mount makes the image generic and easy to inspect.
+CMD ["python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime"]

@@ -142,3 +142,16 @@ def test_docker_session_status_unavailable(monkeypatch, tmp_path):
     ).fetchone()
     payload = json.loads(row[0])
     assert payload["action"] == "docker_unavailable"
+
+
+def test_session_dockerfile_and_build_script_exist():
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = repo_root / "docker" / "Dockerfile.session"
+    script = repo_root / "docker" / "create-session-image.sh"
+
+    assert dockerfile.exists()
+    text = dockerfile.read_text(encoding="utf-8")
+    assert "egg-bridge" in text
+    assert "sessiond.py" in text
+    assert script.exists()
+    assert "Dockerfile.session" in script.read_text(encoding="utf-8")

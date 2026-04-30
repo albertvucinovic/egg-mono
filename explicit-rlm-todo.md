@@ -76,6 +76,7 @@ Legend:
 
 - [x] Bash REPL.
 - [ ] Explicit REPL channel sharing policy/API (`share_repl`) beyond memory provider.
+- [x] Dedicated session Dockerfile/image build script.
 - [x] Docker `egg-sessiond` (Python/Bash eval + file bridge implemented; hardening remains ongoing).
 - [x] `eggtools.py` and `eggtool` in container.
 - [x] Spawn capability attenuation and session sharing.
