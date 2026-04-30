@@ -642,6 +642,45 @@ _MEMORY_PYTHON_REPLS: Dict[tuple[str, str], Dict[str, Any]] = {}
 _MEMORY_BASH_ENVS: Dict[tuple[str, str], Dict[str, str]] = {}
 
 
+def _append_runtime_repl_message(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    role: str,
+    content: str,
+    *,
+    language: str,
+    repl_name: str,
+    repl_channel: str,
+    session_id: Optional[str],
+    caller_thread_id: str,
+) -> None:
+    """Append a hidden/audit message to a runtime thread for REPL evals."""
+
+    try:
+        from .api import append_message
+
+        append_message(
+            db,
+            runtime_thread_id,
+            role,
+            content,
+            extra={
+                "no_api": True,
+                "keep_user_turn": True,
+                "origin": "repl_eval",
+                "runtime": True,
+                "language": language,
+                "repl_name": repl_name,
+                "repl_channel": repl_channel,
+                "session_id": session_id,
+                "caller_thread_id": caller_thread_id,
+            },
+        )
+    except Exception:
+        # Runtime audit messages should never make REPL execution fail.
+        pass
+
+
 def _make_eggtools_module(eval_token: str):
     """Create an in-memory eggtools module bound to an eval token."""
 
@@ -994,6 +1033,17 @@ def execute_python_repl(
             "share_repl": cfg.share_repl,
         },
     )
+    _append_runtime_repl_message(
+        db,
+        runtime_thread_id,
+        "user",
+        code,
+        language="python",
+        repl_name=repl_name,
+        repl_channel=channel,
+        session_id=cfg.session_id,
+        caller_thread_id=caller_thread_id,
+    )
 
     if cfg.provider == "memory":
         from .repl_bridge import create_eval_context, dispose_eval_context
@@ -1007,9 +1057,21 @@ def execute_python_repl(
             drive_runtime_tools=drive_runtime_tools,
         )
         try:
-            return _execute_python_memory(cfg.session_id, channel, code, eval_token=ctx.token)
+            out = _execute_python_memory(cfg.session_id, channel, code, eval_token=ctx.token)
         finally:
             dispose_eval_context(ctx.token)
+        _append_runtime_repl_message(
+            db,
+            runtime_thread_id,
+            "tool",
+            out,
+            language="python",
+            repl_name=repl_name,
+            repl_channel=channel,
+            session_id=cfg.session_id,
+            caller_thread_id=caller_thread_id,
+        )
+        return out
     if cfg.provider == "docker":
         from .repl_bridge import create_eval_context, dispose_eval_context
 
@@ -1022,7 +1084,7 @@ def execute_python_repl(
             drive_runtime_tools=drive_runtime_tools,
         )
         try:
-            return _execute_python_docker(
+            out = _execute_python_docker(
                 db,
                 runtime_thread_id,
                 code,
@@ -1032,6 +1094,18 @@ def execute_python_repl(
             )
         finally:
             dispose_eval_context(ctx.token)
+        _append_runtime_repl_message(
+            db,
+            runtime_thread_id,
+            "tool",
+            out,
+            language="python",
+            repl_name=repl_name,
+            repl_channel=channel,
+            session_id=cfg.session_id,
+            caller_thread_id=caller_thread_id,
+        )
+        return out
     return f"Error: unknown session provider: {cfg.provider}"
 
 
@@ -1086,6 +1160,17 @@ def execute_bash_repl(
             "share_repl": cfg.share_repl,
         },
     )
+    _append_runtime_repl_message(
+        db,
+        runtime_thread_id,
+        "user",
+        script,
+        language="bash",
+        repl_name=repl_name,
+        repl_channel=channel,
+        session_id=cfg.session_id,
+        caller_thread_id=caller_thread_id,
+    )
 
     from .repl_bridge import create_eval_context, dispose_eval_context
 
@@ -1099,9 +1184,21 @@ def execute_bash_repl(
     )
     try:
         if cfg.provider == "memory":
-            return _execute_bash_memory(cfg.session_id, channel, script, eval_token=ctx.token, timeout_sec=bridge_timeout_sec)
+            out = _execute_bash_memory(cfg.session_id, channel, script, eval_token=ctx.token, timeout_sec=bridge_timeout_sec)
+            _append_runtime_repl_message(
+                db,
+                runtime_thread_id,
+                "tool",
+                out,
+                language="bash",
+                repl_name=repl_name,
+                repl_channel=channel,
+                session_id=cfg.session_id,
+                caller_thread_id=caller_thread_id,
+            )
+            return out
         if cfg.provider == "docker":
-            return _execute_bash_docker(
+            out = _execute_bash_docker(
                 db,
                 runtime_thread_id,
                 script,
@@ -1109,6 +1206,18 @@ def execute_bash_repl(
                 eval_token=ctx.token,
                 timeout_sec=bridge_timeout_sec,
             )
+            _append_runtime_repl_message(
+                db,
+                runtime_thread_id,
+                "tool",
+                out,
+                language="bash",
+                repl_name=repl_name,
+                repl_channel=channel,
+                session_id=cfg.session_id,
+                caller_thread_id=caller_thread_id,
+            )
+            return out
         return f"Error: unknown session provider: {cfg.provider}"
     finally:
         dispose_eval_context(ctx.token)

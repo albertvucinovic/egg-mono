@@ -31,6 +31,12 @@ except Exception:
     list_threads = None  # type: ignore
     list_children_with_meta = None  # type: ignore
 
+from eggthreads.command_catalog import (  # type: ignore
+    EGG_COMMAND_COMPLETIONS,
+    SESSION_ON_COMPLETIONS,
+    SESSION_TARGET_COMPLETIONS,
+)
+
 
 class ModelCompleter(Completer):
     """Completer for '/model ' values, leveraging an eggllm-like client if provided.
@@ -254,6 +260,31 @@ class EggCompleter(Completer):
             for name in sorted(files):
                 if name.startswith(prefix):
                     yield Completion(name, start_position=-len(prefix))
+            return
+
+        if text.startswith('/sessionOn '):
+            prefix = text[len('/sessionOn '):]
+            try:
+                current_fragment = document.get_word_before_cursor(WORD=True)
+            except Exception:
+                current_fragment = prefix.split()[-1] if prefix.split() else ''
+            frag_l = current_fragment.lower()
+            for option in SESSION_ON_COMPLETIONS:
+                if not frag_l or frag_l in option.lower():
+                    yield Completion(option, start_position=-len(current_fragment))
+            return
+
+        if text.startswith('/sessionStop ') or text.startswith('/sessionReset '):
+            command = '/sessionStop ' if text.startswith('/sessionStop ') else '/sessionReset '
+            prefix = text[len(command):]
+            try:
+                current_fragment = document.get_word_before_cursor(WORD=True)
+            except Exception:
+                current_fragment = prefix.split()[-1] if prefix.split() else ''
+            frag_l = current_fragment.lower()
+            for option in SESSION_TARGET_COMPLETIONS:
+                if not frag_l or option.startswith(frag_l):
+                    yield Completion(option, start_position=-len(current_fragment))
             return
 
         # 3) /thread: suggest thread ids (with name/recap meta)
@@ -573,27 +604,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name
-            cmds = [
-                '/help', '/model', '/updateAllModels',
-                '/spawnChildThread', '/spawnAutoApprovedChildThread', '/waitForThreads', '/parentThread',
-                '/listChildren', '/threads', '/thread', '/deleteThread', '/newThread', '/duplicateThread',
-                '/continue', '/rename',
-                '/schedulers', '/enterMode', '/toggleAutoApproval',
-                '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus', '/toolInfo',
-                '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
-                '/setSandboxConfiguration',
-                '/getSandboxingConfig',
-                '/setContextLimit',
-                '/setThreadPriority',
-                '/togglePanel',
-                '/toggleBorders',
-                '/redraw',
-                '/displayMode',
-                '/login', '/logout', '/authStatus',
-                '/startSearxng',
-                '/stopSearxng',
-            ]
-            return _mk_items([c for c in cmds if c.startswith(prefix)], prefix)
+            return _mk_items([c for c in EGG_COMMAND_COMPLETIONS if c.startswith(prefix)], prefix)
 
         cmd = prefix[:sp]
         sub = prefix[sp+1:]  # raw arg text
@@ -746,6 +757,12 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
             except Exception:
                 files = []
             return _mk_items(files, arg_tok)
+
+        if cmd == '/sessionOn':
+            return _mk_items(SESSION_ON_COMPLETIONS, arg_tok)
+
+        if cmd in ('/sessionStop', '/sessionReset'):
+            return _mk_items(SESSION_TARGET_COMPLETIONS, arg_tok)
 
         if cmd == '/togglePanel':
             opts = ['chat', 'children', 'system']

@@ -4,16 +4,38 @@ from __future__ import annotations
 import pytest
 
 
+class HelpOnlyApp:
+    def __init__(self):
+        self._system_log = []
+        self.printed = []
+
+    def log_system(self, message: str) -> None:
+        self._system_log.append(message)
+
+    def console_print_block(self, *args, **kwargs) -> None:
+        self.printed.append(args)
+
+
 class TestCmdHelp:
     """Tests for cmd_help()."""
 
-    def test_displays_commands_text(self, egg_app):
+    def test_displays_commands_text(self):
         """Should display COMMANDS_TEXT in console."""
-        egg_app.cmd_help("")
+        from egg.commands.utility import UtilityCommandsMixin
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            pass
+
+        app = App()
+
+        app.cmd_help("")
 
         # Should log help message
         assert any("Help" in msg or "help" in msg.lower() or "Command" in msg
-                   for msg in egg_app._system_log)
+                   for msg in app._system_log)
+        assert app.printed
+        assert any("/sessionStatus" in str(call) for call in app.printed)
+        assert any("/pythonRepl" in str(call) for call in app.printed)
 
 
 class TestCmdPaste:

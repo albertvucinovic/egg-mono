@@ -10,6 +10,7 @@ from typing import Optional, List
 from fastapi import APIRouter
 
 from eggthreads import list_threads, create_default_tools
+from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS
 
 from .. import core
 
@@ -72,21 +73,7 @@ async def get_autocomplete(
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name - always return full command for robust replacement
-            commands = [
-                '/help', '/model', '/updateAllModels',
-                '/spawn', '/spawnAutoApprovedChildThread', '/newThread',
-                '/threads', '/thread', '/parentThread', '/listChildren',
-                '/deleteThread', '/duplicateThread', '/rename', '/waitForThreads', '/continue',
-                '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus', '/toolInfo',
-                '/disableTool', '/enableTool', '/toolsSecrets',
-                '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
-                '/sessionStatus', '/sessionOn', '/sessionOff', '/sessionStop', '/sessionReset',
-                '/pythonRepl', '/bashRepl',
-                '/setContextLimit', '/setThreadPriority',
-                '/togglePanel', '/toggleBorders', '/theme',
-                '/login', '/logout', '/authStatus',
-                '/cost', '/schedulers', '/enterMode', '/paste', '/quit',
-            ]
+            commands = EGGW_COMMAND_COMPLETIONS
             pref_lower = prefix.lower()
             for cmd in commands:
                 if pref_lower in cmd.lower():
@@ -275,7 +262,7 @@ async def get_autocomplete(
                         })
 
             elif cmd in ('/sessionStop', '/sessionReset'):
-                for opt in ['python', 'bash', 'all']:
+                for opt in SESSION_TARGET_COMPLETIONS:
                     if not arg_tok or arg_tok.lower() in opt:
                         suggestions.append({
                             "display": opt,
@@ -284,7 +271,7 @@ async def get_autocomplete(
                         })
 
             elif cmd == '/sessionOn':
-                for opt in ['provider=docker', 'provider=memory', 'share_with_children=true', 'share_repl=true']:
+                for opt in SESSION_ON_COMPLETIONS:
                     if not arg_tok or arg_tok.lower() in opt.lower():
                         suggestions.append({
                             "display": opt,

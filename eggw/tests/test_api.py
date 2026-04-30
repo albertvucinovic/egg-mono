@@ -368,3 +368,30 @@ class TestSessionCommands:
         )
         assert off_resp.status_code == 200
         assert off_resp.json()["success"] is True
+
+
+class TestAutocomplete:
+    """Test backend autocomplete for session/RLM commands."""
+
+    def test_session_command_autocomplete(self, client):
+        response = client.get("/api/autocomplete", params={"line": "/session", "cursor": 8})
+        assert response.status_code == 200
+        displays = [s["display"] for s in response.json()["suggestions"]]
+        assert "/sessionStatus" in displays
+        assert "/sessionOn" in displays
+        assert "/sessionStop" in displays
+        assert "/sessionReset" in displays
+
+    def test_session_argument_autocomplete(self, client):
+        response = client.get("/api/autocomplete", params={"line": "/sessionOn provider=", "cursor": 20})
+        assert response.status_code == 200
+        displays = [s["display"] for s in response.json()["suggestions"]]
+        assert "provider=docker" in displays
+        assert "provider=memory" in displays
+
+        response = client.get("/api/autocomplete", params={"line": "/sessionReset ", "cursor": 14})
+        assert response.status_code == 200
+        displays = [s["display"] for s in response.json()["suggestions"]]
+        assert "python" in displays
+        assert "bash" in displays
+        assert "all" in displays

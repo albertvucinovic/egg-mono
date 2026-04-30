@@ -175,6 +175,13 @@ from .repl_bridge import (
     dispose_eval_context,
     call_tool as repl_bridge_call_tool,
 )
+from .command_catalog import (
+    SESSION_COMMAND_COMPLETIONS,
+    SESSION_ON_COMPLETIONS,
+    SESSION_TARGET_COMPLETIONS,
+    EGG_COMMAND_COMPLETIONS,
+    EGGW_COMMAND_COMPLETIONS,
+)
 
 from .tools import ToolRegistry, create_default_tools
 
@@ -235,5 +242,7 @@ __all__ = [
     'EvalContext', 'ReplBridgeError', 'ReplToolTimeout',
     'create_eval_context', 'resolve_eval_context', 'dispose_eval_context',
     'repl_bridge_call_tool',
+    'SESSION_COMMAND_COMPLETIONS', 'SESSION_ON_COMPLETIONS', 'SESSION_TARGET_COMPLETIONS',
+    'EGG_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',
 ]
 from .event_watcher import EventWatcher

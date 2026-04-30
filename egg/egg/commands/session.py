@@ -125,8 +125,16 @@ class SessionCommandsMixin:
             self.log_system("Usage: /pythonRepl <python code>")
             return
         try:
-            from eggthreads import execute_python_repl
+            from eggthreads import execute_python_repl, append_message, create_snapshot
             out = execute_python_repl(self.db, self.current_thread, code, drive_runtime_tools=True)
+            append_message(
+                self.db,
+                self.current_thread,
+                "user",
+                f"Command: /pythonRepl {code}\n\nOutput:\n{out}",
+                extra={"keep_user_turn": True, "no_api": True, "origin": "ui_python_repl"},
+            )
+            create_snapshot(self.db, self.current_thread)
             self.log_system("Python REPL executed (see console for output).")
             self.console_print_block("Python REPL", out, border_style="magenta")
             self.ensure_scheduler_for(self.current_thread)
@@ -139,8 +147,16 @@ class SessionCommandsMixin:
             self.log_system("Usage: /bashRepl <bash script>")
             return
         try:
-            from eggthreads import execute_bash_repl
+            from eggthreads import execute_bash_repl, append_message, create_snapshot
             out = execute_bash_repl(self.db, self.current_thread, script, drive_runtime_tools=True)
+            append_message(
+                self.db,
+                self.current_thread,
+                "user",
+                f"Command: /bashRepl {script}\n\nOutput:\n{out}",
+                extra={"keep_user_turn": True, "no_api": True, "origin": "ui_bash_repl"},
+            )
+            create_snapshot(self.db, self.current_thread)
             self.log_system("Bash REPL executed (see console for output).")
             self.console_print_block("Bash REPL", out, border_style="magenta")
             self.ensure_scheduler_for(self.current_thread)

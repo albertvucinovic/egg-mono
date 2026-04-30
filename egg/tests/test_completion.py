@@ -252,6 +252,35 @@ class TestGetAutocompleteItems:
         assert '/help' in displays
         assert '/model' in displays
         assert '/thread' in displays
+        assert '/sessionStatus' in displays
+        assert '/pythonRepl' in displays
+
+    def test_returns_session_command_completions(self, isolated_db):
+        """Should return RLM/session command completions."""
+        items = get_autocomplete_items("/session", 8, isolated_db, lambda: "tid", None)
+
+        displays = [item['display'] for item in items]
+        assert '/sessionStatus' in displays
+        assert '/sessionOn' in displays
+        assert '/sessionStop' in displays
+        assert '/sessionReset' in displays
+
+    def test_returns_session_on_argument_completions(self, isolated_db):
+        """Should suggest sessionOn named arguments."""
+        items = get_autocomplete_items("/sessionOn provider=", 20, isolated_db, lambda: "tid", None)
+
+        displays = [item['display'] for item in items]
+        assert 'provider=docker' in displays
+        assert 'provider=memory' in displays
+
+    def test_returns_session_target_completions(self, isolated_db):
+        """Should suggest target runtimes for sessionStop/sessionReset."""
+        items = get_autocomplete_items("/sessionStop ", 13, isolated_db, lambda: "tid", None)
+
+        displays = [item['display'] for item in items]
+        assert 'python' in displays
+        assert 'bash' in displays
+        assert 'all' in displays
 
     def test_filters_commands_by_prefix(self, isolated_db):
         """Should filter commands by prefix."""
