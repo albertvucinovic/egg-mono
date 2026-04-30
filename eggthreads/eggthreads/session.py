@@ -923,45 +923,60 @@ def _make_eggtools_module(eval_token: str):
 
     mod = types.ModuleType("eggtools")
 
+    def _tool_timeout(args: Dict[str, Any]) -> Optional[float]:
+        timeout_sec = args.get("timeout_sec")
+        if timeout_sec is not None:
+            args.setdefault("_egg_tool_timeout_sec", timeout_sec)
+            try:
+                return float(timeout_sec)
+            except Exception:
+                return None
+        return None
+
     def tool(name: str, **kwargs: Any) -> str:
-        return repl_bridge.call_tool(eval_token, name, kwargs)
+        args = dict(kwargs)
+        return repl_bridge.call_tool(eval_token, name, args, timeout_sec=_tool_timeout(args))
 
     def spawn_agent(context_text: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["context_text"] = context_text
-        return repl_bridge.call_tool(eval_token, "spawn_agent", args)
+        args.setdefault("_egg_raw_thread_id_result", True)
+        return repl_bridge.call_tool(eval_token, "spawn_agent", args, timeout_sec=_tool_timeout(args))
 
     def spawn_agent_auto(context_text: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["context_text"] = context_text
-        return repl_bridge.call_tool(eval_token, "spawn_agent_auto", args)
+        args.setdefault("_egg_raw_thread_id_result", True)
+        return repl_bridge.call_tool(eval_token, "spawn_agent_auto", args, timeout_sec=_tool_timeout(args))
 
     def wait(thread_ids: Any, **kwargs: Any) -> str:
         if isinstance(thread_ids, (str, int)):
             thread_ids = [str(thread_ids)]
+        if isinstance(thread_ids, (list, tuple, set)):
+            thread_ids = [str(t).splitlines()[-1].strip() for t in thread_ids if isinstance(t, (str, int))]
         args = dict(kwargs)
         args["thread_ids"] = thread_ids
-        return repl_bridge.call_tool(eval_token, "wait", args)
+        return repl_bridge.call_tool(eval_token, "wait", args, timeout_sec=_tool_timeout(args))
 
     def web_search(query: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["query"] = query
-        return repl_bridge.call_tool(eval_token, "web_search", args)
+        return repl_bridge.call_tool(eval_token, "web_search", args, timeout_sec=_tool_timeout(args))
 
     def fetch_url(url: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["url"] = url
-        return repl_bridge.call_tool(eval_token, "fetch_url", args)
+        return repl_bridge.call_tool(eval_token, "fetch_url", args, timeout_sec=_tool_timeout(args))
 
     def bash(script: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["script"] = script
-        return repl_bridge.call_tool(eval_token, "bash", args)
+        return repl_bridge.call_tool(eval_token, "bash", args, timeout_sec=_tool_timeout(args))
 
     def python(script: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["script"] = script
-        return repl_bridge.call_tool(eval_token, "python", args)
+        return repl_bridge.call_tool(eval_token, "python", args, timeout_sec=_tool_timeout(args))
 
     def session_status(**kwargs: Any) -> str:
         return repl_bridge.call_tool(eval_token, "session_status", dict(kwargs))

@@ -738,6 +738,8 @@ def thread_state(db: ThreadsDB, thread_id: str) -> str:
       - "paused"                  (thread.status == 'paused')
     """
     th = db.get_thread(thread_id)
+    if th is None:
+        return "unknown"
     if th and th.status == "paused":
         return "paused"
 

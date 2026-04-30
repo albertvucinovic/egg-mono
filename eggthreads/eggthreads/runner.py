@@ -2050,6 +2050,8 @@ class ThreadRunner:
                     cmd_text = self._get_parent_message_content(tc.parent_msg_id)
                     if not cmd_text:
                         cmd_text = self._render_tool_invocation(tc)
+                    if self._user_tool_call_wants_raw_result(tc):
+                        cmd_text = None
                     if cmd_text:
                         # Avoid duplicating the command if the preview already starts with it.
                         if not content.startswith(cmd_text):
@@ -2150,6 +2152,28 @@ class ThreadRunner:
         except Exception:
             payload = {}
         return bool(payload.get('no_api'))
+
+    def _user_tool_call_wants_raw_result(self, tc: ToolCallState) -> bool:
+        """Return True for internal RA3 calls whose result is consumed by code.
+
+        UI-originated user commands intentionally include the command text in
+        the published tool message for readability.  REPL bridge helpers such
+        as ``eggtools.spawn_agent()`` need the returned value to remain a raw
+        thread id so user Python can immediately pass it to ``eggtools.wait``.
+        """
+
+        try:
+            args = tc.arguments
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except Exception:
+                    args = {}
+            if isinstance(args, dict) and args.get('_egg_raw_thread_id_result'):
+                return True
+        except Exception:
+            return False
+        return False
 
     def _render_tool_invocation(self, tc: ToolCallState) -> str:
         """Render a human-readable representation of a tool invocation.

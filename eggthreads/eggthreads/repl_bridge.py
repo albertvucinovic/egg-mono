@@ -129,6 +129,7 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
     if not tool_name:
         raise ReplBridgeError("Tool name is required")
     args = dict(arguments or {})
+    tool_timeout_sec = args.pop("_egg_tool_timeout_sec", None)
     _authorize(db, ctx.runtime_thread_id, tool_name)
 
     from .api import enqueue_user_tool_call, wait_for_tool_call_result
@@ -147,6 +148,11 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
     )
 
     effective_timeout = ctx.bridge_timeout_sec if timeout_sec is None else timeout_sec
+    if tool_timeout_sec is not None:
+        try:
+            effective_timeout = float(tool_timeout_sec)
+        except Exception:
+            pass
     if not ctx.drive_runtime_tools:
         result = wait_for_tool_call_result(
             db,

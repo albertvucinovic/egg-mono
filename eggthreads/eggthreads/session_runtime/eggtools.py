@@ -47,11 +47,14 @@ def tool(name: str, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
             timeout_sec = float(os.environ.get("EGG_TOOL_TIMEOUT", "30"))
         except Exception:
             timeout_sec = 30.0
+    arguments = dict(kwargs)
+    if timeout_sec is not None:
+        arguments["_egg_tool_timeout_sec"] = timeout_sec
     _atomic_write_json(req_path, {
         "id": req_id,
         "token": _eval_token(),
         "name": name,
-        "arguments": kwargs,
+        "arguments": arguments,
         "timeout_sec": timeout_sec,
     })
     start = time.time()
@@ -74,17 +77,21 @@ def tool(name: str, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
 
 def spawn_agent(context_text: str, **kwargs: Any) -> str:
     kwargs["context_text"] = context_text
+    kwargs.setdefault("_egg_raw_thread_id_result", True)
     return tool("spawn_agent", **kwargs)
 
 
 def spawn_agent_auto(context_text: str, **kwargs: Any) -> str:
     kwargs["context_text"] = context_text
+    kwargs.setdefault("_egg_raw_thread_id_result", True)
     return tool("spawn_agent_auto", **kwargs)
 
 
 def wait(thread_ids: Any, **kwargs: Any) -> str:
     if isinstance(thread_ids, (str, int)):
         thread_ids = [str(thread_ids)]
+    if isinstance(thread_ids, (list, tuple, set)):
+        thread_ids = [str(t).splitlines()[-1].strip() for t in thread_ids if isinstance(t, (str, int))]
     kwargs["thread_ids"] = thread_ids
     return tool("wait", **kwargs)
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import eggthreads as ts
+from eggthreads.runner import RunnerConfig, SubtreeScheduler
 
 
 def _make_db(tmp_path: Path) -> ts.ThreadsDB:
@@ -133,3 +135,70 @@ def test_python_repl_spawn_agent_creates_child_under_runtime_and_attenuates_tool
     assert child_cfg.allowed_tools == {"web_search"}
     assert child_cfg.is_tool_allowed("web_search")
     assert not child_cfg.is_tool_allowed("bash")
+
+
+def test_python_repl_wait_observes_child_result_under_scheduler(tmp_path, monkeypatch):
+    """Regression: eggtools.wait() should work from /pythonRepl scheduler flow."""
+
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    ts.enable_thread_session(db, parent, provider="memory")
+    runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
+    ts.set_thread_tools_enabled(db, runtime, True)
+    ts.set_thread_tool_allowlist(db, runtime, ["spawn_agent", "wait"])
+
+    class MockLLM:
+        current_model_key = "mock"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        def set_model_with_config(self, model_key, config):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            yield {"type": "content_delta", "text": "child done"}
+            yield {"type": "done", "message": {"role": "assistant", "content": "child done"}}
+
+    async def run() -> str:
+        code = (
+            "from eggtools import spawn_agent, wait\n"
+            "child = spawn_agent('Say exactly child done', label='kid')\n"
+            "print(wait([child], timeout_sec=10))\n"
+        )
+        tcid = ts.enqueue_user_tool_call(
+            db,
+            parent,
+            "python_repl",
+            {"code": code, "bridge_timeout_sec": 10},
+            hidden=True,
+            keep_user_turn=True,
+            origin="ui_python_repl",
+            auto_approve=True,
+        )
+        scheduler = SubtreeScheduler(
+            db,
+            parent,
+            llm=MockLLM(),
+            config=RunnerConfig(max_concurrent_threads=4, api_timeout_sec=5, lease_ttl_sec=5),
+            owner="test",
+        )
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.01))
+        try:
+            result = await ts.wait_for_tool_call_result_async(db, parent, tcid, timeout_sec=15, poll_interval=0.05)
+            assert result.state == "TC6"
+            assert not result.timed_out
+            return result.content or ""
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    out = asyncio.run(run())
+    assert "Thread " in out
+    assert "Last assistant message:\nchild done" in out
+    assert "(no assistant content found)" not in out

@@ -84,6 +84,9 @@ class ToolRegistry:
 
         # Propagate tool timeout for subprocess-based tools
         tool_timeout = context.get("tool_timeout_sec")
+        repl_tool_timeout = args.pop("_egg_tool_timeout_sec", None)
+        if repl_tool_timeout is not None:
+            tool_timeout = repl_tool_timeout
         if tool_timeout is not None and "_tool_timeout_sec" not in args:
             args["_tool_timeout_sec"] = tool_timeout
 
@@ -671,6 +674,10 @@ def create_default_tools() -> ToolRegistry:
         if not system_prompt:
             system_prompt = 'You are a helpful assistant.'
 
+        # Presentation-only REPL bridge hint; ThreadRunner reads it from the
+        # persisted tool-call arguments before invoking this implementation.
+        args.pop('_egg_raw_thread_id_result', None)
+
         # Create child thread
         try:
             child = create_child_thread(db, parent_id, name=label, initial_model_key=initial_model_key)
@@ -756,6 +763,9 @@ def create_default_tools() -> ToolRegistry:
         user_text = (args.get('context_text') or '').strip() or 'Spawned task'
         initial_model_key = _spawn_initial_model_key(args)
         system_prompt = (args.get('system_prompt') or '').strip() or None
+        # Presentation-only REPL bridge hint; ThreadRunner reads it from the
+        # persisted tool-call arguments before invoking this implementation.
+        args.pop('_egg_raw_thread_id_result', None)
 
         db = ThreadsDB()
 
