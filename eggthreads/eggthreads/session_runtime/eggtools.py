@@ -82,7 +82,9 @@ def spawn_agent_auto(context_text: str, **kwargs: Any) -> str:
     return tool("spawn_agent_auto", **kwargs)
 
 
-def wait(thread_ids: list[str], **kwargs: Any) -> str:
+def wait(thread_ids: Any, **kwargs: Any) -> str:
+    if isinstance(thread_ids, (str, int)):
+        thread_ids = [str(thread_ids)]
     kwargs["thread_ids"] = thread_ids
     return tool("wait", **kwargs)
 

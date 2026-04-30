@@ -936,7 +936,9 @@ def _make_eggtools_module(eval_token: str):
         args["context_text"] = context_text
         return repl_bridge.call_tool(eval_token, "spawn_agent_auto", args)
 
-    def wait(thread_ids: list[str], **kwargs: Any) -> str:
+    def wait(thread_ids: Any, **kwargs: Any) -> str:
+        if isinstance(thread_ids, (str, int)):
+            thread_ids = [str(thread_ids)]
         args = dict(kwargs)
         args["thread_ids"] = thread_ids
         return repl_bridge.call_tool(eval_token, "wait", args)
@@ -1229,6 +1231,23 @@ def execute_python_repl(
       * returns an actionable error for Docker until the Docker provider lands.
     """
 
+    # Safety invariant: normal REPL tool execution runs as an outer tool call
+    # on the caller/application thread.  Programmatic eggtools calls from the
+    # REPL are enqueued on the runtime child and should be driven by the active
+    # SubtreeScheduler.  Direct-driving is only for isolated unit/headless tests
+    # where no scheduler exists.
+    if drive_runtime_tools:
+        try:
+            import asyncio as _asyncio
+
+            _asyncio.get_running_loop()
+            return (
+                "Error: drive_runtime_tools=True cannot be used while an asyncio event loop is running. "
+                "Queue python_repl as a tool call and let SubtreeScheduler drive runtime tool calls."
+            )
+        except RuntimeError:
+            pass
+
     runtime_thread_id = get_or_create_runtime_thread(
         db,
         caller_thread_id,
@@ -1355,6 +1374,18 @@ def execute_bash_repl(
     drive_runtime_tools: bool = False,
 ) -> str:
     """Execute Bash in the caller's persistent runtime session."""
+
+    if drive_runtime_tools:
+        try:
+            import asyncio as _asyncio
+
+            _asyncio.get_running_loop()
+            return (
+                "Error: drive_runtime_tools=True cannot be used while an asyncio event loop is running. "
+                "Queue bash_repl as a tool call and let SubtreeScheduler drive runtime tool calls."
+            )
+        except RuntimeError:
+            pass
 
     runtime_thread_id = get_or_create_runtime_thread(
         db,

@@ -98,3 +98,17 @@ def test_share_repl_true_shares_interpreter_channel(tmp_path):
     assert "ERROR" not in ts.execute_python_repl(db, parent, "shared_value = 99")
     child_out = ts.execute_python_repl(db, child, "shared_value")
     assert "99" in child_out
+
+
+def test_direct_drive_reports_error_inside_running_loop(tmp_path):
+    import asyncio
+
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.enable_thread_session(db, parent, provider="memory")
+
+    async def run():
+        return ts.execute_python_repl(db, parent, "1 + 1", drive_runtime_tools=True)
+
+    out = asyncio.run(run())
+    assert "drive_runtime_tools=True cannot be used" in out

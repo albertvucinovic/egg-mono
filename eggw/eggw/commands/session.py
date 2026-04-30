@@ -12,8 +12,7 @@ from eggthreads import (
     stop_thread_session,
     reset_thread_session,
     cleanup_docker_sessions,
-    execute_python_repl,
-    execute_bash_repl,
+    enqueue_user_tool_call,
 )
 
 from ..models import CommandResponse
@@ -189,9 +188,20 @@ async def cmd_python_repl(thread_id: str, code: str) -> CommandResponse:
     if not (code or "").strip():
         return CommandResponse(success=False, message="Usage: /pythonRepl <python code>")
     try:
-        out = execute_python_repl(core.db, thread_id, code, drive_runtime_tools=True)
+        tcid = enqueue_user_tool_call(
+            core.db,
+            thread_id,
+            "python_repl",
+            {"code": code},
+            content=f"/pythonRepl {code}",
+            hidden=True,
+            keep_user_turn=True,
+            origin="ui_python_repl",
+            auto_approve=True,
+            approval_reason="Approved /pythonRepl command",
+        )
         ensure_scheduler_for(thread_id)
-        return CommandResponse(success=True, message=out, data={"language": "python"})
+        return CommandResponse(success=True, message=f"Python REPL queued as tool call: {tcid[-8:]}", data={"language": "python", "tool_call_id": tcid})
     except Exception as e:
         return CommandResponse(success=False, message=f"/pythonRepl error: {e}")
 
@@ -200,8 +210,19 @@ async def cmd_bash_repl(thread_id: str, script: str) -> CommandResponse:
     if not (script or "").strip():
         return CommandResponse(success=False, message="Usage: /bashRepl <bash script>")
     try:
-        out = execute_bash_repl(core.db, thread_id, script, drive_runtime_tools=True)
+        tcid = enqueue_user_tool_call(
+            core.db,
+            thread_id,
+            "bash_repl",
+            {"script": script},
+            content=f"/bashRepl {script}",
+            hidden=True,
+            keep_user_turn=True,
+            origin="ui_bash_repl",
+            auto_approve=True,
+            approval_reason="Approved /bashRepl command",
+        )
         ensure_scheduler_for(thread_id)
-        return CommandResponse(success=True, message=out, data={"language": "bash"})
+        return CommandResponse(success=True, message=f"Bash REPL queued as tool call: {tcid[-8:]}", data={"language": "bash", "tool_call_id": tcid})
     except Exception as e:
         return CommandResponse(success=False, message=f"/bashRepl error: {e}")

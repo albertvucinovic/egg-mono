@@ -369,6 +369,23 @@ class TestSessionCommands:
         assert off_resp.status_code == 200
         assert off_resp.json()["success"] is True
 
+    def test_python_repl_command_enqueues_tool_call(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Session Test"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/pythonRepl print('hi')"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["tool_call_id"]
+
+        from eggthreads import build_tool_call_states
+        states = build_tool_call_states(core_state.db, thread_id)
+        assert any(tc.name == "python_repl" for tc in states.values())
+
 
 class TestAutocomplete:
     """Test backend autocomplete for session/RLM commands."""

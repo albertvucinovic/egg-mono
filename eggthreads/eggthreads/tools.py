@@ -1012,6 +1012,16 @@ def create_default_tools() -> ToolRegistry:
         from .api import wait_for_threads
 
         tids_arg = args.get('thread_ids') or args.get('threads') or args.get('thread_id')
+        if 'thread_ids' not in args and 'threads' not in args and 'thread_id' not in args:
+            tid_context = args.get('_thread_id')
+            if isinstance(tid_context, str) and tid_context.strip():
+                # Convenience for REPL code: eggtools.wait(tid) sends the id as
+                # the raw positional argument, which ToolRegistry stores under
+                # _arg before injecting _thread_id.  Treat _arg as the target
+                # thread id rather than waiting on the current runtime thread.
+                raw = args.get('_arg')
+                if isinstance(raw, (str, int)):
+                    tids_arg = str(raw)
         if isinstance(tids_arg, str):
             thread_ids = [tids_arg]
         elif isinstance(tids_arg, list):

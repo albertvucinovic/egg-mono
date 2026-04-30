@@ -152,18 +152,21 @@ class SessionCommandsMixin:
             self.log_system("Usage: /pythonRepl <python code>")
             return
         try:
-            from eggthreads import execute_python_repl, append_message, create_snapshot
-            out = execute_python_repl(self.db, self.current_thread, code, drive_runtime_tools=True)
-            append_message(
+            from eggthreads import enqueue_user_tool_call, create_snapshot
+            tcid = enqueue_user_tool_call(
                 self.db,
                 self.current_thread,
-                "user",
-                f"Command: /pythonRepl {code}\n\nOutput:\n{out}",
-                extra={"keep_user_turn": True, "no_api": True, "origin": "ui_python_repl"},
+                "python_repl",
+                {"code": code},
+                content=f"/pythonRepl {code}",
+                hidden=True,
+                keep_user_turn=True,
+                origin="ui_python_repl",
+                auto_approve=True,
+                approval_reason="Approved /pythonRepl command",
             )
             create_snapshot(self.db, self.current_thread)
-            self.log_system("Python REPL executed (see console for output).")
-            self.console_print_block("Python REPL", out, border_style="magenta")
+            self.log_system(f"Python REPL queued as tool call {tcid[-8:]}; scheduler will execute it.")
             self.ensure_scheduler_for(self.current_thread)
         except Exception as e:
             self.log_system(f"/pythonRepl error: {e}")
@@ -174,18 +177,21 @@ class SessionCommandsMixin:
             self.log_system("Usage: /bashRepl <bash script>")
             return
         try:
-            from eggthreads import execute_bash_repl, append_message, create_snapshot
-            out = execute_bash_repl(self.db, self.current_thread, script, drive_runtime_tools=True)
-            append_message(
+            from eggthreads import enqueue_user_tool_call, create_snapshot
+            tcid = enqueue_user_tool_call(
                 self.db,
                 self.current_thread,
-                "user",
-                f"Command: /bashRepl {script}\n\nOutput:\n{out}",
-                extra={"keep_user_turn": True, "no_api": True, "origin": "ui_bash_repl"},
+                "bash_repl",
+                {"script": script},
+                content=f"/bashRepl {script}",
+                hidden=True,
+                keep_user_turn=True,
+                origin="ui_bash_repl",
+                auto_approve=True,
+                approval_reason="Approved /bashRepl command",
             )
             create_snapshot(self.db, self.current_thread)
-            self.log_system("Bash REPL executed (see console for output).")
-            self.console_print_block("Bash REPL", out, border_style="magenta")
+            self.log_system(f"Bash REPL queued as tool call {tcid[-8:]}; scheduler will execute it.")
             self.ensure_scheduler_for(self.current_thread)
         except Exception as e:
             self.log_system(f"/bashRepl error: {e}")

@@ -2265,20 +2265,43 @@ async def execute_bash_command_async(db: ThreadsDB, thread_id: str, script: str,
 
 
 def _last_assistant_content_from_snapshot(db: ThreadsDB, thread_id: str) -> str:
-    """Return the last assistant message content from a thread snapshot."""
+    """Return the last assistant message content for a thread.
+
+    Prefer the snapshot cache when available, but fall back to the event log.
+    Snapshots can lag immediately after a child thread finishes; the event log
+    remains the source of truth for programmatic waits from REPL code.
+    """
 
     row = db.get_thread(thread_id)
-    if not row or not row.snapshot_json:
-        return ''
+    if row and row.snapshot_json:
+        try:
+            snap = json.loads(row.snapshot_json)
+        except Exception:
+            snap = None
+        if isinstance(snap, dict):
+            msgs = snap.get('messages', []) or []
+            for m in reversed(msgs):
+                try:
+                    if m.get('role') == 'assistant' and isinstance(m.get('content'), str):
+                        return m.get('content') or ''
+                except Exception:
+                    continue
+
     try:
-        snap = json.loads(row.snapshot_json)
+        cur = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC",
+            (thread_id,),
+        )
     except Exception:
         return ''
-    msgs = snap.get('messages', []) or []
-    for m in reversed(msgs):
+    for (payload_json,) in cur.fetchall():
         try:
-            if m.get('role') == 'assistant' and isinstance(m.get('content'), str):
-                return m.get('content') or ''
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            continue
+        try:
+            if payload.get('role') == 'assistant' and isinstance(payload.get('content'), str):
+                return payload.get('content') or ''
         except Exception:
             continue
     return ''

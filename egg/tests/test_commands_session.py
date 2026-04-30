@@ -90,25 +90,29 @@ class TestSessionCommands:
 
     def test_python_repl_executes(self, app, monkeypatch):
         calls = []
-        monkeypatch.setattr("eggthreads.execute_python_repl", lambda db, tid, code, **kw: calls.append((tid, code, kw)) or "ok")
+        monkeypatch.setattr("eggthreads.enqueue_user_tool_call", lambda db, tid, name, args, **kw: calls.append((tid, name, args, kw)) or "tc_python")
+        monkeypatch.setattr("eggthreads.create_snapshot", lambda db, tid: None)
 
         app.cmd_pythonRepl("print('hi')")
 
         assert calls
-        assert calls[0][1] == "print('hi')"
-        assert calls[0][2]["drive_runtime_tools"] is True
-        assert app.printed
+        assert calls[0][1] == "python_repl"
+        assert calls[0][2] == {"code": "print('hi')"}
+        assert calls[0][3]["origin"] == "ui_python_repl"
+        assert app.ensured == [app.current_thread]
 
     def test_bash_repl_executes(self, app, monkeypatch):
         calls = []
-        monkeypatch.setattr("eggthreads.execute_bash_repl", lambda db, tid, script, **kw: calls.append((tid, script, kw)) or "ok")
+        monkeypatch.setattr("eggthreads.enqueue_user_tool_call", lambda db, tid, name, args, **kw: calls.append((tid, name, args, kw)) or "tc_bash")
+        monkeypatch.setattr("eggthreads.create_snapshot", lambda db, tid: None)
 
         app.cmd_bashRepl("echo hi")
 
         assert calls
-        assert calls[0][1] == "echo hi"
-        assert calls[0][2]["drive_runtime_tools"] is True
-        assert app.printed
+        assert calls[0][1] == "bash_repl"
+        assert calls[0][2] == {"script": "echo hi"}
+        assert calls[0][3]["origin"] == "ui_bash_repl"
+        assert app.ensured == [app.current_thread]
 
     def test_session_status_prints(self, app, monkeypatch):
         class Status:
