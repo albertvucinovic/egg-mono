@@ -18,7 +18,7 @@ Legend:
 - [x] Extend `ToolsConfig` with `allowed_tools: Optional[Set[str]]`.
 - [x] Parse `tools.config` payload `allow_only`.
 - [x] Add `ToolsConfig.is_tool_allowed(name)`.
-- [ ] Add public APIs:
+- [x] Add public APIs:
   - [x] `set_thread_tool_allowlist(db, thread_id, names)`
   - [x] `clear_thread_tool_allowlist(db, thread_id)`
 - [x] Update RA1 tool spec filtering to use `is_tool_allowed`.
@@ -76,9 +76,16 @@ Legend:
 
 - [x] REPL tools auto-create/reuse sessions from env/default policy.
 - [x] Bash REPL.
-- [ ] Explicit REPL channel sharing policy/API (`share_repl`) beyond memory provider.
+- [x] Explicit REPL channel sharing policy/API (`share_repl`) beyond memory provider.
 - [x] Dedicated session Dockerfile/image build script.
 - [x] Docker `egg-sessiond` (Python/Bash eval + file bridge implemented; hardening remains ongoing).
 - [x] `eggtools.py` and `eggtool` in container.
 - [x] Spawn capability attenuation and session sharing.
-- [ ] TUI/Web session commands.
+- [x] TUI/Web session commands.
+
+## Follow-up hardening
+
+- [ ] Docker hardening: avoid or mask writable `.egg` project mounts.
+- [ ] Strict nested approval modes (`nested_tool_approval=prompt|never`).
+- [ ] Optional runtime-thread collapse/filtering in TUI/Web tree views.
+- [ ] Richer session lifecycle/status reconciliation for externally stopped containers.

@@ -79,6 +79,7 @@ from .commands import (
     DisplayCommandsMixin,
     UtilityCommandsMixin,
     AuthCommandsMixin,
+    SessionCommandsMixin,
 )
 
 # eggllm (optional, for /model and catalogs)
@@ -95,6 +96,7 @@ class EggDisplayApp(
     DisplayCommandsMixin,
     UtilityCommandsMixin,
     AuthCommandsMixin,
+    SessionCommandsMixin,
     FormattingMixin,
     PanelsMixin,
     ApprovalMixin,

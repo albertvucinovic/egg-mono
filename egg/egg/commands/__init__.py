@@ -6,6 +6,7 @@ from .sandbox import SandboxCommandsMixin
 from .display import DisplayCommandsMixin
 from .utility import UtilityCommandsMixin
 from .auth import AuthCommandsMixin
+from .session import SessionCommandsMixin
 
 __all__ = [
     'ModelCommandsMixin',
@@ -15,4 +16,5 @@ __all__ = [
     'DisplayCommandsMixin',
     'UtilityCommandsMixin',
     'AuthCommandsMixin',
+    'SessionCommandsMixin',
 ]

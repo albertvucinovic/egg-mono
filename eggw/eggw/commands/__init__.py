@@ -27,6 +27,15 @@ from .sandbox import (
     cmd_set_sandbox_configuration,
     cmd_get_sandboxing_config,
 )
+from .session import (
+    cmd_session_status,
+    cmd_session_on,
+    cmd_session_off,
+    cmd_session_stop,
+    cmd_session_reset,
+    cmd_python_repl,
+    cmd_bash_repl,
+)
 from .auth import cmd_login, cmd_logout, cmd_auth_status
 from .utility import (
     cmd_toggle_auto_approval,
@@ -76,6 +85,14 @@ __all__ = [
     "cmd_toggle_sandboxing",
     "cmd_set_sandbox_configuration",
     "cmd_get_sandboxing_config",
+    # Session commands
+    "cmd_session_status",
+    "cmd_session_on",
+    "cmd_session_off",
+    "cmd_session_stop",
+    "cmd_session_reset",
+    "cmd_python_repl",
+    "cmd_bash_repl",
     # Utility commands
     "cmd_toggle_auto_approval",
     "cmd_cost",
@@ -163,6 +180,20 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_set_sandbox_configuration(thread_id, command_arg)
         elif command_name == "getSandboxingConfig":
             return await cmd_get_sandboxing_config(thread_id)
+        elif command_name == "sessionStatus":
+            return await cmd_session_status(thread_id)
+        elif command_name == "sessionOn":
+            return await cmd_session_on(thread_id, command_arg)
+        elif command_name == "sessionOff":
+            return await cmd_session_off(thread_id)
+        elif command_name == "sessionStop":
+            return await cmd_session_stop(thread_id, command_arg)
+        elif command_name == "sessionReset":
+            return await cmd_session_reset(thread_id, command_arg)
+        elif command_name == "pythonRepl":
+            return await cmd_python_repl(thread_id, command_arg)
+        elif command_name == "bashRepl":
+            return await cmd_bash_repl(thread_id, command_arg)
         # P1 Commands
         elif command_name == "updateAllModels":
             return await cmd_update_all_models(command_arg)

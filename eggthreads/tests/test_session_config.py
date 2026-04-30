@@ -20,13 +20,14 @@ def test_session_config_defaults_disabled(tmp_path):
     assert cfg.enabled is False
     assert cfg.provider == "docker"
     assert cfg.session_id is None
+    assert cfg.share_repl is False
 
 
 def test_enable_thread_session_appends_config_and_stable_id(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
 
-    sid = ts.enable_thread_session(db, tid, image="custom-image", share_with_children_default=True)
+    sid = ts.enable_thread_session(db, tid, image="custom-image", share_with_children_default=True, share_repl=True)
     cfg = ts.get_thread_session_config(db, tid)
 
     assert cfg.enabled is True
@@ -34,6 +35,7 @@ def test_enable_thread_session_appends_config_and_stable_id(tmp_path):
     assert sid.startswith("sess_")
     assert cfg.image == "custom-image"
     assert cfg.share_with_children_default is True
+    assert cfg.share_repl is True
     assert cfg.owner_thread_id == tid
 
     sid2 = ts.enable_thread_session(db, tid, image="custom-image")
@@ -50,6 +52,40 @@ def test_session_config_inherits_to_runtime_child(tmp_path):
     assert cfg.enabled is True
     assert cfg.session_id == sid
     assert cfg.source == f"event:{parent}"
+
+
+def test_repl_channel_defaults_per_runtime_thread():
+    assert ts.repl_channel_name("thread-A", "default") != ts.repl_channel_name("thread-B", "default")
+    assert ts.repl_channel_name("thread-A", "default", share_repl=True) == "default"
+
+
+def test_reset_thread_session_rotates_session_id_and_preserves_policy(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    old_sid = ts.enable_thread_session(db, tid, provider="memory", share_repl=True)
+
+    new_sid = ts.reset_thread_session(db, tid, reason="test")
+
+    assert new_sid != old_sid
+    cfg = ts.get_thread_session_config(db, tid)
+    assert cfg.enabled is True
+    assert cfg.provider == "memory"
+    assert cfg.share_repl is True
+    assert cfg.session_id == new_sid
+
+
+def test_stop_thread_session_clears_memory_repl_state(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.enable_thread_session(db, tid, provider="memory")
+
+    assert "5" in ts.execute_python_repl(db, tid, "x = 5\nx")
+    runtime = ts.find_runtime_thread(db, tid, language="python")
+    assert runtime is not None
+    st = ts.stop_thread_session(db, runtime.runtime_thread_id, reason="test")
+    assert st.status == "stopped"
+    out = ts.execute_python_repl(db, tid, "x")
+    assert "NameError" in out
 
 
 def test_child_can_share_specific_parent_session(tmp_path):

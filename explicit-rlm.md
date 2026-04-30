@@ -1459,6 +1459,12 @@ workflows where parent/child runtime threads intentionally use the same Python
 or Bash interpreter channel.  This must be opt-in because it creates stronger
 coupling, possible blocking interactions, and shared mutable language state.
 
+Implementation note: `session.config` now has an explicit `share_repl` boolean.
+When false (the default), the provider-level REPL channel name is scoped by the
+runtime thread id even if multiple runtime threads reuse the same `session_id`.
+When true, the requested `repl_name` is used directly so callers can knowingly
+share interpreter state across runtime threads.
+
 ### 20.2 Should runtime threads be hidden/collapsed by default?
 
 Runtime threads may be noisy. But they are valuable for audit.

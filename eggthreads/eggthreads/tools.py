@@ -386,6 +386,130 @@ def create_default_tools() -> ToolRegistry:
         impl=_bash_repl,
     )
 
+    def _session_status(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .session import find_runtime_thread, get_thread_session_status
+
+        thread_id = (args.get('_thread_id') or '').strip()
+        if not thread_id:
+            return 'Error: session_status requires thread context.'
+        db = ThreadsDB()
+        lines = []
+        st = get_thread_session_status(db, thread_id)
+        lines.append("Current thread session:")
+        lines.append(f"  Enabled: {st.enabled}")
+        lines.append(f"  Provider: {st.provider}")
+        lines.append(f"  Session ID: {st.session_id or '(none)'}")
+        lines.append(f"  Status: {st.status}")
+        lines.append(f"  Share REPL channel: {st.share_repl}")
+        if st.container_name:
+            lines.append(f"  Container: {st.container_name}")
+        if st.message:
+            lines.append(f"  Message: {st.message}")
+        for language in ("python", "bash"):
+            rt = find_runtime_thread(db, thread_id, language=language)
+            if rt is None:
+                continue
+            rst = get_thread_session_status(db, rt.runtime_thread_id)
+            lines.append("")
+            lines.append(f"Runtime {language} ({rt.runtime_thread_id[-8:]}):")
+            lines.append(f"  Session ID: {rst.session_id or '(none)'}")
+            lines.append(f"  Provider: {rst.provider}")
+            lines.append(f"  Status: {rst.status}")
+            lines.append(f"  Share REPL channel: {rst.share_repl}")
+            if rst.container_name:
+                lines.append(f"  Container: {rst.container_name}")
+            if rst.message:
+                lines.append(f"  Message: {rst.message}")
+        return "\n".join(lines)
+
+    reg.register(
+        name='session_status',
+        description='Show persistent REPL/session status for the current thread and runtime children.',
+        parameters_schema={"type": "object", "properties": {}},
+        impl=_session_status,
+    )
+
+    def _session_reset(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .session import find_runtime_thread, reset_thread_session
+
+        thread_id = (args.get('_thread_id') or '').strip()
+        if not thread_id:
+            return 'Error: session_reset requires thread context.'
+        language = str(args.get('language') or '').strip().lower()
+        targets: list[str] = []
+        db = ThreadsDB()
+        if language in ('python', 'bash'):
+            rt = find_runtime_thread(db, thread_id, language=language)
+            targets = [rt.runtime_thread_id] if rt is not None else [thread_id]
+        elif language in ('runtimes', 'runtime', 'all'):
+            for lang in ('python', 'bash'):
+                rt = find_runtime_thread(db, thread_id, language=lang)
+                if rt is not None:
+                    targets.append(rt.runtime_thread_id)
+            if not targets:
+                targets = [thread_id]
+        else:
+            targets = [thread_id]
+        lines = []
+        for target in targets:
+            sid = reset_thread_session(db, target, reason='session_reset tool')
+            lines.append(f"Reset session for {target[-8:]}: {sid}")
+        return "\n".join(lines)
+
+    reg.register(
+        name='session_reset',
+        description='Reset the current thread persistent REPL/session state. Optional language=python|bash|all targets runtime sessions.',
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "language": {"type": "string", "description": "Optional target runtime language: python, bash, or all."},
+            },
+        },
+        impl=_session_reset,
+    )
+
+    def _session_stop(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .session import find_runtime_thread, stop_thread_session
+
+        thread_id = (args.get('_thread_id') or '').strip()
+        if not thread_id:
+            return 'Error: session_stop requires thread context.'
+        language = str(args.get('language') or '').strip().lower()
+        targets: list[str] = []
+        db = ThreadsDB()
+        if language in ('python', 'bash'):
+            rt = find_runtime_thread(db, thread_id, language=language)
+            targets = [rt.runtime_thread_id] if rt is not None else [thread_id]
+        elif language in ('runtimes', 'runtime', 'all'):
+            for lang in ('python', 'bash'):
+                rt = find_runtime_thread(db, thread_id, language=lang)
+                if rt is not None:
+                    targets.append(rt.runtime_thread_id)
+            if not targets:
+                targets = [thread_id]
+        else:
+            targets = [thread_id]
+        lines = []
+        for target in targets:
+            st = stop_thread_session(db, target, reason='session_stop tool')
+            lines.append(f"Stop session for {target[-8:]}: {st.status} ({st.session_id or '(none)'})")
+        return "\n".join(lines)
+
+    reg.register(
+        name='session_stop',
+        description='Stop the current thread persistent REPL/session without disabling its config. Optional language=python|bash|all targets runtime sessions.',
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "language": {"type": "string", "description": "Optional target runtime language: python, bash, or all."},
+            },
+        },
+        impl=_session_stop,
+    )
+
     # javascript (placeholder for remote-debugging execution; here we only echo input)
     def _javascript(args: Dict[str, Any]):
         script = args.get('script', '')
@@ -487,6 +611,7 @@ def create_default_tools() -> ToolRegistry:
                 owner_thread_id=parent_session.owner_thread_id or parent_id,
                 workspace=parent_session.workspace,
                 share_with_children_default=parent_session.share_with_children_default,
+                share_repl=_clean_bool_arg(args.get('share_repl')) if args.get('share_repl') is not None else parent_session.share_repl,
                 reason='spawn_agent share_session',
             )
 
@@ -605,6 +730,7 @@ def create_default_tools() -> ToolRegistry:
                 "allowed_tools": {"type": "array", "items": {"type": "string"}},
                 "disabled_tools": {"type": "array", "items": {"type": "string"}},
                 "share_session": {"type": "boolean"},
+                "share_repl": {"type": "boolean"},
             },
             # Models must provide a short description of the sub-task.
             "required": ["context_text"],
@@ -727,6 +853,7 @@ def create_default_tools() -> ToolRegistry:
                 "allowed_tools": {"type": "array", "items": {"type": "string"}},
                 "disabled_tools": {"type": "array", "items": {"type": "string"}},
                 "share_session": {"type": "boolean"},
+                "share_repl": {"type": "boolean"},
             },
             "required": ["context_text"],
         },

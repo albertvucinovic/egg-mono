@@ -80,6 +80,8 @@ async def get_autocomplete(
                 '/toggleAutoApproval', '/toolsOn', '/toolsOff', '/toolsStatus', '/toolInfo',
                 '/disableTool', '/enableTool', '/toolsSecrets',
                 '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
+                '/sessionStatus', '/sessionOn', '/sessionOff', '/sessionStop', '/sessionReset',
+                '/pythonRepl', '/bashRepl',
                 '/setContextLimit', '/setThreadPriority',
                 '/togglePanel', '/toggleBorders', '/theme',
                 '/login', '/logout', '/authStatus',
@@ -266,6 +268,24 @@ async def get_autocomplete(
                 # on/off suggestions
                 for opt in ['on', 'off']:
                     if not arg_tok or arg_tok.lower() in opt:
+                        suggestions.append({
+                            "display": opt,
+                            "insert": opt,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd in ('/sessionStop', '/sessionReset'):
+                for opt in ['python', 'bash', 'all']:
+                    if not arg_tok or arg_tok.lower() in opt:
+                        suggestions.append({
+                            "display": opt,
+                            "insert": opt,
+                            "replace": len(arg_tok),
+                        })
+
+            elif cmd == '/sessionOn':
+                for opt in ['provider=docker', 'provider=memory', 'share_with_children=true', 'share_repl=true']:
+                    if not arg_tok or arg_tok.lower() in opt.lower():
                         suggestions.append({
                             "display": opt,
                             "insert": opt,

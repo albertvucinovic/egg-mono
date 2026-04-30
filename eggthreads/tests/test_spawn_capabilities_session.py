@@ -122,3 +122,48 @@ def test_spawn_agent_honors_parent_share_with_children_default(tmp_path, monkeyp
     cfg = ts.get_thread_session_config(db, child)
     assert cfg.enabled is True
     assert cfg.session_id == sid
+
+
+def test_spawn_agent_share_session_does_not_share_repl_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.append_message(db, parent, "system", "system")
+    sid = ts.enable_thread_session(db, parent, provider="memory", share_repl=False)
+
+    child = create_default_tools().execute(
+        "spawn_agent",
+        {
+            "parent_thread_id": parent,
+            "context_text": "do child work",
+            "label": "child",
+            "share_session": True,
+        },
+    )
+
+    cfg = ts.get_thread_session_config(db, child)
+    assert cfg.session_id == sid
+    assert cfg.share_repl is False
+
+
+def test_spawn_agent_share_repl_is_explicit(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.append_message(db, parent, "system", "system")
+    sid = ts.enable_thread_session(db, parent, provider="memory", share_repl=False)
+
+    child = create_default_tools().execute(
+        "spawn_agent",
+        {
+            "parent_thread_id": parent,
+            "context_text": "do child work",
+            "label": "child",
+            "share_session": True,
+            "share_repl": True,
+        },
+    )
+
+    cfg = ts.get_thread_session_config(db, child)
+    assert cfg.session_id == sid
+    assert cfg.share_repl is True

@@ -105,3 +105,15 @@ def bash(script: str, **kwargs: Any) -> str:
 def python(script: str, **kwargs: Any) -> str:
     kwargs["script"] = script
     return tool("python", **kwargs)
+
+
+def session_status(**kwargs: Any) -> str:
+    return tool("session_status", **kwargs)
+
+
+def session_reset(**kwargs: Any) -> str:
+    return tool("session_reset", **kwargs)
+
+
+def session_stop(**kwargs: Any) -> str:
+    return tool("session_stop", **kwargs)

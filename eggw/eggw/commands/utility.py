@@ -267,6 +267,15 @@ Sandbox:
   /setSandboxConfiguration <cfg> - Apply sandbox config
   /getSandboxingConfig           - Show sandbox config
 
+Persistent REPL Sessions:
+  /sessionStatus                 - Show session/runtime status
+  /sessionOn [provider=...]      - Enable persistent session
+  /sessionOff                    - Disable session config
+  /sessionStop [python|bash|all] - Stop session runtime
+  /sessionReset [python|bash|all]- Reset session state
+  /pythonRepl <code>             - Execute persistent Python REPL code
+  /bashRepl <script>             - Execute persistent Bash REPL script
+
 Utility:
   /cost                          - Show token usage and cost
   /toggleAutoApproval            - Toggle auto-approve tools

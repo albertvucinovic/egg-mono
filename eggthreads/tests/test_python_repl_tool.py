@@ -54,3 +54,47 @@ def test_python_repl_tool_registered():
     tools = ts.create_default_tools()
     names = {spec["function"]["name"] for spec in tools.tools_spec()}
     assert "python_repl" in names
+    assert "session_status" in names
+    assert "session_reset" in names
+    assert "session_stop" in names
+
+
+def test_shared_session_uses_separate_repl_channel_by_default(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    sid = ts.enable_thread_session(db, parent, provider="memory", share_repl=False)
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.set_thread_session_config(
+        db,
+        child,
+        enabled=True,
+        provider="memory",
+        share="session",
+        session_id=sid,
+        owner_thread_id=parent,
+    )
+
+    assert "ERROR" not in ts.execute_python_repl(db, parent, "x = 'parent'")
+    child_out = ts.execute_python_repl(db, child, "globals().get('x', 'missing')")
+    assert "missing" in child_out
+
+
+def test_share_repl_true_shares_interpreter_channel(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    sid = ts.enable_thread_session(db, parent, provider="memory", share_repl=True)
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.set_thread_session_config(
+        db,
+        child,
+        enabled=True,
+        provider="memory",
+        share="session",
+        session_id=sid,
+        owner_thread_id=parent,
+        share_repl=True,
+    )
+
+    assert "ERROR" not in ts.execute_python_repl(db, parent, "shared_value = 99")
+    child_out = ts.execute_python_repl(db, child, "shared_value")
+    assert "99" in child_out

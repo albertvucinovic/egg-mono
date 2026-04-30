@@ -326,3 +326,45 @@ class TestCommands:
 # Run tests
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestSessionCommands:
+    """Test persistent session commands."""
+
+    def test_session_status_command(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Session Test"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/sessionStatus"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "Current thread session" in data["message"]
+
+    def test_session_on_off_commands(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Session Test"})
+        thread_id = create_resp.json()["id"]
+
+        on_resp = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/sessionOn provider=memory share_repl=true"},
+        )
+        assert on_resp.status_code == 200
+        on_data = on_resp.json()
+        assert on_data["success"] is True
+        assert on_data["data"]["provider"] == "memory"
+        assert on_data["data"]["share_repl"] is True
+
+        status_resp = client.get(f"/api/threads/{thread_id}/session")
+        assert status_resp.status_code == 200
+        assert status_resp.json()["enabled"] is True
+
+        off_resp = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/sessionOff"},
+        )
+        assert off_resp.status_code == 200
+        assert off_resp.json()["success"] is True

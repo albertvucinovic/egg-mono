@@ -13,6 +13,9 @@ from eggthreads import (
     get_thread_sandbox_config,
     set_thread_sandbox_config,
     is_user_sandbox_control_enabled,
+    get_thread_session_status,
+    enable_thread_session,
+    disable_thread_session,
 )
 
 from .. import core
@@ -116,6 +119,71 @@ async def set_thread_sandbox(thread_id: str, enabled: bool = True, config_name: 
         }
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{thread_id}/session")
+async def get_thread_session(thread_id: str):
+    """Get persistent REPL/session status for a thread."""
+    if not core.db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = core.db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    st = get_thread_session_status(core.db, thread_id)
+    return {
+        "enabled": st.enabled,
+        "provider": st.provider,
+        "session_id": st.session_id,
+        "status": st.status,
+        "message": st.message,
+        "container_name": st.container_name,
+        "share_repl": getattr(st, "share_repl", False),
+    }
+
+
+@router.post("/{thread_id}/session")
+async def set_thread_session(
+    thread_id: str,
+    enabled: bool = True,
+    provider: str = "docker",
+    image: str = "egg-rlm-session",
+    share_with_children: bool = False,
+    share_repl: bool = False,
+):
+    """Enable/disable persistent REPL/session config for a thread."""
+    if not core.db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = core.db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    try:
+        if enabled:
+            sid = enable_thread_session(
+                core.db,
+                thread_id,
+                provider=provider,
+                image=image,
+                share_with_children_default=share_with_children,
+                share_repl=share_repl,
+                reason="API",
+            )
+        else:
+            disable_thread_session(core.db, thread_id, reason="API")
+            sid = None
+        st = get_thread_session_status(core.db, thread_id)
+        return {
+            "enabled": st.enabled,
+            "provider": st.provider,
+            "session_id": st.session_id or sid,
+            "status": st.status,
+            "share_repl": getattr(st, "share_repl", False),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

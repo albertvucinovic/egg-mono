@@ -32,6 +32,10 @@ Commands:
     /toggleSandboxing, /setSandboxConfiguration <file.json>
     /getSandboxingConfig
     /toolsSecrets <on|off>, /toolsStatus
+  Persistent REPL sessions:
+    /sessionStatus, /sessionOn [provider=docker|memory] [image=...] [share_with_children=true] [share_repl=true]
+    /sessionOff, /sessionStop [python|bash|all], /sessionReset [python|bash|all]
+    /pythonRepl <code>, /bashRepl <script>
   Display:
     /togglePanel (chat|children|system)
     /toggleBorders
