@@ -9,7 +9,11 @@ thread used as the execution/audit container for programmatic REPL tool calls.
 
 import json
 import os
+import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .db import ThreadsDB
@@ -53,6 +57,14 @@ class SessionStatus:
     status: str
     message: str = ""
     container_name: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DockerSessionHandle:
+    session_id: str
+    container_name: str
+    bridge_dir: str
+    runtime_dir: str
 
 
 def _clean_runtime_part(value: Any, default: str) -> str:
@@ -118,12 +130,80 @@ def docker_session_container_name(db: ThreadsDB, session_id: str) -> str:
 def docker_session_available() -> bool:
     """Return True if Docker CLI/daemon appear available."""
 
-    import subprocess
     try:
         subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=5)
         return True
     except Exception:
         return False
+
+
+def _bridge_root() -> Path:
+    return (Path.cwd() / ".egg" / "rlm_sessions").resolve()
+
+
+def _session_bridge_dir(session_id: str) -> Path:
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in session_id)
+    path = _bridge_root() / safe / "bridge"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _session_runtime_dir(session_id: str) -> Path:
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in session_id)
+    path = _bridge_root() / safe / "runtime"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_runtime_files(runtime_dir: Path) -> None:
+    from importlib import resources
+
+    for name in ("eggtools.py", "sessiond.py"):
+        try:
+            data = resources.files("eggthreads.session_runtime").joinpath(name).read_text(encoding="utf-8")
+        except Exception:
+            src = Path(__file__).resolve().parent / "session_runtime" / name
+            data = src.read_text(encoding="utf-8")
+        (runtime_dir / name).write_text(data, encoding="utf-8")
+
+
+def _docker_inspect_running(container_name: str) -> Optional[bool]:
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip().lower() == "true"
+
+
+def _start_docker_container(cfg: SessionConfig, container_name: str, bridge_dir: Path, runtime_dir: Path) -> None:
+    existing_running = _docker_inspect_running(container_name)
+    if existing_running is True:
+        return
+    if existing_running is False:
+        subprocess.run(["docker", "start", container_name], capture_output=True, check=True, timeout=20)
+        return
+
+    workspace = cfg.workspace or "/workspace"
+    cmd = [
+        "docker", "run", "-d", "--init",
+        "--name", container_name,
+        "--label", "egg.kind=rlm-session",
+        "--label", f"egg.session_id={cfg.session_id}",
+        "-v", f"{bridge_dir}:/egg-bridge",
+        "-v", f"{runtime_dir}:/egg-runtime:ro",
+        "-v", f"{Path.cwd().resolve()}:{workspace}",
+        "-w", workspace,
+        cfg.image,
+        "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
+    ]
+    subprocess.run(cmd, capture_output=True, check=True, timeout=60)
 
 
 def get_thread_session_config(db: ThreadsDB, thread_id: str) -> SessionConfig:
@@ -278,18 +358,126 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
         )
         return status
 
+    bridge_dir = _session_bridge_dir(cfg.session_id)
+    runtime_dir = _session_runtime_dir(cfg.session_id)
+    _write_runtime_files(runtime_dir)
+    try:
+        _start_docker_container(cfg, status.container_name, bridge_dir, runtime_dir)
+        action = "docker_started"
+    except Exception as e:
+        append_session_lifecycle_event(
+            db,
+            thread_id,
+            action="docker_error",
+            session_id=cfg.session_id,
+            payload={"container_name": status.container_name, "error": str(e)},
+        )
+        return SessionStatus(True, cfg.provider, cfg.session_id, "error", str(e), status.container_name)
+
     append_session_lifecycle_event(
         db,
         thread_id,
-        action="docker_skeleton_ready",
+        action=action,
         session_id=cfg.session_id,
         payload={
             "container_name": status.container_name,
             "image": cfg.image,
             "workspace": cfg.workspace,
+            "bridge_dir": str(bridge_dir),
+            "runtime_dir": str(runtime_dir),
         },
     )
     return status
+
+
+def get_or_start_docker_session_handle(db: ThreadsDB, thread_id: str) -> DockerSessionHandle:
+    cfg = get_thread_session_config(db, thread_id)
+    if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
+        raise RuntimeError("Docker session is not enabled for this thread")
+    status = get_or_start_docker_session(db, thread_id)
+    if status.status not in ("available",) or not status.container_name:
+        raise RuntimeError(status.message or f"Docker session not available: {status.status}")
+    return DockerSessionHandle(
+        session_id=cfg.session_id,
+        container_name=status.container_name,
+        bridge_dir=str(_session_bridge_dir(cfg.session_id)),
+        runtime_dir=str(_session_runtime_dir(cfg.session_id)),
+    )
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + f".{os.urandom(4).hex()}.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _service_tool_requests(bridge_dir: Path) -> None:
+    from .repl_bridge import call_tool
+
+    for req_path in sorted(bridge_dir.glob("tool_*.req.json")):
+        claimed = req_path.with_suffix(req_path.suffix + ".host")
+        try:
+            os.replace(req_path, claimed)
+        except Exception:
+            continue
+        req_id = req_path.name[len("tool_"):-len(".req.json")]
+        res_path = bridge_dir / f"tool_{req_id}.res.json"
+        try:
+            payload = json.loads(claimed.read_text(encoding="utf-8"))
+            result = call_tool(
+                str(payload.get("token") or ""),
+                str(payload.get("name") or ""),
+                payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {},
+                timeout_sec=payload.get("timeout_sec"),
+            )
+            _atomic_write_json(res_path, {"ok": True, "result": result})
+        except Exception as e:
+            _atomic_write_json(res_path, {"ok": False, "error": f"{type(e).__name__}: {e}"})
+        finally:
+            try:
+                claimed.unlink()
+            except Exception:
+                pass
+
+
+def _execute_python_docker(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    code: str,
+    *,
+    repl_name: str,
+    eval_token: str,
+    timeout_sec: Optional[float],
+) -> str:
+    handle = get_or_start_docker_session_handle(db, runtime_thread_id)
+    bridge_dir = Path(handle.bridge_dir)
+    req_id = os.urandom(8).hex()
+    req_path = bridge_dir / f"eval_{req_id}.req.json"
+    res_path = bridge_dir / f"eval_{req_id}.res.json"
+    _atomic_write_json(req_path, {
+        "id": req_id,
+        "language": "python",
+        "code": code,
+        "repl_name": repl_name,
+        "token": eval_token,
+    })
+    start = time.time()
+    while True:
+        _service_tool_requests(bridge_dir)
+        if res_path.exists():
+            try:
+                payload = json.loads(res_path.read_text(encoding="utf-8"))
+            finally:
+                try:
+                    res_path.unlink()
+                except Exception:
+                    pass
+            if payload.get("ok"):
+                return str(payload.get("output") or "")
+            return f"Error: Docker Python REPL failed: {payload.get('error') or 'unknown error'}"
+        if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
+            return "Error: Docker Python REPL timed out."
+        time.sleep(0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +657,27 @@ def execute_python_repl(
         finally:
             dispose_eval_context(ctx.token)
     if cfg.provider == "docker":
-        return "Error: Docker session provider is not implemented yet."
+        from .repl_bridge import create_eval_context, dispose_eval_context
+
+        ctx = create_eval_context(
+            db,
+            caller_thread_id=caller_thread_id,
+            runtime_thread_id=runtime_thread_id,
+            session_id=cfg.session_id,
+            bridge_timeout_sec=bridge_timeout_sec,
+            drive_runtime_tools=drive_runtime_tools,
+        )
+        try:
+            return _execute_python_docker(
+                db,
+                runtime_thread_id,
+                code,
+                repl_name=repl_name,
+                eval_token=ctx.token,
+                timeout_sec=bridge_timeout_sec,
+            )
+        finally:
+            dispose_eval_context(ctx.token)
     return f"Error: unknown session provider: {cfg.provider}"
 
 
@@ -639,6 +847,7 @@ __all__ = [
     "docker_session_container_name",
     "docker_session_available",
     "get_or_start_docker_session",
+    "get_or_start_docker_session_handle",
     "set_thread_session_config",
     "enable_thread_session",
     "disable_thread_session",

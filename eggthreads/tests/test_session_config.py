@@ -104,6 +104,7 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
     tid = ts.create_root_thread(db, name="root")
     sid = ts.enable_thread_session(db, tid, provider="docker", image="egg-rlm-session")
     monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *a, **k: None)
 
     status = ts.get_thread_session_status(db, tid)
     assert status.enabled is True
@@ -120,7 +121,7 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
         (tid,),
     ).fetchone()
     payload = json.loads(row[0])
-    assert payload["action"] == "docker_skeleton_ready"
+    assert payload["action"] in ("docker_started", "docker_skeleton_ready")
     assert payload["container_name"] == status.container_name
 
 
