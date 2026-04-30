@@ -254,6 +254,15 @@ class TestGetAutocompleteItems:
         assert '/thread' in displays
         assert '/sessionStatus' in displays
         assert '/pythonRepl' in displays
+        assert '/skills' in displays
+        assert '/skill' in displays
+
+    def test_returns_skill_name_completions(self, isolated_db):
+        """Should suggest packaged skill names for /skill."""
+        items = get_autocomplete_items("/skill r", 8, isolated_db, lambda: "tid", None)
+
+        displays = [item['display'] for item in items]
+        assert 'rlm' in displays
 
     def test_returns_session_command_completions(self, isolated_db):
         """Should return RLM/session command completions."""

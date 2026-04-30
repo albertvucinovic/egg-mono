@@ -33,6 +33,7 @@ EGG_COMMAND_COMPLETIONS: List[str] = [
     '/spawnChildThread', '/spawnAutoApprovedChildThread', '/waitForThreads', '/parentThread',
     '/listChildren', '/threads', '/thread', '/deleteThread', '/newThread', '/duplicateThread',
     '/continue', '/rename',
+    '/skills', '/skill',
     '/schedulers', '/enterMode', '/toggleAutoApproval',
     '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus', '/toolInfo',
     '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',

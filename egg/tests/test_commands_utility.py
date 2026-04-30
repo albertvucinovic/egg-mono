@@ -1,6 +1,8 @@
 """Tests for commands/utility.py UtilityCommandsMixin."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 
@@ -36,6 +38,77 @@ class TestCmdHelp:
         assert app.printed
         assert any("/sessionStatus" in str(call) for call in app.printed)
         assert any("/pythonRepl" in str(call) for call in app.printed)
+        assert any("/skill" in str(call) for call in app.printed)
+
+
+class TestCmdSkills:
+    """Tests for skill document commands."""
+
+    def test_lists_packaged_skills(self):
+        from egg.commands.utility import UtilityCommandsMixin
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            pass
+
+        app = App()
+
+        app.cmd_skills("")
+
+        assert app.printed
+        assert any("rlm" in str(call).lower() for call in app.printed)
+
+    def test_displays_skill_document(self):
+        from egg.commands.utility import UtilityCommandsMixin
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            pass
+
+        app = App()
+
+        app.cmd_skill("rlm")
+
+        assert app.printed
+        assert any("chunk_text" in str(call) for call in app.printed)
+        assert any("Skill /rlm" in msg for msg in app._system_log)
+
+    def test_skill_loads_document_into_thread_context_once(self):
+        from egg.commands.utility import UtilityCommandsMixin
+        from eggthreads import ThreadsDB, create_root_thread, create_snapshot
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            def __init__(self):
+                super().__init__()
+                self.db = ThreadsDB(":memory:")
+                self.db.init_schema()
+                self.current_thread = create_root_thread(self.db, name="root")
+                create_snapshot(self.db, self.current_thread)
+
+        app = App()
+
+        app.cmd_skill("rlm")
+        app.cmd_skill("rlm")
+
+        row = app.db.get_thread(app.current_thread)
+        assert row and row.snapshot_json
+        messages = json.loads(row.snapshot_json)["messages"]
+        loaded = [
+            message for message in messages
+            if message.get("role") == "system" and "egg-skill:rlm" in (message.get("content") or "")
+        ]
+        assert len(loaded) == 1
+        assert "chunk_text" in loaded[0]["content"]
+
+    def test_skill_requires_name(self):
+        from egg.commands.utility import UtilityCommandsMixin
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            pass
+
+        app = App()
+
+        app.cmd_skill("")
+
+        assert any("Usage: /skill <name>" in msg for msg in app._system_log)
 
 
 class TestCmdPaste:

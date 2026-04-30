@@ -37,6 +37,8 @@ Commands:
     /sessionOff, /sessionStop [python|bash|all], /sessionReset [python|bash|all]
     /sessionCleanup [stopped|all] [older_than=1h]
     /pythonRepl <code>, /bashRepl <script>
+  Skills:
+    /skills, /skill <name> — show packaged skill documents (for example: /skill rlm)
   Display:
     /togglePanel (chat|children|system)
     /toggleBorders

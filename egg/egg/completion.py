@@ -287,6 +287,18 @@ class EggCompleter(Completer):
                     yield Completion(option, start_position=-len(current_fragment))
             return
 
+        if text.startswith('/skill '):
+            prefix = text[len('/skill '):]
+            try:
+                from egg.skills.registry import list_skills
+                names = [skill.name for skill in list_skills()]
+            except Exception:
+                names = []
+            for name in sorted(names):
+                if name.startswith(prefix):
+                    yield Completion(name, start_position=-len(prefix))
+            return
+
         # 3) /thread: suggest thread ids (with name/recap meta)
         if text.startswith('/thread '):
             prefix = text[len('/thread '):]
@@ -766,6 +778,14 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
 
         if cmd == '/sessionCleanup':
             return _mk_items(['stopped', 'all', 'older_than=1h', 'older_than=1d'], arg_tok)
+
+        if cmd == '/skill':
+            try:
+                from egg.skills.registry import list_skills
+                names = [skill.name for skill in list_skills()]
+            except Exception:
+                names = []
+            return _mk_items(names, arg_tok)
 
         if cmd == '/togglePanel':
             opts = ['chat', 'children', 'system']
