@@ -27,12 +27,27 @@ def test_execute_bash_repl_memory_provider_persists_environment(tmp_path):
     assert runtime.runtime_thread_id in ts.list_children_ids(db, parent)
 
 
-def test_execute_bash_repl_requires_enabled_session(tmp_path):
+def test_execute_bash_repl_auto_creates_session_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("EGG_RLM_SESSION_PROVIDER", "memory")
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")
 
     out = ts.execute_bash_repl(db, parent, "echo hi")
-    assert "session is not enabled" in out
+    assert "hi" in out
+    runtime = ts.find_runtime_thread(db, parent, language="bash")
+    assert runtime is not None
+    cfg = ts.get_thread_session_config(db, runtime.runtime_thread_id)
+    assert cfg.enabled is True
+    assert cfg.provider == "memory"
+
+
+def test_execute_bash_repl_reports_disabled_auto_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("EGG_RLM_AUTO_SESSION", "0")
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+
+    out = ts.execute_bash_repl(db, parent, "echo hi")
+    assert "auto-create is disabled" in out
 
 
 def test_bash_repl_tool_registered():

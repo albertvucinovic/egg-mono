@@ -297,6 +297,59 @@ def disable_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user
     set_thread_session_config(db, thread_id, enabled=False, reason=reason)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+def ensure_thread_session_for_repl(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    *,
+    language: str,
+    reason: str,
+) -> SessionConfig:
+    """Return an enabled session config, auto-creating one when allowed.
+
+    Explicit ``session.config`` events always win.  If none is enabled, REPL
+    tools can auto-create a runtime-local session using environment defaults:
+
+    - ``EGG_RLM_AUTO_SESSION`` (default: on)
+    - ``EGG_RLM_SESSION_PROVIDER`` (default: docker)
+    - ``EGG_RLM_SESSION_IMAGE`` (default: egg-rlm-session)
+    """
+
+    cfg = get_thread_session_config(db, runtime_thread_id)
+    if cfg.enabled:
+        return cfg
+    if not _env_bool("EGG_RLM_AUTO_SESSION", True):
+        return cfg
+    provider = _clean_runtime_part(os.environ.get("EGG_RLM_SESSION_PROVIDER"), "docker")
+    image = _clean_runtime_part(os.environ.get("EGG_RLM_SESSION_IMAGE"), "egg-rlm-session")
+    workspace = _clean_runtime_part(os.environ.get("EGG_RLM_SESSION_WORKSPACE"), "/workspace")
+    set_thread_session_config(
+        db,
+        runtime_thread_id,
+        enabled=True,
+        provider=provider,
+        image=image,
+        share="private",
+        owner_thread_id=runtime_thread_id,
+        workspace=workspace,
+        reason=f"auto:{reason}:{language}",
+    )
+    append_session_lifecycle_event(
+        db,
+        runtime_thread_id,
+        action="auto_created",
+        session_id=get_thread_session_config(db, runtime_thread_id).session_id,
+        payload={"provider": provider, "image": image, "language": language, "reason": reason},
+    )
+    return get_thread_session_config(db, runtime_thread_id)
+
+
 def append_session_lifecycle_event(
     db: ThreadsDB,
     thread_id: str,
@@ -709,12 +762,11 @@ def execute_python_repl(
         name=runtime_name,
         reason="python_repl",
     )
-    cfg = get_thread_session_config(db, runtime_thread_id)
+    cfg = ensure_thread_session_for_repl(db, runtime_thread_id, language="python", reason="python_repl")
     if not cfg.enabled or not cfg.session_id:
         return (
-            "Error: persistent session is not enabled for this thread. "
-            "Call enable_thread_session(..., provider='memory') for tests or "
-            "provider='docker' once Docker sessions are implemented."
+            "Error: persistent session is not enabled for this thread and auto-create is disabled. "
+            "Set EGG_RLM_AUTO_SESSION=1 or call enable_thread_session(...)."
         )
 
     append_session_lifecycle_event(
@@ -784,11 +836,11 @@ def execute_bash_repl(
         name=runtime_name,
         reason="bash_repl",
     )
-    cfg = get_thread_session_config(db, runtime_thread_id)
+    cfg = ensure_thread_session_for_repl(db, runtime_thread_id, language="bash", reason="bash_repl")
     if not cfg.enabled or not cfg.session_id:
         return (
-            "Error: persistent session is not enabled for this thread. "
-            "Call enable_thread_session(..., provider='memory') for tests or provider='docker'."
+            "Error: persistent session is not enabled for this thread and auto-create is disabled. "
+            "Set EGG_RLM_AUTO_SESSION=1 or call enable_thread_session(...)."
         )
 
     append_session_lifecycle_event(
@@ -996,6 +1048,7 @@ __all__ = [
     "set_thread_session_config",
     "enable_thread_session",
     "disable_thread_session",
+    "ensure_thread_session_for_repl",
     "append_session_lifecycle_event",
     "execute_python_repl",
     "execute_bash_repl",

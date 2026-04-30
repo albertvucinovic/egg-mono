@@ -74,6 +74,7 @@ Legend:
 
 ## Phase 7+: Later phases
 
+- [x] REPL tools auto-create/reuse sessions from env/default policy.
 - [x] Bash REPL.
 - [ ] Explicit REPL channel sharing policy/API (`share_repl`) beyond memory provider.
 - [x] Dedicated session Dockerfile/image build script.
