@@ -38,7 +38,7 @@ Commands:
     /sessionCleanup [stopped|all] [older_than=1h]
     /pythonRepl <code>, /bashRepl <script>
   Skills:
-    /skills, /skill <name> — show packaged skill documents (for example: /skill rlm)
+    /skills [query], /skill <name> — show packaged skill documents (for example: /skill rlm)
   Display:
     /togglePanel (chat|children|system)
     /toggleBorders
@@ -62,9 +62,18 @@ def get_system_prompt() -> str:
     """Load the system prompt from the systemPrompt file."""
     try:
         with open(SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
-            return f.read().strip()
+            prompt = f.read().strip()
     except Exception:
-        return "You are a helpful assistant."
+        prompt = "You are a helpful assistant."
+    try:
+        from eggthreads.skills import render_skill_index
+
+        skill_index = render_skill_index().strip()
+    except Exception:
+        skill_index = ""
+    if skill_index and skill_index not in prompt:
+        return f"{prompt}\n\n{skill_index}".strip()
+    return prompt
 
 
 def snapshot_messages(db, thread_id: str) -> List[Dict[str, Any]]:

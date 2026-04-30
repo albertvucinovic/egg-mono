@@ -106,6 +106,12 @@ def fetch_url(url: str, **kwargs: Any) -> str:
     return tool("fetch_url", **kwargs)
 
 
+def skill(name: Optional[str] = None, **kwargs: Any) -> str:
+    if name is not None:
+        kwargs["name"] = name
+    return tool("skill", **kwargs)
+
+
 def bash(script: str, **kwargs: Any) -> str:
     kwargs["script"] = script
     return tool("bash", **kwargs)

@@ -31,4 +31,4 @@ where = ["."]
 include = ["egg*"]
 
 [tool.setuptools.package-data]
-egg = ["systemPrompt", "skills/*.md"]
+egg = ["systemPrompt"]

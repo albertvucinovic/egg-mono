@@ -122,6 +122,42 @@ def create_default_tools() -> ToolRegistry:
 
     reg = ToolRegistry()
 
+    def _skill(args: Dict[str, Any]):
+        from .skills import render_skill_tool_output
+
+        name = args.get('name')
+        if name is None:
+            # Accept a raw positional argument for local/tool bridge callers.
+            name = args.get('_arg')
+        query = args.get('query')
+        return render_skill_tool_output(
+            str(name) if name is not None else None,
+            query=str(query) if query is not None else None,
+        )
+
+    reg.register(
+        name='skill',
+        description=(
+            'List available Egg skill documents, search skills, or load one skill by name. '
+            'Skills are markdown instructions/examples/snippets; this tool is read-only '
+            'and does not install new runtime APIs.'
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Optional skill name to load, for example 'rlm'. Omit to list skills.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional plain substring search over skill names, descriptions, and documents.",
+                },
+            },
+        },
+        impl=_skill,
+    )
+
     # bash
     def _bash(args: Dict[str, Any]):
         from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings

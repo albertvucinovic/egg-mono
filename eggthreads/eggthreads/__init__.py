@@ -188,6 +188,7 @@ from .command_catalog import (
 )
 
 from .tools import ToolRegistry, create_default_tools
+from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill_index, render_skill_tool_output, search_skills
 
 from .llm import create_llm_client
 
@@ -228,6 +229,7 @@ __all__ = [
     'set_sandbox_globally_enabled', 'set_sandbox_config',
     'get_thread_sandbox_config', 'set_thread_sandbox_config', 'set_subtree_sandbox_config', 'get_thread_sandbox_status',
     'ToolRegistry', 'create_default_tools',
+    'Skill', 'get_skill', 'list_skills', 'load_skill_text', 'render_skill_index', 'render_skill_tool_output', 'search_skills',
     'create_llm_client',
     'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'streaming_token_stats', 'total_token_stats', 'EventWatcher',
     'enable_user_sandbox_control',

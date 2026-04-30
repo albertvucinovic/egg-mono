@@ -290,7 +290,7 @@ class EggCompleter(Completer):
         if text.startswith('/skill '):
             prefix = text[len('/skill '):]
             try:
-                from egg.skills.registry import list_skills
+                from eggthreads.skills import list_skills
                 names = [skill.name for skill in list_skills()]
             except Exception:
                 names = []
@@ -781,7 +781,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
 
         if cmd == '/skill':
             try:
-                from egg.skills.registry import list_skills
+                from eggthreads.skills import list_skills
                 names = [skill.name for skill in list_skills()]
             except Exception:
                 names = []

@@ -57,6 +57,20 @@ class TestCmdSkills:
         assert app.printed
         assert any("rlm" in str(call).lower() for call in app.printed)
 
+    def test_searches_packaged_skills(self):
+        from egg.commands.utility import UtilityCommandsMixin
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            pass
+
+        app = App()
+
+        app.cmd_skills("persistent REPL")
+
+        assert app.printed
+        assert any("SKILL SEARCH RESULTS" in str(call) for call in app.printed)
+        assert any("rlm" in str(call).lower() for call in app.printed)
+
     def test_displays_skill_document(self):
         from egg.commands.utility import UtilityCommandsMixin
 

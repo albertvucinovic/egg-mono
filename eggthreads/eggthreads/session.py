@@ -968,6 +968,12 @@ def _make_eggtools_module(eval_token: str):
         args["url"] = url
         return repl_bridge.call_tool(eval_token, "fetch_url", args, timeout_sec=_tool_timeout(args))
 
+    def skill(name: Optional[str] = None, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        if name is not None:
+            args["name"] = name
+        return repl_bridge.call_tool(eval_token, "skill", args, timeout_sec=_tool_timeout(args))
+
     def bash(script: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["script"] = script
@@ -993,6 +999,7 @@ def _make_eggtools_module(eval_token: str):
     mod.wait = wait
     mod.web_search = web_search
     mod.fetch_url = fetch_url
+    mod.skill = skill
     mod.bash = bash
     mod.python = python
     mod.session_status = session_status

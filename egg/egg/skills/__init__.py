@@ -1,1 +1,13 @@
-"""Packaged Egg skill documents."""
+"""Compatibility wrapper for packaged Egg skill documents."""
+
+from eggthreads.skills import Skill, get_skill, list_skills, load_skill_text, render_skill_index, render_skill_tool_output, search_skills
+
+__all__ = [
+    "Skill",
+    "get_skill",
+    "list_skills",
+    "load_skill_text",
+    "render_skill_index",
+    "render_skill_tool_output",
+    "search_skills",
+]

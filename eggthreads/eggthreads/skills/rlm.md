@@ -1,5 +1,8 @@
 # RLM Skill: Persistent REPL + Recursive Subthreads
 
+> Use persistent REPL variables for large context/tool outputs, then chunk,
+> delegate to subthreads when useful, and synthesize compact findings.
+
 Use this skill when the task involves long context, large tool output, expensive
 intermediate data, or a need to repeatedly inspect/transform data over multiple
 turns.

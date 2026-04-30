@@ -95,15 +95,13 @@ class UtilityCommandsMixin:
             self.log_system(COMMANDS_TEXT)
 
     def cmd_skills(self, arg: str) -> None:
-        """List packaged skill documents."""
+        """List or search packaged skill documents."""
         try:
-            from egg.skills.registry import list_skills
+            from eggthreads.tools import create_default_tools
 
-            skills = list_skills()
-            if not skills:
-                text = "No packaged skills available."
-            else:
-                text = "\n".join(f"/skill {skill.name} — {skill.title}\n  {skill.description}" for skill in skills)
+            query = (arg or "").strip()
+            args = {"query": query} if query else {}
+            text = create_default_tools().execute("skill", args)
             self.log_system("Skills list (see console for full).")
             self.console_print_block("Skills", text, border_style="cyan")
         except Exception as e:
@@ -116,12 +114,13 @@ class UtilityCommandsMixin:
             self.log_system("Usage: /skill <name>")
             return
         try:
-            from egg.skills.registry import load_skill_text, get_skill
+            from eggthreads.tools import create_default_tools
+            from eggthreads.skills import get_skill
 
             skill = get_skill(name)
-            text = load_skill_text(skill.name)
+            text = create_default_tools().execute("skill", {"name": skill.name})
             marker = f"<!-- egg-skill:{skill.name} -->"
-            context_text = f"{marker}\n# Egg skill: {skill.title}\n\n{text}"
+            context_text = f"{marker}\n{text}"
             loaded = False
             already_loaded = False
             db = getattr(self, "db", None)

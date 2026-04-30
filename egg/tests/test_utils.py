@@ -32,7 +32,9 @@ class TestGetSystemPrompt:
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", prompt_file)
 
         result = get_system_prompt()
-        assert result == "Custom system prompt for testing."
+        assert result.startswith("Custom system prompt for testing.")
+        assert "AVAILABLE SKILLS" in result
+        assert "rlm" in result
 
     def test_strips_whitespace(self, tmp_path, monkeypatch):
         """Should strip leading/trailing whitespace from prompt."""
@@ -43,7 +45,8 @@ class TestGetSystemPrompt:
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", prompt_file)
 
         result = get_system_prompt()
-        assert result == "Prompt with whitespace"
+        assert result.startswith("Prompt with whitespace")
+        assert "AVAILABLE SKILLS" in result
 
     def test_returns_default_on_missing_file(self, tmp_path, monkeypatch):
         """Should return default prompt when file is missing."""
@@ -51,7 +54,8 @@ class TestGetSystemPrompt:
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", tmp_path / "nonexistent")
 
         result = get_system_prompt()
-        assert result == "You are a helpful assistant."
+        assert result.startswith("You are a helpful assistant.")
+        assert "AVAILABLE SKILLS" in result
 
     def test_returns_default_on_read_error(self, tmp_path, monkeypatch):
         """Should return default prompt on any read error."""
@@ -63,7 +67,8 @@ class TestGetSystemPrompt:
         monkeypatch.setattr(utils, "SYSTEM_PROMPT_PATH", prompt_dir)
 
         result = get_system_prompt()
-        assert result == "You are a helpful assistant."
+        assert result.startswith("You are a helpful assistant.")
+        assert "AVAILABLE SKILLS" in result
 
 
 class TestSnapshotMessages:
