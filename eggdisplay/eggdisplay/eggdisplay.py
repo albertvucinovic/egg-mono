@@ -630,6 +630,9 @@ except ImportError:
 import threading
 import queue
 import time
+import sys
+import os
+import select
 from rich.console import Console
 from rich.live import Live
 from rich.text import Text
@@ -733,6 +736,154 @@ class LiveEditorBase:
             return "shift-enter"
 
         return key
+
+    @staticmethod
+    def _raw_input_settings(old_settings, termios):
+        """Return non-canonical, no-echo terminal settings for key reads."""
+        new_settings = list(old_settings)
+        new_settings[6] = list(old_settings[6])
+        new_settings[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+        new_settings[6][termios.VMIN] = 1
+        new_settings[6][termios.VTIME] = 0
+        return new_settings
+
+    @staticmethod
+    def _read_key_from_fd(fd: int) -> str:
+        """Read one logical key from an already-raw file descriptor."""
+
+        def _read_byte() -> bytes:
+            return os.read(fd, 1)
+
+        def _has_more(timeout: float) -> bool:
+            r, _w, _x = select.select([fd], [], [], timeout)
+            return bool(r)
+
+        return LiveEditorBase._read_key_bytes(_read_byte, _has_more)
+
+    @staticmethod
+    def read_key() -> str:
+        """Read one logical key from stdin, preserving full ANSI sequences.
+
+        ``readchar.readkey()`` only collects a small fixed number of bytes for
+        escape sequences and toggles terminal mode for every byte. That is
+        enough for arrows, but it can truncate or drop bytes from longer CSI
+        reports such as SGR mouse events (``ESC [ < b ; x ; y M``). The
+        truncated tail (for example ``72;92M``) then arrives as printable text
+        and can be inserted into Egg's input panel.
+
+        This reader puts the TTY in non-canonical mode once, then keeps
+        consuming a CSI/SS3 sequence until its real final byte, so mouse wheel
+        / click reports reach the application as one key.
+        """
+        try:
+            import termios
+        except Exception:
+            return readchar.readkey()
+
+        try:
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+        except Exception:
+            return readchar.readkey()
+
+        new_settings = LiveEditorBase._raw_input_settings(old_settings, termios)
+
+        try:
+            # TCSANOW deliberately does not flush queued input. Flushing here
+            # is the root of the mouse-tail leak with readchar.readkey().
+            termios.tcsetattr(fd, termios.TCSANOW, new_settings)
+            return LiveEditorBase._read_key_from_fd(fd)
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _enter_raw_input_mode():
+        """Set stdin raw-ish for continuous key reading.
+
+        Returns ``(termios, fd, old_settings)``. Callers must restore with
+        ``termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)``.
+        """
+        import termios
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        new_settings = LiveEditorBase._raw_input_settings(old_settings, termios)
+        # Do not use TCSAFLUSH: mouse wheel bursts may already be queued.
+        termios.tcsetattr(fd, termios.TCSANOW, new_settings)
+        return termios, fd, old_settings
+
+    @staticmethod
+    def _read_key_bytes(read_byte, has_more) -> str:
+        """Assemble one logical key from a byte reader.
+
+        ``read_byte`` returns exactly one byte. ``has_more(timeout)`` reports
+        whether a continuation byte is ready, used only to distinguish a
+        literal Esc key from the start of an escape sequence.
+        """
+
+        def _decode(data: bytes) -> str:
+            if not data:
+                return ""
+            return data.decode(sys.stdin.encoding or "utf-8", errors="replace")
+
+        def _check_interrupt(data: bytes) -> None:
+            try:
+                text = data.decode("ascii")
+            except Exception:
+                return
+            if text in readchar.config.INTERRUPT_KEYS:
+                raise KeyboardInterrupt
+
+        first = read_byte()
+        _check_interrupt(first)
+        if first != b"\x1b":
+            # Preserve common UTF-8 printable input even though escape/key
+            # protocols themselves are ASCII.
+            b0 = first[0] if first else 0
+            expected = 1
+            if 0xC2 <= b0 <= 0xDF:
+                expected = 2
+            elif 0xE0 <= b0 <= 0xEF:
+                expected = 3
+            elif 0xF0 <= b0 <= 0xF4:
+                expected = 4
+            data = first
+            while len(data) < expected:
+                data += read_byte()
+            return _decode(data)
+
+        # A literal Esc key has no following byte. Poll briefly and return
+        # bare ESC when no continuation is available. Egg's app-level input
+        # handler still debounces bare ESC before acting on it.
+        if not has_more(0.05):
+            return "\x1b"
+
+        second = read_byte()
+        _check_interrupt(second)
+
+        # CSI: ESC [ ... final-byte. This covers arrows, bracketed paste
+        # markers, CSI-u keys, and SGR mouse reports of arbitrary length.
+        if second == b"[":
+            seq = b"\x1b" + second
+            while True:
+                nxt = read_byte()
+                _check_interrupt(nxt)
+                seq += nxt
+                if nxt and 0x40 <= nxt[0] <= 0x7E:
+                    return _decode(seq)
+
+        # SS3: ESC O final-byte (function/cursor keys on some terminals).
+        if second == b"O":
+            nxt = read_byte()
+            _check_interrupt(nxt)
+            return _decode(b"\x1b" + second + nxt)
+
+        # Alt/meta combinations and a literal double-Esc sequence are already
+        # complete after the second byte.
+        return _decode(b"\x1b" + second)
 
     # ------------ Shared rendering ------------
     def _render(self) -> Text:
@@ -901,19 +1052,33 @@ class RealTimeEditor(LiveEditorBase):
         application decide whether to quit. The loop exits when
         self.running is set to False.
         """
-        while self.running:
-            try:
-                key = readchar.readkey()
-                self.input_queue.put(key)
-            except KeyboardInterrupt:
-                # Normalize KeyboardInterrupt to a Ctrl+C key and
-                # continue, letting the main loop handle it.
+        raw_state = None
+        try:
+            raw_state = self._enter_raw_input_mode()
+            _termios, fd, _old_settings = raw_state
+        except Exception:
+            fd = None
+        try:
+            while self.running:
                 try:
-                    self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                    key = self._read_key_from_fd(fd) if fd is not None else self.read_key()
+                    self.input_queue.put(key)
+                except KeyboardInterrupt:
+                    # Normalize KeyboardInterrupt to a Ctrl+C key and
+                    # continue, letting the main loop handle it.
+                    try:
+                        self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                    except Exception:
+                        pass
+                except Exception:
+                    break
+        finally:
+            if raw_state is not None:
+                termios_mod, raw_fd, old_settings = raw_state
+                try:
+                    termios_mod.tcsetattr(raw_fd, termios_mod.TCSADRAIN, old_settings)
                 except Exception:
                     pass
-            except Exception:
-                break
 
     def run(self, *, inline: bool = True):
         self.running = True
@@ -961,19 +1126,36 @@ class AsyncRealTimeEditor(LiveEditorBase):
         application decides whether to quit. The loop exits when
         self.running is set to False.
         """
-        while self.running:
-            try:
-                key = await asyncio.to_thread(readchar.readkey)
-                await self.input_queue.put(key)
-            except KeyboardInterrupt:
-                # Normalize KeyboardInterrupt to a Ctrl+C key and
-                # continue, letting the main loop handle it.
+        raw_state = None
+        try:
+            raw_state = self._enter_raw_input_mode()
+            _termios, fd, _old_settings = raw_state
+        except Exception:
+            fd = None
+        try:
+            while self.running:
                 try:
-                    await self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                    if fd is not None:
+                        key = await asyncio.to_thread(self._read_key_from_fd, fd)
+                    else:
+                        key = await asyncio.to_thread(self.read_key)
+                    await self.input_queue.put(key)
+                except KeyboardInterrupt:
+                    # Normalize KeyboardInterrupt to a Ctrl+C key and
+                    # continue, letting the main loop handle it.
+                    try:
+                        await self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                    except Exception:
+                        pass
+                except Exception:
+                    break
+        finally:
+            if raw_state is not None:
+                termios_mod, raw_fd, old_settings = raw_state
+                try:
+                    termios_mod.tcsetattr(raw_fd, termios_mod.TCSADRAIN, old_settings)
                 except Exception:
                     pass
-            except Exception:
-                break
 
     async def run_async(self, *, inline: bool = True):
         self.running = True

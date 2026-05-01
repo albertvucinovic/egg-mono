@@ -1,6 +1,9 @@
 from eggdisplay import RealTimeEditor
 
 
+LiveEditorBase = RealTimeEditor.__mro__[1]
+
+
 PASTE_START = "\x1b[200~"
 PASTE_END = "\x1b[201~"
 
@@ -108,3 +111,92 @@ def test_plain_multichar_paste_strips_terminal_control_sequences():
     assert "\x1b[31m" not in text
     assert "\x1b[0m" not in text
     assert "\x08" not in text
+
+
+def test_read_key_preserves_full_sgr_mouse_sequence():
+    """Regression for mouse reports leaking tails like ``72;92M``.
+
+    ``readchar.readkey()`` truncates long CSI sequences after five bytes;
+    Egg's reader must instead read until the CSI final byte so the app sees a
+    single non-printable mouse key, not printable semicolon-separated numbers.
+    """
+    chars = iter(b"\x1b[<65;72;92M")
+
+    def read_byte():
+        return bytes([next(chars)])
+
+    assert (
+        LiveEditorBase._read_key_bytes(read_byte, lambda _timeout: True)
+        == "\x1b[<65;72;92M"
+    )
+
+
+def test_read_key_preserves_full_csi_u_shift_enter():
+    chars = iter(b"\x1b[13;2u")
+
+    def read_byte():
+        return bytes([next(chars)])
+
+    assert (
+        LiveEditorBase._read_key_bytes(read_byte, lambda _timeout: True)
+        == "\x1b[13;2u"
+    )
+
+
+def test_read_key_returns_bare_escape_when_no_tail():
+    chars = iter(b"\x1b")
+
+    def read_byte():
+        return bytes([next(chars)])
+
+    assert LiveEditorBase._read_key_bytes(read_byte, lambda _timeout: False) == "\x1b"
+
+
+def test_raw_input_settings_do_not_flush_queued_mouse_bytes():
+    """Input setup should not use TCSAFLUSH-style flushing.
+
+    The reader applies these settings with TCSANOW so bytes already queued by
+    the terminal (the rest of a mouse report) remain available to assemble.
+    """
+
+    class FakeTermios:
+        ICANON = 0b001
+        ECHO = 0b010
+        ISIG = 0b100
+        VMIN = 0
+        VTIME = 1
+
+    old = [0, 0, 0, FakeTermios.ICANON | FakeTermios.ECHO | FakeTermios.ISIG, 0, 0, [9, 9]]
+
+    new = LiveEditorBase._raw_input_settings(old, FakeTermios)
+
+    assert new[3] == 0
+    assert new[6][FakeTermios.VMIN] == 1
+    assert new[6][FakeTermios.VTIME] == 0
+    # The control-character list is copied, not mutated in place.
+    assert old[6] == [9, 9]
+
+
+def test_read_key_from_fd_keeps_multiple_mouse_reports_separate(monkeypatch):
+    """A wheel burst may queue multiple full reports before we read.
+
+    Continuous raw-mode reading must return one complete SGR report per call,
+    leaving the next report queued instead of leaking it to the editor.
+    """
+    stream = bytearray(b"\x1b[<65;55;65M\x1b[<65;55;65M")
+
+    def fake_read(fd, count):
+        assert fd == 123
+        assert count == 1
+        return bytes([stream.pop(0)])
+
+    def fake_select(reads, _writes, _errors, _timeout):
+        assert reads == [123]
+        return (reads if stream else [], [], [])
+
+    monkeypatch.setattr("os.read", fake_read)
+    monkeypatch.setattr("select.select", fake_select)
+
+    assert LiveEditorBase._read_key_from_fd(123) == "\x1b[<65;55;65M"
+    assert LiveEditorBase._read_key_from_fd(123) == "\x1b[<65;55;65M"
+    assert stream == bytearray()

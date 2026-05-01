@@ -24,7 +24,26 @@ import sys
 from typing import List, Optional
 
 from rich.console import Console
-from rich.cells import split_graphemes
+
+try:
+    from rich.cells import split_graphemes
+except ImportError:  # pragma: no cover - compatibility with older Rich
+    import unicodedata
+
+    from rich.cells import cell_len
+
+    def split_graphemes(text: str):
+        spans = []
+        for index, char in enumerate(text):
+            if spans and (
+                unicodedata.combining(char)
+                or unicodedata.category(char).startswith("M")
+            ):
+                start, _end, width = spans[-1]
+                spans[-1] = (start, index + 1, width)
+            else:
+                spans.append((index, index + 1, cell_len(char)))
+        return spans, cell_len(text)
 
 
 class _DiffRendererBase:
