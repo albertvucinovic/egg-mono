@@ -12,6 +12,9 @@ from eggthreads import (
     stop_thread_session,
     reset_thread_session,
     cleanup_docker_sessions,
+    list_docker_session_containers,
+    docker_session_available,
+    docker_session_db_hash,
     enqueue_user_tool_call,
 )
 
@@ -171,15 +174,78 @@ async def cmd_session_cleanup(thread_id: str, arg: str) -> CommandResponse:
     try:
         from eggthreads.session import _parse_duration_seconds  # type: ignore
 
+        older_than_sec = _parse_duration_seconds(older_than)
+        available = docker_session_available()
+        if not available:
+            return CommandResponse(
+                success=False,
+                message="Docker is not available, so /sessionCleanup cannot inspect or remove Docker session containers.",
+                data={"docker_available": False},
+            )
+
+        before = list_docker_session_containers(core.db)
         removed = cleanup_docker_sessions(
             core.db,
             stopped_only=stopped_only,
-            older_than_sec=_parse_duration_seconds(older_than),
+            older_than_sec=older_than_sec,
         )
         if not removed:
-            return CommandResponse(success=True, message="No matching Docker RLM session containers to clean up.", data={"removed": []})
-        lines = [f"{item.get('name')}: {'removed' if item.get('removed') else 'error'}" for item in removed]
-        return CommandResponse(success=True, message="\n".join(lines), data={"removed": removed})
+            running = [item for item in before if item.get("running")]
+            lines = [
+                "No matching Docker RLM session containers to clean up.",
+                "",
+                f"Mode: {'stopped only' if stopped_only else 'all/force'}",
+                f"DB label hash: {docker_session_db_hash(core.db)}",
+            ]
+            if older_than_sec is not None:
+                lines.append(f"Older than: {older_than} ({older_than_sec:g}s)")
+            if running and stopped_only:
+                lines.extend([
+                    "",
+                    f"Found {len(running)} running matching container(s); default cleanup skips running sessions.",
+                    "Use /sessionStop first, or /sessionCleanup all to force-remove them.",
+                ])
+            elif before:
+                lines.extend([
+                    "",
+                    f"Found {len(before)} matching container(s), but none matched the cleanup filter.",
+                ])
+            else:
+                lines.extend([
+                    "",
+                    "No containers matched this Egg database label. If you expected containers, check that eggw is using the same EGG_DB_PATH as the process that created them.",
+                ])
+            return CommandResponse(
+                success=True,
+                message="\n".join(lines),
+                data={
+                    "removed": [],
+                    "docker_available": True,
+                    "matching_containers": before,
+                    "stopped_only": stopped_only,
+                    "older_than_sec": older_than_sec,
+                    "db_hash": docker_session_db_hash(core.db),
+                },
+            )
+        lines = [
+            f"Session cleanup processed {len(removed)} container(s):",
+            "",
+            *[
+                f"{item.get('name')}: {'removed' if item.get('removed') else 'error: ' + str(item.get('error', 'unknown'))}"
+                for item in removed
+            ],
+        ]
+        return CommandResponse(
+            success=True,
+            message="\n".join(lines),
+            data={
+                "removed": removed,
+                "docker_available": True,
+                "stopped_only": stopped_only,
+                "older_than_sec": older_than_sec,
+                "db_hash": docker_session_db_hash(core.db),
+            },
+        )
     except Exception as e:
         return CommandResponse(success=False, message=f"/sessionCleanup error: {e}")
 

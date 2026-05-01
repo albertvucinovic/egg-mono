@@ -45,12 +45,16 @@ from .utility import (
     cmd_wait_for_threads,
     execute_bash_command_handler,
     cmd_help,
+    cmd_skills,
+    cmd_skill,
     cmd_toggle_panel,
     cmd_paste,
     cmd_enter_mode,
     cmd_toggle_borders,
     cmd_quit,
     cmd_theme,
+    cmd_start_searxng,
+    cmd_stop_searxng,
     get_auto_approval_status,
     cmd_setContextLimit,
     cmd_setThreadPriority,
@@ -102,12 +106,16 @@ __all__ = [
     "cmd_wait_for_threads",
     "execute_bash_command_handler",
     "cmd_help",
+    "cmd_skills",
+    "cmd_skill",
     "cmd_toggle_panel",
     "cmd_paste",
     "cmd_enter_mode",
     "cmd_toggle_borders",
     "cmd_quit",
     "cmd_theme",
+    "cmd_start_searxng",
+    "cmd_stop_searxng",
     "get_auto_approval_status",
     "cmd_setContextLimit",
     "cmd_setThreadPriority",
@@ -148,6 +156,10 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_new_thread(command_arg)
         elif command_name == "help":
             return cmd_help()
+        elif command_name == "skills":
+            return await cmd_skills(thread_id, command_arg)
+        elif command_name == "skill":
+            return await cmd_skill(thread_id, command_arg)
         elif command_name == "toggleAutoApproval":
             return await cmd_toggle_auto_approval(thread_id)
         elif command_name == "parentThread":
@@ -227,6 +239,14 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return cmd_theme(command_arg)
         elif command_name == "quit":
             return cmd_quit()
+        elif command_name == "redraw":
+            return CommandResponse(success=True, message="Redraw is not needed in eggw; the browser UI updates automatically.")
+        elif command_name == "displayMode":
+            return CommandResponse(success=True, message="/displayMode is terminal-only; eggw uses the browser layout.")
+        elif command_name == "startSearxng":
+            return cmd_start_searxng()
+        elif command_name == "stopSearxng":
+            return cmd_stop_searxng()
         elif command_name == "setContextLimit":
             return await cmd_setContextLimit(thread_id, command_arg)
         elif command_name == "setThreadPriority":

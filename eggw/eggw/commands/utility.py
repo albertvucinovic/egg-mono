@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import List
+import subprocess
+from pathlib import Path
+from typing import List, Optional
 
 from eggthreads import (
     approve_tool_calls_for_thread,
@@ -17,6 +19,8 @@ from eggthreads import (
     set_thread_scheduling,
     UNSET,
     parse_args,
+    append_message,
+    create_snapshot,
 )
 
 from ..models import CommandResponse
@@ -35,6 +39,107 @@ THEMES = [
     "fruit-background", "vegetables-background", "coffee-background", "matrix-background",
     "light-background", "light-mono-background", "colorful-light-background",
 ]
+
+
+def _find_searxng_dir() -> Optional[Path]:
+    """Find the packaged SearXNG docker-compose directory."""
+    candidates = [
+        Path.cwd() / "eggthreads" / "eggthreads" / "web" / "searxng",
+        Path(__file__).resolve().parents[3] / "eggthreads" / "eggthreads" / "web" / "searxng",
+        Path(__file__).resolve().parents[4] / "eggthreads" / "eggthreads" / "web" / "searxng",
+    ]
+    for candidate in candidates:
+        if (candidate / "docker-compose.yml").exists():
+            return candidate
+    return None
+
+
+def _resolve_compose_cmd() -> Optional[List[str]]:
+    """Return docker compose argv prefix, or None when unavailable."""
+    try:
+        proc = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0:
+            return ["docker", "compose"]
+    except Exception:
+        pass
+    try:
+        proc = subprocess.run(["docker-compose", "version"], capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0:
+            return ["docker-compose"]
+    except Exception:
+        pass
+    return None
+
+
+def _run_searxng_compose(compose_args: List[str], *, action: str, success_summary: str, timeout_sec: int) -> CommandResponse:
+    searxng_dir = _find_searxng_dir()
+    if searxng_dir is None:
+        return CommandResponse(
+            success=False,
+            message="Could not locate eggthreads/eggthreads/web/searxng/docker-compose.yml.",
+        )
+    compose = _resolve_compose_cmd()
+    if compose is None:
+        return CommandResponse(
+            success=False,
+            message="Neither 'docker compose' nor 'docker-compose' is available on PATH.",
+        )
+    argv = compose + compose_args
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(searxng_dir),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        return CommandResponse(
+            success=False,
+            message=f"SearXNG {action} timed out after {timeout_sec}s running `{' '.join(argv)}`.",
+        )
+    except Exception as e:
+        return CommandResponse(
+            success=False,
+            message=f"SearXNG {action} failed to launch `{' '.join(argv)}`: {e}",
+        )
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    combined = "\n".join(part for part in (stdout, stderr) if part) or "(no output)"
+    if len(combined) > 4000:
+        combined = combined[:4000] + "\n... (truncated)"
+    if proc.returncode != 0:
+        return CommandResponse(
+            success=False,
+            message=f"SearXNG {action} failed (exit {proc.returncode}).\n\n$ {' '.join(argv)}\n{combined}",
+            data={"returncode": proc.returncode, "cwd": str(searxng_dir)},
+        )
+    return CommandResponse(
+        success=True,
+        message=f"{success_summary}\n\n$ {' '.join(argv)}\n{combined}",
+        data={"returncode": proc.returncode, "cwd": str(searxng_dir)},
+    )
+
+
+def cmd_start_searxng() -> CommandResponse:
+    """Start local SearXNG docker-compose service."""
+    return _run_searxng_compose(
+        ["up", "-d"],
+        action="start",
+        success_summary="Container up at http://localhost:8888. web_search / fetch_url will now use SearXNG.",
+        timeout_sec=600,
+    )
+
+
+def cmd_stop_searxng() -> CommandResponse:
+    """Stop local SearXNG docker-compose service."""
+    return _run_searxng_compose(
+        ["down"],
+        action="stop",
+        success_summary="Container stopped. web_search / fetch_url will now fail until restarted or backend is changed.",
+        timeout_sec=120,
+    )
 
 
 def get_auto_approval_status(thread_id: str) -> bool:
@@ -63,6 +168,82 @@ async def cmd_toggle_auto_approval(thread_id: str) -> CommandResponse:
         message=f"Auto-approval {'enabled' if new_state else 'disabled'}",
         data={"auto_approval": new_state},
     )
+
+
+async def cmd_skills(thread_id: str, query: str) -> CommandResponse:
+    """List or search packaged skill documents."""
+    try:
+        from eggthreads.tools import create_default_tools
+
+        search = (query or "").strip()
+        args = {"query": search} if search else {}
+        text = create_default_tools().execute("skill", args)
+        return CommandResponse(
+            success=True,
+            message=text,
+            data={"query": search, "action": "list_skills"},
+        )
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/skills error: {e}")
+
+
+async def cmd_skill(thread_id: str, name: str) -> CommandResponse:
+    """Show and load a packaged skill document into thread context."""
+    skill_name = (name or "").strip()
+    if not skill_name:
+        return CommandResponse(success=False, message="Usage: /skill <name>")
+
+    try:
+        from eggthreads.skills import get_skill
+        from eggthreads.tools import create_default_tools
+
+        skill = get_skill(skill_name)
+        text = create_default_tools().execute("skill", {"name": skill.name})
+        marker = f"<!-- egg-skill:{skill.name} -->"
+        context_text = f"{marker}\n{text}"
+
+        already_loaded = False
+        try:
+            cur = core.db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'",
+                (thread_id,),
+            )
+            for row in cur.fetchall():
+                try:
+                    payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+                except Exception:
+                    payload = {}
+                if payload.get("role") == "system" and marker in str(payload.get("content") or ""):
+                    already_loaded = True
+                    break
+        except Exception:
+            already_loaded = False
+
+        loaded = False
+        if not already_loaded:
+            append_message(core.db, thread_id, "system", context_text)
+            create_snapshot(core.db, thread_id)
+            loaded = True
+
+        status = (
+            f"Skill /{skill.name} loaded into thread context."
+            if loaded
+            else f"Skill /{skill.name} already loaded; showing document."
+        )
+        return CommandResponse(
+            success=True,
+            message=f"{status}\n\n{text}",
+            data={
+                "skill": skill.name,
+                "title": skill.title,
+                "loaded": loaded,
+                "already_loaded": already_loaded,
+            },
+        )
+    except KeyError:
+        return CommandResponse(success=False, message=f"Unknown skill: {skill_name}")
+    except Exception as e:
+        return CommandResponse(success=False, message=f"/skill error: {e}")
 
 
 async def cmd_cost(thread_id: str) -> CommandResponse:
@@ -158,7 +339,7 @@ def cmd_schedulers() -> CommandResponse:
 
 async def cmd_wait_for_threads(thread_id: str, thread_selectors: str) -> CommandResponse:
     """Handle /waitForThreads command - wait for threads to complete."""
-    from eggthreads import wait_subtree_idle, collect_subtree
+    from eggthreads import wait_subtree_idle
 
     selectors = thread_selectors.strip().split() if thread_selectors.strip() else []
     if not selectors:
@@ -253,6 +434,10 @@ Model:
   /model [name]                  - Get or set model for thread
   /updateAllModels <provider>    - Update model catalog
 
+Skills:
+  /skills [query]                - List/search packaged skills
+  /skill <name>                  - Show and load a skill document
+
 Tools:
   /toolsOn                       - Enable all tools
   /toolsOff                      - Disable all tools
@@ -273,7 +458,7 @@ Persistent REPL Sessions:
   /sessionOff                    - Disable session config
   /sessionStop [python|bash|all] - Stop session runtime
   /sessionReset [python|bash|all]- Reset session state
-  /sessionCleanup [stopped|all]  - Remove Docker session containers
+  /sessionCleanup [stopped|all] [older_than=1h] - Remove Docker session containers
   /pythonRepl <code>             - Execute persistent Python REPL code
   /bashRepl <script>             - Execute persistent Bash REPL script
 
@@ -291,6 +476,8 @@ Utility:
   /authStatus                    - Show ChatGPT OAuth status
   /login                         - Start ChatGPT OAuth login
   /logout                        - Clear ChatGPT OAuth token
+  /startSearxng                  - Start local SearXNG container
+  /stopSearxng                   - Stop local SearXNG container
   /help                          - Show this help
 
 Shell:

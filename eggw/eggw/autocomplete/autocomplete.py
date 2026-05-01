@@ -11,6 +11,7 @@ from fastapi import APIRouter
 
 from eggthreads import list_threads, create_default_tools
 from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS
+from eggthreads.skills import list_skills
 
 from .. import core
 
@@ -193,6 +194,19 @@ async def get_autocomplete(
                                     })
                     except Exception:
                         pass
+
+            elif cmd == '/skill':
+                arg_lower = arg_tok.lower()
+                for skill in list_skills():
+                    hay = f"{skill.name} {skill.title} {skill.description}".lower()
+                    if arg_lower and arg_lower not in hay:
+                        continue
+                    suggestions.append({
+                        "display": skill.name,
+                        "insert": skill.name,
+                        "replace": len(arg_tok),
+                        "meta": skill.description,
+                    })
 
             elif cmd in ('/spawn', '/spawnAutoApprovedChildThread'):
                 # Filesystem path suggestions

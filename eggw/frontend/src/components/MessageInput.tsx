@@ -87,20 +87,6 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     },
   });
 
-  // Commands that should show their response in chat, like /help.
-  // Keep informational/status/configuration commands visible here so their
-  // output is not hidden away in the System Log panel.
-  const commandsWithChatOutput = [
-    '/help', '/threads', '/listChildren', '/cost', '/toolsStatus',
-    '/schedulers', '/model', '/parentThread', '/theme', '/toolInfo',
-    '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsSecrets',
-    '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
-    '/sessionStatus', '/sessionOn', '/sessionOff', '/sessionStop',
-    '/sessionReset', '/sessionCleanup', '/pythonRepl', '/bashRepl',
-    '/waitForThreads', '/setContextLimit', '/setThreadPriority',
-    '/authStatus', '/login', '/logout'
-  ];
-
   // Command mutation
   const commandMutation = useMutation({
     mutationFn: (command: string) => executeCommand(currentThreadId!, command),
@@ -119,23 +105,19 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
         });
       }
     },
-    onSuccess: (response, command) => {
-      // Check if this command should show output in chat
-      const cmdBase = command.split(/\s+/)[0].toLowerCase();
-      const showInChat = commandsWithChatOutput.some(c => cmdBase === c.toLowerCase());
-
+    onSuccess: (response) => {
       if (response.success) {
-        // For info commands, show output as a system message in chat
-        if (showInChat && response.message) {
+        // Show every command response in Chat Messages. The System Log stays
+        // as a compact event log, but command output should be visible in the
+        // transcript area consistently (like /help).
+        if (response.message) {
           addMessage({
             id: `cmd-${Date.now()}`,
             role: "system",
             content: response.message,
           });
-        } else {
-          // For action commands, just log to system panel
-          addSystemLog(response.message, "success");
         }
+        addSystemLog(response.message || "Command completed", "success");
 
         // Handle specific command responses
         if (response.data?.child_id) {

@@ -326,6 +326,7 @@ export default function ThreadPage() {
             <div className="mt-4 pt-4 border-t border-[var(--panel-border)] text-sm" style={{ color: "var(--muted)" }}>
               <p className="font-medium mb-2" style={{ color: "var(--foreground)" }}>Commands:</p>
               <p>/model, /updateAllModels, /spawn, /spawnAutoApprovedChildThread</p>
+              <p>/skills, /skill</p>
               <p>/newThread, /threads, /thread, /rename, /waitForThreads</p>
               <p>/parentThread, /listChildren, /deleteThread, /duplicateThread</p>
               <p>/toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus, /toolInfo</p>
@@ -335,6 +336,7 @@ export default function ThreadPage() {
               <p>/sessionCleanup, /pythonRepl, /bashRepl</p>
               <p>/setContextLimit, /setThreadPriority, /authStatus, /login, /logout</p>
               <p>/togglePanel, /toggleBorders, /enterMode, /theme, /cost, /quit</p>
+              <p>/startSearxng, /stopSearxng</p>
               <p>$ cmd - Shell, $$ cmd - Hidden shell</p>
             </div>
             <button

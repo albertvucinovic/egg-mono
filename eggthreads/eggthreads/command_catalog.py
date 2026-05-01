@@ -29,7 +29,7 @@ SESSION_ON_COMPLETIONS: List[str] = [
 SESSION_TARGET_COMPLETIONS: List[str] = ['python', 'bash', 'all']
 
 EGG_COMMAND_COMPLETIONS: List[str] = [
-    '/help', '/model', '/updateAllModels',
+    '/help', '/cost', '/model', '/updateAllModels',
     '/spawnChildThread', '/spawnAutoApprovedChildThread', '/waitForThreads', '/parentThread',
     '/listChildren', '/threads', '/thread', '/deleteThread', '/newThread', '/duplicateThread',
     '/continue', '/rename',
