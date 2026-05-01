@@ -271,6 +271,19 @@ class PanelsMixin:
             inner = f"llm {tps_str}" if tps_str else "llm"
         elif kind == 'tool':
             tool_name = ""
+            indicator = ls.get('tool_stream_indicator') if isinstance(ls.get('tool_stream_indicator'), dict) else {}
+            if indicator and indicator.get('active'):
+                tool_name = str(indicator.get('name') or "")
+                try:
+                    indicator_text = self._tool_stream_indicator_text(
+                        name=tool_name,
+                        frames=int(indicator.get('frames') or 0),
+                        compact=True,
+                    )
+                except Exception:
+                    indicator_text = "tool: saving output"
+                inner = indicator_text
+                return f"[yellow]Streaming\[{inner}][/yellow]"
             tools = ls.get('tools') if isinstance(ls.get('tools'), dict) else {}
             if tools:
                 try:

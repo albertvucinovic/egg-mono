@@ -20,6 +20,10 @@ STREAM_STYLE_TOOL_OUTPUT: Optional[str] = "yellow"
 STREAM_STYLE_TOOL_CALL_ARGS: Optional[str] = "dim yellow"
 
 
+def _new_tool_stream_indicator() -> Dict[str, Any]:
+    return {"active": False, "name": "", "frames": 0}
+
+
 class StreamingMixin:
     """Mixin providing async streaming/watching methods for EggDisplayApp."""
 
@@ -64,6 +68,7 @@ class StreamingMixin:
             "content": "",
             "reason": "",
             "tools": {},
+            "tool_stream_indicator": _new_tool_stream_indicator(),
             "tc_text": {},
             "tc_order": [],
         }
@@ -105,6 +110,7 @@ class StreamingMixin:
                     "content": "",
                     "reason": "",
                     "tools": {},
+                    "tool_stream_indicator": _new_tool_stream_indicator(),
                     "tc_text": {},
                     "tc_order": [],
                 }
@@ -211,6 +217,7 @@ class StreamingMixin:
                 "content": "",
                 "reason": "",
                 "tools": {},
+                "tool_stream_indicator": _new_tool_stream_indicator(),
                 "tc_text": {},
                 "tc_order": [],
             }
@@ -238,9 +245,18 @@ class StreamingMixin:
                 name = tl.get('name') or 'tool'
                 tout = tl.get('text') or ''
                 self._live_state.setdefault('tools', {})
-                self._live_state['tools'][name] = self._live_state['tools'].get(name, '') + tout
-                if tout:
-                    self._stream_append_on_renderer(tout, style=STREAM_STYLE_TOOL_OUTPUT)
+                is_suppressed = bool(tl.get('suppressed'))
+                if is_suppressed:
+                    indicator = self._live_state.setdefault('tool_stream_indicator', _new_tool_stream_indicator())
+                    indicator['active'] = True
+                    indicator['name'] = name
+                    indicator['frames'] = int(indicator.get('frames') or 0) + 1
+                    if name not in self._live_state['tools']:
+                        self._live_state['tools'][name] = self._live_state['tools'].get(name, '')
+                else:
+                    self._live_state['tools'][name] = self._live_state['tools'].get(name, '') + tout
+                    if tout:
+                        self._stream_append_on_renderer(tout, style=STREAM_STYLE_TOOL_OUTPUT)
             tcd = payload.get('tool_call')
             if isinstance(tcd, dict):
                 raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
@@ -294,6 +310,18 @@ class StreamingMixin:
         except Exception:
             pass
 
+    def _tool_stream_indicator_text(self, *, name: str = "", frames: int = 0, compact: bool = False) -> str:
+        frames_list = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+        try:
+            glyph = frames_list[int(frames or 0) % len(frames_list)]
+        except Exception:
+            glyph = "…"
+        if compact:
+            suffix = f" {name}" if name else ""
+            return f"{glyph} tool{suffix}: saving output"
+        suffix = f" ({name})" if name else ""
+        return f"{glyph} tool streaming{suffix}: preview limit reached; saving output only"
+
     def _stream_end_on_renderer(self) -> None:
         renderer = getattr(self, '_renderer', None)
         if renderer is None or not hasattr(renderer, 'stream_end'):
@@ -331,6 +359,7 @@ class StreamingMixin:
         for name, txt in (ls.get('tools') or {}).items():
             if isinstance(txt, str) and txt:
                 self._stream_append_on_renderer(txt, style=STREAM_STYLE_TOOL_OUTPUT)
+        indicator = ls.get('tool_stream_indicator') or {}
         for k in ls.get('tc_order') or []:
             t = (ls.get('tc_text') or {}).get(k, '')
             if isinstance(t, str) and t:

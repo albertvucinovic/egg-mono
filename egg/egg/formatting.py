@@ -343,6 +343,20 @@ class FormattingMixin:
             for name, txt in (ls.get('tools') or {}).items():
                 if txt:
                     parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
+            indicator = ls.get('tool_stream_indicator') or {}
+            if isinstance(indicator, dict) and indicator.get('active'):
+                name = str(indicator.get('name') or 'tool')
+                try:
+                    text = self._tool_stream_indicator_text(
+                        name=name,
+                        frames=int(indicator.get('frames') or 0),
+                    )
+                except Exception:
+                    text = "preview limit reached; saving output only"
+                parts.append(
+                    f"\n[Tool: {name} (streaming)]\n"
+                    f"{text}"
+                )
             if ls.get('content'):
                 parts.append(f"\n[Assistant (streaming){live_tps_text}]\n{ls['content']}")
 

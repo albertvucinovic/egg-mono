@@ -163,3 +163,5 @@ def test_fullscreen_scroll_position_stays_stable_when_stream_changes() -> None:
 
     r.stream_end()
     assert r._prev_viewport == before
+
+

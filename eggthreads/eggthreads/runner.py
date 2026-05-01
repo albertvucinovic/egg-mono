@@ -71,6 +71,75 @@ LONG_OUTPUT_CHAR_THRESHOLD = 100_000
 # the full output is stashed to disk.
 PREVIEW_MAX_LINES = 200
 PREVIEW_MAX_CHARS = 8000
+TOOL_STREAM_PREVIEW_MAX_LINES = PREVIEW_MAX_LINES
+TOOL_STREAM_PREVIEW_MAX_CHARS = PREVIEW_MAX_CHARS
+
+
+class ToolStreamPreviewLimiter:
+    """Bound live tool-output streaming to a short preview.
+
+    Full tool output is still accumulated by the runner and later handled by
+    the normal output-approval/stash path. This helper only controls what is
+    emitted as ``stream.delta`` events for the live UI, so a huge stdout/stderr
+    burst does not flood the TUI or event log.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_lines: int = TOOL_STREAM_PREVIEW_MAX_LINES,
+        max_chars: int = TOOL_STREAM_PREVIEW_MAX_CHARS,
+    ):
+        self.max_lines = max(0, int(max_lines))
+        self.max_chars = max(0, int(max_chars))
+        self.chars_seen = 0
+        self.lines_seen = 0
+        self.suppressed = False
+
+    def filter(self, text: str) -> tuple[str, bool]:
+        """Return ``(preview_text, just_suppressed)`` for the next chunk."""
+        if not isinstance(text, str) or not text:
+            return "", False
+        if self.suppressed:
+            return "", False
+
+        remaining_chars = self.max_chars - self.chars_seen
+        remaining_lines = self.max_lines - self.lines_seen
+        if remaining_chars <= 0 or remaining_lines <= 0:
+            self.suppressed = True
+            return "", True
+
+        out: list[str] = []
+        chars_left = remaining_chars
+        lines_left = remaining_lines
+        i = 0
+        n = len(text)
+        while i < n and chars_left > 0 and lines_left > 0:
+            ch = text[i]
+            out.append(ch)
+            chars_left -= 1
+            self.chars_seen += 1
+            i += 1
+            if ch == "\n":
+                lines_left -= 1
+                self.lines_seen += 1
+
+        if i < n:
+            self.suppressed = True
+            return "".join(out), True
+        return "".join(out), False
+
+    def should_emit_indicator(self, chunk_index: int) -> bool:
+        """Return True occasionally while output remains suppressed."""
+        return self.suppressed and int(chunk_index) % 20 == 0
+
+
+def tool_stream_suppressed_notice(tool_name: str = "") -> str:
+    name = f" for {tool_name}" if tool_name else ""
+    return (
+        f"\n[Live tool output{name} exceeded preview limit; continuing without streaming. "
+        "Full output will be saved to a file if it exceeds the normal long-output threshold.]\n"
+    )
 
 
 def stash_tool_output_and_build_preview(
@@ -243,6 +312,103 @@ def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_outpu
         )
     except Exception:
         pass
+
+
+def emit_tool_stream_delta(
+    db,
+    *,
+    thread_id: str,
+    invoke_id: str,
+    tool_call_id: str,
+    tool_name: str = "",
+    text: str = "",
+    current_model: Optional[str] = None,
+    suppressed: bool = False,
+) -> None:
+    """Append one tool-output stream.delta event."""
+    payload_tool: Dict[str, Any] = {
+        'name': tool_name or '',
+        'id': tool_call_id,
+    }
+    if suppressed:
+        payload_tool['suppressed'] = True
+    else:
+        payload_tool['text'] = text
+    payload: Dict[str, Any] = {'tool': payload_tool, 'model_key': current_model}
+    db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_='stream.delta',
+        invoke_id=invoke_id,
+        chunk_seq=db.max_chunk_seq(invoke_id) + 1,
+        payload=payload,
+    )
+
+
+def emit_limited_tool_stream_delta(
+    db,
+    limiter: ToolStreamPreviewLimiter,
+    text: str,
+    *,
+    thread_id: str,
+    invoke_id: str,
+    tool_call_id: str,
+    tool_name: str = "",
+    current_model: Optional[str] = None,
+    heartbeat,
+    suppressed_counter: Optional[Dict[str, int]] = None,
+) -> bool:
+    """Emit bounded live preview for a tool-output chunk.
+
+    Returns False when the caller should stop because the stream lease was
+    lost; otherwise True.
+    """
+    preview_text, just_suppressed = limiter.filter(text)
+    if suppressed_counter is not None:
+        suppressed_counter.setdefault('count', 0)
+    if just_suppressed:
+        preview_text += tool_stream_suppressed_notice(tool_name)
+        if not heartbeat():
+            return False
+        emit_tool_stream_delta(
+            db,
+            thread_id=thread_id,
+            invoke_id=invoke_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            current_model=current_model,
+            suppressed=True,
+        )
+        if suppressed_counter is not None:
+            suppressed_counter['count'] = int(suppressed_counter.get('count') or 0) + 1
+    elif not preview_text and limiter.suppressed and suppressed_counter is not None:
+        suppressed_counter['count'] = int(suppressed_counter.get('count') or 0) + 1
+        if limiter.should_emit_indicator(suppressed_counter['count']):
+            if not heartbeat():
+                return False
+            emit_tool_stream_delta(
+                db,
+                thread_id=thread_id,
+                invoke_id=invoke_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                current_model=current_model,
+                suppressed=True,
+            )
+    if not preview_text:
+        return True
+    if not heartbeat():
+        return False
+    emit_tool_stream_delta(
+        db,
+        thread_id=thread_id,
+        invoke_id=invoke_id,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        text=preview_text,
+        current_model=current_model,
+    )
+    return True
 
 
 def _no_api_calls_mode(cfg: Optional['RunnerConfig'] = None) -> bool:
@@ -1679,12 +1845,14 @@ class ThreadRunner:
         # stream.delta events for live display.
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []
+        stream_limiter = ToolStreamPreviewLimiter()
 
         cancelled = False
 
         async def _stream_reader(stream, is_stdout: bool):
             nonlocal cancelled
             header_emitted = False
+            suppressed_counter = {'count': 0}
             prefix = '--- STDOUT ---\n' if is_stdout else '--- STDERR ---\n'
             while True:
                 try:
@@ -1719,20 +1887,31 @@ class ThreadRunner:
                 else:
                     stderr_buf.append(text)
 
-                # Stream this chunk immediately for live UI. If raw tool
-                # output is not allowed (secrets masking enabled), do not
-                # stream the actual content.
-                if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                # Stream only a bounded live preview. The full output remains
+                # in stdout_buf/stderr_buf and will be saved to disk by the
+                # normal long-output approval path after the tool finishes.
+                def _heartbeat() -> bool:
+                    return self.db.heartbeat(
+                        self.thread_id,
+                        invoke_id,
+                        _now_plus(self.cfg.lease_ttl_sec),
+                    )
+
+                ok = emit_limited_tool_stream_delta(
+                    self.db,
+                    stream_limiter,
+                    text,
+                    thread_id=self.thread_id,
+                    invoke_id=invoke_id,
+                    tool_call_id=tc.tool_call_id,
+                    tool_name=tc.name or '',
+                    current_model=current_model,
+                    heartbeat=_heartbeat,
+                    suppressed_counter=suppressed_counter,
+                )
+                if not ok:
                     cancelled = True
                     break
-                self.db.append_event(
-                    event_id=_os.urandom(10).hex(),
-                    thread_id=self.thread_id,
-                    type_='stream.delta',
-                    invoke_id=invoke_id,
-                    chunk_seq=self.db.max_chunk_seq(invoke_id) + 1,
-                    payload={'tool': {'name': tc.name or '', 'text': text, 'id': tc.tool_call_id}, 'model_key': current_model},
-                )
                 await _asyncio.sleep(0)
 
         watcher = _asyncio.create_task(_hb_watcher())
@@ -1963,22 +2142,36 @@ class ThreadRunner:
                 out = full_result or ''
                 CH = 400
                 cancelled = False
+                stream_limiter = ToolStreamPreviewLimiter()
+                suppressed_counter = {'count': 0}
                 for i in range(0, len(out), CH):
                     part = out[i : i + CH]
-                    # Respect the per-thread lease: if we lose it (e.g. via
-                    # interrupt_thread on Ctrl+C), stop streaming further
-                    # tool output for this invoke.
-                    if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
+                    # Respect the per-thread lease while emitting only a
+                    # bounded live preview. The full output remains in
+                    # full_result and is handled by the normal long-output
+                    # approval/stash path below.
+                    def _heartbeat() -> bool:
+                        return self.db.heartbeat(
+                            self.thread_id,
+                            invoke_id,
+                            _now_plus(self.cfg.lease_ttl_sec),
+                        )
+
+                    ok = emit_limited_tool_stream_delta(
+                        self.db,
+                        stream_limiter,
+                        part,
+                        thread_id=self.thread_id,
+                        invoke_id=invoke_id,
+                        tool_call_id=tc.tool_call_id,
+                        tool_name=tc.name or '',
+                        current_model=current_model,
+                        heartbeat=_heartbeat,
+                        suppressed_counter=suppressed_counter,
+                    )
+                    if not ok:
                         cancelled = True
                         break
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.thread_id,
-                        type_='stream.delta',
-                        invoke_id=invoke_id,
-                        chunk_seq=self.db.max_chunk_seq(invoke_id) + 1,
-                        payload={'tool': {'name': tc.name or '', 'text': part, 'id': tc.tool_call_id}, 'model_key': current_model},
-                    )
                     await asyncio.sleep(0)
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),

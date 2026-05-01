@@ -519,7 +519,11 @@ class FullScreenDiffRenderer(_DiffRendererBase):
 
     def _stream_rows(self, width: int) -> List[str]:
         """Split the in-flight stream buffer into terminal-width visual rows."""
-        if not self._stream_buffer or width <= 0:
+        return self._stream_rows_from_ansi(self._stream_buffer, width)
+
+    def _stream_rows_from_ansi(self, ansi_text: str, width: int) -> List[str]:
+        """Split an ANSI-rendered string into terminal-width visual rows."""
+        if not ansi_text or width <= 0:
             return []
 
         def _sgr_is_reset(seq: str) -> bool:
@@ -567,7 +571,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
 
         rows: List[str] = []
         active_sgr = ""
-        for logical in self._stream_buffer.split("\n"):
+        for logical in ansi_text.split("\n"):
             start_rows_len = len(rows)
             current = active_sgr
             col = 0

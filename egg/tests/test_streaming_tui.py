@@ -122,3 +122,47 @@ def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypat
     assert "Assistant (streaming)]" not in panel_text2
     thread_line2 = app.format_thread_line(tid)
     assert "STREAMING" not in thread_line2
+
+
+def test_suppressed_tool_stream_shows_indicator_not_more_output(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "stream.open",
+                "invoke_id": invoke_id,
+                "ts": "2024-01-01 00:00:00",
+                "payload_json": json.dumps({"stream_kind": "tool"}),
+            },
+            tid,
+        )
+    )
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "stream.delta",
+                "invoke_id": invoke_id,
+                "payload_json": json.dumps({"tool": {"name": "bash", "text": "preview"}}),
+            },
+            tid,
+        )
+    )
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "stream.delta",
+                "invoke_id": invoke_id,
+                "payload_json": json.dumps({"tool": {"name": "bash", "suppressed": True}}),
+            },
+            tid,
+        )
+    )
+
+    panel_text = app.compose_chat_panel_text()
+    assert "preview" in panel_text
+    assert "saving output only" in panel_text
+    assert "tool bash: saving output" in app._current_stream_header_part()
+    assert app._live_state["tool_stream_indicator"]["active"] is True

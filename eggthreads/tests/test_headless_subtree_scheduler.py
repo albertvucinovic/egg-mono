@@ -27,8 +27,6 @@ import pytest
 
 import eggthreads as ts
 from eggthreads.examples import headless_subtree_scheduler as hs  # type: ignore
-
-import json
 import os
 
 def _create_dummy_models_json(tmp_path):
@@ -455,6 +453,55 @@ def test_word_count_includes_streaming_deltas(tmp_path) -> None:
     total = ts.word_count_from_events(db, tid)
     # Should count the 3 words from the delta
     assert total - base == 3
+
+
+def test_tool_stream_preview_limiter_suppresses_after_preview() -> None:
+    from eggthreads.runner import ToolStreamPreviewLimiter, tool_stream_suppressed_notice
+
+    limiter = ToolStreamPreviewLimiter(max_lines=3, max_chars=10)
+
+    preview, suppressed = limiter.filter("abc\ndef\nghi\njkl")
+
+    assert suppressed is True
+    assert preview == "abc\ndef\ngh"
+    assert limiter.filter("more output") == ("", False)
+    assert "continuing without streaming" in tool_stream_suppressed_notice("bash")
+
+
+def test_emit_limited_tool_stream_delta_emits_preview_then_indicator(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    import json
+    from eggthreads import ThreadsDB, create_root_thread
+    from eggthreads.runner import ToolStreamPreviewLimiter, emit_limited_tool_stream_delta
+
+    db = ThreadsDB()
+    db.init_schema()
+    tid = create_root_thread(db, name="Root")
+    invoke = "invoke-tool-preview"
+    limiter = ToolStreamPreviewLimiter(max_lines=100, max_chars=5)
+    counter = {"count": 0}
+
+    ok = emit_limited_tool_stream_delta(
+        db,
+        limiter,
+        "abcdefghi",
+        thread_id=tid,
+        invoke_id=invoke,
+        tool_call_id="tc1",
+        tool_name="bash",
+        heartbeat=lambda: True,
+        suppressed_counter=counter,
+    )
+
+    assert ok is True
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='stream.delta' ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()
+    payloads = [json.loads(row[0]) for row in rows]
+    assert payloads[0]["tool"]["suppressed"] is True
+    assert payloads[1]["tool"]["text"].startswith("abcde")
+    assert "continuing without streaming" in payloads[1]["tool"]["text"]
 
 def test_env_path(monkeypatch) -> None:
     """_env_path returns trimmed env var or default."""
