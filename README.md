@@ -78,12 +78,6 @@ eggflow[eggthreads] @ git+https://github.com/albertvucinovic/egg-mono.git#subdir
 /sessionStatus
 ```
 
-For the Docker provider, build the session image once if it is not already available:
-
-```bash
-./eggthreads/docker/create-session-image.sh
-```
-
 Use `/skills` to list packaged skill documents and `/skill rlm` for the persistent-REPL/subagent workflow notes.
 
 **Headless agent:**
@@ -151,6 +145,22 @@ Tool execution can run in a sandbox. Three providers are supported — use which
 | **srt** (Anthropic sandbox runtime) | Linux, macOS | `npm install -g @anthropic-ai/sandbox-runtime` |
 
 If no provider is available, commands run unsandboxed. Sandboxing can be disabled entirely with `EGG_SANDBOX_MODE=off`.
+
+### Docker-backed services
+
+Egg uses Docker in three separate places. Set up only the pieces you need:
+
+| Use | Image/container | Setup |
+|-----|-----------------|-------|
+| Tool sandboxing | `egg-sandbox` image | Optional but recommended for Docker sandboxing: `./eggthreads/docker/create-image.sh` |
+| Persistent REPL sessions | `egg-rlm-session` image | Included in `create-image.sh`, or build just this image with `./eggthreads/docker/create-session-image.sh` |
+| Web search | `egg-searxng` + `egg-searxng-valkey` containers | Start with `/startSearxng` in `egg`, or run `docker compose up -d` in `eggthreads/eggthreads/web/searxng/` |
+
+Notes:
+
+- `create-image.sh` builds both local Egg images (`egg-sandbox` and `egg-rlm-session`).
+- If `egg-sandbox` is missing, Docker sandboxing falls back to `python:3.12-slim`, but the local image includes extra tools/packages used by Egg.
+- SearXNG uses public images from Docker Hub; there is no local image to build. Stop it with `/stopSearxng` or `docker compose down` in the SearXNG directory.
 
 ## Development
 
