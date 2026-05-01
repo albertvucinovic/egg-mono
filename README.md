@@ -1,12 +1,12 @@
 # egg-mono
 
-A modular AI conversation platform. Tree-structured threads, multi-provider LLM routing, sandboxed tool execution — usable from a terminal TUI, a web UI, or as building blocks for headless agents.
+A modular AI conversation platform. Tree-structured threads, multi-provider LLM routing, sandboxed tool execution, and persistent REPL sessions — usable from a terminal TUI, a web UI, or as building blocks for headless agents.
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| **eggthreads** | Core engine — SQLite-backed tree-structured conversation threads with async runners, sandboxing, and tool execution |
+| **eggthreads** | Core engine — SQLite-backed tree-structured conversation threads with async runners, sandboxing, persistent sessions, and tool execution |
 | **eggllm** | LLM router with OpenAI-compatible provider abstraction (OpenAI, Anthropic, Google, DeepSeek, Groq, and more) |
 | **eggflow** | Task-based execution engine with caching, crash recovery, and optional eggthreads integration |
 | **eggdisplay** | Rich-based TUI text editor and display panels |
@@ -25,6 +25,8 @@ A modular AI conversation platform. Tree-structured threads, multi-provider LLM 
 ```
 
 `egg` also depends on `eggdisplay`; headless agents typically add `eggflow` for caching and crash recovery. The core libraries have no UI dependencies and can be composed into agents that run unattended — `egg` and `eggw` are just two frontends built on top of them.
+
+Recent builds also include an explicit RLM workflow: persistent Python/Bash REPL sessions, packaged skills, and subagent tools (`spawn_agent`, `wait`, `send_message_to_child`) that let long-running tasks keep state and delegate work without stuffing every intermediate result into chat context.
 
 ## Install
 
@@ -64,6 +66,25 @@ eggflow[eggthreads] @ git+https://github.com/albertvucinovic/egg-mono.git#subdir
 ```bash
 ./eggw/eggw.sh
 ```
+
+**Persistent REPL sessions:**
+
+`egg` and `eggw` support per-thread Python/Bash REPL sessions. The REPL keeps variables and shell state across calls, and REPL code can use the small `eggtools` bridge to call Egg tools or coordinate subagents.
+
+```text
+/sessionOn provider=docker
+/pythonRepl data = {"status": "kept in session"}
+/bashRepl pwd
+/sessionStatus
+```
+
+For the Docker provider, build the session image once if it is not already available:
+
+```bash
+./eggthreads/docker/create-session-image.sh
+```
+
+Use `/skills` to list packaged skill documents and `/skill rlm` for the persistent-REPL/subagent workflow notes.
 
 **Headless agent:**
 
