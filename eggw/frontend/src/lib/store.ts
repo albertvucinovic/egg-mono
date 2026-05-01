@@ -256,7 +256,7 @@ export const useAppStore = create<AppState>((set) => ({
     })),
 
   // UI preferences
-  showBorders: true,
+  showBorders: false,
   toggleBorders: () => set((state) => ({ showBorders: !state.showBorders })),
   enterMode: "send",
   setEnterMode: (mode) => set({ enterMode: mode }),

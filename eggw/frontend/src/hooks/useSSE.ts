@@ -222,6 +222,21 @@ export function useSSE(threadId: string | null) {
       }
     });
 
+    // Runtime threads are created as real child threads, then linked by a
+    // runtime.config event on the parent. Refresh child/root thread queries so
+    // @runtime:* entries appear in the Children panel and tree without a page
+    // reload after /pythonRepl or /bashRepl starts them.
+    es.addEventListener("runtime.config", () => {
+      try {
+        addSystemLog("Runtime thread linked", "info");
+        queryClient.invalidateQueries({ queryKey: ["threadChildren", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+        queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+      } catch (err) {
+        console.error("Failed to parse runtime.config:", err);
+      }
+    });
+
     // Handle control.interrupt events (e.g., from delayed /continue)
     es.addEventListener("control.interrupt", (e) => {
       try {
