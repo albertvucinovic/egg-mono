@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type WheelEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -14,6 +14,8 @@ import { fetchMessages } from "@/lib/api";
 import { useAppStore, Message } from "@/lib/store";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
+
+const STICKY_BOTTOM_THRESHOLD_PX = 4;
 
 /**
  * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
@@ -329,124 +331,191 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
   const stickToBottomRef = useRef(true);
   const rafIdRef = useRef<number | null>(null);
   const isAutoScrollingRef = useRef(false);
+  const autoScrollGenerationRef = useRef(0);
 
-  // Check if at bottom (within 50px tolerance)
-  const isAtBottom = () => {
-    if (!scrollRef.current) return true;
+  const distanceFromBottom = useCallback(() => {
+    if (!scrollRef.current) return 0;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    return scrollHeight - scrollTop - clientHeight < 50;
-  };
+    return Math.max(0, scrollHeight - scrollTop - clientHeight);
+  }, []);
 
-  // Handle user scroll - only update stickToBottom when user scrolls, not during auto-scroll
-  const handleScroll = () => {
-    if (isAutoScrollingRef.current) return; // Ignore scroll events during auto-scroll
+  const isAtBottom = useCallback(() => {
+    return distanceFromBottom() <= STICKY_BOTTOM_THRESHOLD_PX;
+  }, [distanceFromBottom]);
+
+  const finishAutoScrollSoon = useCallback((generation: number) => {
+    window.setTimeout(() => {
+      if (autoScrollGenerationRef.current === generation) {
+        isAutoScrollingRef.current = false;
+      }
+    }, 50);
+  }, []);
+
+  // In sticky mode every output append must keep following the tail.  Use
+  // clientHeight as the target rather than a captured scrollHeight value so
+  // fast-growing content cannot leave us one frame behind.
+  const scrollToBottomNow = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const generation = autoScrollGenerationRef.current + 1;
+    autoScrollGenerationRef.current = generation;
+    isAutoScrollingRef.current = true;
+    const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    el.scrollTop = target;
+    stickToBottomRef.current = true;
+    finishAutoScrollSoon(generation);
+  }, [finishAutoScrollSoon]);
+
+  // Handle user scroll - scrolling up disables sticky mode; scrolling back to
+  // the bottom reenables it.  Programmatic scroll events should not disable it.
+  const handleScroll = useCallback(() => {
+    if (isAutoScrollingRef.current) return;
     stickToBottomRef.current = isAtBottom();
-  };
+  }, [isAtBottom]);
 
-  // Scroll to bottom using requestAnimationFrame for smooth, reliable scrolling
-  const scrollToBottom = () => {
+  const updateStickyAfterUserScroll = useCallback((forceStickyTail = false, exactBottomOnly = false) => {
+    isAutoScrollingRef.current = false;
+    autoScrollGenerationRef.current += 1;
+    requestAnimationFrame(() => {
+      if (forceStickyTail) {
+        scrollToBottomNow();
+        return;
+      }
+      stickToBottomRef.current = exactBottomOnly
+        ? distanceFromBottom() <= 1
+        : isAtBottom();
+    });
+  }, [distanceFromBottom, isAtBottom, scrollToBottomNow]);
+
+  const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0) {
+      stickToBottomRef.current = false;
+      updateStickyAfterUserScroll(false, true);
+      return;
+    }
+    const scrollingDownToTail =
+      event.deltaY > 0 &&
+      distanceFromBottom() <= Math.abs(event.deltaY) + STICKY_BOTTOM_THRESHOLD_PX;
+    updateStickyAfterUserScroll(scrollingDownToTail);
+  }, [distanceFromBottom, updateStickyAfterUserScroll]);
+
+  const handleTouchMove = useCallback(() => {
+    // Direction is not exposed here, so let the post-scroll position decide.
+    // Touch scrolling away disables sticky; touch scrolling back to the exact
+    // bottom reenables it via the normal bottom check.
+    updateStickyAfterUserScroll(false, true);
+  }, [updateStickyAfterUserScroll]);
+
+
+  const handlePointerUp = useCallback(() => {
+    updateStickyAfterUserScroll();
+  }, [updateStickyAfterUserScroll]);
+
+  // Scroll to bottom using requestAnimationFrame for smooth, reliable scrolling.
+  const scrollToBottom = useCallback(() => {
     if (!stickToBottomRef.current) return;
     if (rafIdRef.current !== null) return; // Already scheduled
 
     rafIdRef.current = requestAnimationFrame(() => {
       rafIdRef.current = null;
-      if (scrollRef.current && stickToBottomRef.current) {
-        isAutoScrollingRef.current = true;
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      if (!stickToBottomRef.current) return;
 
-        // For fast streams, check if we're actually at bottom after scrolling
-        // If not (content grew during RAF), schedule another scroll
-        requestAnimationFrame(() => {
-          if (scrollRef.current && stickToBottomRef.current) {
-            const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-            if (scrollHeight - scrollTop - clientHeight > 10) {
-              // Not at bottom - content grew, scroll again
-              scrollRef.current.scrollTop = scrollHeight;
-            }
-          }
-          // Reset flag after ensuring we're at bottom
-          // Use setTimeout to ensure scroll events have settled
-          setTimeout(() => {
-            isAutoScrollingRef.current = false;
-          }, 50);
-        });
-      }
+      scrollToBottomNow();
+
+      // For fast streams, content can grow again in the same frame.  Re-check
+      // for a second frame and keep sticky mode enabled if another adjustment
+      // is needed.
+      requestAnimationFrame(() => {
+        if (stickToBottomRef.current && distanceFromBottom() > 1) {
+          scrollToBottomNow();
+        }
+      });
     });
-  };
+  }, [distanceFromBottom, scrollToBottomNow]);
 
-  // Subscribe to streaming buffer updates - bypasses React entirely
-  // This is O(1) per chunk with direct DOM manipulation
-  // Re-runs when isStreaming changes to catch up with buffered content when refs become available
-  useEffect(() => {
+  const flushStreamingText = useCallback(() => {
     // Import here to avoid SSR issues
     const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    let appended = false;
 
-    const handleContentUpdate = () => {
-      if (!streamingContentRef.current) return;
-
+    if (streamingContentRef.current) {
       const chunks = streamingBuffer.contentChunks;
-      // Only append new chunks since last update
       for (let i = lastContentIndexRef.current; i < chunks.length; i++) {
         streamingContentRef.current.appendChild(document.createTextNode(chunks[i]));
+        appended = true;
       }
       lastContentIndexRef.current = chunks.length;
+    }
 
-      // Scroll to bottom if we were already there
-      scrollToBottom();
-    };
-
-    const handleReasoningUpdate = () => {
-      if (!streamingReasoningRef.current) return;
-
+    if (streamingReasoningRef.current) {
       const chunks = streamingBuffer.reasoningChunks;
-      // Show the reasoning container when first chunk arrives
-      if (chunks.length > 0 && lastReasoningIndexRef.current === 0) {
+      if (chunks.length > 0) {
         const container = document.getElementById('streaming-reasoning-container');
         if (container) container.style.display = 'block';
       }
       for (let i = lastReasoningIndexRef.current; i < chunks.length; i++) {
         streamingReasoningRef.current.appendChild(document.createTextNode(chunks[i]));
+        appended = true;
       }
       lastReasoningIndexRef.current = chunks.length;
-
-      // Scroll to bottom if we were already there
-      scrollToBottom();
-    };
-
-    const unsubContent = streamingBuffer.subscribeContent(handleContentUpdate);
-    const unsubReasoning = streamingBuffer.subscribeReasoning(handleReasoningUpdate);
-
-    // Render any existing buffer content (catches up when joining mid-stream)
-    // When isStreaming changes to true, refs should be available after render
-    if (isStreaming) {
-      // Use setTimeout + double RAF to ensure refs are fully available
-      // setTimeout(0) is more reliable than RAF alone for background tabs
-      const timeoutId = setTimeout(() => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            handleContentUpdate();
-            handleReasoningUpdate();
-          });
-        });
-      }, 0);
-      return () => {
-        clearTimeout(timeoutId);
-        unsubContent();
-        unsubReasoning();
-        if (rafIdRef.current !== null) {
-          cancelAnimationFrame(rafIdRef.current);
-        }
-      };
     }
 
+    if (appended) scrollToBottom();
+  }, [scrollToBottom]);
+
+  const flushStreamingToolOutput = useCallback(() => {
+    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    let appended = false;
+
+    streamingBuffer.toolOutputChunks.forEach((chunks, toolId) => {
+      const el = streamingToolOutputRefs.current[toolId];
+      if (!el) return;
+      const lastIndex = lastToolOutputIndexRef.current[toolId] || 0;
+      for (let i = lastIndex; i < chunks.length; i++) {
+        el.appendChild(document.createTextNode(chunks[i]));
+        appended = true;
+      }
+      if (stickToBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+      lastToolOutputIndexRef.current[toolId] = chunks.length;
+    });
+
+    if (appended) scrollToBottom();
+  }, [scrollToBottom]);
+
+  const scheduleStreamingFlush = useCallback((flush: () => void) => {
+    const timeoutId = window.setTimeout(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(flush);
+      });
+    }, 0);
+    return timeoutId;
+  }, []);
+
+  // Subscribe to streaming buffer updates - bypasses React entirely
+  // This is O(1) per chunk with direct DOM manipulation
+  // Re-runs when isStreaming changes to catch up with buffered content when refs become available
+  useEffect(() => {
+    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+
+    const unsubContent = streamingBuffer.subscribeContent(flushStreamingText);
+    const unsubReasoning = streamingBuffer.subscribeReasoning(flushStreamingText);
+
+    // Render any existing buffer content (catches up when joining mid-stream).
+    // When isStreaming changes to true, refs should be available after render.
+    const timeoutId = isStreaming ? scheduleStreamingFlush(flushStreamingText) : null;
+
     return () => {
+      if (timeoutId !== null) clearTimeout(timeoutId);
       unsubContent();
       unsubReasoning();
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
       }
     };
-  }, [isStreaming]);
+  }, [isStreaming, flushStreamingText, scheduleStreamingFlush]);
 
   // Subscribe to streaming tool-output preview updates. Like text streaming,
   // this writes chunks directly to DOM so large/fast tool output does not
@@ -454,38 +523,14 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
   useEffect(() => {
     const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
 
-    const handleToolOutputUpdate = () => {
-      streamingBuffer.toolOutputChunks.forEach((chunks, toolId) => {
-        const el = streamingToolOutputRefs.current[toolId];
-        if (!el) return;
-        const lastIndex = lastToolOutputIndexRef.current[toolId] || 0;
-        for (let i = lastIndex; i < chunks.length; i++) {
-          el.appendChild(document.createTextNode(chunks[i]));
-        }
-        lastToolOutputIndexRef.current[toolId] = chunks.length;
-      });
-
-      scrollToBottom();
-    };
-
-    const unsubToolOutput = streamingBuffer.subscribeToolOutput(handleToolOutputUpdate);
-
-    if (isStreaming) {
-      const timeoutId = setTimeout(() => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(handleToolOutputUpdate);
-        });
-      }, 0);
-      return () => {
-        clearTimeout(timeoutId);
-        unsubToolOutput();
-      };
-    }
+    const unsubToolOutput = streamingBuffer.subscribeToolOutput(flushStreamingToolOutput);
+    const timeoutId = isStreaming ? scheduleStreamingFlush(flushStreamingToolOutput) : null;
 
     return () => {
+      if (timeoutId !== null) clearTimeout(timeoutId);
       unsubToolOutput();
     };
-  }, [isStreaming, streamingToolOutputs]);
+  }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleStreamingFlush]);
 
   // Reset DOM state when streaming stops
   useEffect(() => {
@@ -513,92 +558,80 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
     retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 5000),
   });
 
-  // Sync fetched messages to store and scroll to bottom if we were at bottom
+  // Sync fetched messages to store and scroll to bottom if we were sticky
   useEffect(() => {
     if (data) {
-      // Capture scroll state BEFORE DOM update (messages change will cause scroll events)
-      const wasAtBottom = isAtBottom();
+      // Capture sticky state BEFORE DOM update.  Do not derive this from the
+      // current distance here: replacing the streaming block with the final
+      // message can shrink content and make an intentionally scrolled-up view
+      // look "at bottom" for one render.
+      const wasSticky = stickToBottomRef.current;
       setMessages(data);
       // Scroll to bottom after DOM update if we were at bottom before
-      if (wasAtBottom) {
+      if (wasSticky) {
         // Double RAF: first waits for React render, second waits for paint
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
-            if (scrollRef.current) {
-              isAutoScrollingRef.current = true;
-              scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-              requestAnimationFrame(() => {
-                isAutoScrollingRef.current = false;
-              });
-            }
+            scrollToBottomNow();
           });
         });
       }
     }
-  }, [data, setMessages]);
+  }, [data, scrollToBottomNow, setMessages]);
 
   // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
     stickToBottomRef.current = true;
     requestAnimationFrame(() => {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
+      scrollToBottomNow();
     });
-  }, [currentThreadId]);
+  }, [currentThreadId, scrollToBottomNow]);
 
   // Scroll to bottom when streaming starts (assistant header appears)
   useEffect(() => {
     if (isStreaming) {
-      stickToBottomRef.current = true;
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          if (scrollRef.current) {
-            isAutoScrollingRef.current = true;
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            // Use 50ms timeout (matching scrollToBottom) to allow scroll events to settle
-            setTimeout(() => {
-              isAutoScrollingRef.current = false;
-            }, 50);
-          }
+          scrollToBottom();
         });
       });
     }
-  }, [isStreaming]);
+  }, [isStreaming, scrollToBottom]);
 
   // Scroll to bottom when new streaming tool calls or tool outputs appear (tool headers)
   useEffect(() => {
     if ((Object.keys(streamingToolCalls).length > 0 || Object.keys(streamingToolOutputs).length > 0) && stickToBottomRef.current) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          if (scrollRef.current) {
-            isAutoScrollingRef.current = true;
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            // Use 50ms timeout (matching scrollToBottom) to allow scroll events to settle
-            setTimeout(() => {
-              isAutoScrollingRef.current = false;
-            }, 50);
-          }
+          scrollToBottomNow();
         });
       });
     }
-  }, [streamingToolCalls, streamingToolOutputs]);
+  }, [scrollToBottomNow, streamingToolCalls, streamingToolOutputs]);
 
   // Scroll to bottom when UI-only messages are added (e.g., /cost, /help)
   useEffect(() => {
-    if (scrollTrigger > 0) {
+    if (scrollTrigger > 0 && stickToBottomRef.current) {
       requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          isAutoScrollingRef.current = true;
-          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-          // Use 50ms timeout (matching scrollToBottom) to allow scroll events to settle
-          setTimeout(() => {
-            isAutoScrollingRef.current = false;
-          }, 50);
-        }
+        scrollToBottomNow();
       });
     }
-  }, [scrollTrigger]);
+  }, [scrollToBottomNow, scrollTrigger]);
+
+  useEffect(() => {
+    if (!scrollRef.current) return;
+    if (typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      scrollToBottom();
+    });
+    observer.observe(scrollRef.current);
+    if (scrollRef.current.firstElementChild) {
+      observer.observe(scrollRef.current.firstElementChild);
+    }
+
+    return () => observer.disconnect();
+  }, [currentThreadId, isStreaming, messages.length, scrollToBottom]);
 
   if (!currentThreadId) {
     return (
@@ -622,51 +655,60 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
       <div className={`px-3 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)", background: "var(--panel-bg)" }}>
         <span>Chat Messages{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}</span>
       </div>
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto p-4" data-testid="chat-panel">
-        {isLoading ? (
-          <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
-        ) : isError ? (
-          <div className="text-center space-y-2">
-            <div style={{ color: "var(--error, #ef4444)" }}>Failed to load messages</div>
-            <button
-              onClick={() => refetch()}
-              className="px-3 py-1 rounded text-sm"
-              style={{ background: "var(--accent)", color: "var(--background)" }}
-            >
-              Retry
-            </button>
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="text-center" style={{ color: "var(--muted)" }}>
-            No messages yet. Start a conversation!
-          </div>
-        ) : (
-          <>
-            {messages.map((msg, idx) => (
-              <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} />
-            ))}
-
-            {/* Streaming content */}
-            {isStreaming && (
-              <div
-                className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
-                style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        onWheel={handleWheel}
+        onTouchMove={handleTouchMove}
+        onPointerUp={handlePointerUp}
+        className="flex-1 overflow-auto p-4"
+        data-testid="chat-panel"
+      >
+        <div data-testid="chat-panel-content">
+          {isLoading ? (
+            <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
+          ) : isError ? (
+            <div className="text-center space-y-2">
+              <div style={{ color: "var(--error, #ef4444)" }}>Failed to load messages</div>
+              <button
+                onClick={() => refetch()}
+                className="px-3 py-1 rounded text-sm"
+                style={{ background: "var(--accent)", color: "var(--background)" }}
               >
-                <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                  <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>{streamingRoleLabel}</span>
-                  {streamingModelKey && (
-                    <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
-                  )}
-                  <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
-                </div>
+                Retry
+              </button>
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="text-center" style={{ color: "var(--muted)" }}>
+              No messages yet. Start a conversation!
+            </div>
+          ) : (
+            <>
+              {messages.map((msg, idx) => (
+                <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} />
+              ))}
 
-                {/* Streaming reasoning - direct DOM updates via ref */}
-                <details
+              {/* Streaming content */}
+              {isStreaming && (
+                <div
+                  className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
+                  style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
+                >
+                  <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+                    <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>{streamingRoleLabel}</span>
+                    {streamingModelKey && (
+                      <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
+                    )}
+                    <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                  </div>
+
+                  {/* Streaming reasoning - direct DOM updates via ref */}
+                  <details
                   open
                   className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
                   style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
                   id="streaming-reasoning-container"
-                >
+                  >
                   <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
                     Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
                   </summary>
@@ -675,10 +717,10 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                     className="mt-2 text-sm whitespace-pre-wrap"
                     style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
                   />
-                </details>
+                  </details>
 
-                {/* Streaming content - direct DOM updates via ref for O(1) performance */}
-                <div
+                  {/* Streaming content - direct DOM updates via ref for O(1) performance */}
+                  <div
                   ref={streamingContentRef}
                   className="text-sm"
                   style={{
@@ -686,10 +728,10 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
                   }}
-                />
+                  />
 
-                {/* Streaming tool output preview */}
-                {Object.keys(streamingToolOutputs).length > 0 && (
+                  {/* Streaming tool output preview */}
+                  {Object.keys(streamingToolOutputs).length > 0 && (
                   <div className="mt-2 space-y-2">
                     {Object.entries(streamingToolOutputs).map(([toolId, tool]) => (
                       <details
@@ -727,10 +769,10 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                       </details>
                     ))}
                   </div>
-                )}
+                  )}
 
-                {/* Streaming tool calls */}
-                {Object.keys(streamingToolCalls).length > 0 && (
+                  {/* Streaming tool calls */}
+                  {Object.keys(streamingToolCalls).length > 0 && (
                   <div className="mt-2 space-y-2">
                     {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
                       const isBash = tc.name === "bash";
@@ -771,13 +813,14 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                       );
                     })}
                   </div>
-                )}
+                  )}
               </div>
             )}
-          </>
-        )}
-        {/* Scroll anchor for auto-scroll */}
-        <div ref={bottomRef} />
+            </>
+          )}
+          {/* Scroll anchor for auto-scroll */}
+          <div ref={bottomRef} />
+        </div>
       </div>
     </div>
   );
