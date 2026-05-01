@@ -331,7 +331,10 @@ export default function ThreadPage() {
               <p>/toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus, /toolInfo</p>
               <p>/disableTool, /enableTool, /toolsSecrets</p>
               <p>/toggleSandboxing, /setSandboxConfiguration, /getSandboxingConfig</p>
-              <p>/togglePanel, /toggleBorders, /enterMode, /cost, /quit</p>
+              <p>/sessionStatus, /sessionOn, /sessionOff, /sessionStop, /sessionReset</p>
+              <p>/sessionCleanup, /pythonRepl, /bashRepl</p>
+              <p>/setContextLimit, /setThreadPriority, /authStatus, /login, /logout</p>
+              <p>/togglePanel, /toggleBorders, /enterMode, /theme, /cost, /quit</p>
               <p>$ cmd - Shell, $$ cmd - Hidden shell</p>
             </div>
             <button

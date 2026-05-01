@@ -87,12 +87,18 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     },
   });
 
-  // Commands that should show output in chat (info/status commands)
+  // Commands that should show their response in chat, like /help.
+  // Keep informational/status/configuration commands visible here so their
+  // output is not hidden away in the System Log panel.
   const commandsWithChatOutput = [
     '/help', '/threads', '/listChildren', '/cost', '/toolsStatus',
     '/schedulers', '/model', '/parentThread', '/theme', '/toolInfo',
     '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsSecrets',
-    '/setContextLimit'
+    '/toggleSandboxing', '/setSandboxConfiguration', '/getSandboxingConfig',
+    '/sessionStatus', '/sessionOn', '/sessionOff', '/sessionStop',
+    '/sessionReset', '/sessionCleanup', '/pythonRepl', '/bashRepl',
+    '/waitForThreads', '/setContextLimit', '/setThreadPriority',
+    '/authStatus', '/login', '/logout'
   ];
 
   // Command mutation

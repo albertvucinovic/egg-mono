@@ -283,6 +283,14 @@ Utility:
   /schedulers                    - Show active schedulers
   /waitForThreads <ids...>       - Wait for threads to complete
   /setContextLimit [limit]       - Set or show max context tokens
+  /setThreadPriority [opts]      - Set/show scheduler priority/timeouts
+  /theme [name]                  - List or switch themes
+  /togglePanel <name>            - Show/hide a panel
+  /toggleBorders                 - Toggle panel borders
+  /enterMode <send|newline>      - Set Enter key behavior
+  /authStatus                    - Show ChatGPT OAuth status
+  /login                         - Start ChatGPT OAuth login
+  /logout                        - Clear ChatGPT OAuth token
   /help                          - Show this help
 
 Shell:
