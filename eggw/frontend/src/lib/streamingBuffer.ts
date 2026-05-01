@@ -17,11 +17,13 @@ class StreamingBuffer {
   // Content chunks - mutable array, O(1) push
   contentChunks: string[] = [];
   reasoningChunks: string[] = [];
+  toolOutputChunks: Map<string, string[]> = new Map();
   toolCalls: Map<string, { name: string; arguments: string }> = new Map();
 
   // Listeners for DOM updates (called on every chunk)
   private contentListeners: Set<StreamingListener> = new Set();
   private reasoningListeners: Set<StreamingListener> = new Set();
+  private toolOutputListeners: Set<StreamingListener> = new Set();
 
   // Append content chunk - O(1)
   appendContent(chunk: string) {
@@ -33,6 +35,17 @@ class StreamingBuffer {
   appendReasoning(chunk: string) {
     this.reasoningChunks.push(chunk);
     this.notifyReasoningListeners();
+  }
+
+  // Append tool output chunk - O(1). Key is normally the tool_call_id.
+  appendToolOutput(key: string, chunk: string) {
+    const chunks = this.toolOutputChunks.get(key);
+    if (chunks) {
+      chunks.push(chunk);
+    } else {
+      this.toolOutputChunks.set(key, [chunk]);
+    }
+    this.notifyToolOutputListeners();
   }
 
   // Append tool call arguments - O(1)
@@ -50,6 +63,7 @@ class StreamingBuffer {
   clear() {
     this.contentChunks = [];
     this.reasoningChunks = [];
+    this.toolOutputChunks = new Map();
     this.toolCalls = new Map();
   }
 
@@ -60,6 +74,10 @@ class StreamingBuffer {
 
   getReasoning(): string {
     return this.reasoningChunks.join('');
+  }
+
+  getToolOutput(key: string): string {
+    return (this.toolOutputChunks.get(key) || []).join('');
   }
 
   // Subscribe to content updates
@@ -73,12 +91,21 @@ class StreamingBuffer {
     return () => this.reasoningListeners.delete(listener);
   }
 
+  subscribeToolOutput(listener: StreamingListener): () => void {
+    this.toolOutputListeners.add(listener);
+    return () => this.toolOutputListeners.delete(listener);
+  }
+
   private notifyContentListeners() {
     this.contentListeners.forEach(l => l());
   }
 
   private notifyReasoningListeners() {
     this.reasoningListeners.forEach(l => l());
+  }
+
+  private notifyToolOutputListeners() {
+    this.toolOutputListeners.forEach(l => l());
   }
 }
 

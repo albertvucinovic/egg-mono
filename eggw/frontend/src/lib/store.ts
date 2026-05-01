@@ -31,6 +31,13 @@ export interface ToolCall {
   output_decision?: string;
 }
 
+export interface StreamingToolOutput {
+  id: string;
+  name: string;
+  suppressed: boolean;
+  suppressedFrames: number;
+}
+
 export interface SystemLog {
   timestamp: Date;
   message: string;
@@ -67,6 +74,11 @@ interface AppState {
   streamingToolCalls: Record<string, { name: string; arguments: string }>;
   setStreamingToolCalls: (tcs: Record<string, { name: string; arguments: string }>) => void;
   appendToolCallArguments: (tcId: string, name: string, argsDelta: string) => void;
+
+  // Streaming tool output previews (tool_call_id -> metadata; text lives in streamingBuffer)
+  streamingToolOutputs: Record<string, StreamingToolOutput>;
+  setStreamingToolOutputs: (outputs: Record<string, StreamingToolOutput>) => void;
+  upsertStreamingToolOutput: (id: string, name: string, suppressed?: boolean) => void;
 
   // Tool calls
   pendingTools: ToolCall[];
@@ -120,6 +132,7 @@ export const useAppStore = create<AppState>((set) => ({
     streamingReasoning: "",
     streamingReasoningChunks: [],
     streamingToolCalls: {},
+    streamingToolOutputs: {},
     streamingModelKey: null,
     streamingKind: null,
     isStreaming: false,
@@ -176,6 +189,30 @@ export const useAppStore = create<AppState>((set) => ({
           [tcId]: {
             name: name || existing.name,
             arguments: existing.arguments + argsDelta,
+          },
+        },
+      };
+    }),
+
+  // Streaming tool output previews
+  streamingToolOutputs: {},
+  setStreamingToolOutputs: (outputs) => set({ streamingToolOutputs: outputs }),
+  upsertStreamingToolOutput: (id, name, suppressed = false) =>
+    set((state) => {
+      const existing = state.streamingToolOutputs[id] || {
+        id,
+        name: "",
+        suppressed: false,
+        suppressedFrames: 0,
+      };
+      return {
+        streamingToolOutputs: {
+          ...state.streamingToolOutputs,
+          [id]: {
+            id,
+            name: name || existing.name,
+            suppressed: existing.suppressed || suppressed,
+            suppressedFrames: existing.suppressedFrames + (suppressed ? 1 : 0),
           },
         },
       };

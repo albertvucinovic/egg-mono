@@ -11,6 +11,8 @@ export function useSSE(threadId: string | null) {
   const queryClient = useQueryClient();
   const {
     setStreamingToolCalls,
+    setStreamingToolOutputs,
+    upsertStreamingToolOutput,
     appendToolCallArguments,
     setIsStreaming,
     setStreamingModelKey,
@@ -29,6 +31,7 @@ export function useSSE(threadId: string | null) {
     // Clear streaming state
     streamingBuffer.clear();
     setStreamingToolCalls({});
+    setStreamingToolOutputs({});
     setStreamingKind(null);
     setIsStreaming(false);
 
@@ -54,13 +57,14 @@ export function useSSE(threadId: string | null) {
           const data = JSON.parse(e.data);
           const payload = data.payload || {};
           modelKey = payload.model_key || null;
-          streamKind = payload.stream_kind || null;
+          streamKind = payload.stream_kind || payload.purpose || null;
         } catch {
           // Data might not be JSON, ignore
         }
 
         streamingBuffer.clear();
         setStreamingToolCalls({});
+        setStreamingToolOutputs({});
         setStreamingModelKey(modelKey);
         setStreamingKind(streamKind);
         setIsStreaming(true);
@@ -87,6 +91,32 @@ export function useSSE(threadId: string | null) {
           streamingBuffer.appendContent(payload.text);
         }
 
+        if (payload.tool) {
+          const tool = payload.tool;
+          const toolId = tool.id || tool.name || "tool";
+          const toolName = tool.name || "tool";
+          if (toolId) {
+            const streamingState = useAppStore.getState();
+            if (!streamingState.isStreaming) {
+              setIsStreaming(true);
+            }
+            if (streamingState.streamingKind !== "tool") {
+              setStreamingKind("tool");
+            }
+            if (tool.text) {
+              streamingBuffer.appendToolOutput(toolId, tool.text);
+            }
+            // Only update React state when a tool output block first appears,
+            // or when the preview limiter emits a suppressed indicator. Text
+            // chunks go directly to streamingBuffer/DOM to avoid re-rendering
+            // the whole chat for every output line.
+            const existingOutput = useAppStore.getState().streamingToolOutputs[toolId];
+            if (!existingOutput || tool.suppressed) {
+              upsertStreamingToolOutput(toolId, toolName, !!tool.suppressed);
+            }
+          }
+        }
+
         // Tool calls still go through Zustand (less frequent, acceptable)
         if (payload.tool_call) {
           const tc = payload.tool_call;
@@ -107,6 +137,7 @@ export function useSSE(threadId: string | null) {
       try {
         streamingBuffer.clear();
         setStreamingToolCalls({});
+        setStreamingToolOutputs({});
         setStreamingModelKey(null);
         setStreamingKind(null);
         setIsStreaming(false);
@@ -139,6 +170,7 @@ export function useSSE(threadId: string | null) {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         addSystemLog(`Tool executing: ${payload.name || "unknown"}`, "info");
+        setStreamingKind("tool");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
@@ -211,6 +243,8 @@ export function useSSE(threadId: string | null) {
   }, [
     threadId,
     setStreamingToolCalls,
+    setStreamingToolOutputs,
+    upsertStreamingToolOutput,
     appendToolCallArguments,
     setIsStreaming,
     setStreamingModelKey,

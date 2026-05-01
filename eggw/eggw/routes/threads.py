@@ -265,7 +265,25 @@ async def get_thread_state_endpoint(thread_id: str):
     state = thread_state(core.db, thread_id)
     root_id = get_thread_root_id(thread_id)
 
+    streaming_kind = None
+    streaming_invoke_id = None
+    try:
+        row_open = core.db.current_open(thread_id)
+        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        if (
+            row_open is not None
+            and isinstance(row_open["lease_until"], str)
+            and row_open["lease_until"] > now_iso
+        ):
+            streaming_kind = row_open["purpose"]
+            streaming_invoke_id = row_open["invoke_id"]
+    except Exception:
+        streaming_kind = None
+        streaming_invoke_id = None
+
     return {
         "state": state,
+        "streaming_kind": streaming_kind,
+        "streaming_invoke_id": streaming_invoke_id,
         "scheduler_running": root_id in core.active_schedulers,
     }

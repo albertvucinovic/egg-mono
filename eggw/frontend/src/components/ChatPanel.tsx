@@ -48,6 +48,12 @@ function preprocessLatex(content: string): string {
   return processed;
 }
 
+function toolStreamSavingText(name: string, frames: number = 0): string {
+  const framesList = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const glyph = framesList[Math.max(0, frames) % framesList.length] || "…";
+  return `${glyph} tool${name ? ` ${name}` : ""}: preview limit reached; saving output only`;
+}
+
 interface MessageBlockProps {
   message: Message;
   showBorders?: boolean;
@@ -302,14 +308,17 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
   const streamingReasoningRef = useRef<HTMLDivElement>(null);
+  const streamingToolOutputRefs = useRef<Record<string, HTMLPreElement | null>>({});
   const lastContentIndexRef = useRef(0);
   const lastReasoningIndexRef = useRef(0);
+  const lastToolOutputIndexRef = useRef<Record<string, number>>({});
 
   const {
     currentThreadId,
     messages,
     setMessages,
     streamingToolCalls,
+    streamingToolOutputs,
     streamingModelKey,
     streamingKind,
     isStreaming,
@@ -370,7 +379,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
   // Re-runs when isStreaming changes to catch up with buffered content when refs become available
   useEffect(() => {
     // Import here to avoid SSR issues
-    const { streamingBuffer } = require("@/lib/streamingBuffer");
+    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
 
     const handleContentUpdate = () => {
       if (!streamingContentRef.current) return;
@@ -439,17 +448,60 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
     };
   }, [isStreaming]);
 
+  // Subscribe to streaming tool-output preview updates. Like text streaming,
+  // this writes chunks directly to DOM so large/fast tool output does not
+  // trigger a React render per chunk.
+  useEffect(() => {
+    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+
+    const handleToolOutputUpdate = () => {
+      streamingBuffer.toolOutputChunks.forEach((chunks, toolId) => {
+        const el = streamingToolOutputRefs.current[toolId];
+        if (!el) return;
+        const lastIndex = lastToolOutputIndexRef.current[toolId] || 0;
+        for (let i = lastIndex; i < chunks.length; i++) {
+          el.appendChild(document.createTextNode(chunks[i]));
+        }
+        lastToolOutputIndexRef.current[toolId] = chunks.length;
+      });
+
+      scrollToBottom();
+    };
+
+    const unsubToolOutput = streamingBuffer.subscribeToolOutput(handleToolOutputUpdate);
+
+    if (isStreaming) {
+      const timeoutId = setTimeout(() => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(handleToolOutputUpdate);
+        });
+      }, 0);
+      return () => {
+        clearTimeout(timeoutId);
+        unsubToolOutput();
+      };
+    }
+
+    return () => {
+      unsubToolOutput();
+    };
+  }, [isStreaming, streamingToolOutputs]);
+
   // Reset DOM state when streaming stops
   useEffect(() => {
     if (!isStreaming) {
       lastContentIndexRef.current = 0;
       lastReasoningIndexRef.current = 0;
+      lastToolOutputIndexRef.current = {};
       if (streamingContentRef.current) {
         streamingContentRef.current.textContent = '';
       }
       if (streamingReasoningRef.current) {
         streamingReasoningRef.current.textContent = '';
       }
+      Object.values(streamingToolOutputRefs.current).forEach((el) => {
+        if (el) el.textContent = '';
+      });
     }
   }, [isStreaming]);
 
@@ -514,9 +566,9 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
     }
   }, [isStreaming]);
 
-  // Scroll to bottom when new streaming tool calls appear (tool headers)
+  // Scroll to bottom when new streaming tool calls or tool outputs appear (tool headers)
   useEffect(() => {
-    if (Object.keys(streamingToolCalls).length > 0 && stickToBottomRef.current) {
+    if ((Object.keys(streamingToolCalls).length > 0 || Object.keys(streamingToolOutputs).length > 0) && stickToBottomRef.current) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           if (scrollRef.current) {
@@ -530,7 +582,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
         });
       });
     }
-  }, [streamingToolCalls]);
+  }, [streamingToolCalls, streamingToolOutputs]);
 
   // Scroll to bottom when UI-only messages are added (e.g., /cost, /help)
   useEffect(() => {
@@ -563,6 +615,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
     isStreaming && streamingKind === "llm"
       ? formatStreamingTps(streamingTps)
       : formatStreamingTps(lastMessageWithTps?.tps ?? null);
+  const streamingRoleLabel = streamingKind === "tool" ? "Tool" : "Assistant";
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -600,7 +653,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                 style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
               >
                 <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                  <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>Assistant</span>
+                  <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>{streamingRoleLabel}</span>
                   {streamingModelKey && (
                     <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
                   )}
@@ -634,6 +687,47 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                     wordBreak: "break-word",
                   }}
                 />
+
+                {/* Streaming tool output preview */}
+                {Object.keys(streamingToolOutputs).length > 0 && (
+                  <div className="mt-2 space-y-2">
+                    {Object.entries(streamingToolOutputs).map(([toolId, tool]) => (
+                      <details
+                        key={toolId}
+                        open
+                        className={`rounded ${showBorders ? 'border' : ''}`}
+                        style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
+                      >
+                        <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
+                          <span className="font-medium" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>{tool.name || "tool"}</span>
+                          <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                            {toolId.slice(-8)}
+                          </span>
+                          <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
+                        </summary>
+                        <div className="px-2 pb-2">
+                          <pre
+                            ref={(el) => {
+                              streamingToolOutputRefs.current[toolId] = el;
+                            }}
+                            data-testid="streaming-tool-output"
+                            className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words"
+                            style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}
+                          />
+                          {tool.suppressed && (
+                            <div
+                              data-testid="streaming-tool-output-suppressed"
+                              className="mt-2 text-xs animate-pulse"
+                              style={{ color: "var(--muted)" }}
+                            >
+                              {toolStreamSavingText(tool.name, tool.suppressedFrames)}
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    ))}
+                  </div>
+                )}
 
                 {/* Streaming tool calls */}
                 {Object.keys(streamingToolCalls).length > 0 && (

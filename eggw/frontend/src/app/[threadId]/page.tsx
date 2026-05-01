@@ -32,6 +32,7 @@ export default function ThreadPage() {
     setStreamingContent,
     setStreamingReasoning,
     setStreamingToolCalls,
+    setStreamingToolOutputs,
     setStreamingKind,
     panelVisibility,
     togglePanel,
@@ -168,6 +169,7 @@ export default function ThreadPage() {
           setStreamingContent("");
           setStreamingReasoning("");
           setStreamingToolCalls({});
+          setStreamingToolOutputs({});
           setStreamingKind(null);
           setIsStreaming(false);
           // Refetch messages to get the saved partial content from backend
@@ -266,7 +268,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingKind, router]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingToolOutputs, setStreamingKind, router]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);

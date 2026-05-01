@@ -30,6 +30,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     setStreamingContent,
     setStreamingReasoning,
     setStreamingToolCalls,
+    setStreamingToolOutputs,
     setStreamingKind,
     addSystemLog,
     addMessage,
@@ -72,6 +73,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
       setStreamingContent("");
       setStreamingReasoning("");
       setStreamingToolCalls({});
+      setStreamingToolOutputs({});
       setStreamingKind(null);
       setIsStreaming(false);
       // Refetch messages to get the saved partial content from backend

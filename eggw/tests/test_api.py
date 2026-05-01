@@ -124,6 +124,27 @@ class TestThreadOperations:
         assert "state" in data
         assert data["state"] == "waiting_user"  # New thread waits for user
 
+    def test_get_thread_state_includes_stream_kind(self, client):
+        """Thread state exposes active stream purpose for web UI polling."""
+        create_resp = client.post("/api/threads", json={"name": "Streaming Tool Test"})
+        thread_id = create_resp.json()["id"]
+
+        invoke_id = "invoke-tool-state"
+        assert core_state.db.try_open_stream(
+            thread_id,
+            invoke_id,
+            "2999-01-01 00:00:00",
+            owner="test",
+            purpose="tool",
+        )
+
+        response = client.get(f"/api/threads/{thread_id}/state")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "running"
+        assert data["streaming_kind"] == "tool"
+        assert data["streaming_invoke_id"] == invoke_id
+
 
 class TestMessageOperations:
     """Test message sending and retrieval."""
@@ -162,6 +183,71 @@ class TestMessageOperations:
         assert isinstance(data, list)
         assert len(data) >= 1
         assert any(m["content"] == "Test message" for m in data)
+
+
+class TestEventStreaming:
+    """Test SSE event shaping for streaming UI clients."""
+
+    def test_sse_replays_active_tool_stream_with_preview_limit_indicator(self, client):
+        """An eggw client joining mid-tool-stream sees preview + suppressed event."""
+        # Create thread
+        create_resp = client.post("/api/threads", json={"name": "Tool Stream"})
+        thread_id = create_resp.json()["id"]
+        invoke_id = "invoke-tool-sse"
+
+        # Simulate an active tool stream. The SSE endpoint should start from
+        # stream.open and replay the current stream so a joining web client can
+        # reconstruct the same limited preview the TUI shows.
+        assert core_state.db.try_open_stream(
+            thread_id,
+            invoke_id,
+            "2999-01-01 00:00:00",
+            owner="test",
+            purpose="tool",
+        )
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="stream.open",
+            msg_id=os.urandom(10).hex(),
+            invoke_id=invoke_id,
+            payload={"stream_kind": "tool", "model_key": "test-model"},
+        )
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="stream.delta",
+            invoke_id=invoke_id,
+            chunk_seq=1,
+            payload={"tool": {"id": "tc1", "name": "bash", "text": "preview"}},
+        )
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="stream.delta",
+            invoke_id=invoke_id,
+            chunk_seq=2,
+            payload={"tool": {"id": "tc1", "name": "bash", "suppressed": True}},
+        )
+
+        with client.stream("GET", f"/api/threads/{thread_id}/events") as response:
+            assert response.status_code == 200
+            lines = []
+            for line in response.iter_lines():
+                if line:
+                    lines.append(line)
+                if sum(1 for line in lines if line.startswith("data: ")) >= 3:
+                    break
+
+        data_events = [json.loads(line.removeprefix("data: ")) for line in lines if line.startswith("data: ")]
+        assert [event["event_type"] for event in data_events] == [
+            "stream.open",
+            "stream.delta",
+            "stream.delta",
+        ]
+        assert data_events[0]["payload"]["stream_kind"] == "tool"
+        assert data_events[1]["payload"]["tool"]["text"] == "preview"
+        assert data_events[2]["payload"]["tool"]["suppressed"] is True
 
 
 class TestToolCalls:
