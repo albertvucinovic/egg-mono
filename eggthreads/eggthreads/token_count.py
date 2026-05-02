@@ -178,7 +178,13 @@ def _first_delta_ts(db: "ThreadsDB", invoke_id: str) -> Optional[float]:
             payload = {}
         if not isinstance(payload, dict):
             continue
-        if payload.get("text") or payload.get("reason") or payload.get("tool_call") or payload.get("tool"):
+        if (
+            payload.get("text")
+            or payload.get("reason")
+            or payload.get("reasoning_summary")
+            or payload.get("tool_call")
+            or payload.get("tool")
+        ):
             return _event_ts_to_epoch(ts_value)
     return None
 
@@ -262,6 +268,8 @@ def live_llm_tps_for_invoke(
         rs = payload.get("reason")
         if isinstance(rs, str) and rs:
             reasoning_parts.append(rs)
+        # ``reasoning_summary`` is display-only and intentionally excluded
+        # from durable/live reasoning token accounting.
         tc = payload.get("tool_call")
         if isinstance(tc, dict):
             tcid = str(tc.get("id") or tc.get("name") or "")
@@ -805,6 +813,8 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
             rs = payload.get("reason")
             if isinstance(rs, str) and rs:
                 stream_reason_parts.append(rs)
+            # ``reasoning_summary`` is display-only; do not fold it into the
+            # synthetic in-progress assistant message as durable reasoning.
 
             tc = payload.get("tool_call")
             if isinstance(tc, dict):

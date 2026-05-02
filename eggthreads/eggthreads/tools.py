@@ -6,6 +6,31 @@ from typing import Any, Callable, Dict, List
 from .terminal_safety import looks_like_terminal_control_text, sanitize_terminal_text
 
 
+def resolve_tool_timeout_arg(
+    args: Dict[str, Any],
+    *,
+    config_key: str = "_tool_timeout_sec",
+) -> float | None:
+    """Resolve tool subprocess timeout from decoded tool arguments.
+
+    Priority matches the runner helper: LLM/tool-call ``timeout_sec`` first,
+    then the runner-injected config/default timeout under ``config_key``.
+    Invalid or non-positive values are treated as absent, so callers get a
+    single, consistent interpretation across bash/Python implementations.
+    """
+    for candidate in (args.get('timeout_sec'), args.get(config_key)):
+        if candidate is None:
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+
 class ToolRegistry:
     """Simple registry for OpenAI function-call compatible tools.
 
@@ -167,13 +192,8 @@ def create_default_tools() -> ToolRegistry:
         import time as _time
 
         script = args.get('script', '')
-        # Timeout priority: LLM-specified > RunnerConfig > None
-        llm_timeout = args.get('timeout_sec')
-        config_timeout = args.get('_tool_timeout_sec')
-        try:
-            timeout = float(llm_timeout) if llm_timeout is not None else config_timeout
-        except (ValueError, TypeError):
-            timeout = config_timeout
+        # Timeout priority: LLM-specified > RunnerConfig/default > None.
+        timeout = resolve_tool_timeout_arg(args)
         # Cancel check callback - returns True if command should be cancelled
         cancel_check = args.get('_cancel_check')
         # Mirror the async runner: build an explicit argv and optionally
@@ -261,13 +281,8 @@ def create_default_tools() -> ToolRegistry:
 
         script = args.get('script', '')
         thread_id = (args.get('_thread_id') or '').strip()
-        # Timeout priority: LLM-specified > RunnerConfig > None
-        llm_timeout = args.get('timeout_sec')
-        config_timeout = args.get('_tool_timeout_sec')
-        try:
-            timeout = float(llm_timeout) if llm_timeout is not None else config_timeout
-        except (ValueError, TypeError):
-            timeout = config_timeout
+        # Timeout priority: LLM-specified > RunnerConfig/default > None.
+        timeout = resolve_tool_timeout_arg(args)
         # Cancel check callback - returns True if command should be cancelled
         cancel_check = args.get('_cancel_check')
 

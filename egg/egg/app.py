@@ -589,13 +589,44 @@ class EggDisplayApp(
             pass
         finally:
             self.running = False
-            # Cancel watcher task
+            # Cancel background tasks and await their shutdown so asyncio
+            # does not destroy still-pending scheduler/runner tasks on exit.
+            tasks = []
             if self._watch_task:
+                tasks.append(self._watch_task)
+            try:
+                for entry in self.active_schedulers.values():
+                    task = entry.get("task") if isinstance(entry, dict) else None
+                    if task is not None:
+                        tasks.append(task)
+            except Exception:
+                pass
+            if tasks:
+                for task in tasks:
+                    try:
+                        task.cancel()
+                    except Exception:
+                        pass
                 try:
-                    self._watch_task.cancel()
-                    await asyncio.sleep(0)
+                    await asyncio.gather(*tasks, return_exceptions=True)
                 except Exception:
                     pass
+            try:
+                schedulers = [
+                    entry.get("scheduler")
+                    for entry in self.active_schedulers.values()
+                    if isinstance(entry, dict) and entry.get("scheduler") is not None
+                ]
+                await asyncio.gather(
+                    *(sched.shutdown() for sched in schedulers if hasattr(sched, "shutdown")),
+                    return_exceptions=True,
+                )
+            except Exception:
+                pass
+            try:
+                self.active_schedulers.clear()
+            except Exception:
+                pass
             # Stop editor input loop
             try:
                 self.input_panel.editor.running = False

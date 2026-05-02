@@ -229,6 +229,12 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 return True
         return False
 
+    def _event_seq(ev: Dict[str, Any]) -> int:
+        try:
+            return int(ev.get("event_seq"))
+        except Exception:
+            return -1
+
     # Second pass: fold tool_call.* events and tool messages into states,
     # and record global auto-approval intervals.
     for ev in _iter_events(db, thread_id):
@@ -298,30 +304,38 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
         elif ev_type == "tool_call.execution_started":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                states[tcid].execution_started = True
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    tc.execution_started = True
         elif ev_type == "tool_call.summary":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                summary = payload.get("summary")
-                if isinstance(summary, str):
-                    states[tcid].summary = summary
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    summary = payload.get("summary")
+                    if isinstance(summary, str):
+                        tc.summary = summary
         elif ev_type == "tool_call.finished":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                reason = payload.get("reason")
-                if isinstance(reason, str):
-                    states[tcid].finished_reason = reason
-                out = payload.get('output')
-                if out is not None:
-                    states[tcid].finished_output = str(out)
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    reason = payload.get("reason")
+                    if isinstance(reason, str):
+                        tc.finished_reason = reason
+                    out = payload.get('output')
+                    if out is not None:
+                        tc.finished_output = str(out)
         elif ev_type == "tool_call.output_approval":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                decision = payload.get("decision")
-                if isinstance(decision, str):
-                    states[tcid].output_decision = decision
-                # Preserve full payload for later use when publishing
-                states[tcid].last_output_approval_payload = payload
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    decision = payload.get("decision")
+                    if isinstance(decision, str):
+                        tc.output_decision = decision
+                    # Preserve full payload for later use when publishing
+                    tc.last_output_approval_payload = payload
         elif ev_type == "msg.create":
             # Final published tool result
             try:
@@ -336,7 +350,9 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                     continue
                 # Also skip if this is after continue boundary and belongs to a continued tool call
                 if tcid in states and not _should_skip_tc_event(ev, tcid):
-                    states[tcid].published = True
+                    tc = states[tcid]
+                    if _event_seq(ev) > tc.parent_event_seq:
+                        tc.published = True
 
     # Finalize global intervals: if auto-approval was still active at the
     # end of the log, close the interval with an open-ended end (None).
@@ -386,16 +402,17 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
     """Return the event_seq of the last *LLM* stream boundary for a thread.
 
     Boundaries are either:
-      - a stream.close whose invoke_id saw LLM-style deltas (``text`` or
-        ``reason`` fields), or
+      - a stream.close whose invoke_id saw LLM-style deltas (``text``,
+        ``reason``, or display-only ``reasoning_summary`` fields), or
       - a control.interrupt whose payload.old_invoke_id matches such an
         invoke_id.
 
     We intentionally ignore stream.close events that belong purely to
     tool-execution streams (RA2/RA3). Those streams only emit deltas
-    with a ``tool`` field (and no top-level ``text``/``reason``),
-    whereas LLM streams (RA1) emit deltas with ``text`` and/or
-    ``reason`` keys.
+    with a ``tool`` field (and no top-level ``text``/``reason`` /
+    ``reasoning_summary`` / ``tool_call``), whereas LLM streams (RA1)
+    emit text, durable reasoning, display-only summaries, and/or tool-call
+    argument deltas.
 
     This distinction matters because RA1 (LLM turns) should be driven by
     user/tool messages that appear *after* the last LLM turn finishes or
@@ -458,7 +475,12 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
                 payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
             except Exception:
                 payload = {}
-            if isinstance(payload, dict) and ("text" in payload or "reason" in payload):
+            if isinstance(payload, dict) and (
+                "text" in payload
+                or "reason" in payload
+                or "reasoning_summary" in payload
+                or "tool_call" in payload
+            ):
                 if isinstance(inv, str) and inv:
                     llm_invokes.add(inv)
         elif t == "stream.close" and isinstance(inv, str) and inv in llm_invokes:

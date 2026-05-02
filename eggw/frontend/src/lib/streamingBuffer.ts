@@ -17,6 +17,7 @@ class StreamingBuffer {
   // Content chunks - mutable array, O(1) push
   contentChunks: string[] = [];
   reasoningChunks: string[] = [];
+  reasoningSummaryChunks: string[] = [];
   toolOutputChunks: Map<string, string[]> = new Map();
   toolCalls: Map<string, { name: string; arguments: string }> = new Map();
 
@@ -34,6 +35,12 @@ class StreamingBuffer {
   // Append reasoning chunk - O(1)
   appendReasoning(chunk: string) {
     this.reasoningChunks.push(chunk);
+    this.notifyReasoningListeners();
+  }
+
+  // Append display-only reasoning summary chunk - O(1)
+  appendReasoningSummary(chunk: string) {
+    this.reasoningSummaryChunks.push(chunk);
     this.notifyReasoningListeners();
   }
 
@@ -63,6 +70,7 @@ class StreamingBuffer {
   clear() {
     this.contentChunks = [];
     this.reasoningChunks = [];
+    this.reasoningSummaryChunks = [];
     this.toolOutputChunks = new Map();
     this.toolCalls = new Map();
   }
@@ -74,6 +82,10 @@ class StreamingBuffer {
 
   getReasoning(): string {
     return this.reasoningChunks.join('');
+  }
+
+  getReasoningSummary(): string {
+    return this.reasoningSummaryChunks.join('');
   }
 
   getToolOutput(key: string): string {

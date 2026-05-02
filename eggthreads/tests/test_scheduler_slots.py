@@ -1544,3 +1544,118 @@ def test_runner_config_llm_concurrency_alias():
     cfg2 = RunnerConfig(max_concurrent_threads=7, max_concurrent_llm_threads=3)
     assert cfg2.effective_max_concurrent_llm_threads == 3
     assert cfg2.max_concurrent_tool_threads is None
+
+
+def test_scheduler_cancellation_awaits_running_drive_tasks(tmp_path):
+    """Cancelling run_forever should cancel/await child drive tasks.
+
+    Regression coverage for the TUI warning "Task was destroyed but it is
+    pending!" pointing at the drive task awaiting ThreadRunner.run_once().
+    """
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    _make_thread_runnable(db, root)
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def mock_run_once(self):
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def run_test():
+        scheduler = SubtreeScheduler(db, root, llm=MagicMock(), config=RunnerConfig())
+        with patch('eggthreads.runner.ThreadRunner.run_once', mock_run_once):
+            task = asyncio.create_task(scheduler.run_forever(poll_sec=0.01))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        assert cancelled.is_set()
+
+    asyncio.run(run_test())
+
+
+def test_runner_cancellation_does_not_emit_runner_error(tmp_path):
+    """ThreadRunner cancellation is cleanup, not an LLM/runner error message."""
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    _make_thread_runnable(db, root)
+
+    class SlowLLM:
+        current_model_key = "mock"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            await asyncio.sleep(3600)
+            yield {"type": "done", "message": {"role": "assistant", "content": "late"}}
+
+    async def run_test():
+        runner = ts.ThreadRunner(db, root, llm=SlowLLM(), config=RunnerConfig(lease_ttl_sec=5))
+        task = asyncio.create_task(runner.run_once())
+        deadline = asyncio.get_running_loop().time() + 1
+        while db.current_open(root) is None and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert db.current_open(root) is not None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run_test())
+
+    rows = db.conn.execute("SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'", (root,)).fetchall()
+    payloads = [json.loads(r[0]) for r in rows]
+    assert not any("LLM/runner error" in str(p.get("content", "")) for p in payloads)
+    assert db.current_open(root) is None
+
+
+def test_runner_persists_partial_tool_call_on_provider_transport_error(tmp_path):
+    """If the provider drops after streaming a tool call, keep that tool call."""
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    _make_thread_runnable(db, root)
+
+    class ToolThenBoomLLM:
+        current_model_key = "mock"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            yield {"type": "tool_calls_delta", "delta": [{
+                "id": "call_partial",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"script":"echo hi"}'},
+            }]}
+            raise RuntimeError("Response payload is not completed: <TransferEncodingError: 400>")
+
+    async def run_test():
+        runner = ts.ThreadRunner(db, root, llm=ToolThenBoomLLM(), config=RunnerConfig())
+        assert await runner.run_once() is True
+
+    asyncio.run(run_test())
+
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq",
+        (root,),
+    ).fetchall()
+    payloads = [json.loads(r[0]) for r in rows]
+    assistant = payloads[-1]
+    assert assistant["role"] == "assistant"
+    assert assistant["incomplete"] is True
+    assert assistant["tool_calls"][0]["id"] == "call_partial"
+    assert assistant["tool_calls"][0]["function"]["arguments"] == '{"script":"echo hi"}'
+    assert not any("LLM/runner error" in str(p.get("content", "")) for p in payloads)
