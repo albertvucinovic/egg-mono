@@ -626,6 +626,15 @@ Return the effective ToolsConfig for a thread.
 This walks ``tools.config`` events in order and applies their
 payloads to an initially permissive configuration.
 
+### `inherit_tools_config_for_child(db: 'ThreadsDB', parent_thread_id: 'str', child_thread_id: 'str') -> 'None'`
+
+Copy the parent's effective tools config onto a newly-created child.
+
+Tool configuration is copied by value at child creation time rather than
+resolved dynamically through ancestors. This gives new children the
+parent's current restrictions while still allowing trusted programmatic
+code to widen the child later with the normal tools configuration helpers.
+
 ### `set_thread_tools_enabled(db: 'ThreadsDB', thread_id: 'str', enabled: 'bool') -> 'None'`
 
 Enable or disable LLM tools for a thread (RA1 exposure).

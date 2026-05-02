@@ -231,7 +231,8 @@ def create_root_thread(db: ThreadsDB, name: Optional[str] = None, initial_model_
 
 
 def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = None, initial_model_key: Optional[str] = None,
-                        models_path: str = "models.json", all_models_path: str | None = None) -> str:
+                        models_path: str = "models.json", all_models_path: str | None = None,
+                        inherit_tools_config: bool = True) -> str:
     """Create a child thread branching from a parent thread.
 
     Child threads inherit the parent's model configuration by default
@@ -246,6 +247,10 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
             inherits from the parent thread's current model.
         models_path: Path to models.json configuration file.
         all_models_path: Path to all-models.json catalog file (optional).
+        inherit_tools_config: When True (default), copy the parent's
+            current effective tools configuration onto the child at creation
+            time. Trusted programmatic callers may set this False or widen the
+            child afterwards with the tools configuration helpers.
 
     Returns:
         The new child thread's unique ID (ULID format).
@@ -272,6 +277,20 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     # Do not eagerly persist sandbox configuration on the child.
     # The effective sandbox config is resolved by inheriting the nearest
     # ancestor's sandbox.config event at execution time.
+
+    # Tool capability config is intentionally copied by value at creation time
+    # (like model config) rather than resolved dynamically through ancestors.
+    # This gives new children the parent's current restrictions without making
+    # later parent changes silently mutate existing children. Programmatic code
+    # with DB/API access can still widen the child explicitly after creation.
+    if inherit_tools_config:
+        try:
+            from .tools_config import inherit_tools_config_for_child
+            inherit_tools_config_for_child(db, parent_id, tid)
+        except Exception:
+            # Best-effort: thread creation should not fail solely because an
+            # advisory tools.config event could not be copied.
+            pass
 
     return tid
 

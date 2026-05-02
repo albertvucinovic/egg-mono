@@ -10,6 +10,7 @@ from eggthreads import (
     enable_tool_for_thread,
     set_thread_allow_raw_tool_output,
     get_thread_tools_config,
+    get_tool_statuses_for_config,
     create_default_tools,
 )
 
@@ -62,37 +63,43 @@ async def cmd_tools_status(thread_id: str) -> CommandResponse:
         lines = []
 
         # Overall tools status
-        tools_status = "ENABLED" if cfg.llm_tools_enabled else "DISABLED"
+        llm_tools_enabled = bool(getattr(cfg, "llm_tools_enabled", True))
+        tools_status = "ENABLED" if llm_tools_enabled else "DISABLED"
         lines.append(f"Tools for LLM: {tools_status}")
 
         # Secrets mode
-        secrets_mode = "raw (secrets visible)" if cfg.allow_raw_tool_output else "masked"
+        allow_raw_tool_output = bool(getattr(cfg, "allow_raw_tool_output", False))
+        secrets_mode = "raw (secrets visible)" if allow_raw_tool_output else "masked"
         lines.append(f"Tool output secrets: {secrets_mode}")
+
+        allowed_tools = getattr(cfg, "allowed_tools", None)
+        if allowed_tools is None:
+            lines.append("Tool allowlist: all registered tools")
+            allowed_tools_data = None
+        else:
+            allowed_tools_data = sorted(allowed_tools)
+            allowed_names = ", ".join(allowed_tools_data) or "(none)"
+            lines.append(f"Tool allowlist: {allowed_names}")
 
         lines.append("")
         lines.append("Available tools:")
 
         # List all tools with their status
-        disabled_set = {n.lower() for n in cfg.disabled_tools}
         tool_statuses = []
-        for name, info in sorted(available_tools.items()):
-            is_disabled = name.lower() in disabled_set
-            is_local_only = info.get("local_only", False)
-
-            status_parts = []
-            if is_disabled:
-                status_parts.append("DISABLED")
-            else:
-                status_parts.append("enabled")
-            if is_local_only:
+        for tool_status in get_tool_statuses_for_config(cfg, available_tools):
+            status_parts = [tool_status["status_label"]]
+            if tool_status.get("local_only", False):
                 status_parts.append("local-only")
 
             status_str = ", ".join(status_parts)
-            lines.append(f"  {name}: {status_str}")
+            lines.append(f"  {tool_status['name']}: {status_str}")
             tool_statuses.append({
-                "name": name,
-                "enabled": not is_disabled,
-                "local_only": is_local_only,
+                "name": tool_status["name"],
+                "enabled": tool_status["enabled"],
+                "status": tool_status["status"],
+                "disabled": tool_status["disabled"],
+                "allowed_by_allowlist": tool_status["allowed_by_allowlist"],
+                "local_only": tool_status["local_only"],
             })
 
         lines.append("")
@@ -103,9 +110,10 @@ async def cmd_tools_status(thread_id: str) -> CommandResponse:
             success=True,
             message="\n".join(lines),
             data={
-                "llm_tools_enabled": cfg.llm_tools_enabled,
-                "allow_raw_tool_output": cfg.allow_raw_tool_output,
-                "disabled_tools": sorted(cfg.disabled_tools),
+                "llm_tools_enabled": llm_tools_enabled,
+                "allow_raw_tool_output": allow_raw_tool_output,
+                "allowed_tools": allowed_tools_data,
+                "disabled_tools": sorted(getattr(cfg, "disabled_tools", set()) or set()),
                 "tools": tool_statuses,
             },
         )
