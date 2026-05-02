@@ -156,13 +156,14 @@ class ToolCommandsMixin:
     def cmd_toolsStatus(self, arg: str) -> None:
         """Handle /toolsStatus command - report tools configuration and available tools."""
         try:
-            from eggthreads import get_thread_tools_config  # type: ignore
+            from eggthreads import get_thread_tools_config, get_tool_statuses_for_config  # type: ignore
             cfg = get_thread_tools_config(self.db, self.current_thread)
         except Exception as e:
             self.log_system(f'/toolStatus error: {e}')
             return
 
         available_tools = get_available_tools()
+        tool_statuses = get_tool_statuses_for_config(cfg, available_tools)
 
         # Build status message
         lines = []
@@ -175,25 +176,24 @@ class ToolCommandsMixin:
         secrets_mode = 'raw (secrets visible)' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked'
         lines.append(f"Tool output secrets: {secrets_mode}")
 
+        allowed_tools = getattr(cfg, 'allowed_tools', None)
+        if allowed_tools is None:
+            lines.append("Tool allowlist: all registered tools")
+        else:
+            allowed_names = ", ".join(sorted(allowed_tools)) or "(none)"
+            lines.append(f"Tool allowlist: {allowed_names}")
+
         lines.append("")
         lines.append("Available tools:")
 
         # List all tools with their status
-        disabled_set = {n.lower() for n in cfg.disabled_tools}
-        for name, info in sorted(available_tools.items()):
-            is_disabled = name.lower() in disabled_set
-            is_local_only = info.get("local_only", False)
-
-            status_parts = []
-            if is_disabled:
-                status_parts.append("DISABLED")
-            else:
-                status_parts.append("enabled")
-            if is_local_only:
+        for tool_status in tool_statuses:
+            status_parts = [tool_status["status_label"]]
+            if tool_status.get("local_only", False):
                 status_parts.append("local-only")
 
             status_str = ", ".join(status_parts)
-            lines.append(f"  {name}: {status_str}")
+            lines.append(f"  {tool_status['name']}: {status_str}")
 
         lines.append("")
         lines.append("Use /disableTool <name> or /enableTool <name> to control individual tools")

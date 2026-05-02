@@ -14,7 +14,8 @@ Payload schema (all keys optional)::
     {
       "llm_tools_enabled": true | false,
       "disable": ["tool_name", ...],
-      "enable":  ["tool_name", ...]
+      "enable":  ["tool_name", ...],
+      "allow_only": ["tool_name", ...] | null
     }
 
 Semantics:
@@ -26,13 +27,16 @@ Semantics:
     tool call is attempted (RA2/RA3), they are treated as immediately
     finished with a synthetic "tool disabled" output instead of being
     executed.
+  - ``allow_only`` restricts the thread to exactly those tool names.
+    ``null`` clears the allowlist. Disabled tools still win over
+    allowlist entries.
 
 Callers should use the helpers in this module rather than emitting
 ``tools.config`` events directly.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Set, List
+from typing import Any, Mapping, Optional, Set, List
 
 from .db import ThreadsDB
 
@@ -237,6 +241,74 @@ def clear_thread_tool_allowlist(db: ThreadsDB, thread_id: str) -> None:
     """Clear any explicit allowlist, returning to all-tools-minus-disabled."""
 
     _append_tools_config_event(db, thread_id, {"allow_only": None})
+
+
+def get_tool_statuses_for_config(
+    cfg: ToolsConfig,
+    available_tools: Mapping[str, Mapping[str, Any]],
+) -> List[dict[str, Any]]:
+    """Return effective per-tool statuses for a tools configuration.
+
+    ``/toolsStatus`` callers need the same capability decision as RA1/RA3:
+    a tool is usable only when it is in the explicit allowlist (if one is
+    configured) and is not disabled.  This helper centralises that logic so
+    status UIs do not accidentally report allowlist-excluded tools as enabled.
+
+    Each returned dict contains:
+      - ``name``: registered tool name
+      - ``enabled``: effective usability in this thread
+      - ``status``: one of ``"enabled"``, ``"disabled"``, ``"not_allowed"``
+      - ``status_label``: human-readable label for command output
+      - ``disabled``: whether the tool is explicitly disabled
+      - ``allowed_by_allowlist``: whether the allowlist permits the tool
+      - ``local_only``: registry metadata, if present
+    """
+
+    disabled_set = {
+        n.strip().lower()
+        for n in (getattr(cfg, "disabled_tools", None) or set())
+        if isinstance(n, str) and n.strip()
+    }
+
+    allowed_raw = getattr(cfg, "allowed_tools", None)
+    allowed_set: Optional[Set[str]]
+    if allowed_raw is None:
+        allowed_set = None
+    else:
+        allowed_set = {
+            n.strip().lower()
+            for n in allowed_raw
+            if isinstance(n, str) and n.strip()
+        }
+
+    statuses: List[dict[str, Any]] = []
+    for name, info in sorted(available_tools.items()):
+        key = name.strip().lower() if isinstance(name, str) else ""
+        is_disabled = key in disabled_set
+        allowed_by_allowlist = allowed_set is None or key in allowed_set
+        enabled = bool(key) and allowed_by_allowlist and not is_disabled
+
+        if is_disabled:
+            status = "disabled"
+            status_label = "DISABLED"
+        elif not allowed_by_allowlist:
+            status = "not_allowed"
+            status_label = "not allowed"
+        else:
+            status = "enabled"
+            status_label = "enabled"
+
+        statuses.append({
+            "name": name,
+            "enabled": enabled,
+            "status": status,
+            "status_label": status_label,
+            "disabled": is_disabled,
+            "allowed_by_allowlist": allowed_by_allowlist,
+            "local_only": bool((info or {}).get("local_only", False)),
+        })
+
+    return statuses
 
 
 # -------- Subtree helpers -------------------------------------------------

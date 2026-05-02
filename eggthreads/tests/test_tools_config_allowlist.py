@@ -54,6 +54,35 @@ def test_tools_config_allowlist_parses_and_disables_override(tmp_path):
     assert not cfg.is_tool_allowed("blocked_tool")
 
 
+def test_tool_statuses_reflect_allowlist_and_disabled_tools(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+
+    ts.set_thread_tool_allowlist(db, tid, ["allowed_tool", "disabled_tool"])
+    ts.disable_tool_for_thread(db, tid, "disabled_tool")
+    cfg = ts.get_thread_tools_config(db, tid)
+
+    statuses = {
+        item["name"]: item
+        for item in ts.get_tool_statuses_for_config(
+            cfg,
+            {
+                "allowed_tool": {"local_only": False},
+                "disabled_tool": {"local_only": False},
+                "other_tool": {"local_only": True},
+            },
+        )
+    }
+
+    assert statuses["allowed_tool"]["enabled"] is True
+    assert statuses["allowed_tool"]["status"] == "enabled"
+    assert statuses["disabled_tool"]["enabled"] is False
+    assert statuses["disabled_tool"]["status"] == "disabled"
+    assert statuses["other_tool"]["enabled"] is False
+    assert statuses["other_tool"]["status"] == "not_allowed"
+    assert statuses["other_tool"]["local_only"] is True
+
+
 class _ToolCallingLLM:
     current_model_key = "test-model"
 

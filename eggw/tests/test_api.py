@@ -408,6 +408,31 @@ class TestCommands:
         assert data["success"] is True
         assert "Available commands" in data["message"]
 
+    def test_tools_status_reflects_thread_tool_allowlist(self, client):
+        """/toolsStatus should report effective tools after set_thread_tool_allowlist."""
+        create_resp = client.post("/api/threads", json={"name": "Tools Status Test"})
+        thread_id = create_resp.json()["id"]
+
+        import eggthreads as ts
+
+        ts.set_thread_tool_allowlist(core_state.db, thread_id, ["bash"])
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/toolsStatus"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["allowed_tools"] == ["bash"]
+
+        statuses = {item["name"]: item for item in data["data"]["tools"]}
+        assert statuses["bash"]["enabled"] is True
+        assert statuses["bash"]["status"] == "enabled"
+        assert statuses["python"]["enabled"] is False
+        assert statuses["python"]["status"] == "not_allowed"
+        assert "python: not allowed" in data["message"]
+
 
 # Run tests
 if __name__ == "__main__":
