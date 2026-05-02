@@ -208,8 +208,128 @@ def test_start_docker_container_masks_egg_and_outputs(monkeypatch, tmp_path):
     assert f"{tmp_path.resolve()}:/workspace" in joined
     assert ":/workspace/.egg:ro" in joined
     assert ":/workspace/.egg_outputs:ro" in joined
+    assert f"{tmp_path.resolve()}/.egg_outputs/{tid}:/workspace/.egg_outputs/{tid}:ro" in joined
+    assert "--user" in argv
     assert f"egg.db_hash={ts.docker_session_db_hash(db)}" in joined
     assert sid
+
+
+def test_start_docker_container_applies_sandbox_mount_policy(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        settings={
+            "provider": "docker",
+            "network": {"allowedDomains": []},
+            "filesystem": {
+                "allowWrite": ["writes"],
+                "denyRead": ["secret"],
+                "denyWrite": ["readonly"],
+            },
+        },
+        reason="test",
+    )
+    cfg = ts.get_thread_session_config(db, tid)
+    # Explicitly enable the REPL session after sandbox setup so this test only
+    # inspects Docker argv construction.
+    ts.enable_thread_session(db, tid, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, tid)
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    calls = []
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_inspect_running", lambda name: None)
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(ts.eggthreads.session.subprocess, "run", fake_run)
+
+    ts.eggthreads.session._start_docker_container(db, tid, cfg, "egg-test", bridge, runtime)
+
+    argv = calls[-1]
+    joined = "\n".join(argv)
+    assert "--network\nnone" in joined
+    assert f"{tmp_path.resolve()}:/workspace:ro" in joined
+    assert f"{(tmp_path / 'writes').resolve()}:/workspace/writes" in joined
+    assert ":/workspace/secret:ro" in joined
+    assert ":/workspace/readonly:ro" in joined
+    assert "--cap-drop\nALL" in joined
+
+
+def test_start_docker_container_mounts_workspace_rw_when_allowwrite_omitted(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.set_thread_sandbox_config(
+        db,
+        tid,
+        enabled=True,
+        settings={
+            "provider": "docker",
+            "network": "none",
+            "filesystem": {"denyRead": ["secret"]},
+        },
+        reason="test",
+    )
+    ts.enable_thread_session(db, tid, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, tid)
+    bridge = tmp_path / "bridge"
+    runtime = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime.mkdir()
+    calls = []
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_inspect_running", lambda name: None)
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(ts.eggthreads.session.subprocess, "run", fake_run)
+
+    ts.eggthreads.session._start_docker_container(db, tid, cfg, "egg-test", bridge, runtime)
+
+    joined = "\n".join(calls[-1])
+    assert f"{tmp_path.resolve()}:/workspace" in joined
+    assert f"{tmp_path.resolve()}:/workspace:ro" not in joined
+    assert ":/workspace/secret:ro" in joined
+
+
+def test_tool_output_stash_is_thread_scoped(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+
+    from eggthreads.runner import stash_tool_output_and_build_preview
+
+    preview, saved = stash_tool_output_and_build_preview(
+        db,
+        tid,
+        "tc_test",
+        "\n".join(f"line {i}" for i in range(100)),
+        max_lines=1,
+        max_chars=20,
+    )
+
+    assert saved
+    assert Path(saved).parent == tmp_path / ".egg_outputs" / tid
+    assert f".egg_outputs/{tid}/" in preview
 
 
 def test_docker_session_status_unavailable(monkeypatch, tmp_path):

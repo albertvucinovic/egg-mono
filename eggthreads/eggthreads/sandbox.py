@@ -98,7 +98,40 @@ def get_mandatory_protected_paths() -> List[str]:
         str(sandbox_dir),
         str((sandbox_dir / "default.json").resolve()),
         str(egg_dir),
+        str((egg_dir.parent / ".egg_outputs").resolve()),
     ]
+
+
+def _mandatory_protected_paths_for_working_dir(working_dir: Optional[Path] = None) -> List[Path]:
+    """Return non-overridable Egg-private paths for a specific workspace."""
+
+    paths: List[Path] = []
+    try:
+        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        paths.append((wd / ".egg").resolve())
+        paths.append((wd / ".egg_outputs").resolve())
+    except Exception:
+        pass
+    for raw in get_mandatory_protected_paths():
+        try:
+            paths.append(Path(raw).resolve())
+        except Exception:
+            continue
+    # Keep broader ancestors first and drop nested duplicates.
+    out: List[Path] = []
+    for p in sorted(set(paths), key=lambda item: len(item.parts)):
+        if any(p == existing or _is_relative_to_path(p, existing) for existing in out):
+            continue
+        out.append(p)
+    return out
+
+
+def _is_relative_to_path(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
 
 
 _default_docker_image_cache = None
@@ -180,8 +213,9 @@ def apply_mandatory_protections(provider_name: str, settings: Dict[str, Any],
     # Make a copy to avoid modifying original
     result = copy.deepcopy(settings) if isinstance(settings, dict) else {}
     
-    # Get mandatory protected paths
-    protected_paths = get_mandatory_protected_paths()
+    # Get mandatory protected paths. These are injected last and are not
+    # overridable by user config.
+    protected_paths = [str(p) for p in _mandatory_protected_paths_for_working_dir(working_dir)]
     
     if provider_name == "srt":
         # For SRT, we need to update the filesystem.denyWrite list
@@ -341,15 +375,15 @@ class DockerProvider:
         from pathlib import Path
         wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
         cmd.extend(["-v", f"{wd}:{workspace}"])
-        # Protect mandatory paths (e.g., .egg directory)
-        protected_paths = get_mandatory_protected_paths()
-        for protected in protected_paths:
+        # Protect mandatory Egg-private paths last. These restrictions are not
+        # overridable by user-provided extra_mounts.
+        protected_mounts: List[tuple[Path, str]] = []
+        for prot_path in _mandatory_protected_paths_for_working_dir(wd):
             try:
-                prot_path = Path(protected).resolve()
-                if prot_path.exists():
+                if prot_path.exists() or prot_path.name in (".egg", ".egg_outputs"):
                     rel_path = prot_path.relative_to(wd)
                     container_path = str(Path(workspace) / rel_path)
-                    cmd.extend(["-v", f"{prot_path}:{container_path}:ro"])
+                    protected_mounts.append((prot_path, container_path))
             except (ValueError, Exception):
                 # Path not inside working directory or other error
                 pass
@@ -360,6 +394,8 @@ class DockerProvider:
         for arg in extra_args:
             if isinstance(arg, str):
                 cmd.append(arg)
+        for prot_path, container_path in protected_mounts:
+            cmd.extend(["-v", f"{prot_path}:{container_path}:ro"])
         # Set working directory inside container
         cmd.extend(["-w", workspace])
         # Image
@@ -433,11 +469,10 @@ class BwrapProvider:
                "--proc", "/proc",
                "--unshare-net",
                "--chdir", str(wd)]
-        # Protect mandatory paths (e.g., .egg directory)
-        protected_paths = get_mandatory_protected_paths()
-        for protected in protected_paths:
+        # Protect mandatory Egg-private paths last. These restrictions are not
+        # overridable by caller config.
+        for prot_path in _mandatory_protected_paths_for_working_dir(wd):
             try:
-                prot_path = Path(protected).resolve()
                 if prot_path.exists():
                     # Only protect if path is inside working directory
                     _ = prot_path.relative_to(wd)

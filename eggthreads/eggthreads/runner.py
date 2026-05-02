@@ -153,20 +153,16 @@ def stash_tool_output_and_build_preview(
 ) -> tuple:
     """Persist *full_output* to disk and return ``(preview, saved_path)``.
 
-    The file is created under the *thread's own working directory*
-    (``<thread_wd>/.egg_outputs/``) rather than the shared project
-    ``.egg/`` so that subthreads with restricted (subdirectory)
-    sandboxes don't see each other's stashed outputs through their own
-    workspace. Each thread's stash lives in the same filesystem scope
-    as the thread's sandbox — Docker / srt subdir-binds isolate it
-    naturally; bwrap still exposes the whole host ``/`` read-only (a
-    pre-existing property of the bwrap provider), but at least the
-    feature doesn't add new cross-thread disclosure by default.
+    The file is created under a thread-scoped directory inside the thread's
+    working directory (``<thread_wd>/.egg_outputs/<thread_id>/``).  The
+    per-thread level is important when parent/child threads intentionally share
+    a working directory: a child should be able to read its own long-output
+    files, but not parent/sibling stashes.
 
     The returned *preview* contains at most *max_lines*/*max_chars* of
     the output followed by a note that references the saved file via
-    its workspace-relative path (e.g. ``.egg_outputs/abc.txt``), which
-    resolves identically inside and outside the sandbox.
+    its workspace-relative path (e.g. ``.egg_outputs/<thread_id>/abc.txt``),
+    which resolves identically inside and outside the sandbox.
 
     Returns ``(preview, "")`` if the file could not be written — the
     preview will still be returned so the caller can proceed.
@@ -194,7 +190,9 @@ def stash_tool_output_and_build_preview(
                 workspace = _Path(db_path).resolve().parent.parent
             else:
                 workspace = _Path.cwd().resolve()
-        out_dir = workspace / ".egg_outputs"
+        safe_tid = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(thread_id or 'thread'))
+        safe_tid = safe_tid or 'thread'
+        out_dir = workspace / ".egg_outputs" / safe_tid
         out_dir.mkdir(parents=True, exist_ok=True)
         tid_suffix = str(thread_id or "thread")[-8:]
         tcid_suffix = str(tool_call_id or "tc")[-8:]

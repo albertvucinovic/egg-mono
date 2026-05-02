@@ -12,6 +12,7 @@ import os
 import subprocess
 import tempfile
 import time
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -72,7 +73,7 @@ class DockerSessionHandle:
     workspace: str
 
 
-_DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-v1"
+_DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-sandbox-v2"
 
 
 def _clean_runtime_part(value: Any, default: str) -> str:
@@ -235,6 +236,197 @@ def docker_session_mount_dir(db: ThreadsDB, runtime_thread_id: str, cfg: Session
         return _ensure_thread_working_directory(db, mount_tid).resolve()
     except Exception:
         return Path.cwd().resolve()
+
+
+def _sandbox_path_values(settings: Dict[str, Any], key: str) -> List[str]:
+    fs = settings.get("filesystem") if isinstance(settings, dict) else None
+    if not isinstance(fs, dict):
+        return []
+    raw = fs.get(key)
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    out: List[str] = []
+    for value in raw:
+        if isinstance(value, str) and value.strip():
+            out.append(value.strip())
+    return out
+
+
+def _resolve_sandbox_path(value: str, mount_dir: Path) -> Optional[Path]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = mount_dir / p
+        return p.resolve()
+    except Exception:
+        return None
+
+
+def _container_workspace_path(host_path: Path, mount_dir: Path, workspace: str) -> Optional[str]:
+    try:
+        rel = host_path.resolve().relative_to(mount_dir.resolve())
+    except Exception:
+        return None
+    container = Path(workspace.rstrip("/") or "/") / rel
+    return str(container)
+
+
+def _is_mount_equal_or_under(path: Path, root: Path) -> bool:
+    try:
+        p = path.resolve()
+        r = root.resolve()
+        return p == r or _is_relative_to(p, r)
+    except Exception:
+        return False
+
+
+def _sandbox_network_to_docker(network: Any, fallback: str) -> str:
+    """Map Egg sandbox network settings to Docker's coarse network modes."""
+
+    if isinstance(network, str) and network.strip():
+        return network.strip()
+    if isinstance(network, dict):
+        allowed = network.get("allowedDomains")
+        denied = network.get("deniedDomains")
+        if isinstance(allowed, list):
+            # Domain-level filtering is not expressible with plain Docker.  Use
+            # coarse semantics: empty allowlist denies all network; a non-empty
+            # allowlist needs network access and relies on external DNS/proxy
+            # controls if stricter domain filtering is required.
+            return "none" if len(allowed) == 0 else (fallback or "bridge")
+        if isinstance(denied, list) and denied:
+            # Docker cannot deny specific domains. Keep the fallback mode.
+            return fallback or "none"
+    return fallback or "none"
+
+
+def _docker_repl_mount_args_from_sandbox(
+    *,
+    mount_dir: Path,
+    workspace: str,
+    sandbox_settings: Dict[str, Any],
+    skip_denied_paths: Optional[List[Path]] = None,
+) -> List[str]:
+    """Translate filesystem sandbox policy into Docker REPL mount flags.
+
+    The persistent REPL container cannot be wrapped per eval, so its direct
+    file I/O boundary must be represented in container mounts.  The workspace
+    is read-write by default; an explicit ``filesystem.allowWrite`` list narrows
+    writes by mounting the workspace read-only and overlaying the allowed paths
+    read-write.  denyRead/denyWrite paths are masked with read-only empty
+    directories where possible.
+    """
+
+    mount_dir = mount_dir.resolve()
+    workspace = workspace or "/workspace"
+    fs = sandbox_settings.get("filesystem") if isinstance(sandbox_settings, dict) else None
+    explicit_allow_write = isinstance(fs, dict) and "allowWrite" in fs
+
+    args: List[str] = ["-v", f"{mount_dir}:{workspace}:ro"]
+
+    allow_paths: List[Path] = []
+    if not explicit_allow_write:
+        allow_paths.append(mount_dir)
+    else:
+        for raw in _sandbox_path_values(sandbox_settings, "allowWrite"):
+            p = _resolve_sandbox_path(raw, mount_dir)
+            if p is not None and _is_mount_equal_or_under(p, mount_dir):
+                allow_paths.append(p)
+
+    # If allowWrite includes the workspace root, the policy grants writes to
+    # the whole thread working directory.  Keep the single root rw mount and
+    # rely on deny masks below for protected paths.
+    root_rw = any(p.resolve() == mount_dir for p in allow_paths)
+    if root_rw:
+        args = ["-v", f"{mount_dir}:{workspace}"]
+    else:
+        for p in sorted({p.resolve() for p in allow_paths}, key=lambda item: len(item.parts)):
+            # Docker creates missing bind sources as root-owned directories, so
+            # create explicit directories to keep ownership predictable.
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            container_path = _container_workspace_path(p, mount_dir, workspace)
+            if container_path:
+                args.extend(["-v", f"{p}:{container_path}"])
+
+    skip_roots = [p.resolve() for p in (skip_denied_paths or [])]
+    denied: List[Path] = []
+    for key in ("denyRead", "denyWrite"):
+        for raw in _sandbox_path_values(sandbox_settings, key):
+            p = _resolve_sandbox_path(raw, mount_dir)
+            if p is None or not _is_mount_equal_or_under(p, mount_dir):
+                continue
+            if any(_is_mount_equal_or_under(p, skip) for skip in skip_roots):
+                # These paths are already masked by fixed REPL safety mounts
+                # (notably .egg/.egg_outputs). Avoid duplicate/nested Docker
+                # bind mounts, which can fail on some Docker versions.
+                continue
+            if any(_is_mount_equal_or_under(p, existing) for existing in denied):
+                # A broader denied ancestor already hides this path.
+                continue
+            # If this path is a broader ancestor of existing denied paths, keep
+            # only the broader mount.
+            denied = [existing for existing in denied if not _is_mount_equal_or_under(existing, p)]
+            if p.exists() and p.is_file():
+                # Masking files with directory bind mounts is not portable.
+                # The containing directory is the safe over-approximation.
+                p = p.parent
+            if _is_mount_equal_or_under(p, mount_dir):
+                denied.append(p)
+
+    for p in sorted({p.resolve() for p in denied}, key=lambda item: len(item.parts)):
+        container_path = _container_workspace_path(p, mount_dir, workspace)
+        if not container_path:
+            continue
+        mask = _session_mask_dir("sandbox", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
+        args.extend(["-v", f"{mask}:{container_path}:ro"])
+
+    return args
+
+
+def _docker_repl_mandatory_mask_args(*, mount_dir: Path, workspace: str, session_id: str) -> List[str]:
+    """Return final non-overridable masks for Egg-private workspace paths."""
+
+    workspace = workspace or "/workspace"
+    mask_dir = _session_mask_dir(session_id, "egg")
+    return ["-v", f"{mask_dir}:{workspace.rstrip('/')}/.egg:ro"]
+
+
+def _safe_thread_output_dir_name(thread_id: str) -> str:
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(thread_id or 'thread'))
+    return safe or 'thread'
+
+
+def _docker_repl_thread_output_mount_args(*, mount_dir: Path, workspace: str, runtime_thread_id: str) -> List[str]:
+    """Expose only this thread's long-output stash inside the REPL container."""
+
+    mount_dir = mount_dir.resolve()
+    workspace = workspace or "/workspace"
+    safe_tid = _safe_thread_output_dir_name(runtime_thread_id)
+    host_dir = mount_dir / ".egg_outputs" / safe_tid
+    try:
+        host_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    container_dir = str(Path(workspace.rstrip("/") or "/") / ".egg_outputs" / safe_tid)
+    return ["-v", f"{host_dir}:{container_dir}:ro"]
+
+
+def _prepare_outputs_mask_dir(session_id: str, runtime_thread_id: str) -> Path:
+    """Create an empty .egg_outputs mask with this thread's mountpoint."""
+
+    mask_dir = _session_mask_dir(session_id, "egg_outputs")
+    safe_tid = _safe_thread_output_dir_name(runtime_thread_id)
+    try:
+        (mask_dir / safe_tid).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return mask_dir
 
 
 def _docker_existing_mount_policy(container_name: str) -> Optional[str]:
@@ -428,11 +620,48 @@ def _start_docker_container(
     workspace = cfg.workspace or "/workspace"
     network = cfg.network or "none"
     mount_dir = docker_session_mount_dir(db, runtime_thread_id, cfg)
-    mask_egg_dir = _session_mask_dir(cfg.session_id or container_name, "egg")
-    mask_outputs_dir = _session_mask_dir(cfg.session_id or container_name, "egg_outputs")
+    mandatory_mask_args = _docker_repl_mandatory_mask_args(
+        mount_dir=mount_dir,
+        workspace=workspace,
+        session_id=cfg.session_id or container_name,
+    )
+    outputs_mask_dir = _prepare_outputs_mask_dir(cfg.session_id or container_name, runtime_thread_id)
+    thread_output_mount_args = _docker_repl_thread_output_mount_args(
+        mount_dir=mount_dir,
+        workspace=workspace,
+        runtime_thread_id=runtime_thread_id,
+    )
+    sandbox_mount_args = ["-v", f"{mount_dir}:{workspace}"]
+    sandbox_effective = False
+    try:
+        from .sandbox import get_thread_sandbox_config, normalize_provider_settings
+
+        sb = get_thread_sandbox_config(db, runtime_thread_id)
+        sandbox_effective = bool(sb.enabled)
+        if sandbox_effective:
+            # Use the thread sandbox policy for persistent REPL mounts. If the
+            # thread's sandbox provider is srt/bwrap, its filesystem/network
+            # policy is still useful and translated onto Docker's coarser model.
+            settings = normalize_provider_settings("docker", dict(sb.settings or {}))
+            # Do not call apply_mandatory_protections("srt", ...) here: that
+            # would inject the whole .egg directory into denyWrite, and this
+            # REPL mount layer has stronger fixed masks for .egg/.egg_outputs
+            # below. We also want missing allowWrite to mean workspace rw by
+            # default, not the Docker provider default's allowWrite=["."].
+            network = _sandbox_network_to_docker(settings.get("network"), network)
+            sandbox_mount_args = _docker_repl_mount_args_from_sandbox(
+                mount_dir=mount_dir,
+                workspace=workspace,
+                sandbox_settings=settings,
+                skip_denied_paths=[mount_dir / ".egg", mount_dir / ".egg_outputs"],
+            )
+    except Exception:
+        sandbox_effective = False
+
     cmd = [
         "docker", "run", "-d", "--init",
         "--name", container_name,
+        "--user", f"{os.getuid()}",
         "--network", network,
         "--label", "egg.kind=rlm-session",
         "--label", f"egg.session_id={cfg.session_id}",
@@ -440,11 +669,14 @@ def _start_docker_container(
         "--label", f"egg.runtime_thread_id={runtime_thread_id}",
         "--label", f"egg.db_hash={docker_session_db_hash(db)}",
         "--label", f"egg.mount_policy={_DOCKER_MOUNT_POLICY}",
+        "--label", f"egg.sandbox_mounts={'on' if sandbox_effective else 'off'}",
         "-v", f"{bridge_dir}:/egg-bridge",
         "-v", f"{runtime_dir}:/egg-runtime:ro",
-        "-v", f"{mount_dir}:{workspace}",
-        "-v", f"{mask_egg_dir}:{workspace.rstrip('/')}/.egg:ro",
-        "-v", f"{mask_outputs_dir}:{workspace.rstrip('/')}/.egg_outputs:ro",
+        *sandbox_mount_args,
+        "-v", f"{outputs_mask_dir}:{workspace.rstrip('/')}/.egg_outputs:ro",
+        *thread_output_mount_args,
+        *mandatory_mask_args,
+        "--cap-drop", "ALL",
         "-w", workspace,
         cfg.image,
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
