@@ -93,3 +93,39 @@ def test_reasoning_delta_is_still_persisted(tmp_path):
     assert assistant["role"] == "assistant"
     assert assistant["content"] == "final"
     assert assistant["reasoning"] == "durable reasoning"
+    assert "reasoning_content" not in assistant
+
+
+def test_reasoning_content_not_round_tripped_without_explicit_encrypted_policy(tmp_path):
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.create_snapshot(db, tid)
+
+    runner = ts.ThreadRunner(db, tid, llm=_ReasoningLLM())
+    assert asyncio.run(runner.run_once()) is True
+
+    ts.append_message(db, tid, "user", "next")
+    ts.create_snapshot(db, tid)
+    captured = []
+
+    class _CaptureLLM:
+        current_model_key = "test-model"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        def set_model_with_config(self, model_key, config):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            captured.extend(messages)
+            yield {"type": "content_delta", "text": "ok"}
+            yield {"type": "done", "message": {"role": "assistant", "content": "ok"}}
+
+    runner2 = ts.ThreadRunner(db, tid, llm=_CaptureLLM())
+    assert asyncio.run(runner2.run_once()) is True
+    assistant_context = [m for m in captured if m.get("role") == "assistant"]
+    assert assistant_context
+    assert all("reasoning_content" not in m for m in assistant_context)

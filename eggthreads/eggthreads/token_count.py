@@ -178,7 +178,13 @@ def _first_delta_ts(db: "ThreadsDB", invoke_id: str) -> Optional[float]:
             payload = {}
         if not isinstance(payload, dict):
             continue
-        if payload.get("text") or payload.get("reason") or payload.get("tool_call") or payload.get("tool"):
+        if (
+            payload.get("text")
+            or payload.get("reason")
+            or payload.get("reasoning_summary")
+            or payload.get("tool_call")
+            or payload.get("tool")
+        ):
             return _event_ts_to_epoch(ts_value)
     return None
 

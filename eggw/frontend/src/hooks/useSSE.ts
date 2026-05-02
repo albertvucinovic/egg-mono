@@ -87,7 +87,7 @@ export function useSSE(threadId: string | null) {
           streamingBuffer.appendReasoning(payload.reason);
         }
 
-        if (payload.reasoning_summary) {
+        if (typeof payload.reasoning_summary === "string" && payload.reasoning_summary) {
           streamingBuffer.appendReasoningSummary(payload.reasoning_summary);
         }
 

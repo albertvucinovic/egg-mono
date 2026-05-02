@@ -293,3 +293,27 @@ class TestDefaultToolTimeoutAPI:
             assert eggthreads.get_default_tool_timeout() == 0
         finally:
             eggthreads.set_default_tool_timeout(original)
+
+
+class TestRunnerToolTimeoutResolution:
+    """Tests shared timeout resolution used by runner display and execution."""
+
+    def test_shared_resolver_uses_llm_timeout_before_config_default(self):
+        from eggthreads.runner import resolve_tool_timeout_sec
+
+        assert resolve_tool_timeout_sec({"timeout_sec": 5}, 30, 60) == 5.0
+
+    def test_shared_resolver_falls_back_for_invalid_or_non_positive_llm_timeout(self):
+        from eggthreads.runner import resolve_tool_timeout_sec
+
+        assert resolve_tool_timeout_sec({"timeout_sec": "bad"}, 7, 30) == 7.0
+        assert resolve_tool_timeout_sec({"timeout_sec": -1}, 7, 30) == 7.0
+        assert resolve_tool_timeout_sec({}, None, 30) == 30.0
+        assert resolve_tool_timeout_sec({}, 0, None) is None
+
+    def test_tool_registry_timeout_resolver_is_shared_by_bash_and_python_tools(self):
+        from eggthreads.tools import resolve_tool_timeout_arg
+
+        assert resolve_tool_timeout_arg({"timeout_sec": 2, "_tool_timeout_sec": 30}) == 2.0
+        assert resolve_tool_timeout_arg({"timeout_sec": "bad", "_tool_timeout_sec": 30}) == 30.0
+        assert resolve_tool_timeout_arg({"timeout_sec": -1, "_tool_timeout_sec": 30}) == 30.0

@@ -934,19 +934,13 @@ class ThreadRunner:
         encrypted_thinking_mode: Optional[str] = None
         # Resolve per-model options from the registry if possible.
         try:
-            if self.llm is not None and current_model:
-                from eggllm import LLMClient as _LLMClient  # type: ignore
-                # We only access the registry via the concrete eggllm
-                # client; other implementations may not expose it.
-                if isinstance(self.llm, _LLMClient):
-                    opts = self.llm.registry.model_options(current_model)  # type: ignore[attr-defined]
-                    if isinstance(opts, dict):
-                        tp = opts.get('thinking_content_policy')
-                        if isinstance(tp, str) and tp.strip():
-                            thinking_policy = tp.strip().lower()
-                        tk = opts.get('thinking_content_key')
-                        if isinstance(tk, str) and tk.strip():
-                            thinking_key = tk.strip()
+            opts = self._model_thinking_options(current_model)
+            tp = opts.get('thinking_content_policy')
+            if isinstance(tp, str) and tp.strip():
+                thinking_policy = tp.strip().lower()
+            tk = opts.get('thinking_content_key')
+            if isinstance(tk, str) and tk.strip():
+                thinking_key = tk.strip()
         except Exception:
             thinking_policy = None
             thinking_key = None

@@ -254,6 +254,24 @@ def test_discover_runner_actionable_ra1_after_llm_boundary(tmp_path):
     assert ra.msg_id == "m-user"
 
 
+def test_reasoning_summary_stream_delta_counts_as_llm_boundary(tmp_path):
+    """Summary-only LLM streams should not re-trigger the same user turn."""
+
+    import eggthreads as ts
+
+    db = _make_db(tmp_path)
+    tid = "thread-summary-boundary"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hi"}, msg_id="m-user")
+    inv = "inv-summary"
+    db.append_event("s-open", tid, "stream.open", {"model_key": "m"}, msg_id="m-asst", invoke_id=inv)
+    db.append_event("s-delta", tid, "stream.delta", {"reasoning_summary": "display"}, invoke_id=inv, chunk_seq=0)
+    db.append_event("s-close", tid, "stream.close", {}, invoke_id=inv)
+
+    assert ts.discover_runner_actionable(db, tid) is None
+
+
 def test_thread_state_waiting_and_running(tmp_path):
     """thread_state reflects TC1/TC4 presence and active streams/RA1.
 
