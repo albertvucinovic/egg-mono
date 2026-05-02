@@ -1619,3 +1619,43 @@ def test_runner_cancellation_does_not_emit_runner_error(tmp_path):
     payloads = [json.loads(r[0]) for r in rows]
     assert not any("LLM/runner error" in str(p.get("content", "")) for p in payloads)
     assert db.current_open(root) is None
+
+
+def test_runner_persists_partial_tool_call_on_provider_transport_error(tmp_path):
+    """If the provider drops after streaming a tool call, keep that tool call."""
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    _make_thread_runnable(db, root)
+
+    class ToolThenBoomLLM:
+        current_model_key = "mock"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            yield {"type": "tool_calls_delta", "delta": [{
+                "id": "call_partial",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"script":"echo hi"}'},
+            }]}
+            raise RuntimeError("Response payload is not completed: <TransferEncodingError: 400>")
+
+    async def run_test():
+        runner = ts.ThreadRunner(db, root, llm=ToolThenBoomLLM(), config=RunnerConfig())
+        assert await runner.run_once() is True
+
+    asyncio.run(run_test())
+
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq",
+        (root,),
+    ).fetchall()
+    payloads = [json.loads(r[0]) for r in rows]
+    assistant = payloads[-1]
+    assert assistant["role"] == "assistant"
+    assert assistant["incomplete"] is True
+    assert assistant["tool_calls"][0]["id"] == "call_partial"
+    assert assistant["tool_calls"][0]["function"]["arguments"] == '{"script":"echo hi"}'
+    assert not any("LLM/runner error" in str(p.get("content", "")) for p in payloads)

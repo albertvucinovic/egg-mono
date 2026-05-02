@@ -310,9 +310,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
   const streamingReasoningRef = useRef<HTMLDivElement>(null);
+  const streamingReasoningSummaryRef = useRef<HTMLDivElement>(null);
   const streamingToolOutputRefs = useRef<Record<string, HTMLPreElement | null>>({});
   const lastContentIndexRef = useRef(0);
   const lastReasoningIndexRef = useRef(0);
+  const lastReasoningSummaryIndexRef = useRef(0);
   const lastToolOutputIndexRef = useRef<Record<string, number>>({});
 
   const {
@@ -460,6 +462,19 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
       lastReasoningIndexRef.current = chunks.length;
     }
 
+    if (streamingReasoningSummaryRef.current) {
+      const chunks = streamingBuffer.reasoningSummaryChunks;
+      if (chunks.length > 0) {
+        const container = document.getElementById('streaming-reasoning-summary-container');
+        if (container) container.style.display = 'block';
+      }
+      for (let i = lastReasoningSummaryIndexRef.current; i < chunks.length; i++) {
+        streamingReasoningSummaryRef.current.appendChild(document.createTextNode(chunks[i]));
+        appended = true;
+      }
+      lastReasoningSummaryIndexRef.current = chunks.length;
+    }
+
     if (appended) scrollToBottom();
   }, [scrollToBottom]);
 
@@ -537,12 +552,16 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
     if (!isStreaming) {
       lastContentIndexRef.current = 0;
       lastReasoningIndexRef.current = 0;
+      lastReasoningSummaryIndexRef.current = 0;
       lastToolOutputIndexRef.current = {};
       if (streamingContentRef.current) {
         streamingContentRef.current.textContent = '';
       }
       if (streamingReasoningRef.current) {
         streamingReasoningRef.current.textContent = '';
+      }
+      if (streamingReasoningSummaryRef.current) {
+        streamingReasoningSummaryRef.current.textContent = '';
       }
       Object.values(streamingToolOutputRefs.current).forEach((el) => {
         if (el) el.textContent = '';
@@ -714,6 +733,23 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                   </summary>
                   <div
                     ref={streamingReasoningRef}
+                    className="mt-2 text-sm whitespace-pre-wrap"
+                    style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
+                  />
+                  </details>
+
+                  {/* Streaming reasoning summary - display-only, not persisted as reasoning */}
+                  <details
+                  open
+                  className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
+                  style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
+                  id="streaming-reasoning-summary-container"
+                  >
+                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+                    Reasoning Summary <span className="text-xs animate-pulse">(streaming...)</span>
+                  </summary>
+                  <div
+                    ref={streamingReasoningSummaryRef}
                     className="mt-2 text-sm whitespace-pre-wrap"
                     style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
                   />

@@ -336,6 +336,12 @@ class FormattingMixin:
             live_tps_text = f" ({live_tps})" if live_tps else ""
             if ls.get('reason'):
                 parts.append(f"\n[Reasoning (streaming){live_tps_text}]\n{ls['reason']}")
+            reasoning_summary = ls.get('reasoning_summary') or {}
+            if isinstance(reasoning_summary, dict) and reasoning_summary.get('active') and reasoning_summary.get('text'):
+                parts.append(
+                    f"\n[Reasoning Summary (streaming){live_tps_text}]\n"
+                    f"{reasoning_summary.get('text')}"
+                )
             for pk in ls.get('tc_order') or []:
                 delta = (ls.get('tc_text') or {}).get(pk, '')
                 if delta:

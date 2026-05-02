@@ -16,6 +16,7 @@ from eggthreads import create_snapshot, EventWatcher, ThreadsDB
 # of provider output live in exactly one place.
 STREAM_STYLE_TEXT: Optional[str] = None           # assistant content: plain
 STREAM_STYLE_REASON: Optional[str] = "dim magenta"
+STREAM_STYLE_REASONING_SUMMARY: Optional[str] = "dim magenta"
 STREAM_STYLE_TOOL_OUTPUT: Optional[str] = "yellow"
 STREAM_STYLE_TOOL_CALL_ARGS: Optional[str] = "dim yellow"
 STREAM_STYLE_TOOL_SUMMARY: Optional[str] = "dim yellow"
@@ -27,6 +28,10 @@ def _new_tool_stream_indicator() -> Dict[str, Any]:
 
 def _new_tool_summary() -> Dict[str, Any]:
     return {"active": False, "name": "", "text": ""}
+
+
+def _new_reasoning_summary() -> Dict[str, Any]:
+    return {"active": False, "text": ""}
 
 
 class StreamingMixin:
@@ -72,6 +77,7 @@ class StreamingMixin:
             "started_at": None,
             "content": "",
             "reason": "",
+            "reasoning_summary": _new_reasoning_summary(),
             "tools": {},
             "tool_stream_indicator": _new_tool_stream_indicator(),
             "tool_summary": _new_tool_summary(),
@@ -115,6 +121,7 @@ class StreamingMixin:
                     "started_at": self._event_started_at_epoch(row_open["opened_at"]),
                     "content": "",
                     "reason": "",
+                    "reasoning_summary": _new_reasoning_summary(),
                     "tools": {},
                     "tool_stream_indicator": _new_tool_stream_indicator(),
                     "tool_summary": _new_tool_summary(),
@@ -223,6 +230,7 @@ class StreamingMixin:
                 "started_at": started_at,
                 "content": "",
                 "reason": "",
+                "reasoning_summary": _new_reasoning_summary(),
                 "tools": {},
                 "tool_stream_indicator": _new_tool_stream_indicator(),
                 "tool_summary": _new_tool_summary(),
@@ -248,6 +256,12 @@ class StreamingMixin:
             if isinstance(rs, str) and rs:
                 self._live_state['reason'] = (self._live_state.get('reason') or '') + rs
                 self._stream_append_on_renderer(rs, style=STREAM_STYLE_REASON)
+            rsum = payload.get('reasoning_summary')
+            if isinstance(rsum, str) and rsum:
+                summary_state = self._live_state.setdefault('reasoning_summary', _new_reasoning_summary())
+                summary_state['active'] = True
+                summary_state['text'] = str(summary_state.get('text') or '') + rsum
+                self._stream_append_on_renderer(rsum, style=STREAM_STYLE_REASONING_SUMMARY)
             tl = payload.get('tool')
             if isinstance(tl, dict):
                 name = tl.get('name') or 'tool'
@@ -276,15 +290,6 @@ class StreamingMixin:
                         order.append(raw_key)
                     text_map[raw_key] = text_map.get(raw_key, '') + frag
                     self._stream_append_on_renderer(frag, style=STREAM_STYLE_TOOL_CALL_ARGS)
-            tsu = payload.get('tool_summary')
-            if isinstance(tsu, dict):
-                summary = tsu.get('summary')
-                if isinstance(summary, str) and summary:
-                    tsummary = self._live_state.setdefault('tool_summary', _new_tool_summary())
-                    tsummary['active'] = True
-                    tsummary['name'] = str(tsu.get('name') or tsummary.get('name') or 'tool')
-                    tsummary['text'] = summary
-                    self._stream_append_on_renderer(f"\n{summary}\n", style=STREAM_STYLE_TOOL_SUMMARY)
         elif t == 'tool_call.summary':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})

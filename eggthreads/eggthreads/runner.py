@@ -374,6 +374,56 @@ def tool_timeout_summary(
     return f"{name} running; timeout in {remaining:.0f}s (limit {limit:.0f}s)"
 
 
+def parse_tool_arguments(arguments: Any) -> Dict[str, Any]:
+    """Return tool arguments as a dict without mutating caller-owned data.
+
+    Tool arguments enter the runner from provider ``tool_calls`` and may be a
+    JSON string, an already-decoded dict, or an arbitrary scalar.  Bash and the
+    generic tool path both need the same interpretation, so keep the coercion in
+    one place instead of letting timeout handling drift between paths.
+    """
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments) if arguments.strip() else {}
+        except Exception:
+            return {"script": arguments}
+    if isinstance(arguments, dict):
+        return dict(arguments)
+    return {"script": str(arguments)}
+
+
+def resolve_tool_timeout_sec(
+    arguments: Any,
+    config_timeout_sec: Optional[float] = None,
+    default_timeout_sec: Optional[float] = None,
+) -> Optional[float]:
+    """Resolve the effective positive timeout for a tool call.
+
+    Priority is intentionally shared by bash and non-bash execution paths:
+
+    1. LLM/tool-call supplied ``timeout_sec`` when it parses as a positive
+       number.
+    2. ``RunnerConfig.tool_timeout_sec`` when set to a positive number.
+    3. Global default timeout when set to a positive number.
+
+    ``None`` means no active timeout.  Invalid or non-positive LLM values are
+    treated as absent and fall back to the next configured source; this matches
+    the intent documented in the tool schemas and avoids misleading countdowns.
+    """
+    args = parse_tool_arguments(arguments)
+    candidates = (args.get('timeout_sec'), config_timeout_sec, default_timeout_sec)
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
 def emit_tool_summary_event(
     db,
     *,
@@ -1136,6 +1186,7 @@ class ThreadRunner:
         # invoke_id/tool_call_id and store only that tail in
         # stream.delta payloads.
         tool_calls_args_so_far: Dict[str, str] = {}
+        tool_calls_names_so_far: Dict[str, str] = {}
 
         # Final sanitation step before calling the provider: make sure that
         # user messages never carry "tool_calls" fields and that tool
@@ -1187,6 +1238,7 @@ class ThreadRunner:
         api_timeout_int = int(api_timeout) if api_timeout > 0 else 0
 
         interrupted = False
+        transport_error_after_output: Optional[BaseException] = None
         try:
             async for raw in self.llm.astream_chat(base_messages, tools=tools_spec_to_use, tool_choice=tool_choice, timeout=api_timeout_int):
                 try:
@@ -1240,11 +1292,8 @@ class ThreadRunner:
                                 type_='stream.delta',
                                 invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
-                                payload={
-                                    'reason': reason,
-                                    'reasoning_summary': True,
-                                    'model_key': current_model,
-                                } if is_reasoning_summary else {'reason': reason, 'model_key': current_model},
+                                payload={'reasoning_summary': reason, 'model_key': current_model}
+                                if is_reasoning_summary else {'reason': reason, 'model_key': current_model},
                             )
                             await asyncio.sleep(0)
                     elif et == 'tool_calls_delta':
@@ -1259,6 +1308,8 @@ class ThreadRunner:
                             tcid = str(tc_delta.get('id') or '')
                             fn = tc_delta.get('function') or {}
                             name = fn.get('name') or ''
+                            if name:
+                                tool_calls_names_so_far[tcid] = str(name)
                             args_full = fn.get('arguments') or ''
                             if not isinstance(args_full, str):
                                 try:
@@ -1316,6 +1367,16 @@ class ThreadRunner:
                         if current_model:
                             assistant_msg['model_key'] = current_model
 
+                        passthrough_skip_keys = {'role'}
+                        # ``reasoning_content`` is the provider-facing key for
+                        # durable reasoning.  Eggthreads normalizes durable
+                        # reasoning into the local ``reasoning`` field above,
+                        # so do not persist a duplicate provider key unless a
+                        # model-specific encrypted/thinking policy explicitly
+                        # needs raw provider fields to round-trip.
+                        if not self._should_preserve_provider_reasoning_content(current_model):
+                            passthrough_skip_keys.add('reasoning_content')
+
                         # Preserve any provider-specific fields returned
                         # by eggllm (e.g. Gemini thought signatures).
                         #
@@ -1325,7 +1386,7 @@ class ThreadRunner:
                         # the model/protocol.
                         if isinstance(final, dict):
                             for k, v in final.items():
-                                if k == 'role':
+                                if k in passthrough_skip_keys:
                                     continue
                                 if k in assistant_msg:
                                     continue
@@ -1378,6 +1439,11 @@ class ThreadRunner:
                         return
                 if interrupted:
                     break
+        except Exception as e:
+            if assistant_text_parts or reasoning_parts or tool_calls_args_so_far:
+                transport_error_after_output = e
+            else:
+                raise
         finally:
             # If the stream was interrupted (e.g. via Ctrl+C removing the
             # lease), we still want to persist whatever partial assistant
@@ -1416,6 +1482,36 @@ class ThreadRunner:
                 except Exception:
                     pass
 
+        if transport_error_after_output is not None:
+            partial_msg: Dict[str, Any] = {'role': 'assistant'}
+            if assistant_text_parts:
+                partial_msg['content'] = ''.join(assistant_text_parts)
+            if reasoning_parts:
+                partial_msg['reasoning'] = ''.join(reasoning_parts)
+            if current_model:
+                partial_msg['model_key'] = current_model
+            if tool_calls_args_so_far:
+                partial_tool_calls = []
+                for tcid, args_full in tool_calls_args_so_far.items():
+                    partial_tool_calls.append({
+                        'id': tcid,
+                        'type': 'function',
+                        'function': {
+                            'name': tool_calls_names_so_far.get(tcid, ''),
+                            'arguments': args_full,
+                        },
+                    })
+                partial_msg['tool_calls'] = partial_tool_calls
+            partial_msg['incomplete'] = True
+            partial_msg['incomplete_reason'] = f'provider stream ended early: {transport_error_after_output}'
+            self.db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=self.thread_id,
+                type_='msg.create',
+                msg_id=os.urandom(10).hex(),
+                payload=partial_msg,
+            )
+
 
     def _get_tool_call_id_normalization_strategy(self, model_key: Optional[str]) -> Optional[str]:
         """Get tool_call_id normalization strategy from provider/model config.
@@ -1443,6 +1539,48 @@ class ThreadRunner:
         except Exception:
             pass
         return None
+
+    def _model_thinking_options(self, model_key: Optional[str]) -> Dict[str, Any]:
+        """Return eggllm model options used for thinking/reasoning policy."""
+        if not model_key or self.llm is None:
+            return {}
+        try:
+            from eggllm import LLMClient as _LLMClient  # type: ignore
+            if not isinstance(self.llm, _LLMClient):
+                return {}
+            opts = self.llm.registry.model_options(model_key)  # type: ignore[attr-defined]
+            return opts if isinstance(opts, dict) else {}
+        except Exception:
+            return {}
+
+    def _should_preserve_provider_reasoning_content(self, model_key: Optional[str]) -> bool:
+        """Whether final ``reasoning_content`` should be kept as provider data.
+
+        Plaintext reasoning is stored locally as ``reasoning`` and then sent
+        under the model's configured thinking key when policy allows. Keeping a
+        duplicate ``reasoning_content`` field makes display-only summary safety
+        depend on every provider adapter never populating that key by mistake.
+
+        The exception is encrypted/provider-opaque thinking modes where the
+        configured key may itself be ``reasoning_content`` and must round-trip
+        exactly.
+        """
+        opts = self._model_thinking_options(model_key)
+        policy = opts.get('thinking_content_policy')
+        key = opts.get('thinking_content_key')
+        if not isinstance(policy, str) or not isinstance(key, str):
+            return False
+        policy_norm = policy.strip().lower()
+        key_norm = key.strip()
+        return bool(
+            key_norm == 'reasoning_content'
+            and policy_norm in (
+                'send all encrypted gemini',
+                'send_all_encrypted_gemini',
+                'last assistant turn encrypted gemini',
+                'last_assistant_turn_encrypted_gemini',
+            )
+        )
 
 
     def _sanitize_messages_for_api(self, messages: List[Dict[str, Any]], model_key: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1769,7 +1907,6 @@ class ThreadRunner:
         can terminate the underlying subprocess when the thread's lease
         is interrupted (e.g. via Ctrl+C in the UI).
         """
-        import json as _json
         import asyncio as _asyncio
         import os as _os
         import signal as _signal
@@ -1777,17 +1914,8 @@ class ThreadRunner:
 
         from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
 
-        # Decode arguments into a script string
-        args = tc.arguments
-        if isinstance(args, str):
-            try:
-                args_obj = _json.loads(args) if args.strip() else {}
-            except Exception:
-                args_obj = {"script": args}
-        elif isinstance(args, dict):
-            args_obj = args
-        else:
-            args_obj = {"script": str(args)}
+        # Decode arguments into a script string.
+        args_obj = parse_tool_arguments(tc.arguments)
         script = (args_obj.get("script") or "").strip()
 
         # Mark execution started
@@ -1858,20 +1986,12 @@ class ThreadRunner:
         # True iff we timed out waiting for the command to complete.
         timed_out = False
 
-        # Determine tool timeout: LLM-specified > config setting > global default (30s)
-        # 0 or negative means no timeout
-        llm_timeout = args_obj.get('timeout_sec')
-        if llm_timeout is not None:
-            try:
-                tool_timeout = float(llm_timeout)
-            except (ValueError, TypeError):
-                tool_timeout = None
-        elif self.cfg is not None and self.cfg.tool_timeout_sec is not None:
-            tool_timeout = self.cfg.tool_timeout_sec
-        else:
-            tool_timeout = _default_tool_timeout_sec
-        # Convert to seconds, None means no timeout
-        tool_timeout_sec = tool_timeout if tool_timeout and tool_timeout > 0 else None
+        # Shared timeout resolution: LLM-specified > config > global default.
+        tool_timeout_sec = resolve_tool_timeout_sec(
+            args_obj,
+            self.cfg.tool_timeout_sec if self.cfg is not None else None,
+            _default_tool_timeout_sec,
+        )
 
         import time as _time
         start_time = _time.time()
@@ -2178,18 +2298,17 @@ class ThreadRunner:
                 # asyncio event loop, which is especially important for
                 # tools like `wait` that may sleep and poll.
                 loop = asyncio.get_running_loop()
-                # Determine tool timeout: config setting > global default (30s)
-                # 0 or negative means no timeout
-                if self.cfg is not None and self.cfg.tool_timeout_sec is not None:
-                    tool_timeout = self.cfg.tool_timeout_sec
-                else:
-                    tool_timeout = _default_tool_timeout_sec
-                tool_timeout_int = int(tool_timeout) if tool_timeout > 0 else None
+                # Shared timeout resolution: LLM-specified > config > global default.
+                tool_timeout_sec = resolve_tool_timeout_sec(
+                    tc.arguments,
+                    self.cfg.tool_timeout_sec if self.cfg is not None else None,
+                    _default_tool_timeout_sec,
+                )
 
                 summary_stop = asyncio.Event()
 
                 async def _summary_watcher() -> None:
-                    if tool_timeout_int is None:
+                    if tool_timeout_sec is None:
                         return
                     start = time.time()
                     last = 0.0
@@ -2197,7 +2316,7 @@ class ThreadRunner:
                         now = time.time()
                         if not last or now - last >= 1.0:
                             last = now
-                            summary = tool_timeout_summary(tc.name or 'tool', tool_timeout_int, start, now=now)
+                            summary = tool_timeout_summary(tc.name or 'tool', tool_timeout_sec, start, now=now)
                             if summary:
                                 try:
                                     emit_tool_summary_event(
@@ -2251,7 +2370,7 @@ class ThreadRunner:
                             tc.arguments,
                             thread_id=self.thread_id,
                             initial_model_key=current_model,
-                            tool_timeout_sec=tool_timeout_int,
+                            tool_timeout_sec=tool_timeout_sec,
                             cancel_check=cancel_check,
                         ),
                     )

@@ -69,7 +69,8 @@ def test_reasoning_summary_delta_streams_but_is_not_persisted(tmp_path):
             (tid,),
         )
     ]
-    assert any(d.get("reason") == "display summary" and d.get("reasoning_summary") is True for d in deltas)
+    assert any(d.get("reasoning_summary") == "display summary" for d in deltas)
+    assert not any(d.get("reason") == "display summary" for d in deltas)
 
     assistant = _messages(db, tid)[-1]
     assert assistant["role"] == "assistant"

@@ -87,6 +87,10 @@ export function useSSE(threadId: string | null) {
           streamingBuffer.appendReasoning(payload.reason);
         }
 
+        if (payload.reasoning_summary) {
+          streamingBuffer.appendReasoningSummary(payload.reasoning_summary);
+        }
+
         if (payload.text) {
           streamingBuffer.appendContent(payload.text);
         }
@@ -114,23 +118,6 @@ export function useSSE(threadId: string | null) {
             if (!existingOutput || tool.suppressed) {
               upsertStreamingToolOutput(toolId, toolName, !!tool.suppressed);
             }
-          }
-        }
-
-        if (payload.tool_summary) {
-          const summary = payload.tool_summary;
-          const toolId = summary.id || summary.tool_call_id || summary.name || "tool";
-          const toolName = summary.name || "tool";
-          const text = typeof summary.summary === "string" ? summary.summary : "";
-          if (toolId && text) {
-            const streamingState = useAppStore.getState();
-            if (!streamingState.isStreaming) {
-              setIsStreaming(true);
-            }
-            if (streamingState.streamingKind !== "tool") {
-              setStreamingKind("tool");
-            }
-            upsertStreamingToolOutput(toolId, toolName, false, text);
           }
         }
 

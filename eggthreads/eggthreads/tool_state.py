@@ -402,16 +402,17 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
     """Return the event_seq of the last *LLM* stream boundary for a thread.
 
     Boundaries are either:
-      - a stream.close whose invoke_id saw LLM-style deltas (``text`` or
-        ``reason`` fields), or
+      - a stream.close whose invoke_id saw LLM-style deltas (``text``,
+        ``reason``, or display-only ``reasoning_summary`` fields), or
       - a control.interrupt whose payload.old_invoke_id matches such an
         invoke_id.
 
     We intentionally ignore stream.close events that belong purely to
     tool-execution streams (RA2/RA3). Those streams only emit deltas
-    with a ``tool`` field (and no top-level ``text``/``reason``),
-    whereas LLM streams (RA1) emit deltas with ``text`` and/or
-    ``reason`` keys.
+    with a ``tool`` field (and no top-level ``text``/``reason`` /
+    ``reasoning_summary`` / ``tool_call``), whereas LLM streams (RA1)
+    emit text, durable reasoning, display-only summaries, and/or tool-call
+    argument deltas.
 
     This distinction matters because RA1 (LLM turns) should be driven by
     user/tool messages that appear *after* the last LLM turn finishes or
@@ -474,7 +475,12 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
                 payload = json.loads(ev.get("payload_json")) if isinstance(ev.get("payload_json"), str) else (ev.get("payload_json") or {})
             except Exception:
                 payload = {}
-            if isinstance(payload, dict) and ("text" in payload or "reason" in payload):
+            if isinstance(payload, dict) and (
+                "text" in payload
+                or "reason" in payload
+                or "reasoning_summary" in payload
+                or "tool_call" in payload
+            ):
                 if isinstance(inv, str) and inv:
                     llm_invokes.add(inv)
         elif t == "stream.close" and isinstance(inv, str) and inv in llm_invokes:
