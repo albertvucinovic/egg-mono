@@ -345,6 +345,60 @@ def emit_tool_stream_delta(
     )
 
 
+def tool_timeout_summary(
+    tool_name: str,
+    timeout_sec: Optional[float],
+    started_at: float,
+    *,
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """Return a one-line timeout countdown for a running tool.
+
+    ``None`` means no timeout is active, so callers should not emit a
+    ``tool_call.summary`` event.  Keeping this as a small pure helper avoids
+    duplicating countdown formatting in bash and Python-tool execution paths.
+    """
+    if timeout_sec is None:
+        return None
+    try:
+        limit = float(timeout_sec)
+        if limit <= 0:
+            return None
+        start = float(started_at)
+        current = time.time() if now is None else float(now)
+    except Exception:
+        return None
+    elapsed = max(0.0, current - start)
+    remaining = max(0.0, limit - elapsed)
+    name = str(tool_name or 'tool')
+    return f"{name} running; timeout in {remaining:.0f}s (limit {limit:.0f}s)"
+
+
+def emit_tool_summary_event(
+    db,
+    *,
+    thread_id: str,
+    invoke_id: Optional[str],
+    tool_call_id: str,
+    tool_name: str = "",
+    summary: str,
+) -> None:
+    """Append a persisted tool_call.summary event for live status display."""
+    if not isinstance(summary, str) or not summary:
+        return
+    db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_='tool_call.summary',
+        invoke_id=invoke_id,
+        payload={
+            'tool_call_id': tool_call_id,
+            'name': tool_name or 'tool',
+            'summary': summary,
+        },
+    )
+
+
 def emit_limited_tool_stream_delta(
     db,
     limiter: ToolStreamPreviewLimiter,
