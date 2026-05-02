@@ -815,5 +815,5 @@
       }
     }
   },
-  "default_model": "openai 120b Local"
+  "default_model": "Pro: GPT-5.5 xhigh"
 }

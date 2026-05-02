@@ -1,0 +1,16 @@
+# Local limiter policy for egg-mono SearXNG.
+#
+# The service is published only on host loopback (127.0.0.1:8888), but
+# inside the container requests arrive from Docker's private bridge IP
+# (usually 172.16.0.0/12), not from 127.0.0.1. Pass-list local/private
+# ranges so Egg's own web_search calls are not blocked by SearXNG bot
+# heuristics. Upstream engines can still rate-limit/CAPTCHA independently.
+
+[botdetection.ip_lists]
+pass_ip = [
+  "127.0.0.0/8",
+  "::1",
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+]

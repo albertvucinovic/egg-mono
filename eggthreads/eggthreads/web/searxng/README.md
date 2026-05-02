@@ -72,8 +72,9 @@ your browser is on a different IP), edit `settings.yml` and set
 
 - The `secret_key` in `settings.yml` is a throwaway value committed for
   local development. Rotate it for any internet-exposed deployment.
-- The `limiter` is enabled as a circuit breaker: if an agent loop fires
-  a burst of queries, SearXNG returns HTTP 429 before the burst reaches
-  upstream engines and trips their CAPTCHAs on your shared public IP.
-  Per-request overhead is ~1–3 ms. Requires the Valkey sidecar
-  container (`egg-searxng-valkey`); `/startSearxng` starts both.
+- The `limiter` is enabled with `limiter.toml` mounted by compose. The
+  instance is bound to loopback and local clients are pass-listed, so
+  Egg's own `web_search` calls are not blocked by SearXNG bot heuristics.
+  Upstream engines can still rate-limit or CAPTCHA independently. Requires
+  the Valkey sidecar container (`egg-searxng-valkey`); `/startSearxng`
+  starts both.

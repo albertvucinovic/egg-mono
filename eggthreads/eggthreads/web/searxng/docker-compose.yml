@@ -21,6 +21,7 @@ services:
       - "127.0.0.1:8888:8080"
     volumes:
       - ./settings.yml:/etc/searxng/settings.yml:rw
+      - ./limiter.toml:/etc/searxng/limiter.toml:rw
     environment:
       - SEARXNG_BASE_URL=http://localhost:8888/
       - INSTANCE_NAME=egg-searxng
