@@ -300,3 +300,46 @@ def test_thread_state_waiting_and_running(tmp_path):
     _append_event(db, tid, "tool_call.output_approval", {"tool_call_id": "tc1", "decision": "whole", "preview": "ok"})
     _append_event(db, tid, "msg.create", {"role": "tool", "tool_call_id": "tc1", "content": "ok"})
     assert ts.thread_state(db, tid) == "running"
+
+
+def test_tool_call_lifecycle_events_before_parent_message_are_ignored(tmp_path):
+    """Tool state should not attach stale reused tool_call_id events.
+
+    Some providers may reuse-looking ids across turns, and event replay should
+    only fold lifecycle events that occur after the message declaring that tool
+    call.  Older tool_call.* events with the same id must not make a fresh tool
+    call look already finished/published.
+    """
+
+    db = _make_db(tmp_path)
+    tid = "thread-stale-tool-events"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tc_reused"})
+    _append_event(db, tid, "tool_call.summary", {"tool_call_id": "tc_reused", "summary": "old"})
+    _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tc_reused", "reason": "success", "output": "old"})
+    _append_event(db, tid, "tool_call.output_approval", {"tool_call_id": "tc_reused", "decision": "whole", "preview": "old"})
+    _append_event(db, tid, "msg.create", {"role": "tool", "tool_call_id": "tc_reused", "content": "old"})
+
+    db.append_event(
+        event_id="msg-new-tool",
+        thread_id=tid,
+        type_="msg.create",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tc_reused", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-new-tool",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_reused", "decision": "granted"})
+
+    tc = eggthreads.build_tool_call_states(db, tid)["tc_reused"]
+    assert tc.parent_msg_id == "m-new-tool"
+    assert tc.approval_decision == "granted"
+    assert tc.execution_started is False
+    assert tc.finished_reason is None
+    assert tc.output_decision is None
+    assert tc.published is False
+    assert tc.state == "TC2.1"

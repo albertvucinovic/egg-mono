@@ -685,6 +685,7 @@ class ThreadRunner:
         if context_limit is None and self.cfg.context_limit is not None:
             context_limit = self.cfg.context_limit
 
+        was_cancelled = False
         try:
             if ra.kind == 'RA1_llm':
                 # Check context limit before making LLM call
@@ -723,6 +724,10 @@ class ThreadRunner:
                 # approved tool calls and advance their states.
                 await self._run_ra_tools(invoke_id, current_model, ra)
 
+        except asyncio.CancelledError:
+            # Cooperative shutdown/cancellation should not be recorded as an
+            # LLM/runner error. Defer re-raising until after stream/lease cleanup.
+            was_cancelled = True
         except Exception as e:
             # Surface provider/config/network or tool errors into the thread
             # and ensure RA1 boundaries advance even if the provider fails
@@ -752,8 +757,10 @@ class ThreadRunner:
             except Exception:
                 pass
         finally:
+            stop_flag = True
             try:
                 hb_task.cancel()
+                await asyncio.gather(hb_task, return_exceptions=True)
             except Exception:
                 pass
 
@@ -829,6 +836,8 @@ class ThreadRunner:
             self.db.release(self.thread_id, invoke_id)
         except Exception:
             pass
+        if was_cancelled:
+            raise asyncio.CancelledError
         return True
 
     async def _run_ra1_llm(self, invoke_id: str, current_model: Optional[str]) -> None:
@@ -2815,6 +2824,17 @@ class SubtreeScheduler:
         self.owner = owner or os.environ.get("USER") or "scheduler"
         self.cfg = config or RunnerConfig()
         self.tools = tools or create_default_tools()
+        self._tasks: Set[asyncio.Task] = set()
+
+    async def shutdown(self) -> None:
+        """Cancel and await runner tasks spawned by this scheduler."""
+        tasks = list(self._tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.difference_update(tasks)
 
     def _collect_subtree(self, thread_id: str) -> List[str]:
         # BFS through children table
@@ -3019,11 +3039,17 @@ class SubtreeScheduler:
                     last_run_end.pop(tid, None)  # Clear idle timer when scheduled
 
                 running_threads[tid] = resource_class
-                asyncio.create_task(drive(tid, resource_class))
+                task = asyncio.create_task(drive(tid, resource_class))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
                 if resource_class == "llm":
                     available_llm_slots -= 1
                 elif available_tool_slots is not None:
                     available_tool_slots -= 1
 
-            await asyncio.sleep(poll_sec)
+            try:
+                await asyncio.sleep(poll_sec)
+            except asyncio.CancelledError:
+                await self.shutdown()
+                raise
 

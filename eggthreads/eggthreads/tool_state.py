@@ -229,6 +229,12 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                 return True
         return False
 
+    def _event_seq(ev: Dict[str, Any]) -> int:
+        try:
+            return int(ev.get("event_seq"))
+        except Exception:
+            return -1
+
     # Second pass: fold tool_call.* events and tool messages into states,
     # and record global auto-approval intervals.
     for ev in _iter_events(db, thread_id):
@@ -298,30 +304,38 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
         elif ev_type == "tool_call.execution_started":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                states[tcid].execution_started = True
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    tc.execution_started = True
         elif ev_type == "tool_call.summary":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                summary = payload.get("summary")
-                if isinstance(summary, str):
-                    states[tcid].summary = summary
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    summary = payload.get("summary")
+                    if isinstance(summary, str):
+                        tc.summary = summary
         elif ev_type == "tool_call.finished":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                reason = payload.get("reason")
-                if isinstance(reason, str):
-                    states[tcid].finished_reason = reason
-                out = payload.get('output')
-                if out is not None:
-                    states[tcid].finished_output = str(out)
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    reason = payload.get("reason")
+                    if isinstance(reason, str):
+                        tc.finished_reason = reason
+                    out = payload.get('output')
+                    if out is not None:
+                        tc.finished_output = str(out)
         elif ev_type == "tool_call.output_approval":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
-                decision = payload.get("decision")
-                if isinstance(decision, str):
-                    states[tcid].output_decision = decision
-                # Preserve full payload for later use when publishing
-                states[tcid].last_output_approval_payload = payload
+                tc = states[tcid]
+                if _event_seq(ev) > tc.parent_event_seq:
+                    decision = payload.get("decision")
+                    if isinstance(decision, str):
+                        tc.output_decision = decision
+                    # Preserve full payload for later use when publishing
+                    tc.last_output_approval_payload = payload
         elif ev_type == "msg.create":
             # Final published tool result
             try:
@@ -336,7 +350,9 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
                     continue
                 # Also skip if this is after continue boundary and belongs to a continued tool call
                 if tcid in states and not _should_skip_tc_event(ev, tcid):
-                    states[tcid].published = True
+                    tc = states[tcid]
+                    if _event_seq(ev) > tc.parent_event_seq:
+                        tc.published = True
 
     # Finalize global intervals: if auto-approval was still active at the
     # end of the log, close the interval with an open-ended end (None).
