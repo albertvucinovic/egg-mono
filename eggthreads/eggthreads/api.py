@@ -2236,11 +2236,16 @@ def wait_for_tool_call_result(
     start = time.time()
     last_summary = 0.0
     while True:
-        if timeout_sec is not None:
+        states = build_tool_call_states(db, thread_id)
+        tc = states.get(tool_call_id)
+        if tc is not None and tc.published:
+            return _tool_call_result_now(db, thread_id, tool_call_id)
+        if timeout_sec is not None and float(timeout_sec) > 0 and tc is not None:
             now = time.time()
             if not last_summary or (now - last_summary) >= max(1.0, float(poll_interval)):
                 last_summary = now
                 remaining = max(0.0, float(timeout_sec) - (now - start))
+                tool_name = tc.name or 'tool'
                 try:
                     db.append_event(
                         event_id=_ulid_like(),
@@ -2250,16 +2255,12 @@ def wait_for_tool_call_result(
                         invoke_id=None,
                         payload={
                             'tool_call_id': tool_call_id,
-                            'name': 'tool',
-                            'summary': f"waiting for tool result; timeout in {remaining:.0f}s (limit {float(timeout_sec):.0f}s)",
+                            'name': tool_name,
+                            'summary': f"waiting for {tool_name} result; timeout in {remaining:.0f}s (limit {float(timeout_sec):.0f}s)",
                         },
                     )
                 except Exception:
                     pass
-        states = build_tool_call_states(db, thread_id)
-        tc = states.get(tool_call_id)
-        if tc is not None and tc.published:
-            return _tool_call_result_now(db, thread_id, tool_call_id)
         if timeout_sec is not None and (time.time() - start) >= timeout_sec:
             return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
         try:
@@ -2328,11 +2329,16 @@ async def wait_for_tool_call_result_async(
     start = loop.time()
     last_summary = 0.0
     while True:
-        if timeout_sec is not None:
+        states = build_tool_call_states(db, thread_id)
+        tc = states.get(tool_call_id)
+        if tc is not None and tc.published:
+            return _tool_call_result_now(db, thread_id, tool_call_id)
+        if timeout_sec is not None and float(timeout_sec) > 0 and tc is not None:
             now = loop.time()
             if not last_summary or (now - last_summary) >= max(1.0, float(poll_interval)):
                 last_summary = now
                 remaining = max(0.0, float(timeout_sec) - (now - start))
+                tool_name = tc.name or 'tool'
                 try:
                     db.append_event(
                         event_id=_ulid_like(),
@@ -2342,16 +2348,12 @@ async def wait_for_tool_call_result_async(
                         invoke_id=None,
                         payload={
                             'tool_call_id': tool_call_id,
-                            'name': 'tool',
-                            'summary': f"waiting for tool result; timeout in {remaining:.0f}s (limit {float(timeout_sec):.0f}s)",
+                            'name': tool_name,
+                            'summary': f"waiting for {tool_name} result; timeout in {remaining:.0f}s (limit {float(timeout_sec):.0f}s)",
                         },
                     )
                 except Exception:
                     pass
-        states = build_tool_call_states(db, thread_id)
-        tc = states.get(tool_call_id)
-        if tc is not None and tc.published:
-            return _tool_call_result_now(db, thread_id, tool_call_id)
         if timeout_sec is not None and (loop.time() - start) >= timeout_sec:
             return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
         if timeout_sec is not None:

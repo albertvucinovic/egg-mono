@@ -122,6 +122,19 @@ def test_build_tool_call_states_assistant_tool_lifecycle(tmp_path):
     assert tc.execution_started is True
     assert tc.state == "TC3"
 
+    # Running summary updates are UI-facing metadata and should not
+    # advance the lifecycle beyond TC3.
+    _append_event(
+        db,
+        tid,
+        "tool_call.summary",
+        {"tool_call_id": "tcA", "name": "bash", "summary": "bash running; timeout in 29s (limit 30s)"},
+    )
+    states = eggthreads.build_tool_call_states(db, tid)
+    tc = states["tcA"]
+    assert tc.summary == "bash running; timeout in 29s (limit 30s)"
+    assert tc.state == "TC3"
+
     # Finished with output
     _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tcA", "reason": "success", "output": "ok"})
     states = eggthreads.build_tool_call_states(db, tid)

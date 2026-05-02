@@ -54,6 +54,11 @@ Key event types:
 - `model.switch` - Model configuration changes
 - `control.*` - Thread state control (pause, resume, interrupt)
 
+`tool_call.summary` is a UI-facing lifecycle event: tools may emit a short,
+single-line status update while running. It does not advance the tool-call
+state machine. Egg and eggw display this line live; timeout-bounded tools use
+it to show the time remaining before timeout.
+
 ### Tool Call Workflow
 
 Tool calls follow a state machine:
