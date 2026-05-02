@@ -29,6 +29,7 @@ export interface ToolCall {
   output?: string;
   approval_decision?: string;
   output_decision?: string;
+  summary?: string;
 }
 
 export interface StreamingToolOutput {
@@ -36,6 +37,7 @@ export interface StreamingToolOutput {
   name: string;
   suppressed: boolean;
   suppressedFrames: number;
+  summary?: string;
 }
 
 export interface SystemLog {
@@ -78,7 +80,7 @@ interface AppState {
   // Streaming tool output previews (tool_call_id -> metadata; text lives in streamingBuffer)
   streamingToolOutputs: Record<string, StreamingToolOutput>;
   setStreamingToolOutputs: (outputs: Record<string, StreamingToolOutput>) => void;
-  upsertStreamingToolOutput: (id: string, name: string, suppressed?: boolean) => void;
+  upsertStreamingToolOutput: (id: string, name: string, suppressed?: boolean, summary?: string) => void;
 
   // Tool calls
   pendingTools: ToolCall[];
@@ -197,13 +199,14 @@ export const useAppStore = create<AppState>((set) => ({
   // Streaming tool output previews
   streamingToolOutputs: {},
   setStreamingToolOutputs: (outputs) => set({ streamingToolOutputs: outputs }),
-  upsertStreamingToolOutput: (id, name, suppressed = false) =>
+  upsertStreamingToolOutput: (id, name, suppressed = false, summary) =>
     set((state) => {
       const existing = state.streamingToolOutputs[id] || {
         id,
         name: "",
         suppressed: false,
         suppressedFrames: 0,
+        summary: undefined,
       };
       return {
         streamingToolOutputs: {
@@ -213,6 +216,7 @@ export const useAppStore = create<AppState>((set) => ({
             name: name || existing.name,
             suppressed: existing.suppressed || suppressed,
             suppressedFrames: existing.suppressedFrames + (suppressed ? 1 : 0),
+            summary: summary !== undefined ? summary : existing.summary,
           },
         },
       };

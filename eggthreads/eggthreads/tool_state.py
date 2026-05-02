@@ -36,6 +36,7 @@ class ToolCallState:
     finished_reason: Optional[str] = None  # "success" | "interrupted" | ...
     finished_output: Optional[str] = None  # full tool output from tool_call.finished, if any
     output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
+    summary: Optional[str] = None  # latest one-line running status from tool_call.summary
     published: bool = False  # final tool message written
     # Last output_approval payload (if any) for this tool call; allows UI to
     # encode preview/truncation/paths that the runner can later use when
@@ -298,6 +299,12 @@ def build_tool_call_states(db: ThreadsDB, thread_id: str) -> Dict[str, ToolCallS
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):
                 states[tcid].execution_started = True
+        elif ev_type == "tool_call.summary":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev, tcid):
+                summary = payload.get("summary")
+                if isinstance(summary, str):
+                    states[tcid].summary = summary
         elif ev_type == "tool_call.finished":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev, tcid):

@@ -35,6 +35,7 @@ async def get_tool_calls(thread_id: str):
             output=tc.finished_output,
             approval_decision=tc.approval_decision,
             output_decision=tc.output_decision,
+            summary=tc.summary,
         ))
     return tools
 

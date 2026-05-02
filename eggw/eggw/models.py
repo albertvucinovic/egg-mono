@@ -39,6 +39,7 @@ class ToolCallInfo(BaseModel):
     output: Optional[str] = None
     approval_decision: Optional[str] = None
     output_decision: Optional[str] = None
+    summary: Optional[str] = None
 
 
 class SendMessageRequest(BaseModel):

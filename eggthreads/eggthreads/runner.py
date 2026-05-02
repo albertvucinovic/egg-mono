@@ -1232,7 +1232,7 @@ class ThreadRunner:
                             if isinstance(fc, str) and fc:
                                 assistant_text_parts = [fc]
                         if not saw_reason_delta:
-                            fr = final.get('reasoning') or final.get('reason')
+                            fr = final.get('reasoning') or final.get('reason') or final.get('reasoning_content')
                             if isinstance(fr, str) and fr:
                                 reasoning_parts = [fr]
                         assistant_msg: Dict[str, Any] = {'role': 'assistant'}
@@ -1266,7 +1266,11 @@ class ThreadRunner:
                         # assistant message (no content, no tools, no
                         # reasoning), skip creating a blank assistant
                         # msg and surface a system notice instead.
-                        if not assistant_msg.get('content') and not assistant_msg.get('tool_calls') and not reasoning_parts:
+                        if (not assistant_msg.get('content')
+                            and not assistant_msg.get('tool_calls')
+                            and not reasoning_parts
+                            and not assistant_msg.get('reasoning')
+                            and not assistant_msg.get('reasoning_content')):
                             err_payload: Dict[str, Any] = {
                                 'role': 'system',
                                 'content': 'LLM error: empty assistant message returned by provider',
