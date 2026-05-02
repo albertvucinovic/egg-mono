@@ -243,6 +243,34 @@ def clear_thread_tool_allowlist(db: ThreadsDB, thread_id: str) -> None:
     _append_tools_config_event(db, thread_id, {"allow_only": None})
 
 
+def inherit_tools_config_for_child(db: ThreadsDB, parent_thread_id: str, child_thread_id: str) -> None:
+    """Copy the parent's effective tools config onto a newly-created child.
+
+    Tool configuration is a capability boundary, so descendants should start
+    with the parent's current restrictions.  We intentionally copy by value at
+    creation time instead of resolving through ancestors dynamically: later
+    parent changes do not silently mutate existing children, while trusted
+    programmatic code can still widen a child explicitly with the normal
+    ``set_thread_tool_allowlist`` / ``clear_thread_tool_allowlist`` /
+    ``enable_tool_for_thread`` helpers.
+    """
+
+    cfg = get_thread_tools_config(db, parent_thread_id)
+    if not cfg.has_explicit_config:
+        return
+
+    payload: dict[str, Any] = {
+        "llm_tools_enabled": bool(cfg.llm_tools_enabled),
+        "allow_raw_tool_output": bool(cfg.allow_raw_tool_output),
+    }
+    if cfg.allowed_tools is not None:
+        payload["allow_only"] = sorted(cfg.allowed_tools)
+    if cfg.disabled_tools:
+        payload["disable"] = sorted(cfg.disabled_tools)
+
+    _append_tools_config_event(db, child_thread_id, payload)
+
+
 def get_tool_statuses_for_config(
     cfg: ToolsConfig,
     available_tools: Mapping[str, Mapping[str, Any]],

@@ -83,6 +83,74 @@ def test_tool_statuses_reflect_allowlist_and_disabled_tools(tmp_path):
     assert statuses["other_tool"]["local_only"] is True
 
 
+def test_create_child_thread_inherits_disabled_tools_by_value(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.disable_tool_for_thread(db, parent, "bash")
+
+    child = ts.create_child_thread(db, parent, name="child")
+    cfg = ts.get_thread_tools_config(db, child)
+    assert not cfg.is_tool_allowed("bash")
+
+    ts.enable_tool_for_thread(db, parent, "bash")
+    assert ts.get_thread_tools_config(db, parent).is_tool_allowed("bash")
+    assert not ts.get_thread_tools_config(db, child).is_tool_allowed("bash")
+
+
+def test_create_child_thread_inherits_allowlist_and_disabled_distinctly(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_tool_allowlist(db, parent, ["bash", "web_search"])
+    ts.disable_tool_for_thread(db, parent, "bash")
+
+    child = ts.create_child_thread(db, parent, name="child")
+    cfg = ts.get_thread_tools_config(db, child)
+
+    assert cfg.allowed_tools == {"bash", "web_search"}
+    assert cfg.disabled_tools == {"bash"}
+    assert not cfg.is_tool_allowed("bash")
+    assert cfg.is_tool_allowed("web_search")
+    assert not cfg.is_tool_allowed("python")
+
+
+def test_create_child_thread_inherits_tools_enabled_and_secret_mode(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_tools_enabled(db, parent, False)
+    ts.set_thread_allow_raw_tool_output(db, parent, False)
+
+    child = ts.create_child_thread(db, parent, name="child")
+    cfg = ts.get_thread_tools_config(db, child)
+
+    assert cfg.llm_tools_enabled is False
+    assert cfg.allow_raw_tool_output is False
+
+
+def test_programmatic_child_tool_widening_after_creation(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_tool_allowlist(db, parent, ["web_search"])
+
+    child = ts.create_child_thread(db, parent, name="child")
+    assert not ts.get_thread_tools_config(db, child).is_tool_allowed("bash")
+
+    ts.set_thread_tool_allowlist(db, child, ["web_search", "bash"])
+    cfg = ts.get_thread_tools_config(db, child)
+    assert cfg.is_tool_allowed("web_search")
+    assert cfg.is_tool_allowed("bash")
+
+
+def test_create_child_thread_can_skip_tool_inheritance_for_programmatic_callers(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_tool_allowlist(db, parent, ["web_search"])
+
+    child = ts.create_child_thread(db, parent, name="child", inherit_tools_config=False)
+    cfg = ts.get_thread_tools_config(db, child)
+    assert cfg.allowed_tools is None
+    assert cfg.is_tool_allowed("bash")
+
+
 class _ToolCallingLLM:
     current_model_key = "test-model"
 

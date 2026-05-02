@@ -632,18 +632,16 @@ def create_default_tools() -> ToolRegistry:
 
         db = ThreadsDB()
 
-        # Tool capability attenuation: requested child allowlist is
-        # intersected with the parent's effective capabilities.  If no
-        # explicit child allowlist was requested, inherit any explicit
-        # parent allowlist by value so descendants cannot silently widen it.
+        # Tool capability attenuation: create_child_thread has already copied
+        # the parent's effective tools configuration by value.  A requested
+        # child allowlist can only narrow that inherited capability set; it is
+        # intersected with the parent's effective capabilities so tool/model
+        # callers cannot widen a child during spawn.
         parent_cfg = get_thread_tools_config(db, parent_id)
         requested_allowed = _tool_names_from_arg(args.get('allowed_tools'))
         if requested_allowed:
             allowed = sorted({name for name in requested_allowed if parent_cfg.is_tool_allowed(name)})
             set_thread_tool_allowlist(db, child, allowed)
-        elif parent_cfg.allowed_tools is not None:
-            inherited = sorted({name for name in parent_cfg.allowed_tools if parent_cfg.is_tool_allowed(name)})
-            set_thread_tool_allowlist(db, child, inherited)
 
         for name in _tool_names_from_arg(args.get('disabled_tools')):
             disable_tool_for_thread(db, child, name)
