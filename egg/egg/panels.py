@@ -271,6 +271,10 @@ class PanelsMixin:
             inner = f"llm {tps_str}" if tps_str else "llm"
         elif kind == 'tool':
             tool_name = ""
+            summary = ls.get('tool_summary') if isinstance(ls.get('tool_summary'), dict) else {}
+            if summary and summary.get('active') and summary.get('text'):
+                inner = str(summary.get('text') or '')
+                return f"[yellow]Streaming\[{inner}][/yellow]"
             indicator = ls.get('tool_stream_indicator') if isinstance(ls.get('tool_stream_indicator'), dict) else {}
             if indicator and indicator.get('active'):
                 tool_name = str(indicator.get('name') or "")

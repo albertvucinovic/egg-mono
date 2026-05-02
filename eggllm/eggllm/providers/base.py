@@ -7,6 +7,7 @@ class ProviderAdapter:
     Implementations must yield event dicts during streaming:
     - {"type":"content_delta","text": str}
     - {"type":"reasoning_delta","text": str}
+    - {"type":"reasoning_summary_delta","text": str}
     - {"type":"tool_calls_delta","delta": list}
     - {"type":"done","message": dict}
     """

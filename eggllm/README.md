@@ -238,6 +238,10 @@ for event in llm.stream_chat(messages):
     elif t == "reasoning_delta":
         # Optional: print to a separate "thinking" area
         pass
+    elif t == "reasoning_summary_delta":
+        # Optional: display-only reasoning summary; do not send it back
+        # to the provider as reasoning_content.
+        pass
     elif t == "tool_calls_delta":
         # Optional: update your UI with streamed tool arguments
         pass
@@ -251,6 +255,10 @@ The final assistant message dict may include:
 - content (string)
 - tool_calls (list of function calls with stitched id/name/arguments)
 - reasoning_content (string, if the model produced it)
+
+Responses API reasoning summaries are emitted as `reasoning_summary_delta` for
+display only and are intentionally not persisted into the final message as
+`reasoning_content`.
 
 The library yields events as they arrive and raises exceptions for network or
 provider errors. Wrap your loop in try/except if you need custom handling.

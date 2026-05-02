@@ -117,6 +117,23 @@ export function useSSE(threadId: string | null) {
           }
         }
 
+        if (payload.tool_summary) {
+          const summary = payload.tool_summary;
+          const toolId = summary.id || summary.tool_call_id || summary.name || "tool";
+          const toolName = summary.name || "tool";
+          const text = typeof summary.summary === "string" ? summary.summary : "";
+          if (toolId && text) {
+            const streamingState = useAppStore.getState();
+            if (!streamingState.isStreaming) {
+              setIsStreaming(true);
+            }
+            if (streamingState.streamingKind !== "tool") {
+              setStreamingKind("tool");
+            }
+            upsertStreamingToolOutput(toolId, toolName, false, text);
+          }
+        }
+
         // Tool calls still go through Zustand (less frequent, acceptable)
         if (payload.tool_call) {
           const tc = payload.tool_call;
@@ -169,12 +186,29 @@ export function useSSE(threadId: string | null) {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
-        addSystemLog(`Tool executing: ${payload.name || "unknown"}`, "info");
+        addSystemLog(`Tool executing: ${payload.name || payload.tool_call_id || "unknown"}`, "info");
         setStreamingKind("tool");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.execution_started:", err);
+      }
+    });
+
+    // Handle tool status summaries (for example timeout countdowns).
+    es.addEventListener("tool_call.summary", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const toolId = payload.tool_call_id || payload.id || payload.name || "tool";
+        const toolName = payload.name || "tool";
+        const summary = typeof payload.summary === "string" ? payload.summary : "";
+        if (toolId && summary) {
+          upsertStreamingToolOutput(toolId, toolName, false, summary);
+        }
+        queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
+      } catch (err) {
+        console.error("Failed to parse tool_call.summary:", err);
       }
     });
 

@@ -315,6 +315,33 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         }
                     yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
 
+            elif event_type == "response.reasoning_summary_text.delta":
+                # Reasoning summaries are display-only. Do not persist them as
+                # reasoning_content for future provider requests.
+                delta_text = event_data.get("delta", "")
+                if delta_text:
+                    yield {"type": "reasoning_summary_delta", "text": delta_text}
+
+            elif event_type == "response.reasoning_text.delta":
+                # Reasoning text delta (GPT-OSS models)
+                delta_text = event_data.get("delta", "")
+                if delta_text:
+                    reasoning_parts.append(delta_text)
+                    yield {"type": "reasoning_delta", "text": delta_text}
+
+            elif event_type == "response.incomplete":
+                # Generation stopped early (e.g. max_output_tokens reached).
+                # Still yield whatever was accumulated — reasoning-only responses
+                # are valid for reasoning models.
+                break
+
+            elif event_type in ("response.failed", "error"):
+                # Surface API/stream errors instead of silently ignoring them
+                error_info = event_data.get("error", {}) if isinstance(event_data.get("error"), dict) else {}
+                code = error_info.get("code") or event_data.get("code") or "unknown"
+                message = error_info.get("message") or event_data.get("message") or str(event_data)
+                raise RuntimeError(f"Responses API error ({code}): {message}")
+
             elif event_type in ("response.completed", "response.done"):
                 # Stream complete
                 break
@@ -479,6 +506,33 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     }
                                 }
                             yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
+
+                    elif event_type == "response.reasoning_summary_text.delta":
+                        # Reasoning summaries are display-only. Do not persist
+                        # them as reasoning_content for future provider requests.
+                        delta_text = event_data.get("delta", "")
+                        if delta_text:
+                            yield {"type": "reasoning_summary_delta", "text": delta_text}
+
+                    elif event_type == "response.reasoning_text.delta":
+                        # Reasoning text delta (GPT-OSS models)
+                        delta_text = event_data.get("delta", "")
+                        if delta_text:
+                            reasoning_parts.append(delta_text)
+                            yield {"type": "reasoning_delta", "text": delta_text}
+
+                    elif event_type == "response.incomplete":
+                        # Generation stopped early (e.g. max_output_tokens reached).
+                        # Still yield whatever was accumulated — reasoning-only responses
+                        # are valid for reasoning models.
+                        break
+
+                    elif event_type in ("response.failed", "error"):
+                        # Surface API/stream errors instead of silently ignoring them
+                        error_info = event_data.get("error", {}) if isinstance(event_data.get("error"), dict) else {}
+                        code = error_info.get("code") or event_data.get("code") or "unknown"
+                        message = error_info.get("message") or event_data.get("message") or str(event_data)
+                        raise RuntimeError(f"Responses API error ({code}): {message}")
 
                     elif event_type in ("response.completed", "response.done"):
                         break
