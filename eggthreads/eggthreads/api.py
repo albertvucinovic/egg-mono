@@ -2234,7 +2234,28 @@ def wait_for_tool_call_result(
     from .tool_state import build_tool_call_states
 
     start = time.time()
+    last_summary = 0.0
     while True:
+        if timeout_sec is not None:
+            now = time.time()
+            if not last_summary or (now - last_summary) >= max(1.0, float(poll_interval)):
+                last_summary = now
+                remaining = max(0.0, float(timeout_sec) - (now - start))
+                try:
+                    db.append_event(
+                        event_id=_ulid_like(),
+                        thread_id=thread_id,
+                        type_='tool_call.summary',
+                        msg_id=None,
+                        invoke_id=None,
+                        payload={
+                            'tool_call_id': tool_call_id,
+                            'name': 'tool',
+                            'summary': f"waiting for tool result; timeout in {remaining:.0f}s (limit {float(timeout_sec):.0f}s)",
+                        },
+                    )
+                except Exception:
+                    pass
         states = build_tool_call_states(db, thread_id)
         tc = states.get(tool_call_id)
         if tc is not None and tc.published:

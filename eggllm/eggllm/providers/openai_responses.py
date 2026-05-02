@@ -316,11 +316,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
 
             elif event_type == "response.reasoning_summary_text.delta":
-                # Reasoning summary text delta (streaming reasoning)
+                # Reasoning summaries are display-only. Do not persist them as
+                # reasoning_content for future provider requests.
                 delta_text = event_data.get("delta", "")
                 if delta_text:
-                    reasoning_parts.append(delta_text)
-                    yield {"type": "reasoning_delta", "text": delta_text}
+                    yield {"type": "reasoning_summary_delta", "text": delta_text}
 
             elif event_type == "response.reasoning_text.delta":
                 # Reasoning text delta (GPT-OSS models)
@@ -508,11 +508,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             yield {"type": "tool_calls_delta", "delta": tool_calls_values()}
 
                     elif event_type == "response.reasoning_summary_text.delta":
-                        # Reasoning summary text delta (streaming reasoning)
+                        # Reasoning summaries are display-only. Do not persist
+                        # them as reasoning_content for future provider requests.
                         delta_text = event_data.get("delta", "")
                         if delta_text:
-                            reasoning_parts.append(delta_text)
-                            yield {"type": "reasoning_delta", "text": delta_text}
+                            yield {"type": "reasoning_summary_delta", "text": delta_text}
 
                     elif event_type == "response.reasoning_text.delta":
                         # Reasoning text delta (GPT-OSS models)

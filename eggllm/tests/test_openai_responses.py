@@ -675,3 +675,72 @@ class TestUrlRewriting:
         client.set_model("GPT-4o Responses")
         adapter = client._get_adapter_for_current_model()
         assert isinstance(adapter, OpenAIResponsesAdapter)
+
+
+class TestResponsesReasoningSummaries:
+    """Responses API reasoning summaries are display-only."""
+
+    class _FakeResponse:
+        def __init__(self, events):
+            self._events = events
+
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            for event in self._events:
+                yield ("data: " + json.dumps(event)).encode("utf-8")
+
+    class _FakeSession:
+        def __init__(self, events):
+            self.events = events
+
+        def post(self, *args, **kwargs):
+            return TestResponsesReasoningSummaries._FakeResponse(self.events)
+
+    def test_reasoning_summary_delta_is_not_persisted_as_reasoning_content(self):
+        adapter = OpenAIResponsesAdapter()
+        events = [
+            {"type": "response.reasoning_summary_text.delta", "delta": "Summary only."},
+            {"type": "response.output_text.delta", "delta": "Final answer."},
+            {"type": "response.completed"},
+        ]
+
+        out = list(adapter.stream(
+            "https://example.test/v1/responses",
+            {},
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "Hi"}]},
+            session=self._FakeSession(events),
+        ))
+
+        assert out[0] == {"type": "reasoning_summary_delta", "text": "Summary only."}
+        assert {"type": "reasoning_delta", "text": "Summary only."} not in out
+        assert out[-1] == {
+            "type": "done",
+            "message": {"role": "assistant", "content": "Final answer."},
+        }
+
+    def test_reasoning_text_delta_is_still_persisted_as_reasoning_content(self):
+        adapter = OpenAIResponsesAdapter()
+        events = [
+            {"type": "response.reasoning_text.delta", "delta": "Actual reasoning."},
+            {"type": "response.output_text.delta", "delta": "Final answer."},
+            {"type": "response.completed"},
+        ]
+
+        out = list(adapter.stream(
+            "https://example.test/v1/responses",
+            {},
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "Hi"}]},
+            session=self._FakeSession(events),
+        ))
+
+        assert out[0] == {"type": "reasoning_delta", "text": "Actual reasoning."}
+        assert out[-1] == {
+            "type": "done",
+            "message": {
+                "role": "assistant",
+                "content": "Final answer.",
+                "reasoning_content": "Actual reasoning.",
+            },
+        }

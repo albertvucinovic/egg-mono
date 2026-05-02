@@ -18,10 +18,15 @@ STREAM_STYLE_TEXT: Optional[str] = None           # assistant content: plain
 STREAM_STYLE_REASON: Optional[str] = "dim magenta"
 STREAM_STYLE_TOOL_OUTPUT: Optional[str] = "yellow"
 STREAM_STYLE_TOOL_CALL_ARGS: Optional[str] = "dim yellow"
+STREAM_STYLE_TOOL_SUMMARY: Optional[str] = "dim yellow"
 
 
 def _new_tool_stream_indicator() -> Dict[str, Any]:
     return {"active": False, "name": "", "frames": 0}
+
+
+def _new_tool_summary() -> Dict[str, Any]:
+    return {"active": False, "name": "", "text": ""}
 
 
 class StreamingMixin:
@@ -69,6 +74,7 @@ class StreamingMixin:
             "reason": "",
             "tools": {},
             "tool_stream_indicator": _new_tool_stream_indicator(),
+            "tool_summary": _new_tool_summary(),
             "tc_text": {},
             "tc_order": [],
         }
@@ -111,6 +117,7 @@ class StreamingMixin:
                     "reason": "",
                     "tools": {},
                     "tool_stream_indicator": _new_tool_stream_indicator(),
+                    "tool_summary": _new_tool_summary(),
                     "tc_text": {},
                     "tc_order": [],
                 }
@@ -218,6 +225,7 @@ class StreamingMixin:
                 "reason": "",
                 "tools": {},
                 "tool_stream_indicator": _new_tool_stream_indicator(),
+                "tool_summary": _new_tool_summary(),
                 "tc_text": {},
                 "tc_order": [],
             }
@@ -268,6 +276,26 @@ class StreamingMixin:
                         order.append(raw_key)
                     text_map[raw_key] = text_map.get(raw_key, '') + frag
                     self._stream_append_on_renderer(frag, style=STREAM_STYLE_TOOL_CALL_ARGS)
+            tsu = payload.get('tool_summary')
+            if isinstance(tsu, dict):
+                summary = tsu.get('summary')
+                if isinstance(summary, str) and summary:
+                    tsummary = self._live_state.setdefault('tool_summary', _new_tool_summary())
+                    tsummary['active'] = True
+                    tsummary['name'] = str(tsu.get('name') or tsummary.get('name') or 'tool')
+                    tsummary['text'] = summary
+                    self._stream_append_on_renderer(f"\n{summary}\n", style=STREAM_STYLE_TOOL_SUMMARY)
+        elif t == 'tool_call.summary':
+            try:
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+            except Exception:
+                payload = {}
+            summary = payload.get('summary') if isinstance(payload, dict) else None
+            if isinstance(summary, str) and summary:
+                tsummary = self._live_state.setdefault('tool_summary', _new_tool_summary())
+                tsummary['active'] = True
+                tsummary['name'] = str(payload.get('name') or tsummary.get('name') or 'tool')
+                tsummary['text'] = summary
         elif t == 'stream.close':
             self._live_state['active_invoke'] = None
             self._live_state['stream_kind'] = None

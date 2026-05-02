@@ -99,6 +99,15 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
               </div>
             </div>
 
+            {tc.summary && (
+              <div
+                className="text-xs mb-3 px-2 py-1 rounded border animate-pulse"
+                style={{ borderColor: "var(--tool-call-border)", color: "var(--tool-call-text, var(--tool-call-border))" }}
+              >
+                {tc.summary}
+              </div>
+            )}
+
             {/* Arguments preview */}
             <pre
               className="text-xs mb-3 max-h-32 overflow-auto p-2 rounded"

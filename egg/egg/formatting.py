@@ -343,6 +343,10 @@ class FormattingMixin:
             for name, txt in (ls.get('tools') or {}).items():
                 if txt:
                     parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
+            summary = ls.get('tool_summary') or {}
+            if isinstance(summary, dict) and summary.get('active') and summary.get('text'):
+                name = str(summary.get('name') or 'tool')
+                parts.append(f"\n[Tool: {name} status]\n{summary.get('text')}")
             indicator = ls.get('tool_stream_indicator') or {}
             if isinstance(indicator, dict) and indicator.get('active'):
                 name = str(indicator.get('name') or 'tool')

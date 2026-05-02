@@ -1159,11 +1159,14 @@ class ThreadRunner:
                                 payload={'text': content, 'model_key': current_model},
                             )
                             await asyncio.sleep(0)
-                    elif et == 'reasoning_delta':
-                        saw_reason_delta = True
+                    elif et in ('reasoning_delta', 'reasoning_summary_delta'):
+                        is_reasoning_summary = et == 'reasoning_summary_delta'
+                        if not is_reasoning_summary:
+                            saw_reason_delta = True
                         reason = evt.get('text', '')
                         if reason:
-                            reasoning_parts.append(reason)
+                            if not is_reasoning_summary:
+                                reasoning_parts.append(reason)
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                                 interrupted = True
                                 break
@@ -1174,7 +1177,11 @@ class ThreadRunner:
                                 type_='stream.delta',
                                 invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
-                                payload={'reason': reason, 'model_key': current_model},
+                                payload={
+                                    'reason': reason,
+                                    'reasoning_summary': True,
+                                    'model_key': current_model,
+                                } if is_reasoning_summary else {'reason': reason, 'model_key': current_model},
                             )
                             await asyncio.sleep(0)
                     elif et == 'tool_calls_delta':
@@ -1805,6 +1812,31 @@ class ThreadRunner:
 
         import time as _time
         start_time = _time.time()
+        summary_period_sec = 1.0
+        last_summary_time = 0.0
+
+        def _emit_timeout_summary(*, force: bool = False) -> None:
+            nonlocal last_summary_time
+            summary = tool_timeout_summary(tc.name or 'bash', tool_timeout_sec, start_time, now=_time.time())
+            if not summary:
+                return
+            now = _time.time()
+            if not force and last_summary_time and (now - last_summary_time) < summary_period_sec:
+                return
+            last_summary_time = now
+            try:
+                emit_tool_summary_event(
+                    self.db,
+                    thread_id=self.thread_id,
+                    invoke_id=invoke_id,
+                    tool_call_id=tc.tool_call_id,
+                    tool_name=tc.name or 'bash',
+                    summary=summary,
+                )
+            except Exception:
+                pass
+
+        _emit_timeout_summary(force=True)
 
         def _kill_process_and_container():
             """Helper to stop Docker container and kill process group."""
@@ -1832,6 +1864,7 @@ class ThreadRunner:
                 # If bash has already completed naturally, stop watching.
                 if proc.returncode is not None:
                     return
+                _emit_timeout_summary()
                 # Check for timeout
                 if tool_timeout_sec and (_time.time() - start_time) >= tool_timeout_sec:
                     timed_out = True
@@ -2090,6 +2123,35 @@ class ThreadRunner:
                     tool_timeout = _default_tool_timeout_sec
                 tool_timeout_int = int(tool_timeout) if tool_timeout > 0 else None
 
+                summary_stop = asyncio.Event()
+
+                async def _summary_watcher() -> None:
+                    if tool_timeout_int is None:
+                        return
+                    start = time.time()
+                    last = 0.0
+                    while not summary_stop.is_set():
+                        now = time.time()
+                        if not last or now - last >= 1.0:
+                            last = now
+                            summary = tool_timeout_summary(tc.name or 'tool', tool_timeout_int, start, now=now)
+                            if summary:
+                                try:
+                                    emit_tool_summary_event(
+                                        self.db,
+                                        thread_id=self.thread_id,
+                                        invoke_id=invoke_id,
+                                        tool_call_id=tc.tool_call_id,
+                                        tool_name=tc.name or '',
+                                        summary=summary,
+                                    )
+                                except Exception:
+                                    pass
+                        try:
+                            await asyncio.wait_for(summary_stop.wait(), timeout=0.25)
+                        except asyncio.TimeoutError:
+                            pass
+
                 # Create a cancel check that returns True if lease is lost (e.g., Ctrl+C)
                 def make_cancel_check(db_path, thread_id, invoke_id):
                     # Thread-local storage for executor thread's own connection
@@ -2113,6 +2175,7 @@ class ThreadRunner:
                     return check
 
                 cancel_check = make_cancel_check(self.db.path, self.thread_id, invoke_id)
+                summary_task = asyncio.create_task(_summary_watcher())
 
                 try:
                     full_result = await loop.run_in_executor(
@@ -2131,6 +2194,12 @@ class ThreadRunner:
                     )
                 except Exception as e:
                     full_result = f"ERROR: {e}"
+                finally:
+                    summary_stop.set()
+                    try:
+                        await summary_task
+                    except Exception:
+                        pass
                 if not isinstance(full_result, str):
                     full_result = str(full_result)
 

@@ -748,6 +748,15 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                           <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
                         </summary>
                         <div className="px-2 pb-2">
+                          {tool.summary && (
+                            <div
+                              data-testid="streaming-tool-summary"
+                              className="mb-2 text-xs animate-pulse"
+                              style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                            >
+                              {tool.summary}
+                            </div>
+                          )}
                           <pre
                             ref={(el) => {
                               streamingToolOutputRefs.current[toolId] = el;
