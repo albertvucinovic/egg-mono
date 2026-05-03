@@ -31,7 +31,7 @@ def test_get_or_create_runtime_thread_creates_child_and_config(tmp_path):
     assert cfg.name == "default"
 
     tools_cfg = ts.get_thread_tools_config(db, runtime)
-    assert tools_cfg.llm_tools_enabled is False
+    assert tools_cfg.llm_tools_enabled is True
 
     # Runtime marker exists on the runtime thread itself.
     marker = db.conn.execute(

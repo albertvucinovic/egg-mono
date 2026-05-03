@@ -137,6 +137,32 @@ def test_python_repl_spawn_agent_creates_child_under_runtime_and_attenuates_tool
     assert not child_cfg.is_tool_allowed("bash")
 
 
+def test_runtime_spawned_child_inherits_runtime_tool_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    ts.append_message(db, parent, "system", "system")
+    ts.enable_thread_session(db, parent, provider="memory")
+    runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
+    ts.set_thread_tools_enabled(db, runtime, False)
+    ts.set_thread_tool_allowlist(db, runtime, ["spawn_agent", "bash"])
+
+    out = ts.execute_python_repl(
+        db,
+        parent,
+        "from eggtools import spawn_agent\n"
+        "print(spawn_agent('child task', label='from-repl', allowed_tools=['bash']))",
+        drive_runtime_tools=True,
+        bridge_timeout_sec=5,
+    )
+
+    child = [line.strip() for line in out.splitlines() if line.strip() and not line.startswith('---')][-1]
+    cfg = ts.get_thread_tools_config(db, child)
+    assert cfg.llm_tools_enabled is False
+    assert cfg.allowed_tools == {"bash"}
+
+
 def test_python_repl_wait_observes_child_result_under_scheduler(tmp_path, monkeypatch):
     """Regression: eggtools.wait() should work from /pythonRepl scheduler flow."""
 
