@@ -1184,7 +1184,7 @@ def create_default_tools() -> ToolRegistry:
     # assistant and user commands (/wait) can use the same implementation.
     def _wait_tool(args: Dict[str, Any]):
         from .db import ThreadsDB
-        from .api import wait_for_threads
+        from .api import _clean_wait_thread_id, wait_for_threads
 
         tids_arg = args.get('thread_ids') or args.get('threads') or args.get('thread_id')
         if 'thread_ids' not in args and 'threads' not in args and 'thread_id' not in args:
@@ -1198,11 +1198,12 @@ def create_default_tools() -> ToolRegistry:
                 if isinstance(raw, (str, int)):
                     tids_arg = str(raw)
         if isinstance(tids_arg, str):
-            thread_ids = [tids_arg]
+            thread_ids = [_clean_wait_thread_id(tids_arg)]
         elif isinstance(tids_arg, list):
-            thread_ids = [str(t) for t in tids_arg if isinstance(t, (str, int))]
+            thread_ids = [_clean_wait_thread_id(t) for t in tids_arg if isinstance(t, (str, int))]
         else:
             return 'Error: "thread_ids" must be a string or a list of strings.'
+        thread_ids = [tid for tid in thread_ids if tid]
         if not thread_ids:
             return 'Error: no valid thread_ids provided.'
 

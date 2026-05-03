@@ -94,6 +94,39 @@ def test_wait_for_threads_returns_structured_results(tmp_path):
     assert result.last_assistant_message == "answer"
 
 
+def test_wait_for_threads_normalizes_tool_output_wrapped_thread_id(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.append_message(db, tid, "assistant", "answer")
+    ts.create_snapshot(db, tid)
+
+    wrapped = f"eggtools.spawn_agent_auto(...)\n\n{tid}"
+    results = ts.wait_for_threads(db, [wrapped], timeout_sec=0)
+
+    assert set(results) == {tid}
+    assert results[tid].finished is True
+    assert results[tid].last_assistant_message == "answer"
+
+
+def test_wait_tool_normalizes_tool_output_wrapped_thread_id(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.append_message(db, tid, "assistant", "answer")
+    ts.create_snapshot(db, tid)
+
+    out = ts.create_default_tools().execute(
+        "wait",
+        {"thread_ids": [f"eggtools.spawn_agent_auto(...)\n\n{tid}"], "timeout_sec": 0},
+    )
+
+    assert f"Thread {tid[-8:]} finished" in out
+    assert "answer" in out
+
+
 def test_wait_for_threads_does_not_finish_when_llm_turn_is_actionable(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")
