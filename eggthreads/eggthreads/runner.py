@@ -1932,7 +1932,7 @@ class ThreadRunner:
             argv = wrap_argv_for_sandbox_with_settings(
                 base_argv,
                 enabled=sb.enabled,
-                settings=sb.settings,
+                settings={**dict(sb.settings or {}), "_egg_thread_context": {"thread_id": self.thread_id, "db_path": str(self.db.path)}},
                 working_dir=cwd,
                 provider=sb.provider,
                 container_name=container_name,
