@@ -2931,13 +2931,21 @@ def wait_for_threads(
         for tid in clean_ids:
             if finished.get(tid):
                 continue
+            row = db.get_thread(tid)
+            if row is None:
+                results[tid] = ThreadWaitResult(
+                    thread_id=tid,
+                    finished=False,
+                    state='not_found',
+                )
+                finished[tid] = True
+                continue
             try:
                 st = thread_state(db, tid)
             except Exception:
                 st = 'unknown'
 
             if st == 'waiting_user' and _thread_wait_complete(db, tid):
-                row = db.get_thread(tid)
                 results[tid] = ThreadWaitResult(
                     thread_id=tid,
                     finished=True,
@@ -2966,11 +2974,18 @@ def wait_for_threads(
     for tid in clean_ids:
         if tid in results:
             continue
+        row = db.get_thread(tid)
+        if row is None:
+            results[tid] = ThreadWaitResult(
+                thread_id=tid,
+                finished=False,
+                state='not_found',
+            )
+            continue
         try:
             st = thread_state(db, tid)
         except Exception:
             st = 'unknown'
-        row = db.get_thread(tid)
         results[tid] = ThreadWaitResult(
             thread_id=tid,
             finished=False,

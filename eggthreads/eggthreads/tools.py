@@ -1225,7 +1225,10 @@ def create_default_tools() -> ToolRegistry:
                 lines.append(f"Thread {short} finished. Last assistant message:\n{content}")
             else:
                 st = res.state if res is not None else 'unknown'
-                lines.append(f"Thread {short} not finished (state={st}).")
+                if st == 'not_found':
+                    lines.append(f"Thread {short} not found; not waiting.")
+                else:
+                    lines.append(f"Thread {short} not finished (state={st}).")
         return "\n\n".join(lines)
 
     reg.register(
