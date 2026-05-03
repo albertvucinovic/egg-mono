@@ -31,10 +31,10 @@ def test_docker_python_repl_persists_state_and_eggtools(tmp_path, monkeypatch):
     parent = ts.create_root_thread(db, name="parent")
     ts.enable_thread_session(db, parent, provider="docker", image=image)
 
-    out1 = ts.execute_python_repl(db, parent, "x = 123", bridge_timeout_sec=20)
+    out1 = ts.execute_python_repl(db, parent, "x = 123", timeout_sec=20)
     assert "Error:" not in out1
 
-    out2 = ts.execute_python_repl(db, parent, "x + 1", bridge_timeout_sec=20)
+    out2 = ts.execute_python_repl(db, parent, "x + 1", timeout_sec=20)
     assert "124" in out2
 
     runtime = ts.find_runtime_thread(db, parent, language="python")
@@ -46,7 +46,7 @@ def test_docker_python_repl_persists_state_and_eggtools(tmp_path, monkeypatch):
         db,
         parent,
         "from eggtools import bash\nprint(bash('echo docker-eggtools'))",
-        bridge_timeout_sec=30,
+        timeout_sec=30,
         drive_runtime_tools=True,
     )
     assert "docker-eggtools" in out3
@@ -60,7 +60,7 @@ def test_docker_python_repl_persists_state_and_eggtools(tmp_path, monkeypatch):
         db,
         parent,
         "from eggtools import get_child_status\nprint(get_child_status())",
-        bridge_timeout_sec=30,
+        timeout_sec=30,
         drive_runtime_tools=True,
     )
     assert child in out4

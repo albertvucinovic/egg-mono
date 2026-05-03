@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -2503,6 +2504,66 @@ def _tool_call_result_now(db: ThreadsDB, thread_id: str, tool_call_id: str, *, t
     )
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _timeout_countdown_summary(
+    prefix: str,
+    timeout_sec: Optional[float],
+    started_at: float,
+    *,
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """Format timeout countdowns consistently for wait-style status events."""
+
+    limit = _safe_float(timeout_sec)
+    if limit is None or limit <= 0:
+        return None
+    current = time.time() if now is None else float(now)
+    elapsed = max(0.0, current - float(started_at))
+    remaining = max(0.0, limit - elapsed)
+    return f"{prefix}; timeout in {remaining:.0f}s (limit {limit:.0f}s)"
+
+
+def _append_tool_wait_summary(
+    db: ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    timeout_sec: Optional[float],
+    started_at: float,
+    *,
+    now: Optional[float] = None,
+) -> None:
+    summary = _timeout_countdown_summary(
+        f"waiting for {tool_name or 'tool'} result",
+        timeout_sec,
+        started_at,
+        now=now,
+    )
+    if not summary:
+        return
+    try:
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=thread_id,
+            type_='tool_call.summary',
+            msg_id=None,
+            invoke_id=None,
+            payload={
+                'tool_call_id': tool_call_id,
+                'name': tool_name or 'tool',
+                'summary': summary,
+            },
+        )
+    except Exception:
+        pass
+
+
 def wait_for_tool_call_result(
     db: ThreadsDB,
     thread_id: str,
@@ -2517,7 +2578,6 @@ def wait_for_tool_call_result(
     it suitable as the event-log-backed "callback" used by REPL bridges.
     """
 
-    import time
     from .tool_state import build_tool_call_states
 
     start = time.time()
@@ -2527,32 +2587,17 @@ def wait_for_tool_call_result(
         tc = states.get(tool_call_id)
         if tc is not None and tc.published:
             return _tool_call_result_now(db, thread_id, tool_call_id)
-        if timeout_sec is not None and float(timeout_sec) > 0 and tc is not None:
+        limit = _safe_float(timeout_sec)
+        if limit is not None and limit > 0 and tc is not None:
             now = time.time()
             if not last_summary or (now - last_summary) >= max(1.0, float(poll_interval)):
                 last_summary = now
-                remaining = max(0.0, float(timeout_sec) - (now - start))
-                tool_name = tc.name or 'tool'
-                try:
-                    db.append_event(
-                        event_id=_ulid_like(),
-                        thread_id=thread_id,
-                        type_='tool_call.summary',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'tool_call_id': tool_call_id,
-                            'name': tool_name,
-                            'summary': f"waiting for {tool_name} result; timeout in {remaining:.0f}s (limit {float(timeout_sec):.0f}s)",
-                        },
-                    )
-                except Exception:
-                    pass
-        if timeout_sec is not None and (time.time() - start) >= timeout_sec:
+                _append_tool_wait_summary(db, thread_id, tool_call_id, tc.name or 'tool', limit, start, now=now)
+        if limit is not None and (time.time() - start) >= limit:
             return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
         try:
-            if timeout_sec is not None:
-                remaining = max(0.0, float(timeout_sec) - (time.time() - start))
+            if limit is not None:
+                remaining = max(0.0, limit - (time.time() - start))
                 time.sleep(min(float(poll_interval), remaining))
             else:
                 time.sleep(float(poll_interval))
@@ -2620,31 +2665,16 @@ async def wait_for_tool_call_result_async(
         tc = states.get(tool_call_id)
         if tc is not None and tc.published:
             return _tool_call_result_now(db, thread_id, tool_call_id)
-        if timeout_sec is not None and float(timeout_sec) > 0 and tc is not None:
+        limit = _safe_float(timeout_sec)
+        if limit is not None and limit > 0 and tc is not None:
             now = loop.time()
             if not last_summary or (now - last_summary) >= max(1.0, float(poll_interval)):
                 last_summary = now
-                remaining = max(0.0, float(timeout_sec) - (now - start))
-                tool_name = tc.name or 'tool'
-                try:
-                    db.append_event(
-                        event_id=_ulid_like(),
-                        thread_id=thread_id,
-                        type_='tool_call.summary',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'tool_call_id': tool_call_id,
-                            'name': tool_name,
-                            'summary': f"waiting for {tool_name} result; timeout in {remaining:.0f}s (limit {float(timeout_sec):.0f}s)",
-                        },
-                    )
-                except Exception:
-                    pass
-        if timeout_sec is not None and (loop.time() - start) >= timeout_sec:
+                _append_tool_wait_summary(db, thread_id, tool_call_id, tc.name or 'tool', limit, start, now=now)
+        if limit is not None and (loop.time() - start) >= limit:
             return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
-        if timeout_sec is not None:
-            remaining = max(0.0, float(timeout_sec) - (loop.time() - start))
+        if limit is not None:
+            remaining = max(0.0, limit - (loop.time() - start))
             await asyncio.sleep(min(float(poll_interval), remaining))
         else:
             await asyncio.sleep(float(poll_interval))
@@ -2829,6 +2859,18 @@ def _thread_wait_complete(db: ThreadsDB, thread_id: str) -> bool:
     """
 
     try:
+        # Treat expired leases as stale before asking whether a thread is still
+        # running.  ``current_open`` returns rows regardless of expiry, so a
+        # crashed runner could otherwise make wait block until its own timeout.
+        row = db.current_open(thread_id)
+        if row is not None:
+            try:
+                if str(row['lease_until']) <= _utcnow_iso():
+                    db.release(thread_id, str(row['invoke_id']))
+                else:
+                    return False
+            except Exception:
+                return False
         if db.current_open(thread_id) is not None:
             return False
     except Exception:
@@ -2866,7 +2908,6 @@ def wait_for_threads(
     not used to decide whether a thread is finished.
     """
 
-    import time
     from .tool_state import thread_state
 
     clean_ids = [str(t) for t in (thread_ids or []) if isinstance(t, (str, int))]
@@ -2898,11 +2939,12 @@ def wait_for_threads(
                 all_done = False
         if all_done:
             break
-        if timeout_sec is not None and (time.time() - start) >= timeout_sec:
+        limit = _safe_float(timeout_sec)
+        if limit is not None and (time.time() - start) >= limit:
             break
         try:
-            if timeout_sec is not None:
-                remaining = max(0.0, float(timeout_sec) - (time.time() - start))
+            if limit is not None:
+                remaining = max(0.0, limit - (time.time() - start))
                 time.sleep(min(float(poll_interval), remaining))
             else:
                 time.sleep(float(poll_interval))

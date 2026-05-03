@@ -43,7 +43,7 @@ def test_eggtools_exposes_skill_helper_in_memory_repl(tmp_path, monkeypatch) -> 
         parent,
         "from eggtools import skill\nprint('rlm' in skill())",
         drive_runtime_tools=True,
-        bridge_timeout_sec=5,
+        timeout_sec=5,
     )
 
     assert "True" in out

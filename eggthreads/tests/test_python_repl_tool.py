@@ -52,8 +52,11 @@ def test_execute_python_repl_reports_disabled_auto_session(tmp_path, monkeypatch
 
 def test_python_repl_tool_registered():
     tools = ts.create_default_tools()
-    names = {spec["function"]["name"] for spec in tools.tools_spec()}
-    assert "python_repl" in names
+    specs = {spec["function"]["name"]: spec for spec in tools.tools_spec()}
+    assert "python_repl" in specs
+    props = specs["python_repl"]["function"]["parameters"]["properties"]
+    assert "timeout_sec" in props
+    names = set(specs)
     assert "session_status" in names
     assert "session_reset" in names
     assert "session_stop" in names

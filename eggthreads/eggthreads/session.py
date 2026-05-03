@@ -1144,6 +1144,24 @@ _MEMORY_PYTHON_REPLS: Dict[tuple[str, str], Dict[str, Any]] = {}
 _MEMORY_BASH_ENVS: Dict[tuple[str, str], Dict[str, str]] = {}
 
 
+def _coerce_positive_timeout(value: Any) -> Optional[float]:
+    """Return a positive timeout seconds value, otherwise ``None``.
+
+    ``timeout_sec`` is the only public name for REPL eval limits. Invalid or
+    non-positive values mean "fall back to the next configured source". A
+    caller that wants no timeout should set the runner/global tool timeout to 0
+    rather than passing 0 as a per-call override.
+    """
+
+    if value is None:
+        return None
+    try:
+        timeout = float(value)
+    except Exception:
+        return None
+    return timeout if timeout > 0 else None
+
+
 def _append_runtime_repl_message(
     db: ThreadsDB,
     runtime_thread_id: str,
@@ -1192,18 +1210,18 @@ def _make_eggtools_module(eval_token: str):
     mod = types.ModuleType("eggtools")
 
     def _tool_timeout(args: Dict[str, Any]) -> Optional[float]:
-        timeout_sec = args.get("timeout_sec")
+        timeout_sec = _coerce_positive_timeout(args.get("timeout_sec"))
         if timeout_sec is not None:
             args.setdefault("_egg_tool_timeout_sec", timeout_sec)
-            try:
-                return float(timeout_sec)
-            except Exception:
-                return None
+            return timeout_sec
         return None
 
     def tool(name: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         return repl_bridge.call_tool(eval_token, name, args, timeout_sec=_tool_timeout(args))
+
+    def _pop_timeout_arg(args: Dict[str, Any]) -> Optional[float]:
+        return _coerce_positive_timeout(args.pop("timeout_sec", None))
 
     def _install_generated_wrappers() -> None:
         try:
@@ -1234,31 +1252,35 @@ def _make_eggtools_module(eval_token: str):
 
     def spawn_agent(context_text: str, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["context_text"] = context_text
         args.setdefault("_egg_raw_thread_id_result", True)
-        return repl_bridge.call_tool(eval_token, "spawn_agent", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "spawn_agent", args, timeout_sec=timeout_sec)
 
     def spawn_agent_auto(context_text: str, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["context_text"] = context_text
         args.setdefault("_egg_raw_thread_id_result", True)
-        return repl_bridge.call_tool(eval_token, "spawn_agent_auto", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "spawn_agent_auto", args, timeout_sec=timeout_sec)
 
     def send_message_to_child(child_thread_id: str, message: str, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["child_thread_id"] = child_thread_id
         args["message"] = message
-        return repl_bridge.call_tool(eval_token, "send_message_to_child", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "send_message_to_child", args, timeout_sec=timeout_sec)
 
     def get_child_status(child_thread_ids: Any = None, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         if child_thread_ids is not None:
             if isinstance(child_thread_ids, (str, int)):
                 child_thread_ids = [str(child_thread_ids)]
             if isinstance(child_thread_ids, (list, tuple, set)):
                 child_thread_ids = [str(t).splitlines()[-1].strip() for t in child_thread_ids if isinstance(t, (str, int))]
             args["child_thread_ids"] = child_thread_ids
-        return repl_bridge.call_tool(eval_token, "get_child_status", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "get_child_status", args, timeout_sec=timeout_sec)
 
     def wait(thread_ids: Any, **kwargs: Any) -> str:
         if isinstance(thread_ids, (str, int)):
@@ -1266,43 +1288,55 @@ def _make_eggtools_module(eval_token: str):
         if isinstance(thread_ids, (list, tuple, set)):
             thread_ids = [str(t).splitlines()[-1].strip() for t in thread_ids if isinstance(t, (str, int))]
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["thread_ids"] = thread_ids
-        return repl_bridge.call_tool(eval_token, "wait", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "wait", args, timeout_sec=timeout_sec)
 
     def web_search(query: str, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["query"] = query
-        return repl_bridge.call_tool(eval_token, "web_search", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "web_search", args, timeout_sec=timeout_sec)
 
     def fetch_url(url: str, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["url"] = url
-        return repl_bridge.call_tool(eval_token, "fetch_url", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "fetch_url", args, timeout_sec=timeout_sec)
 
     def skill(name: Optional[str] = None, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         if name is not None:
             args["name"] = name
-        return repl_bridge.call_tool(eval_token, "skill", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "skill", args, timeout_sec=timeout_sec)
 
     def bash(script: str, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["script"] = script
-        return repl_bridge.call_tool(eval_token, "bash", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "bash", args, timeout_sec=timeout_sec)
 
     def python(script: str, **kwargs: Any) -> str:
         args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
         args["script"] = script
-        return repl_bridge.call_tool(eval_token, "python", args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, "python", args, timeout_sec=timeout_sec)
 
     def session_status(**kwargs: Any) -> str:
-        return repl_bridge.call_tool(eval_token, "session_status", dict(kwargs))
+        args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
+        return repl_bridge.call_tool(eval_token, "session_status", args, timeout_sec=timeout_sec)
 
     def session_reset(**kwargs: Any) -> str:
-        return repl_bridge.call_tool(eval_token, "session_reset", dict(kwargs))
+        args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
+        return repl_bridge.call_tool(eval_token, "session_reset", args, timeout_sec=timeout_sec)
 
     def session_stop(**kwargs: Any) -> str:
-        return repl_bridge.call_tool(eval_token, "session_stop", dict(kwargs))
+        args = dict(kwargs)
+        timeout_sec = _pop_timeout_arg(args)
+        return repl_bridge.call_tool(eval_token, "session_stop", args, timeout_sec=timeout_sec)
 
     _install_generated_wrappers()
 
@@ -1556,7 +1590,7 @@ def execute_python_repl(
     *,
     repl_name: str = "default",
     runtime_name: str = "default",
-    bridge_timeout_sec: Optional[float] = 30.0,
+    timeout_sec: Optional[float] = 30.0,
     drive_runtime_tools: bool = False,
 ) -> str:
     """Execute Python code in the caller's persistent runtime session.
@@ -1567,6 +1601,8 @@ def execute_python_repl(
       * supports explicit ``provider='memory'`` for tests/development;
       * returns an actionable error for Docker until the Docker provider lands.
     """
+
+    effective_timeout_sec = _coerce_positive_timeout(timeout_sec)
 
     # Safety invariant: normal REPL tool execution runs as an outer tool call
     # on the caller/application thread.  Programmatic eggtools calls from the
@@ -1644,7 +1680,7 @@ def execute_python_repl(
             caller_thread_id=caller_thread_id,
             runtime_thread_id=runtime_thread_id,
             session_id=cfg.session_id,
-            bridge_timeout_sec=bridge_timeout_sec,
+            timeout_sec=effective_timeout_sec,
             drive_runtime_tools=drive_runtime_tools,
         )
         try:
@@ -1671,7 +1707,7 @@ def execute_python_repl(
             caller_thread_id=caller_thread_id,
             runtime_thread_id=runtime_thread_id,
             session_id=cfg.session_id,
-            bridge_timeout_sec=bridge_timeout_sec,
+            timeout_sec=effective_timeout_sec,
             drive_runtime_tools=drive_runtime_tools,
         )
         try:
@@ -1681,7 +1717,7 @@ def execute_python_repl(
                 code,
                 repl_name=channel,
                 eval_token=ctx.token,
-                timeout_sec=bridge_timeout_sec,
+                timeout_sec=effective_timeout_sec,
             )
         finally:
             dispose_eval_context(ctx.token)
@@ -1707,10 +1743,12 @@ def execute_bash_repl(
     *,
     repl_name: str = "default",
     runtime_name: str = "default",
-    bridge_timeout_sec: Optional[float] = 30.0,
+    timeout_sec: Optional[float] = 30.0,
     drive_runtime_tools: bool = False,
 ) -> str:
     """Execute Bash in the caller's persistent runtime session."""
+
+    effective_timeout_sec = _coerce_positive_timeout(timeout_sec)
 
     if drive_runtime_tools:
         try:
@@ -1782,12 +1820,12 @@ def execute_bash_repl(
         caller_thread_id=caller_thread_id,
         runtime_thread_id=runtime_thread_id,
         session_id=cfg.session_id,
-        bridge_timeout_sec=bridge_timeout_sec,
+        timeout_sec=effective_timeout_sec,
         drive_runtime_tools=drive_runtime_tools,
     )
     try:
         if cfg.provider == "memory":
-            out = _execute_bash_memory(cfg.session_id, channel, script, eval_token=ctx.token, timeout_sec=bridge_timeout_sec)
+            out = _execute_bash_memory(cfg.session_id, channel, script, eval_token=ctx.token, timeout_sec=effective_timeout_sec)
             _append_runtime_repl_message(
                 db,
                 runtime_thread_id,
@@ -1807,7 +1845,7 @@ def execute_bash_repl(
                 script,
                 repl_name=channel,
                 eval_token=ctx.token,
-                timeout_sec=bridge_timeout_sec,
+                timeout_sec=effective_timeout_sec,
             )
             _append_runtime_repl_message(
                 db,

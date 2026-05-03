@@ -16,7 +16,7 @@ def resolve_tool_timeout_arg(
     Priority matches the runner helper: LLM/tool-call ``timeout_sec`` first,
     then the runner-injected config/default timeout under ``config_key``.
     Invalid or non-positive values are treated as absent, so callers get a
-    single, consistent interpretation across bash/Python implementations.
+    single, consistent interpretation across tool implementations.
     """
     for candidate in (args.get('timeout_sec'), args.get(config_key)):
         if candidate is None:
@@ -372,10 +372,10 @@ def create_default_tools() -> ToolRegistry:
         code = args.get('code', '')
         repl_name = (args.get('repl_name') or 'default').strip() or 'default'
         runtime_name = (args.get('runtime_name') or 'default').strip() or 'default'
-        try:
-            bridge_timeout_sec = float(args.get('bridge_timeout_sec')) if args.get('bridge_timeout_sec') is not None else None
-        except Exception:
-            bridge_timeout_sec = 30.0
+        # Use the same canonical timeout parameter and fallback chain as other
+        # tools so the runner's live timeout display and the actual REPL
+        # evaluation bound cannot drift.
+        timeout_sec = resolve_tool_timeout_arg(args)
         drive_runtime_tools = bool(args.get('drive_runtime_tools', False))
         try:
             return execute_python_repl(
@@ -384,7 +384,7 @@ def create_default_tools() -> ToolRegistry:
                 str(code),
                 repl_name=repl_name,
                 runtime_name=runtime_name,
-                bridge_timeout_sec=bridge_timeout_sec,
+                timeout_sec=timeout_sec,
                 drive_runtime_tools=drive_runtime_tools,
             )
         except Exception as e:
@@ -399,7 +399,7 @@ def create_default_tools() -> ToolRegistry:
                 "code": {"type": "string", "description": "Python code to execute in the persistent REPL."},
                 "repl_name": {"type": "string", "description": "Optional REPL channel name (default: default)."},
                 "runtime_name": {"type": "string", "description": "Optional runtime child thread name (default: default)."},
-                "bridge_timeout_sec": {"type": "number", "description": "Seconds to wait for programmatic eggtools calls from this eval."},
+                "timeout_sec": {"type": "number", "description": "Maximum seconds to allow this eval and its programmatic eggtools calls before timing out."},
                 "drive_runtime_tools": {"type": "boolean", "description": "Testing/headless mode: directly drive runtime thread tool calls instead of relying on an active subtree scheduler."},
             },
             "required": ["code"],
@@ -417,10 +417,7 @@ def create_default_tools() -> ToolRegistry:
         script = args.get('script', '')
         repl_name = (args.get('repl_name') or 'default').strip() or 'default'
         runtime_name = (args.get('runtime_name') or 'default').strip() or 'default'
-        try:
-            bridge_timeout_sec = float(args.get('bridge_timeout_sec')) if args.get('bridge_timeout_sec') is not None else None
-        except Exception:
-            bridge_timeout_sec = 30.0
+        timeout_sec = resolve_tool_timeout_arg(args)
         drive_runtime_tools = bool(args.get('drive_runtime_tools', False))
         try:
             return execute_bash_repl(
@@ -429,7 +426,7 @@ def create_default_tools() -> ToolRegistry:
                 str(script),
                 repl_name=repl_name,
                 runtime_name=runtime_name,
-                bridge_timeout_sec=bridge_timeout_sec,
+                timeout_sec=timeout_sec,
                 drive_runtime_tools=drive_runtime_tools,
             )
         except Exception as e:
@@ -444,7 +441,7 @@ def create_default_tools() -> ToolRegistry:
                 "script": {"type": "string", "description": "Bash script to execute in the persistent REPL."},
                 "repl_name": {"type": "string", "description": "Optional REPL channel name (default: default)."},
                 "runtime_name": {"type": "string", "description": "Optional runtime child thread name (default: default)."},
-                "bridge_timeout_sec": {"type": "number", "description": "Seconds to wait for this eval/programmatic eggtool calls."},
+                "timeout_sec": {"type": "number", "description": "Maximum seconds to allow this eval and its programmatic eggtools calls before timing out."},
                 "drive_runtime_tools": {"type": "boolean", "description": "Testing/headless mode: directly drive runtime thread tool calls."},
             },
             "required": ["script"],
@@ -1209,11 +1206,10 @@ def create_default_tools() -> ToolRegistry:
         if not thread_ids:
             return 'Error: no valid thread_ids provided.'
 
-        timeout = args.get('timeout_sec') or args.get('timeout')
-        try:
-            timeout_sec = float(timeout) if timeout is not None else None
-        except Exception:
-            timeout_sec = None
+        # Honour the same timeout chain as the runner's live display. Without
+        # this, wait could keep polling forever while the UI kept showing
+        # "0s (limit 30s)".
+        timeout_sec = resolve_tool_timeout_arg(args)
 
         db = ThreadsDB()
         results = wait_for_threads(db, thread_ids, timeout_sec=timeout_sec, poll_interval=0.2)
