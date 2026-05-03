@@ -1246,7 +1246,12 @@ def _make_eggtools_module(eval_token: str):
             exec(compile(source, "<eggtools-generated>", "exec"), ns, ns)
             for generated_name in ns.get("__all__", []):
                 if isinstance(generated_name, str) and generated_name and not generated_name.startswith("_"):
-                    setattr(mod, generated_name, ns[generated_name])
+                    # Keep hand-written wrappers for tools that need
+                    # presentation hints or argument normalization
+                    # (spawn_agent*, wait, bash, ...). Generated wrappers fill
+                    # in only tools without bespoke behavior.
+                    if not hasattr(mod, generated_name):
+                        setattr(mod, generated_name, ns[generated_name])
         except Exception:
             pass
 

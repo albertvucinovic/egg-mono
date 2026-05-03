@@ -94,7 +94,11 @@ def _load_generated_wrappers() -> None:
     exec(compile(generated.read_text(encoding="utf-8"), str(generated), "exec"), ns, ns)
     for name in ns.get("__all__", []):
         if isinstance(name, str) and name and not name.startswith("_"):
-            globals()[name] = ns[name]
+            # Keep the hand-written wrappers for tools that need presentation
+            # hints or argument normalization (spawn_agent*, wait, bash, ...).
+            # Generated wrappers fill in only tools without bespoke behavior.
+            if name not in globals():
+                globals()[name] = ns[name]
 
 
 def _pop_timeout_arg(kwargs: Dict[str, Any]) -> Optional[float]:

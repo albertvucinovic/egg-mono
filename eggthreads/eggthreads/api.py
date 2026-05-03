@@ -2736,6 +2736,16 @@ def _last_assistant_content_from_snapshot(db: ThreadsDB, thread_id: str) -> str:
     return ''
 
 
+def _clean_wait_thread_id(value: Any) -> str:
+    """Normalize a wait target that may include surrounding tool-output text."""
+
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ''
+
+
 
 def _wait_skipped_msg_ids(db: ThreadsDB, thread_id: str) -> set[str]:
     skipped: set[str] = set()
@@ -2910,7 +2920,8 @@ def wait_for_threads(
 
     from .tool_state import thread_state
 
-    clean_ids = [str(t) for t in (thread_ids or []) if isinstance(t, (str, int))]
+    clean_ids = [_clean_wait_thread_id(t) for t in (thread_ids or []) if isinstance(t, (str, int))]
+    clean_ids = [tid for tid in clean_ids if tid]
     start = time.time()
     finished: Dict[str, bool] = {tid: False for tid in clean_ids}
     results: Dict[str, ThreadWaitResult] = {}
