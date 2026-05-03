@@ -965,6 +965,69 @@ def create_default_tools() -> ToolRegistry:
         local_only=False,
     )
 
+    def _get_child_status(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .api import get_child_thread_statuses
+
+        manager_id = (args.get('_thread_id') or args.get('manager_thread_id') or '').strip()
+        if not manager_id:
+            return 'Error: manager_thread_id is required.'
+
+        tids_arg = args.get('child_thread_ids') or args.get('thread_ids') or args.get('child_thread_id') or args.get('thread_id')
+        if isinstance(tids_arg, str):
+            child_ids = [tids_arg]
+        elif isinstance(tids_arg, list):
+            child_ids = [str(t) for t in tids_arg if isinstance(t, (str, int)) and str(t).strip()]
+        elif tids_arg is None:
+            # No ids means: inspect all direct children of the manager thread.
+            child_ids = None
+        else:
+            return 'Error: child_thread_ids must be a string, a list of strings, or omitted.'
+
+        try:
+            max_errors = int(args.get('max_errors', 5))
+        except Exception:
+            max_errors = 5
+
+        try:
+            statuses = get_child_thread_statuses(
+                ThreadsDB(),
+                manager_id,
+                child_ids,
+                max_errors=max_errors,
+            )
+        except Exception as e:
+            return f"Error: {e}"
+
+        payload = {"children": [st.to_dict() for st in statuses]}
+        return _json.dumps(payload, indent=2, sort_keys=True)
+
+    reg.register(
+        name='get_child_status',
+        description=(
+            'Inspect child or descendant thread status without waiting. Returns JSON with each child\'s '
+            'coarse state, approximate context token length, optional context limit percentage, open invoke, '
+            'last event metadata, and recent LLM/runner/session/tool errors. Omit child_thread_ids to inspect '
+            'all direct children of the calling thread.'
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "child_thread_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional child/descendant thread ids. Omit to inspect all direct children.",
+                },
+                "max_errors": {
+                    "type": "integer",
+                    "description": "Maximum recent error items to include per child (default 5, capped at 20).",
+                },
+            },
+        },
+        impl=_get_child_status,
+        local_only=False,
+    )
+
     # replace_between
     def _replace_between(args: Dict[str, Any]):
         file_path = args.get('file_path', '')

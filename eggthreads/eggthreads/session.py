@@ -1187,6 +1187,16 @@ def _make_eggtools_module(eval_token: str):
         args["message"] = message
         return repl_bridge.call_tool(eval_token, "send_message_to_child", args, timeout_sec=_tool_timeout(args))
 
+    def get_child_status(child_thread_ids: Any = None, **kwargs: Any) -> str:
+        args = dict(kwargs)
+        if child_thread_ids is not None:
+            if isinstance(child_thread_ids, (str, int)):
+                child_thread_ids = [str(child_thread_ids)]
+            if isinstance(child_thread_ids, (list, tuple, set)):
+                child_thread_ids = [str(t).splitlines()[-1].strip() for t in child_thread_ids if isinstance(t, (str, int))]
+            args["child_thread_ids"] = child_thread_ids
+        return repl_bridge.call_tool(eval_token, "get_child_status", args, timeout_sec=_tool_timeout(args))
+
     def wait(thread_ids: Any, **kwargs: Any) -> str:
         if isinstance(thread_ids, (str, int)):
             thread_ids = [str(thread_ids)]
@@ -1235,6 +1245,7 @@ def _make_eggtools_module(eval_token: str):
     mod.spawn_agent = spawn_agent
     mod.spawn_agent_auto = spawn_agent_auto
     mod.send_message_to_child = send_message_to_child
+    mod.get_child_status = get_child_status
     mod.wait = wait
     mod.web_search = web_search
     mod.fetch_url = fetch_url

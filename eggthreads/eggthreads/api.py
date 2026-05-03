@@ -2078,6 +2078,274 @@ class ThreadWaitResult:
     short_recap: Optional[str] = None
 
 
+@dataclass
+class ChildThreadStatus:
+    """Manager-visible status for a child/descendant thread."""
+
+    thread_id: str
+    name: Optional[str]
+    short_recap: Optional[str]
+    state: str
+    context_tokens: int
+    context_limit: Optional[int] = None
+    context_limit_percent: Optional[float] = None
+    error_count: int = 0
+    recent_errors: Optional[List[Dict[str, Any]]] = None
+    last_event_seq: int = -1
+    last_event_ts: Optional[str] = None
+    open_invoke_id: Optional[str] = None
+    token_stats_error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "thread_id": self.thread_id,
+            "name": self.name,
+            "short_recap": self.short_recap,
+            "state": self.state,
+            "context_tokens": int(self.context_tokens),
+            "context_limit": self.context_limit,
+            "context_limit_percent": self.context_limit_percent,
+            "error_count": int(self.error_count),
+            "recent_errors": list(self.recent_errors or []),
+            "last_event_seq": int(self.last_event_seq),
+            "last_event_ts": self.last_event_ts,
+            "open_invoke_id": self.open_invoke_id,
+        }
+        if self.token_stats_error:
+            out["token_stats_error"] = self.token_stats_error
+        return out
+
+
+def _truncate_status_text(value: Any, *, limit: int = 500) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _event_payload_from_row(row: Any) -> Dict[str, Any]:
+    try:
+        raw = row["payload_json"]
+    except Exception:
+        raw = None
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _error_item_from_event(row: Any) -> Optional[Dict[str, Any]]:
+    """Return a compact error item for a known error-like event, if any."""
+
+    try:
+        ev_type = str(row["type"] or "")
+        event_seq = int(row["event_seq"])
+        ts = row["ts"]
+        msg_id = row["msg_id"]
+        invoke_id = row["invoke_id"]
+    except Exception:
+        return None
+
+    payload = _event_payload_from_row(row)
+
+    def item(category: str, message: Any) -> Optional[Dict[str, Any]]:
+        text = _truncate_status_text(message)
+        if not text:
+            return None
+        out: Dict[str, Any] = {
+            "event_seq": event_seq,
+            "ts": ts,
+            "type": ev_type,
+            "category": category,
+            "message": text,
+        }
+        if msg_id:
+            out["msg_id"] = msg_id
+        if invoke_id:
+            out["invoke_id"] = invoke_id
+        return out
+
+    if ev_type == "msg.create":
+        role = payload.get("role")
+        content = payload.get("content")
+        if isinstance(content, str):
+            low = content.lower()
+            if role == "system" and (
+                "llm/runner error" in low
+                or "llm error" in low
+                or "context limit exceeded" in low
+                or low.startswith("error:")
+            ):
+                return item("llm", content)
+        incomplete_reason = payload.get("incomplete_reason")
+        if payload.get("incomplete") or incomplete_reason:
+            reason = incomplete_reason or "assistant message marked incomplete"
+            return item("llm_stream", reason)
+
+    if ev_type == "stream.delta":
+        # ``reason`` is also used for normal reasoning deltas, so only treat it
+        # as an error if the text is explicitly error-like.
+        reason = payload.get("reason")
+        if isinstance(reason, str):
+            low = reason.lower()
+            if "llm/runner error" in low or "llm error" in low or "context limit exceeded" in low:
+                return item("llm", reason)
+
+    if ev_type == "session.lifecycle":
+        action = str(payload.get("action") or "")
+        error = payload.get("error")
+        if error or action.endswith("_error") or action in ("docker_error", "stop_error"):
+            return item("session", error or action)
+
+    if ev_type == "tool_call.finished":
+        reason = str(payload.get("reason") or "")
+        output = payload.get("output")
+        if reason and reason not in ("success", "ok"):
+            return item("tool", f"tool_call.finished reason={reason}")
+        if isinstance(output, str) and output.strip().lower().startswith("error:"):
+            return item("tool", output)
+
+    return None
+
+
+def _recent_thread_errors(db: ThreadsDB, thread_id: str, *, max_errors: int) -> tuple[List[Dict[str, Any]], int]:
+    try:
+        max_errors = max(0, min(int(max_errors), 20))
+    except Exception:
+        max_errors = 5
+    errors: List[Dict[str, Any]] = []
+    count = 0
+    try:
+        cur = db.conn.execute(
+            "SELECT event_seq, ts, type, msg_id, invoke_id, payload_json "
+            "FROM events WHERE thread_id=? ORDER BY event_seq DESC",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        err = _error_item_from_event(row)
+        if err is None:
+            continue
+        count += 1
+        if len(errors) < max_errors:
+            errors.append(err)
+    return errors, count
+
+
+def _last_event_meta(db: ThreadsDB, thread_id: str) -> tuple[int, Optional[str]]:
+    try:
+        row = db.conn.execute(
+            "SELECT event_seq, ts FROM events WHERE thread_id=? ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0]), row[1]
+    except Exception:
+        pass
+    return -1, None
+
+
+def get_child_thread_status(
+    db: ThreadsDB,
+    manager_thread_id: str,
+    child_thread_id: str,
+    *,
+    max_errors: int = 5,
+) -> ChildThreadStatus:
+    """Return status, approximate context length, and recent errors for a descendant.
+
+    The target must be a child or deeper descendant of ``manager_thread_id``;
+    this mirrors ``send_message_to_child_thread`` and prevents managers from
+    inspecting unrelated threads.
+    """
+
+    manager = (manager_thread_id or "").strip()
+    child = (child_thread_id or "").strip()
+    if not manager:
+        raise ValueError("manager_thread_id is required")
+    if not child:
+        raise ValueError("child_thread_id is required")
+    if db.get_thread(manager) is None:
+        raise ValueError(f"manager thread not found: {manager}")
+    row = db.get_thread(child)
+    if row is None:
+        raise ValueError(f"child thread not found: {child}")
+    if not is_descendant_thread(db, manager, child):
+        raise ValueError("target thread must be a child or descendant of the calling thread")
+
+    try:
+        from .tool_state import thread_state
+
+        state = thread_state(db, child)
+    except Exception:
+        state = "unknown"
+
+    context_tokens = 0
+    token_stats_error: Optional[str] = None
+    try:
+        from .token_count import total_token_stats
+
+        stats = total_token_stats(db, child)
+        context_tokens = int(stats.get("context_tokens") or 0)
+    except Exception as e:
+        token_stats_error = f"{type(e).__name__}: {e}"
+
+    context_limit = get_context_limit(db, child)
+    context_limit_percent: Optional[float] = None
+    if isinstance(context_limit, int) and context_limit > 0:
+        context_limit_percent = round((float(context_tokens) / float(context_limit)) * 100.0, 2)
+
+    recent_errors, error_count = _recent_thread_errors(db, child, max_errors=max_errors)
+    last_event_seq, last_event_ts = _last_event_meta(db, child)
+    open_invoke_id = current_open_invoke(db, child)
+
+    return ChildThreadStatus(
+        thread_id=child,
+        name=row.name,
+        short_recap=row.short_recap,
+        state=state,
+        context_tokens=context_tokens,
+        context_limit=context_limit,
+        context_limit_percent=context_limit_percent,
+        error_count=error_count,
+        recent_errors=recent_errors,
+        last_event_seq=last_event_seq,
+        last_event_ts=last_event_ts,
+        open_invoke_id=open_invoke_id,
+        token_stats_error=token_stats_error,
+    )
+
+
+def get_child_thread_statuses(
+    db: ThreadsDB,
+    manager_thread_id: str,
+    child_thread_ids: Optional[List[str]] = None,
+    *,
+    max_errors: int = 5,
+) -> List[ChildThreadStatus]:
+    """Return status records for selected descendants, or all direct children."""
+
+    manager = (manager_thread_id or "").strip()
+    if not manager:
+        raise ValueError("manager_thread_id is required")
+    if db.get_thread(manager) is None:
+        raise ValueError(f"manager thread not found: {manager}")
+    if child_thread_ids is None:
+        targets = list_children_ids(db, manager)
+    else:
+        seen: set[str] = set()
+        targets = []
+        for raw in child_thread_ids:
+            tid = str(raw or "").splitlines()[-1].strip()
+            if tid and tid not in seen:
+                seen.add(tid)
+                targets.append(tid)
+    return [get_child_thread_status(db, manager, tid, max_errors=max_errors) for tid in targets]
+
+
 def enqueue_user_tool_call(
     db: ThreadsDB,
     thread_id: str,

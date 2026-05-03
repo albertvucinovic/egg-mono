@@ -30,8 +30,8 @@ py_files[:50]
 ## Optional bootstrap helpers
 
 There is no special RLM runtime module. The stable runtime API is the small
-`eggtools` bridge (`bash`, `python`, `spawn_agent`, `spawn_agent_auto`, `wait`,
-`web_search`, `fetch_url`, ...). When these helpers are useful, paste/adapt this
+`eggtools` bridge (`bash`, `python`, `spawn_agent`, `spawn_agent_auto`,
+`get_child_status`, `wait`, `web_search`, `fetch_url`, ...). When these helpers are useful, paste/adapt this
 snippet into `python_repl`; because the REPL is persistent, you normally only
 need to define it once per session.
 
@@ -224,7 +224,7 @@ their own conversation context; guide workers with `send_message_to_child` only
 after they have settled.
 
 ```python
-from eggtools import spawn_agent_auto, send_message_to_child, wait
+from eggtools import spawn_agent_auto, get_child_status, send_message_to_child, wait
 
 manager_state = {
     "iteration": 0,
@@ -247,6 +247,12 @@ for question in manager_state["open_questions"]:
 
 result_text = wait(list(manager_state["workers"]), timeout_sec=900)
 manager_state["findings"].append(result_text)
+
+# Poll status without blocking when you need budget/error visibility.  The JSON
+# includes state, approximate context_tokens, context_limit_percent when set,
+# and recent LLM/runner/session/tool errors.
+status_json = get_child_status(list(manager_state["workers"]), max_errors=3)
+print(status_json)
 
 # If a worker needs follow-up, reuse its thread context instead of spawning a
 # replacement. The child must be idle/waiting before guidance is sent.
