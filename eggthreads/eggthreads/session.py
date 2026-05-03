@@ -1859,7 +1859,6 @@ def get_or_create_runtime_thread(
 
     # Import lazily to avoid api <-> session import cycles at module import time.
     from .api import append_message, create_child_thread, create_snapshot
-    from .tools_config import set_thread_tools_enabled
 
     lang = _clean_runtime_part(language, "python")
     nm = _clean_runtime_part(name, "default")
@@ -1890,8 +1889,6 @@ def get_or_create_runtime_thread(
         reason=reason,
     )
 
-    # Runtime threads are execution/audit containers by default, not LLM agents.
-    set_thread_tools_enabled(db, child, False)
     append_message(
         db,
         child,

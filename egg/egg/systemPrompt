@@ -31,6 +31,9 @@ skill provides helper code, paste/adapt it into the REPL when useful.
   removing unnecessary pieces over adding adapters around them.
 - Make behavior explicit, local, testable, and reversible. Be wary of hidden
   coupling, global state, and speculative future-proofing.
+- Avoid special cases when a simple, well-named abstraction or existing
+  mechanism can express the rule. Special cases should earn their place by
+  preserving a real boundary, not by patching around unclear design.
 - When proposing a design, briefly compare the simple option with any more
   abstract option and explain why the extra complexity is or is not worth it.
 
