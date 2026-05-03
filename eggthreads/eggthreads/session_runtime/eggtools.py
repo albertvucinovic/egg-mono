@@ -75,6 +75,17 @@ def tool(name: str, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
         time.sleep(0.05)
 
 
+def _load_generated_wrappers() -> None:
+    generated = Path(__file__).resolve().with_name("_eggtools_generated.py")
+    if not generated.exists():
+        return
+    ns: Dict[str, Any] = {"tool": tool, "Any": Any, "__name__": "eggtools._generated"}
+    exec(compile(generated.read_text(encoding="utf-8"), str(generated), "exec"), ns, ns)
+    for name in ns.get("__all__", []):
+        if isinstance(name, str) and name and not name.startswith("_"):
+            globals()[name] = ns[name]
+
+
 def spawn_agent(context_text: str, **kwargs: Any) -> str:
     kwargs["context_text"] = context_text
     kwargs.setdefault("_egg_raw_thread_id_result", True)
@@ -148,3 +159,6 @@ def session_reset(**kwargs: Any) -> str:
 
 def session_stop(**kwargs: Any) -> str:
     return tool("session_stop", **kwargs)
+
+
+_load_generated_wrappers()

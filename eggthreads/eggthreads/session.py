@@ -579,6 +579,28 @@ def _write_runtime_files(runtime_dir: Path) -> None:
                 os.chmod(runtime_dir / name, 0o755)
             except Exception:
                 pass
+    try:
+        from .tools import create_default_tools
+
+        try:
+            from .session_runtime.tool_wrappers import generate_tool_wrappers_source
+        except Exception:
+            import importlib.util
+
+            helper_path = Path(__file__).resolve().parent / "session_runtime" / "tool_wrappers.py"
+            spec = importlib.util.spec_from_file_location("eggthreads.session_runtime.tool_wrappers", helper_path)
+            if spec is None or spec.loader is None:
+                raise
+            helper = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(helper)
+            generate_tool_wrappers_source = helper.generate_tool_wrappers_source
+
+        specs = [entry["spec"] for entry in create_default_tools()._tools.values()]
+        (runtime_dir / "_eggtools_generated.py").write_text(generate_tool_wrappers_source(specs), encoding="utf-8")
+    except Exception:
+        # The generic eggtools.tool(name, **kwargs) bridge remains available if
+        # wrapper generation fails.
+        pass
 
 
 def _docker_inspect_running(container_name: str) -> Optional[bool]:
@@ -1169,6 +1191,33 @@ def _make_eggtools_module(eval_token: str):
         args = dict(kwargs)
         return repl_bridge.call_tool(eval_token, name, args, timeout_sec=_tool_timeout(args))
 
+    def _install_generated_wrappers() -> None:
+        try:
+            from .tools import create_default_tools
+
+            try:
+                from .session_runtime.tool_wrappers import generate_tool_wrappers_source
+            except Exception:
+                import importlib.util
+
+                helper_path = Path(__file__).resolve().parent / "session_runtime" / "tool_wrappers.py"
+                spec = importlib.util.spec_from_file_location("eggthreads.session_runtime.tool_wrappers", helper_path)
+                if spec is None or spec.loader is None:
+                    raise
+                helper = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(helper)
+                generate_tool_wrappers_source = helper.generate_tool_wrappers_source
+
+            specs = [entry["spec"] for entry in create_default_tools()._tools.values()]
+            ns: Dict[str, Any] = {"tool": tool, "Any": Any, "__name__": "eggtools._generated"}
+            source = generate_tool_wrappers_source(specs)
+            exec(compile(source, "<eggtools-generated>", "exec"), ns, ns)
+            for generated_name in ns.get("__all__", []):
+                if isinstance(generated_name, str) and generated_name and not generated_name.startswith("_"):
+                    setattr(mod, generated_name, ns[generated_name])
+        except Exception:
+            pass
+
     def spawn_agent(context_text: str, **kwargs: Any) -> str:
         args = dict(kwargs)
         args["context_text"] = context_text
@@ -1240,6 +1289,8 @@ def _make_eggtools_module(eval_token: str):
 
     def session_stop(**kwargs: Any) -> str:
         return repl_bridge.call_tool(eval_token, "session_stop", dict(kwargs))
+
+    _install_generated_wrappers()
 
     mod.tool = tool
     mod.spawn_agent = spawn_agent
