@@ -56,6 +56,7 @@ def test_bash_repl_tool_registered():
     assert "bash_repl" in specs
     props = specs["bash_repl"]["function"]["parameters"]["properties"]
     assert "timeout_sec" in props
+    assert "drive_runtime_tools" not in props
 
 
 def test_bash_repl_memory_can_use_eval_token_env(tmp_path):
