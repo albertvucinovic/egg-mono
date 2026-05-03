@@ -127,6 +127,27 @@ def test_wait_tool_normalizes_tool_output_wrapped_thread_id(tmp_path, monkeypatc
     assert "answer" in out
 
 
+def test_wait_for_threads_does_not_block_for_missing_thread(tmp_path):
+    db = _make_db(tmp_path)
+    missing = "01K000000000000000MISSING"
+
+    results = ts.wait_for_threads(db, [missing], timeout_sec=None)
+
+    assert results[missing].finished is False
+    assert results[missing].state == "not_found"
+
+
+def test_wait_tool_reports_missing_thread_without_waiting(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    missing = "01K000000000000000MISSING"
+
+    out = ts.create_default_tools().execute("wait", {"thread_ids": [missing]}, timeout_sec=30)
+
+    assert "not found; not waiting" in out
+
+
 def test_wait_for_threads_does_not_finish_when_llm_turn_is_actionable(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")
