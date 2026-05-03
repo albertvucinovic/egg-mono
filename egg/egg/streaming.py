@@ -21,6 +21,13 @@ STREAM_STYLE_TOOL_OUTPUT: Optional[str] = "yellow"
 STREAM_STYLE_TOOL_CALL_ARGS: Optional[str] = "dim yellow"
 STREAM_STYLE_TOOL_SUMMARY: Optional[str] = "dim yellow"
 
+# Streaming deltas can arrive much faster than a human-visible refresh rate,
+# especially when attaching to an already-running reasoning stream. Repainting
+# the full-screen renderer for every delta makes input/scrolling feel chunky, so
+# coalesce renderer appends to a modest frame rate.
+STREAM_RENDER_FLUSH_SEC = 0.05
+STREAM_RENDER_MAX_BUFFER_CHARS = 64_000
+
 
 def _new_tool_stream_indicator() -> Dict[str, Any]:
     return {"active": False, "name": "", "frames": 0}
@@ -333,6 +340,7 @@ class StreamingMixin:
         if renderer is None or not hasattr(renderer, 'stream_begin'):
             return
         try:
+            self._clear_stream_render_buffer()
             renderer.stream_begin()
             kind = (stream_kind or 'stream').lower()
             if kind == 'llm':
@@ -345,17 +353,94 @@ class StreamingMixin:
         except Exception:
             pass
 
-    def _stream_append_on_renderer(self, text: str, *, style: Optional[str]) -> None:
-        renderer = getattr(self, '_renderer', None)
-        if renderer is None or not hasattr(renderer, 'stream_append'):
-            return
+    def _stream_payload_markup(self, text: str, *, style: Optional[str]) -> str:
         # Escape Rich-markup brackets in raw provider content so it renders
         # literally (we don't know whether the provider's text happens to
         # look like markup tags).
         escaped = (text or "").replace('[', '\\[')
-        payload = f"[{style}]{escaped}[/{style}]" if style else escaped
+        return f"[{style}]{escaped}[/{style}]" if style else escaped
+
+    def _clear_stream_render_buffer(self) -> None:
         try:
-            renderer.stream_append(payload)
+            task = getattr(self, '_stream_render_flush_task', None)
+            if task is not None:
+                task.cancel()
+        except Exception:
+            pass
+        self._stream_render_flush_task = None
+        self._stream_render_buffer = []
+        self._stream_render_buffer_chars = 0
+
+    async def _delayed_stream_render_flush(self) -> None:
+        try:
+            await asyncio.sleep(STREAM_RENDER_FLUSH_SEC)
+            self._stream_render_flush_task = None
+            self._flush_stream_render_buffer_now()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._stream_render_flush_task = None
+
+    def _schedule_stream_render_flush(self) -> None:
+        try:
+            task = getattr(self, '_stream_render_flush_task', None)
+            if task is not None and not task.done():
+                return
+            loop = asyncio.get_running_loop()
+            self._stream_render_flush_task = loop.create_task(self._delayed_stream_render_flush())
+        except Exception:
+            # If there is no running loop (e.g. an isolated unit helper), keep
+            # semantics simple and render immediately.
+            self._flush_stream_render_buffer_now()
+
+    def _flush_stream_render_buffer_now(self) -> None:
+        buf = list(getattr(self, '_stream_render_buffer', []) or [])
+        if not buf:
+            return
+        self._stream_render_buffer = []
+        self._stream_render_buffer_chars = 0
+        try:
+            task = getattr(self, '_stream_render_flush_task', None)
+            if task is not None and not task.done():
+                task.cancel()
+        except Exception:
+            pass
+        self._stream_render_flush_task = None
+
+        renderer = getattr(self, '_renderer', None)
+        if renderer is None or not hasattr(renderer, 'stream_append'):
+            return
+        try:
+            payload = ''.join(
+                self._stream_payload_markup(text, style=style)
+                for text, style in buf
+                if isinstance(text, str) and text
+            )
+            if payload:
+                renderer.stream_append(payload)
+        except Exception:
+            pass
+
+    def _stream_append_on_renderer(self, text: str, *, style: Optional[str]) -> None:
+        renderer = getattr(self, '_renderer', None)
+        if renderer is None or not hasattr(renderer, 'stream_append'):
+            return
+        try:
+            if not isinstance(text, str) or not text:
+                return
+            buf = getattr(self, '_stream_render_buffer', None)
+            if not isinstance(buf, list):
+                buf = []
+                self._stream_render_buffer = buf
+            buf.append((text, style))
+            self._stream_render_buffer_chars = int(getattr(self, '_stream_render_buffer_chars', 0) or 0) + len(text)
+            # Bound attach-time buffers so a very large replay does not defer a
+            # huge render until the end. Normal live streaming is flushed by the
+            # short timer below.
+            if self._stream_render_buffer_chars >= STREAM_RENDER_MAX_BUFFER_CHARS:
+                self._flush_stream_render_buffer_now()
+            else:
+                self._schedule_stream_render_flush()
         except Exception:
             pass
 
@@ -376,7 +461,9 @@ class StreamingMixin:
         if renderer is None or not hasattr(renderer, 'stream_end'):
             return
         try:
+            self._flush_stream_render_buffer_now()
             renderer.stream_end()
+            self._clear_stream_render_buffer()
         except Exception:
             pass
 
@@ -413,3 +500,4 @@ class StreamingMixin:
             t = (ls.get('tc_text') or {}).get(k, '')
             if isinstance(t, str) and t:
                 self._stream_append_on_renderer(t, style=STREAM_STYLE_TOOL_CALL_ARGS)
+        self._flush_stream_render_buffer_now()

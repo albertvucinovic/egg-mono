@@ -223,3 +223,51 @@ def test_watch_thread_yields_while_replaying_large_active_reasoning_stream(tmp_p
 
     assert 0 in sleeps
     assert "r249" in app._live_state["reason"]
+
+
+def test_stream_appends_are_coalesced_for_renderer(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    calls = []
+
+    class Renderer:
+        def stream_begin(self):
+            pass
+
+        def stream_append(self, payload):
+            calls.append(payload)
+
+        def stream_end(self):
+            pass
+
+    app._renderer = Renderer()
+
+    async def scenario():
+        await app.ingest_event_for_live(
+            {
+                "type": "stream.open",
+                "invoke_id": invoke_id,
+                "ts": "2024-01-01 00:00:00",
+                "payload_json": json.dumps({"stream_kind": "llm"}),
+            },
+            tid,
+        )
+        calls.clear()  # ignore header
+        for i in range(10):
+            await app.ingest_event_for_live(
+                {
+                    "type": "stream.delta",
+                    "invoke_id": invoke_id,
+                    "payload_json": json.dumps({"reason": str(i)}),
+                },
+                tid,
+            )
+        assert calls == []
+        app._flush_stream_render_buffer_now()
+
+    asyncio.run(scenario())
+
+    assert len(calls) == 1
+    assert all(str(i) in calls[0] for i in range(10))
