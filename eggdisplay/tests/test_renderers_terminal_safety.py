@@ -165,3 +165,23 @@ def test_fullscreen_scroll_position_stays_stable_when_stream_changes() -> None:
     assert r._prev_viewport == before
 
 
+def test_fullscreen_can_scroll_during_stream_without_prior_paint() -> None:
+    """Scroll should clamp against current stream rows, not stale paint state."""
+    r = TinyTerminalRenderer(width=8, height=4)
+    r._live_lines = ["LIVE"]
+
+    # Simulate a fast stream growing before the main UI loop has repainted the
+    # live panels. This happens easily while reasoning streams in read-only /
+    # NO_API_CALLS scenarios. The scroll call must still see the stream rows.
+    r._stream_buffer = "\n".join(f"reason-{i}" for i in range(8))
+    assert r._scroll_offset == 0
+
+    r.scroll(3)
+
+    # The first paint observes stream growth from 0 rows and compensates the
+    # offset to keep the selected slice stable; the important regression is
+    # that the scroll request is not ignored/clamped to zero.
+    assert r._scroll_offset > 0
+    assert r._prev_viewport[-1] == "LIVE"
+
+
