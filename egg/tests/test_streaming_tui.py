@@ -166,3 +166,60 @@ def test_suppressed_tool_stream_shows_indicator_not_more_output(tmp_path, monkey
     assert "saving output only" in panel_text
     assert "tool bash: saving output" in app._current_stream_header_part()
     assert app._live_state["tool_stream_indicator"]["active"] is True
+
+
+def test_watch_thread_yields_while_replaying_large_active_reasoning_stream(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    assert app.db.try_open_stream(
+        thread_id=tid,
+        invoke_id=invoke_id,
+        lease_until_iso="9999-12-31T23:59:59Z",
+        owner="pytest",
+        purpose="llm",
+    )
+    app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="stream.open",
+        payload={"stream_kind": "llm"},
+        msg_id=_uid(),
+        invoke_id=invoke_id,
+    )
+    for i in range(250):
+        app.db.append_event(
+            event_id=_uid(),
+            thread_id=tid,
+            type_="stream.delta",
+            payload={"reason": f"r{i}\n"},
+            invoke_id=invoke_id,
+            chunk_seq=i,
+        )
+
+    import egg.streaming as streaming_mod
+
+    class _NoOpWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            if False:  # pragma: no cover - keep it an async generator
+                yield []
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _NoOpWatcher)
+
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(streaming_mod.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert 0 in sleeps
+    assert "r249" in app._live_state["reason"]

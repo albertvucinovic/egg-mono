@@ -138,9 +138,17 @@ class StreamingMixin:
                     "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
                     (thread_id, start_after)
                 )
-                for e in cur.fetchall():
+                replay_rows = cur.fetchall()
+                # When attaching to an already-running stream (common in
+                # NO_API_CALLS/read-only viewer mode), there may be thousands of
+                # reasoning deltas to replay. Yield periodically so the main UI
+                # loop can keep processing keypresses, scroll events, and input
+                # redraws while the stream buffer is being rebuilt.
+                for idx, e in enumerate(replay_rows):
                     after_for_watch = e["event_seq"] or after_for_watch
                     await self.ingest_event_for_live(e, thread_id)
+                    if idx and idx % 100 == 0:
+                        await asyncio.sleep(0)
             except Exception:
                 pass
 
@@ -152,13 +160,21 @@ class StreamingMixin:
         ew = EventWatcher(watcher_db, thread_id, after_seq=after_for_watch, poll_sec=0.1)
         async for batch in ew.aiter():
             saw_non_stream_msg = False
-            for e in batch:
+            for idx, e in enumerate(batch):
                 try:
                     if e["type"] in ("msg.create", "msg.edit", "msg.delete"):
                         saw_non_stream_msg = True
                 except Exception:
                     pass
                 await self.ingest_event_for_live(e, thread_id)
+                # Same fairness rule for live catch-up batches: a big burst of
+                # reasoning deltas should not monopolize the event loop and make
+                # typing/scrolling appear frozen.
+                try:
+                    if idx and idx % 100 == 0:
+                        await asyncio.sleep(0)
+                except Exception:
+                    pass
 
             # If we saw message-level events, refresh snapshot to include them
             if saw_non_stream_msg:
