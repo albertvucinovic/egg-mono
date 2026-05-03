@@ -376,6 +376,14 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         # bump / reduce scroll_offset by the row-count delta so the
         # visible slice stays fixed on the same content.
         self._last_stream_rows: int = 0
+        # Cache rendered stream rows. Scrolling while a long reasoning stream
+        # is active must not re-parse the whole ANSI stream buffer for every
+        # wheel event/PageUp; the cache is invalidated only when the stream
+        # buffer changes or the terminal width changes.
+        self._stream_version: int = 0
+        self._stream_rows_cache_width: int = 0
+        self._stream_rows_cache_version: int = -1
+        self._stream_rows_cache: List[str] = []
 
     # -- context manager ----------------------------------------------------
 
@@ -487,6 +495,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     def stream_begin(self) -> None:
         """Start a new streaming session; clear any prior in-flight buffer."""
         self._stream_buffer = ""
+        self._stream_version += 1
         self._paint(self._viewport_w or self._term_width())
 
     def stream_append(self, text) -> None:
@@ -504,6 +513,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         if not ansi:
             return
         self._stream_buffer += ansi
+        self._stream_version += 1
         self._paint(self._viewport_w or self._term_width())
 
     def stream_end(self) -> None:
@@ -514,13 +524,24 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         live stream is replaced with the finalized rendering.
         """
         self._stream_buffer = ""
+        self._stream_version += 1
         self._paint(self._viewport_w or self._term_width())
 
     # -- internal -----------------------------------------------------------
 
     def _stream_rows(self, width: int) -> List[str]:
         """Split the in-flight stream buffer into terminal-width visual rows."""
-        return self._stream_rows_from_ansi(self._stream_buffer, width)
+        width = int(width or 0)
+        if (
+            self._stream_rows_cache_width == width
+            and self._stream_rows_cache_version == self._stream_version
+        ):
+            return self._stream_rows_cache
+        rows = self._stream_rows_from_ansi(self._stream_buffer, width)
+        self._stream_rows_cache_width = width
+        self._stream_rows_cache_version = self._stream_version
+        self._stream_rows_cache = rows
+        return rows
 
     def _max_scroll_offset(self, width: int) -> int:
         """Return the largest valid in-app scroll offset for current content."""
