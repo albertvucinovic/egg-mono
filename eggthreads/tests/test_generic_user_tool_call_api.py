@@ -92,3 +92,32 @@ def test_wait_for_threads_returns_structured_results(tmp_path):
     assert result.finished is True
     assert result.state == "waiting_user"
     assert result.last_assistant_message == "answer"
+
+
+def test_wait_for_threads_does_not_finish_when_llm_turn_is_actionable(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "work to do")
+    ts.create_snapshot(db, child)
+
+    results = ts.wait_for_threads(db, [child], timeout_sec=0)
+    result = results[child]
+
+    assert result.finished is False
+    assert result.last_assistant_message == ""
+
+
+def test_wait_for_threads_waits_for_new_llm_turn_when_old_answer_exists(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.append_message(db, tid, "assistant", "answer")
+    ts.create_snapshot(db, tid)
+    ts.append_message(db, tid, "user", "follow up")
+
+    results = ts.wait_for_threads(db, [tid], timeout_sec=0)
+    result = results[tid]
+
+    assert result.finished is False
+    assert result.last_assistant_message == "answer"

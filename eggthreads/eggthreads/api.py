@@ -2706,6 +2706,150 @@ def _last_assistant_content_from_snapshot(db: ThreadsDB, thread_id: str) -> str:
     return ''
 
 
+
+def _wait_skipped_msg_ids(db: ThreadsDB, thread_id: str) -> set[str]:
+    skipped: set[str] = set()
+    try:
+        cur = db.conn.execute(
+            "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for msg_id, payload_json in rows:
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and payload.get('skipped_on_continue') and msg_id:
+            skipped.add(str(msg_id))
+    return skipped
+
+
+def _is_llm_error_message(payload: Dict[str, Any]) -> bool:
+    if payload.get('role') != 'system':
+        return False
+    content = payload.get('content')
+    if not isinstance(content, str):
+        return False
+    low = content.lower()
+    return 'llm/runner error' in low or 'llm error' in low or 'context limit exceeded' in low
+
+
+def _latest_completed_llm_turn_seq(db: ThreadsDB, thread_id: str) -> int:
+    """Return the last event_seq that represents an LLM turn result.
+
+    Results are assistant messages (including tool-call-only assistants) or
+    system messages that explicitly surface LLM/runner failure.  The event log,
+    not the snapshot cache, is the source of truth for wait semantics.
+    """
+
+    skipped = _wait_skipped_msg_ids(db, thread_id)
+    latest = -1
+    try:
+        cur = db.conn.execute(
+            "SELECT event_seq, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for event_seq, msg_id, payload_json in rows:
+        if msg_id and str(msg_id) in skipped:
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        role = payload.get('role')
+        completed = False
+        if role == 'assistant':
+            completed = bool(
+                payload.get('content')
+                or payload.get('tool_calls')
+                or payload.get('reasoning')
+                or payload.get('reasoning_content')
+                or payload.get('incomplete')
+            )
+        elif _is_llm_error_message(payload):
+            completed = True
+        if completed:
+            try:
+                latest = int(event_seq)
+            except Exception:
+                pass
+    return latest
+
+
+def _latest_api_trigger_seq(db: ThreadsDB, thread_id: str) -> int:
+    """Return the last message event_seq that should trigger an LLM turn."""
+
+    skipped = _wait_skipped_msg_ids(db, thread_id)
+    latest = -1
+    try:
+        cur = db.conn.execute(
+            "SELECT event_seq, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for event_seq, msg_id, payload_json in rows:
+        if msg_id and str(msg_id) in skipped:
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if bool(payload.get('no_api')) or bool(payload.get('keep_user_turn')):
+            continue
+        role = payload.get('role')
+        tool_calls = payload.get('tool_calls') or []
+        triggers = (role == 'user' and not tool_calls) or role == 'tool'
+        if triggers:
+            try:
+                latest = int(event_seq)
+            except Exception:
+                pass
+    return latest
+
+
+def _thread_wait_complete(db: ThreadsDB, thread_id: str) -> bool:
+    """Deterministic event-log predicate for ``wait`` completion.
+
+    A thread is complete for manager ``wait`` when there is no open stream, no
+    unresolved tool call, no runner-actionable work, and every API-triggering
+    user/tool message has a later LLM result (assistant or surfaced LLM error).
+    This avoids treating timing gaps or polling timeouts as state.
+    """
+
+    try:
+        if db.current_open(thread_id) is not None:
+            return False
+    except Exception:
+        return False
+
+    try:
+        from .tool_state import build_tool_call_states, discover_runner_actionable
+
+        if any(tc.state != 'TC6' for tc in build_tool_call_states(db, thread_id).values()):
+            return False
+        if discover_runner_actionable(db, thread_id) is not None:
+            return False
+    except Exception:
+        return False
+
+    latest_trigger = _latest_api_trigger_seq(db, thread_id)
+    if latest_trigger < 0:
+        return True
+    latest_completion = _latest_completed_llm_turn_seq(db, thread_id)
+    return latest_completion >= latest_trigger
+
 def wait_for_threads(
     db: ThreadsDB,
     thread_ids: List[str],
@@ -2713,10 +2857,13 @@ def wait_for_threads(
     timeout_sec: Optional[float] = None,
     poll_interval: float = 0.2,
 ) -> Dict[str, ThreadWaitResult]:
-    """Wait for threads to reach ``waiting_user`` and return structured results.
+    """Wait for threads to finish and return structured results.
 
-    This is the shared implementation behind the human-readable ``wait`` tool
-    and the future REPL bridge's programmatic ``eggtools.wait`` wrapper.
+    Completion is a deterministic event-log predicate, not a timing guess: no
+    open stream, no unresolved tool call, no runner-actionable work, and the
+    latest API-triggering user/tool message (if any) has a later LLM result
+    message.  ``timeout_sec`` only bounds how long this function blocks; it is
+    not used to decide whether a thread is finished.
     """
 
     import time
@@ -2736,7 +2883,8 @@ def wait_for_threads(
                 st = thread_state(db, tid)
             except Exception:
                 st = 'unknown'
-            if st == 'waiting_user':
+
+            if st == 'waiting_user' and _thread_wait_complete(db, tid):
                 row = db.get_thread(tid)
                 results[tid] = ThreadWaitResult(
                     thread_id=tid,
