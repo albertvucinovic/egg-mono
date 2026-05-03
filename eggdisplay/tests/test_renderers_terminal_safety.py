@@ -185,3 +185,26 @@ def test_fullscreen_can_scroll_during_stream_without_prior_paint() -> None:
     assert r._prev_viewport[-1] == "LIVE"
 
 
+def test_fullscreen_scroll_reuses_stream_row_cache() -> None:
+    r = TinyTerminalRenderer(width=8, height=4)
+    r._live_lines = ["LIVE"]
+
+    calls = []
+    original = r._stream_rows_from_ansi
+
+    def counted(ansi_text: str, width: int):
+        calls.append((len(ansi_text), width))
+        return original(ansi_text, width)
+
+    r._stream_rows_from_ansi = counted  # type: ignore[method-assign]
+    r.stream_begin()
+    r.stream_append("\n".join(f"reason-{i}" for i in range(50)))
+    calls.clear()
+    r.stream_append("\nmore")
+
+    r.scroll(1)
+    r.scroll(1)
+
+    assert len(calls) == 1
+
+
