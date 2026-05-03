@@ -93,6 +93,16 @@ def send_message_to_child(child_thread_id: str, message: str, **kwargs: Any) -> 
     return tool("send_message_to_child", **kwargs)
 
 
+def get_child_status(child_thread_ids: Any = None, **kwargs: Any) -> str:
+    if child_thread_ids is not None:
+        if isinstance(child_thread_ids, (str, int)):
+            child_thread_ids = [str(child_thread_ids)]
+        if isinstance(child_thread_ids, (list, tuple, set)):
+            child_thread_ids = [str(t).splitlines()[-1].strip() for t in child_thread_ids if isinstance(t, (str, int))]
+        kwargs["child_thread_ids"] = child_thread_ids
+    return tool("get_child_status", **kwargs)
+
+
 def wait(thread_ids: Any, **kwargs: Any) -> str:
     if isinstance(thread_ids, (str, int)):
         thread_ids = [str(thread_ids)]
