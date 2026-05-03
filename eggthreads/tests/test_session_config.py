@@ -353,12 +353,20 @@ def test_docker_session_status_unavailable(monkeypatch, tmp_path):
 
 def test_session_dockerfile_and_build_script_exist():
     repo_root = Path(__file__).resolve().parents[1]
+    sandbox_dockerfile = repo_root / "docker" / "Dockerfile"
     dockerfile = repo_root / "docker" / "Dockerfile.session"
     script = repo_root / "docker" / "create-session-image.sh"
 
+    sandbox_text = sandbox_dockerfile.read_text(encoding="utf-8")
+    assert "elan toolchain install leanprover/lean4:v4.29.1" in sandbox_text
+    assert "COPY bin/applypatch" in sandbox_text
+
     assert dockerfile.exists()
     text = dockerfile.read_text(encoding="utf-8")
+    assert "FROM ${BASE_IMAGE}" in text
     assert "egg-bridge" in text
     assert "sessiond.py" in text
     assert script.exists()
-    assert "Dockerfile.session" in script.read_text(encoding="utf-8")
+    script_text = script.read_text(encoding="utf-8")
+    assert "Dockerfile.session" in script_text
+    assert "--build-arg \"BASE_IMAGE=$BASE_IMAGE\"" in script_text

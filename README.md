@@ -153,13 +153,19 @@ Egg uses Docker in three separate places. Set up only the pieces you need:
 | Use | Image/container | Setup |
 |-----|-----------------|-------|
 | Tool sandboxing | `egg-sandbox` image | Optional but recommended for Docker sandboxing: `./eggthreads/docker/create-image.sh` |
-| Persistent REPL sessions | `egg-rlm-session` image | Included in `create-image.sh`, or build just this image with `./eggthreads/docker/create-session-image.sh` |
+| Persistent REPL sessions | `egg-rlm-session` thin wrapper image | Included in `create-image.sh`, or build just this image with `./eggthreads/docker/create-session-image.sh` |
 | Web search | `egg-searxng` + `egg-searxng-valkey` containers | Start with `/startSearxng` in `egg`, or run `docker compose up -d` in `eggthreads/eggthreads/web/searxng/` |
 
 Notes:
 
-- `create-image.sh` builds both local Egg images (`egg-sandbox` and `egg-rlm-session`).
+- `create-image.sh` builds the shared `egg-sandbox` runtime and a thin
+  `egg-rlm-session` wrapper. The wrapper keeps the REPL/sessiond default command
+  while reusing the same filesystem/toolchain as sandboxed tool calls.
 - If `egg-sandbox` is missing, Docker sandboxing falls back to `python:3.12-slim`, but the local image includes extra tools/packages used by Egg.
+- `egg-sandbox` includes elan with Lean 4.29.1 plus common Egg development tools
+  (pytest, FastAPI/httpx, pyflakes, pdoc, tox, Node/npm, ripgrep, sqlite, etc.),
+  so Lean projects with a mounted `.lake` cache and egg-mono development both work
+  inside Docker sandboxed tool calls and Docker REPL sessions.
 - SearXNG uses public images from Docker Hub; there is no local image to build. Stop it with `/stopSearxng` or `docker compose down` in the SearXNG directory.
 
 ## Development
