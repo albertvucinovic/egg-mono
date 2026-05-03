@@ -376,7 +376,6 @@ def create_default_tools() -> ToolRegistry:
         # tools so the runner's live timeout display and the actual REPL
         # evaluation bound cannot drift.
         timeout_sec = resolve_tool_timeout_arg(args)
-        drive_runtime_tools = bool(args.get('drive_runtime_tools', False))
         try:
             return execute_python_repl(
                 ThreadsDB(),
@@ -385,7 +384,6 @@ def create_default_tools() -> ToolRegistry:
                 repl_name=repl_name,
                 runtime_name=runtime_name,
                 timeout_sec=timeout_sec,
-                drive_runtime_tools=drive_runtime_tools,
             )
         except Exception as e:
             return f"Error: python_repl failed: {e}"
@@ -400,7 +398,6 @@ def create_default_tools() -> ToolRegistry:
                 "repl_name": {"type": "string", "description": "Optional REPL channel name (default: default)."},
                 "runtime_name": {"type": "string", "description": "Optional runtime child thread name (default: default)."},
                 "timeout_sec": {"type": "number", "description": "Maximum seconds to allow this eval and its programmatic eggtools calls before timing out."},
-                "drive_runtime_tools": {"type": "boolean", "description": "Testing/headless mode: directly drive runtime thread tool calls instead of relying on an active subtree scheduler."},
             },
             "required": ["code"],
         },
@@ -418,7 +415,6 @@ def create_default_tools() -> ToolRegistry:
         repl_name = (args.get('repl_name') or 'default').strip() or 'default'
         runtime_name = (args.get('runtime_name') or 'default').strip() or 'default'
         timeout_sec = resolve_tool_timeout_arg(args)
-        drive_runtime_tools = bool(args.get('drive_runtime_tools', False))
         try:
             return execute_bash_repl(
                 ThreadsDB(),
@@ -427,7 +423,6 @@ def create_default_tools() -> ToolRegistry:
                 repl_name=repl_name,
                 runtime_name=runtime_name,
                 timeout_sec=timeout_sec,
-                drive_runtime_tools=drive_runtime_tools,
             )
         except Exception as e:
             return f"Error: bash_repl failed: {e}"
@@ -442,7 +437,6 @@ def create_default_tools() -> ToolRegistry:
                 "repl_name": {"type": "string", "description": "Optional REPL channel name (default: default)."},
                 "runtime_name": {"type": "string", "description": "Optional runtime child thread name (default: default)."},
                 "timeout_sec": {"type": "number", "description": "Maximum seconds to allow this eval and its programmatic eggtools calls before timing out."},
-                "drive_runtime_tools": {"type": "boolean", "description": "Testing/headless mode: directly drive runtime thread tool calls."},
             },
             "required": ["script"],
         },
