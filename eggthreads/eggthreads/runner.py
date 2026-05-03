@@ -1221,6 +1221,107 @@ class ThreadRunner:
 
         interrupted = False
         transport_error_after_output: Optional[BaseException] = None
+
+        def _persist_assistant_message(final: Dict[str, Any]) -> bool:
+            """Persist a completed assistant turn and return whether it did.
+
+            Eggllm's documented streaming contract ends with a ``done`` event,
+            but a few tests/mocks and some compatibility adapters emit the
+            final assistant as a ``message`` event.  Keeping both event shapes
+            behind one helper prevents completion detection from drifting: any
+            accepted final event creates the same ``msg.create`` boundary that
+            ``wait`` observes.
+            """
+
+            nonlocal assistant_text_parts, reasoning_parts
+            if not isinstance(final, dict):
+                final = {}
+            if not saw_content_delta:
+                fc = final.get('content')
+                if isinstance(fc, str) and fc:
+                    assistant_text_parts = [fc]
+            if not saw_reason_delta:
+                fr = final.get('reasoning') or final.get('reason') or final.get('reasoning_content')
+                if isinstance(fr, str) and fr:
+                    reasoning_parts = [fr]
+            assistant_msg: Dict[str, Any] = {'role': 'assistant'}
+            if assistant_text_parts:
+                assistant_msg['content'] = ''.join(assistant_text_parts)
+            tcs = final.get('tool_calls') or []
+            if isinstance(tcs, list) and tcs:
+                assistant_msg['tool_calls'] = tcs
+            if reasoning_parts:
+                assistant_msg['reasoning'] = ''.join(reasoning_parts)
+            if current_model:
+                assistant_msg['model_key'] = current_model
+
+            passthrough_skip_keys = {'role'}
+            # ``reasoning_content`` is the provider-facing key for durable
+            # reasoning.  Eggthreads normalizes durable reasoning into the
+            # local ``reasoning`` field above, so do not persist a duplicate
+            # provider key unless a model-specific encrypted/thinking policy
+            # explicitly needs raw provider fields to round-trip.
+            if not self._should_preserve_provider_reasoning_content(current_model):
+                passthrough_skip_keys.add('reasoning_content')
+
+            # Preserve any provider-specific fields returned by eggllm (e.g.
+            # Gemini thought signatures). We do not interpret these fields
+            # here; we simply persist them so that the next provider request
+            # can round-trip them when required by the model/protocol.
+            for k, v in final.items():
+                if k in passthrough_skip_keys:
+                    continue
+                if k in assistant_msg:
+                    continue
+                if v is None:
+                    continue
+                assistant_msg[k] = v
+
+            # If the provider returned an entirely empty assistant message (no
+            # content, no tools, no reasoning), skip creating a blank assistant
+            # msg and surface a system notice instead.
+            if (not assistant_msg.get('content')
+                and not assistant_msg.get('tool_calls')
+                and not reasoning_parts
+                and not assistant_msg.get('reasoning')
+                and not assistant_msg.get('reasoning_content')):
+                err_payload: Dict[str, Any] = {
+                    'role': 'system',
+                    'content': 'LLM error: empty assistant message returned by provider',
+                }
+                if current_model:
+                    err_payload['model_key'] = current_model
+                self.db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=self.thread_id,
+                    type_='msg.create',
+                    msg_id=os.urandom(10).hex(),
+                    payload=err_payload,
+                )
+                return False
+
+            try:
+                from .token_count import llm_message_tps_for_invoke
+                tps = llm_message_tps_for_invoke(
+                    self.db,
+                    invoke_id,
+                    content=str(assistant_msg.get('content') or ''),
+                    reasoning=str(assistant_msg.get('reasoning') or ''),
+                    tool_calls=assistant_msg.get('tool_calls') if isinstance(assistant_msg.get('tool_calls'), list) else None,
+                )
+                if isinstance(tps, float) and tps > 0:
+                    assistant_msg['tps'] = tps
+            except Exception:
+                pass
+            self.db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=self.thread_id,
+                type_='msg.create',
+                msg_id=os.urandom(10).hex(),
+                payload=assistant_msg,
+            )
+            return True
+
         try:
             async for raw in self.llm.astream_chat(base_messages, tools=tools_spec_to_use, tool_choice=tool_choice, timeout=api_timeout_int):
                 try:
@@ -1328,96 +1429,11 @@ class ThreadRunner:
                             await asyncio.sleep(0)
                         if interrupted:
                             break
-                    elif et == 'done':
-                        final = evt.get('message') or {}
-                        if not saw_content_delta:
-                            fc = final.get('content')
-                            if isinstance(fc, str) and fc:
-                                assistant_text_parts = [fc]
-                        if not saw_reason_delta:
-                            fr = final.get('reasoning') or final.get('reason') or final.get('reasoning_content')
-                            if isinstance(fr, str) and fr:
-                                reasoning_parts = [fr]
-                        assistant_msg: Dict[str, Any] = {'role': 'assistant'}
-                        if assistant_text_parts:
-                            assistant_msg['content'] = ''.join(assistant_text_parts)
-                        tcs = final.get('tool_calls') or []
-                        if isinstance(tcs, list) and tcs:
-                            assistant_msg['tool_calls'] = tcs
-                        if reasoning_parts:
-                            assistant_msg['reasoning'] = ''.join(reasoning_parts)
-                        if current_model:
-                            assistant_msg['model_key'] = current_model
-
-                        passthrough_skip_keys = {'role'}
-                        # ``reasoning_content`` is the provider-facing key for
-                        # durable reasoning.  Eggthreads normalizes durable
-                        # reasoning into the local ``reasoning`` field above,
-                        # so do not persist a duplicate provider key unless a
-                        # model-specific encrypted/thinking policy explicitly
-                        # needs raw provider fields to round-trip.
-                        if not self._should_preserve_provider_reasoning_content(current_model):
-                            passthrough_skip_keys.add('reasoning_content')
-
-                        # Preserve any provider-specific fields returned
-                        # by eggllm (e.g. Gemini thought signatures).
-                        #
-                        # We *do not* interpret these fields here; we
-                        # simply persist them so that the next provider
-                        # request can round-trip them when required by
-                        # the model/protocol.
-                        if isinstance(final, dict):
-                            for k, v in final.items():
-                                if k in passthrough_skip_keys:
-                                    continue
-                                if k in assistant_msg:
-                                    continue
-                                if v is None:
-                                    continue
-                                assistant_msg[k] = v
-                        # If the provider returned an entirely empty
-                        # assistant message (no content, no tools, no
-                        # reasoning), skip creating a blank assistant
-                        # msg and surface a system notice instead.
-                        if (not assistant_msg.get('content')
-                            and not assistant_msg.get('tool_calls')
-                            and not reasoning_parts
-                            and not assistant_msg.get('reasoning')
-                            and not assistant_msg.get('reasoning_content')):
-                            err_payload: Dict[str, Any] = {
-                                'role': 'system',
-                                'content': 'LLM error: empty assistant message returned by provider',
-                            }
-                            if current_model:
-                                err_payload['model_key'] = current_model
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
-                                type_='msg.create',
-                                msg_id=os.urandom(10).hex(),
-                                payload=err_payload,
-                            )
-                        else:
-                            try:
-                                from .token_count import llm_message_tps_for_invoke
-                                tps = llm_message_tps_for_invoke(
-                                    self.db,
-                                    invoke_id,
-                                    content=str(assistant_msg.get('content') or ''),
-                                    reasoning=str(assistant_msg.get('reasoning') or ''),
-                                    tool_calls=assistant_msg.get('tool_calls') if isinstance(assistant_msg.get('tool_calls'), list) else None,
-                                )
-                                if isinstance(tps, float) and tps > 0:
-                                    assistant_msg['tps'] = tps
-                            except Exception:
-                                pass
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
-                                type_='msg.create',
-                                msg_id=os.urandom(10).hex(),
-                                payload=assistant_msg,
-                            )
+                    elif et in ('done', 'message'):
+                        final = evt.get('message') if et == 'done' else evt
+                        if not isinstance(final, dict):
+                            final = {}
+                        _persist_assistant_message(final)
                         return
                 if interrupted:
                     break

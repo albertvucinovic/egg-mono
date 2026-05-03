@@ -31,7 +31,7 @@ def test_repl_bridge_call_tool_enqueues_ra3_and_direct_drives(tmp_path, monkeypa
         runtime_thread_id=runtime,
         session_id=ts.get_thread_session_config(db, runtime).session_id,
         drive_runtime_tools=True,
-        bridge_timeout_sec=5,
+        timeout_sec=5,
     )
     try:
         out = ts.repl_bridge_call_tool(ctx.token, "bash", {"script": "echo bridge-ok"})
@@ -54,6 +54,9 @@ def test_repl_bridge_call_tool_enqueues_ra3_and_direct_drives(tmp_path, monkeypa
     payload = json.loads(row[0])
     assert payload["origin"] == "repl"
     assert payload["no_api"] is True
+    assert payload["tool_calls"][0]["function"]["arguments"]
+    call_args = json.loads(payload["tool_calls"][0]["function"]["arguments"])
+    assert call_args["timeout_sec"] == 5.0
 
 
 def test_python_repl_eggtools_bash_uses_runtime_thread(tmp_path, monkeypatch):
@@ -70,7 +73,7 @@ def test_python_repl_eggtools_bash_uses_runtime_thread(tmp_path, monkeypatch):
         parent,
         "from eggtools import bash\nprint(bash('echo from-eggtools'))",
         drive_runtime_tools=True,
-        bridge_timeout_sec=5,
+        timeout_sec=5,
     )
 
     assert "from-eggtools" in out
@@ -122,7 +125,7 @@ def test_python_repl_spawn_agent_creates_child_under_runtime_and_attenuates_tool
         parent,
         "from eggtools import spawn_agent\nprint(spawn_agent('child task', label='from-repl', allowed_tools=['web_search', 'bash']))",
         drive_runtime_tools=True,
-        bridge_timeout_sec=5,
+        timeout_sec=5,
     )
 
     # Extract the spawned thread id from the printed output.
@@ -154,7 +157,7 @@ def test_runtime_spawned_child_inherits_runtime_tool_config(tmp_path, monkeypatc
         "from eggtools import spawn_agent\n"
         "print(spawn_agent('child task', label='from-repl', allowed_tools=['bash']))",
         drive_runtime_tools=True,
-        bridge_timeout_sec=5,
+        timeout_sec=5,
     )
 
     child = [line.strip() for line in out.splitlines() if line.strip() and not line.startswith('---')][-1]
@@ -198,7 +201,7 @@ def test_python_repl_wait_observes_child_result_under_scheduler(tmp_path, monkey
             db,
             parent,
             "python_repl",
-            {"code": code, "bridge_timeout_sec": 10},
+            {"code": code, "timeout_sec": 10},
             hidden=True,
             keep_user_turn=True,
             origin="ui_python_repl",
@@ -230,6 +233,55 @@ def test_python_repl_wait_observes_child_result_under_scheduler(tmp_path, monkey
     assert "(no assistant content found)" not in out
 
 
+def test_wait_accepts_message_event_as_completed_assistant_turn(tmp_path, monkeypatch):
+    """Regression: wait should not block when adapters finish with message events."""
+
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "work")
+    ts.create_snapshot(db, child)
+
+    class MessageEventLLM:
+        current_model_key = "mock"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        def set_model_with_config(self, model_key, config):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            yield {"type": "content_delta", "text": "child via message"}
+            yield {"type": "message", "role": "assistant", "content": "child via message", "stop_reason": "end_turn"}
+
+    async def run() -> str:
+        scheduler = SubtreeScheduler(
+            db,
+            parent,
+            llm=MessageEventLLM(),
+            config=RunnerConfig(max_concurrent_threads=2, api_timeout_sec=5, lease_ttl_sec=5),
+            owner="test",
+        )
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.01))
+        try:
+            result = await asyncio.to_thread(ts.create_default_tools().execute, "wait", {"thread_ids": [child], "timeout_sec": 2}, thread_id=parent)
+            return result
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    out = asyncio.run(run())
+    assert "Thread " in out
+    assert "finished" in out
+    assert "child via message" in out
+
+
 def test_python_repl_can_send_message_to_child(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB()
@@ -248,7 +300,7 @@ def test_python_repl_can_send_message_to_child(tmp_path, monkeypatch):
         "child = spawn_agent('initial task', label='worker', allowed_tools=[])\n"
         "print(send_message_to_child(child, 'please refine', require_idle=False))",
         drive_runtime_tools=True,
-        bridge_timeout_sec=5,
+        timeout_sec=5,
     )
 
     assert "Sent message" in out

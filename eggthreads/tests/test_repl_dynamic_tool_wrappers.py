@@ -29,7 +29,7 @@ def test_memory_repl_generated_tool_wrapper_supports_from_import(tmp_path, monke
         parent,
         "from eggtools import replace_between\n"
         "print(replace_between(file_path='sample.txt', start_text='old', end_text=' bye', new_text='new bye'))",
-        bridge_timeout_sec=5,
+        timeout_sec=5,
         drive_runtime_tools=True,
     )
 

@@ -24,7 +24,8 @@ class EvalContext:
     caller_thread_id: str
     runtime_thread_id: str
     session_id: Optional[str]
-    bridge_timeout_sec: Optional[float] = 30.0
+    # Canonicalized eval/programmatic-tool timeout in seconds.
+    timeout_sec: Optional[float] = 30.0
     drive_runtime_tools: bool = False
     expires_at: Optional[float] = None
 
@@ -54,7 +55,7 @@ def create_eval_context(
     caller_thread_id: str,
     runtime_thread_id: str,
     session_id: Optional[str],
-    bridge_timeout_sec: Optional[float] = 30.0,
+    timeout_sec: Optional[float] = 30.0,
     drive_runtime_tools: bool = False,
     ttl_sec: Optional[float] = None,
 ) -> EvalContext:
@@ -68,7 +69,7 @@ def create_eval_context(
         caller_thread_id=caller_thread_id,
         runtime_thread_id=runtime_thread_id,
         session_id=session_id,
-        bridge_timeout_sec=bridge_timeout_sec,
+        timeout_sec=timeout_sec,
         drive_runtime_tools=drive_runtime_tools,
         expires_at=expires_at,
     )
@@ -132,6 +133,31 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
     tool_timeout_sec = args.pop("_egg_tool_timeout_sec", None)
     _authorize(db, ctx.runtime_thread_id, tool_name)
 
+    effective_timeout = ctx.timeout_sec if timeout_sec is None else timeout_sec
+    if tool_timeout_sec is not None:
+        try:
+            effective_timeout = float(tool_timeout_sec)
+        except Exception:
+            pass
+    try:
+        effective_timeout_value = float(effective_timeout) if effective_timeout is not None else None
+    except Exception:
+        effective_timeout_value = None
+    if effective_timeout_value is not None and effective_timeout_value <= 0:
+        effective_timeout_value = None
+
+    # Persist the effective timeout in the queued tool-call arguments so the
+    # runtime runner's timeout display, the tool implementation, and this bridge
+    # wait all observe the same limit.  This also covers Docker REPL helpers,
+    # whose file-RPC envelope carries timeout_sec outside the JSON arguments.
+    if effective_timeout_value is not None:
+        try:
+            current_arg_timeout = float(args.get("timeout_sec")) if args.get("timeout_sec") is not None else None
+        except Exception:
+            current_arg_timeout = None
+        if current_arg_timeout is None or current_arg_timeout <= 0:
+            args["timeout_sec"] = effective_timeout_value
+
     from .api import enqueue_user_tool_call, wait_for_tool_call_result
 
     tcid = enqueue_user_tool_call(
@@ -147,18 +173,12 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
         approval_reason="Approved as REPL programmatic tool call",
     )
 
-    effective_timeout = ctx.bridge_timeout_sec if timeout_sec is None else timeout_sec
-    if tool_timeout_sec is not None:
-        try:
-            effective_timeout = float(tool_timeout_sec)
-        except Exception:
-            pass
     if not ctx.drive_runtime_tools:
         result = wait_for_tool_call_result(
             db,
             ctx.runtime_thread_id,
             tcid,
-            timeout_sec=effective_timeout,
+            timeout_sec=effective_timeout_value,
             poll_interval=0.05,
         )
         if result.timed_out or result.state != "TC6":
@@ -176,7 +196,7 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
         )
         if not result.timed_out and result.state == "TC6":
             return result.content or ""
-        if effective_timeout is not None and (time.time() - start) >= effective_timeout:
+        if effective_timeout_value is not None and (time.time() - start) >= effective_timeout_value:
             raise ReplToolTimeout(ctx.runtime_thread_id, tcid, result.state)
         _drive_runtime_once(db, ctx.runtime_thread_id)
         time.sleep(0.01)

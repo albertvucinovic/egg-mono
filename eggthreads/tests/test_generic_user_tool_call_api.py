@@ -121,3 +121,29 @@ def test_wait_for_threads_waits_for_new_llm_turn_when_old_answer_exists(tmp_path
 
     assert result.finished is False
     assert result.last_assistant_message == "answer"
+
+
+def test_wait_for_threads_releases_expired_open_stream_before_completion_check(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.append_message(db, tid, "assistant", "answer")
+    db.try_open_stream(tid, "stale-invoke", "2000-01-01 00:00:00", owner="stale", purpose="llm")
+
+    results = ts.wait_for_threads(db, [tid], timeout_sec=0)
+    result = results[tid]
+
+    assert result.finished is True
+    assert result.last_assistant_message == "answer"
+    assert db.current_open(tid) is None
+
+
+def test_thread_state_releases_expired_open_stream(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.append_message(db, tid, "assistant", "answer")
+    db.try_open_stream(tid, "stale-invoke", "2000-01-01 00:00:00", owner="stale", purpose="llm")
+
+    assert ts.thread_state(db, tid) == "waiting_user"
+    assert db.current_open(tid) is None

@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .db import ThreadsDB
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @dataclass
@@ -778,7 +783,13 @@ def thread_state(db: ThreadsDB, thread_id: str) -> str:
     except Exception:
         row = None
     if row is not None:
-        return "running"
+        try:
+            if str(row["lease_until"] or "") <= _utcnow_iso():
+                db.release(thread_id, str(row["invoke_id"]))
+            else:
+                return "running"
+        except Exception:
+            return "running"
 
     # Any actionable RA -> running
     if discover_runner_actionable_cached(db, thread_id) is not None:

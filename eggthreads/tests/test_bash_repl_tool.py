@@ -52,8 +52,10 @@ def test_execute_bash_repl_reports_disabled_auto_session(tmp_path, monkeypatch):
 
 def test_bash_repl_tool_registered():
     tools = ts.create_default_tools()
-    names = {spec["function"]["name"] for spec in tools.tools_spec()}
-    assert "bash_repl" in names
+    specs = {spec["function"]["name"]: spec for spec in tools.tools_spec()}
+    assert "bash_repl" in specs
+    props = specs["bash_repl"]["function"]["parameters"]["properties"]
+    assert "timeout_sec" in props
 
 
 def test_bash_repl_memory_can_use_eval_token_env(tmp_path):
