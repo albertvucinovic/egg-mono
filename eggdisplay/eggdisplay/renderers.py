@@ -468,7 +468,8 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         The live region at the bottom of the viewport stays fixed; only
         the history area above it scrolls. Clamped to available content.
         """
-        new_offset = max(0, int(self._scroll_offset) + int(delta))
+        max_offset = self._max_scroll_offset(self._viewport_w or self._term_width())
+        new_offset = min(max_offset, max(0, int(self._scroll_offset) + int(delta)))
         if new_offset == self._scroll_offset:
             return
         self._scroll_offset = new_offset
@@ -520,6 +521,16 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     def _stream_rows(self, width: int) -> List[str]:
         """Split the in-flight stream buffer into terminal-width visual rows."""
         return self._stream_rows_from_ansi(self._stream_buffer, width)
+
+    def _max_scroll_offset(self, width: int) -> int:
+        """Return the largest valid in-app scroll offset for current content."""
+
+        width = int(width or self._term_width() or 80)
+        vh = self._term_height()
+        stream_rows = self._stream_rows(width) if self._stream_buffer else []
+        live_h = min(len(self._live_lines), vh)
+        non_live_h = max(0, vh - live_h)
+        return max(0, len(self._scrollback) + len(stream_rows) - non_live_h)
 
     def _stream_rows_from_ansi(self, ansi_text: str, width: int) -> List[str]:
         """Split an ANSI-rendered string into terminal-width visual rows."""
