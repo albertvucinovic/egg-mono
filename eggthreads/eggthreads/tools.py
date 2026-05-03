@@ -209,7 +209,13 @@ def create_default_tools() -> ToolRegistry:
                 sb = get_thread_sandbox_config(db, tid)
                 from .api import _ensure_thread_working_directory
                 cwd = _ensure_thread_working_directory(db, tid)
-                argv = wrap_argv_for_sandbox_with_settings(base_argv, enabled=sb.enabled, settings=sb.settings, working_dir=cwd, provider=sb.provider)
+                argv = wrap_argv_for_sandbox_with_settings(
+                    base_argv,
+                    enabled=sb.enabled,
+                    settings={**dict(sb.settings or {}), "_egg_thread_context": {"thread_id": tid, "db_path": str(db.path)}},
+                    working_dir=cwd,
+                    provider=sb.provider,
+                )
             except Exception:
                 argv = base_argv
         else:
@@ -297,7 +303,13 @@ def create_default_tools() -> ToolRegistry:
                 sb = get_thread_sandbox_config(db, thread_id)
                 from .api import _ensure_thread_working_directory
                 cwd = _ensure_thread_working_directory(db, thread_id)
-                argv = wrap_argv_for_sandbox_with_settings(base_argv, enabled=sb.enabled, settings=sb.settings, working_dir=cwd, provider=sb.provider)
+                argv = wrap_argv_for_sandbox_with_settings(
+                    base_argv,
+                    enabled=sb.enabled,
+                    settings={**dict(sb.settings or {}), "_egg_thread_context": {"thread_id": thread_id, "db_path": str(db.path)}},
+                    working_dir=cwd,
+                    provider=sb.provider,
+                )
             except Exception:
                 argv = base_argv
         else:

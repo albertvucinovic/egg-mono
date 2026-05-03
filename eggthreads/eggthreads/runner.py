@@ -170,29 +170,19 @@ def stash_tool_output_and_build_preview(
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
 
-    # Resolve the stash directory: the thread's own working directory
-    # (so subthreads with subdir sandboxes get their own scope). Fall
-    # back to the db directory if thread wd can't be resolved.
+    # Resolve the stash directory under the workspace root, not under a
+    # per-thread subdirectory.  Sandboxes/REPLs mask .egg_outputs and expose
+    # only the allowed thread/subtree stash directories explicitly; placing the
+    # store at the root keeps paths stable and avoids nesting inaccessible
+    # .egg_outputs directories inside child working dirs.
     saved_path = ""  # absolute host path (for runner diagnostics)
     relative_path = ""  # workspace-relative path (for the LLM)
     try:
         from pathlib import Path as _Path
-        workspace: Optional[_Path] = None
-        try:
-            # Import lazily to avoid a circular dependency at module load.
-            from .api import get_thread_working_directory as _get_wd
-            workspace = _Path(_get_wd(db, thread_id)).resolve()
-        except Exception:
-            workspace = None
-        if workspace is None or not workspace.exists():
-            db_path = getattr(db, "path", "") or ""
-            if db_path:
-                workspace = _Path(db_path).resolve().parent.parent
-            else:
-                workspace = _Path.cwd().resolve()
-        safe_tid = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(thread_id or 'thread'))
-        safe_tid = safe_tid or 'thread'
-        out_dir = workspace / ".egg_outputs" / safe_tid
+        workspace = _Path.cwd().resolve()
+        from .output_paths import thread_output_dir
+
+        out_dir = thread_output_dir(db, workspace, thread_id)
         out_dir.mkdir(parents=True, exist_ok=True)
         tid_suffix = str(thread_id or "thread")[-8:]
         tcid_suffix = str(tool_call_id or "tc")[-8:]
@@ -1942,7 +1932,7 @@ class ThreadRunner:
             argv = wrap_argv_for_sandbox_with_settings(
                 base_argv,
                 enabled=sb.enabled,
-                settings=sb.settings,
+                settings={**dict(sb.settings or {}), "_egg_thread_context": {"thread_id": self.thread_id, "db_path": str(self.db.path)}},
                 working_dir=cwd,
                 provider=sb.provider,
                 container_name=container_name,

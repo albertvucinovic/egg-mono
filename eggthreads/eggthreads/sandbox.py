@@ -134,6 +134,71 @@ def _is_relative_to_path(child: Path, parent: Path) -> bool:
         return False
 
 
+def _sandbox_mask_dir(*parts: str) -> Path:
+    """Return an empty host directory usable as a read-only bind mask."""
+
+    safe_parts = []
+    for part in parts:
+        safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(part or 'mask'))
+        safe_parts.append(safe or 'mask')
+    path = _ensure_sandbox_dir() / "masks" / Path(*safe_parts)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _docker_thread_output_mounts(settings: Dict[str, Any], workspace: str) -> List[str]:
+    """Return Docker mounts for tree-scoped .egg_outputs access.
+
+    The full .egg_outputs root is masked.  When the caller supplies the
+    internal thread context, the thread's own output subtree is mounted back
+    read-write at ``.egg_outputs/<root>/.../<thread>``.  Because descendants are
+    nested under that path, a parent can read/write its subtree while children
+    cannot read parent/sibling files.
+    """
+
+    workspace = workspace or "/workspace"
+    output_root = (Path.cwd().resolve() / ".egg_outputs")
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    mask_dir = _sandbox_mask_dir("egg_outputs")
+    mounts: List[str] = ["-v", f"{mask_dir}:{Path(workspace) / '.egg_outputs'}:ro"]
+
+    ctx = settings.get("_egg_thread_context") if isinstance(settings, dict) else None
+    if not isinstance(ctx, dict):
+        return mounts
+    thread_id = ctx.get("thread_id")
+    db_path = ctx.get("db_path")
+    if not isinstance(thread_id, str) or not thread_id:
+        return mounts
+
+    try:
+        from .db import ThreadsDB
+        from .output_paths import thread_output_relative_dir
+
+        db = ThreadsDB(db_path) if isinstance(db_path, str) and db_path else ThreadsDB()
+        rel_dir = thread_output_relative_dir(db, thread_id)
+    except Exception:
+        safe_tid = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(thread_id or 'thread')) or 'thread'
+        rel_dir = Path(".egg_outputs") / safe_tid
+
+    rel_under_outputs = Path(*rel_dir.parts[1:]) if len(rel_dir.parts) > 1 else Path(str(thread_id))
+    try:
+        (mask_dir / rel_under_outputs).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    host_dir = Path.cwd().resolve() / rel_dir
+    try:
+        host_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    container_dir = Path(workspace) / rel_dir
+    mounts.extend(["-v", f"{host_dir}:{container_dir}"])
+    return mounts
+
+
 _default_docker_image_cache = None
 
 def _default_docker_image() -> str:
@@ -395,7 +460,10 @@ class DockerProvider:
             if isinstance(arg, str):
                 cmd.append(arg)
         for prot_path, container_path in protected_mounts:
+            if prot_path.name == ".egg_outputs":
+                continue
             cmd.extend(["-v", f"{prot_path}:{container_path}:ro"])
+        cmd.extend(_docker_thread_output_mounts(settings, str(workspace)))
         # Set working directory inside container
         cmd.extend(["-w", workspace])
         # Image

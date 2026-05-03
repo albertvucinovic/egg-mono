@@ -402,28 +402,41 @@ def _safe_thread_output_dir_name(thread_id: str) -> str:
     return safe or 'thread'
 
 
-def _docker_repl_thread_output_mount_args(*, mount_dir: Path, workspace: str, runtime_thread_id: str) -> List[str]:
-    """Expose only this thread's long-output stash inside the REPL container."""
+def _docker_repl_thread_output_mount_args(*, db: ThreadsDB, mount_dir: Path, workspace: str, runtime_thread_id: str) -> List[str]:
+    """Expose only this runtime thread's output subtree inside the REPL."""
 
     mount_dir = mount_dir.resolve()
     workspace = workspace or "/workspace"
-    safe_tid = _safe_thread_output_dir_name(runtime_thread_id)
-    host_dir = mount_dir / ".egg_outputs" / safe_tid
+    try:
+        from .output_paths import thread_output_relative_dir
+
+        rel_dir = thread_output_relative_dir(db, runtime_thread_id)
+        host_dir = mount_dir / rel_dir
+    except Exception:
+        safe_tid = _safe_thread_output_dir_name(runtime_thread_id)
+        rel_dir = Path(".egg_outputs") / safe_tid
+        host_dir = mount_dir / rel_dir
     try:
         host_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    container_dir = str(Path(workspace.rstrip("/") or "/") / ".egg_outputs" / safe_tid)
+    container_dir = str(Path(workspace.rstrip("/") or "/") / rel_dir)
     return ["-v", f"{host_dir}:{container_dir}:ro"]
 
 
-def _prepare_outputs_mask_dir(session_id: str, runtime_thread_id: str) -> Path:
+def _prepare_outputs_mask_dir(db: ThreadsDB, session_id: str, runtime_thread_id: str) -> Path:
     """Create an empty .egg_outputs mask with this thread's mountpoint."""
 
     mask_dir = _session_mask_dir(session_id, "egg_outputs")
-    safe_tid = _safe_thread_output_dir_name(runtime_thread_id)
     try:
-        (mask_dir / safe_tid).mkdir(parents=True, exist_ok=True)
+        from .output_paths import thread_output_relative_dir
+
+        rel_dir = thread_output_relative_dir(db, runtime_thread_id)
+        rel_under_outputs = Path(*rel_dir.parts[1:]) if len(rel_dir.parts) > 1 else Path(_safe_thread_output_dir_name(runtime_thread_id))
+    except Exception:
+        rel_under_outputs = Path(_safe_thread_output_dir_name(runtime_thread_id))
+    try:
+        (mask_dir / rel_under_outputs).mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
     return mask_dir
@@ -647,8 +660,9 @@ def _start_docker_container(
         workspace=workspace,
         session_id=cfg.session_id or container_name,
     )
-    outputs_mask_dir = _prepare_outputs_mask_dir(cfg.session_id or container_name, runtime_thread_id)
+    outputs_mask_dir = _prepare_outputs_mask_dir(db, cfg.session_id or container_name, runtime_thread_id)
     thread_output_mount_args = _docker_repl_thread_output_mount_args(
+        db=db,
         mount_dir=mount_dir,
         workspace=workspace,
         runtime_thread_id=runtime_thread_id,
