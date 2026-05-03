@@ -40,7 +40,7 @@ def test_docker_python_repl_persists_state_and_eggtools(tmp_path, monkeypatch):
     runtime = ts.find_runtime_thread(db, parent, language="python")
     assert runtime is not None
     ts.set_thread_tools_enabled(db, runtime.runtime_thread_id, True)
-    ts.set_thread_tool_allowlist(db, runtime.runtime_thread_id, ["bash"])
+    ts.set_thread_tool_allowlist(db, runtime.runtime_thread_id, ["bash", "get_child_status"])
 
     out3 = ts.execute_python_repl(
         db,
@@ -50,6 +50,21 @@ def test_docker_python_repl_persists_state_and_eggtools(tmp_path, monkeypatch):
         drive_runtime_tools=True,
     )
     assert "docker-eggtools" in out3
+
+    child = ts.create_child_thread(db, runtime.runtime_thread_id, name="status-child")
+    ts.append_message(db, child, "user", "hello")
+    ts.append_message(db, child, "assistant", "done")
+    ts.create_snapshot(db, child)
+
+    out4 = ts.execute_python_repl(
+        db,
+        parent,
+        "from eggtools import get_child_status\nprint(get_child_status())",
+        bridge_timeout_sec=30,
+        drive_runtime_tools=True,
+    )
+    assert child in out4
+    assert "context_tokens" in out4
 
     status = ts.get_thread_session_status(db, runtime.runtime_thread_id)
     if status.container_name:
