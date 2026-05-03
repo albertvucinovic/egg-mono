@@ -214,6 +214,38 @@ def test_start_docker_container_masks_egg_and_outputs(monkeypatch, tmp_path):
     assert sid
 
 
+def test_start_docker_container_mounts_nested_runtime_output_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    runtime = ts.create_child_thread(db, parent, name="@runtime:python")
+    ts.append_runtime_config(db, parent, runtime, language="python")
+    ts.enable_thread_session(db, runtime, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, runtime)
+    bridge = tmp_path / "bridge"
+    runtime_dir = tmp_path / "runtime"
+    bridge.mkdir()
+    runtime_dir.mkdir()
+    calls = []
+    monkeypatch.setattr(ts.eggthreads.session, "_docker_inspect_running", lambda name: None)
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(ts.eggthreads.session.subprocess, "run", fake_run)
+
+    ts.eggthreads.session._start_docker_container(db, runtime, cfg, "egg-test", bridge, runtime_dir)
+
+    joined = "\n".join(calls[-1])
+    nested = f".egg_outputs/{parent}/{runtime}"
+    assert f"{tmp_path.resolve()}/{nested}:/workspace/{nested}:ro" in joined
+
+
 def test_start_docker_container_applies_sandbox_mount_policy(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
@@ -330,6 +362,29 @@ def test_tool_output_stash_is_thread_scoped(tmp_path, monkeypatch):
     assert saved
     assert Path(saved).parent == tmp_path / ".egg_outputs" / tid
     assert f".egg_outputs/{tid}/" in preview
+
+
+def test_tool_output_stash_uses_thread_ancestry_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    grandchild = ts.create_child_thread(db, child, name="grandchild")
+
+    from eggthreads.runner import stash_tool_output_and_build_preview
+
+    preview, saved = stash_tool_output_and_build_preview(
+        db,
+        grandchild,
+        "tc_test",
+        "x" * 100,
+        max_chars=1,
+    )
+
+    expected_dir = tmp_path / ".egg_outputs" / parent / child / grandchild
+    assert saved
+    assert Path(saved).parent == expected_dir
+    assert f".egg_outputs/{parent}/{child}/{grandchild}/" in preview
 
 
 def test_docker_session_status_unavailable(monkeypatch, tmp_path):
