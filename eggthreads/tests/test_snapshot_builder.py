@@ -157,15 +157,23 @@ def test_create_snapshot_appends_msg_create_tail_incrementally(tmp_path, monkeyp
 
     second_id = ts.append_message(db, tid, "assistant", "second", extra={"provider_specific": {"signature": "abc"}})
 
+    token_calls = []
+
+    def fake_extend_token_stats(snapshot, tail_messages):
+        token_calls.append([m["msg_id"] for m in tail_messages])
+        return {"extended": True}
+
     def fail_full_rebuild(self, events):
         raise AssertionError("full snapshot rebuild should not run for append-only msg.create tail")
 
     monkeypatch.setattr("eggthreads.api.SnapshotBuilder.build", fail_full_rebuild)
+    monkeypatch.setattr("eggthreads.token_count.extend_snapshot_token_stats", fake_extend_token_stats)
     snapshot = ts.create_snapshot(db, tid)
 
     assert [m["msg_id"] for m in snapshot["messages"]] == [first_id, second_id]
     assert snapshot["messages"][-1]["provider_specific"] == {"signature": "abc"}
-    assert "token_stats" in snapshot
+    assert snapshot["token_stats"] == {"extended": True}
+    assert token_calls == [[second_id]]
     assert db.get_thread(tid).snapshot_last_event_seq > first_seq
 
 

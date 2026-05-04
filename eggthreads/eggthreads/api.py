@@ -1181,6 +1181,7 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
             tail = cur.fetchall()
             if tail and all(row["type"] == "msg.create" for row in tail):
                 messages = list(messages)
+                tail_messages = []
                 for ev in tail:
                     try:
                         payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
@@ -1193,11 +1194,12 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
                     if ts_val is not None:
                         msg["ts"] = ts_val
                     messages.append(msg)
+                    tail_messages.append(msg)
                 snap["messages"] = messages
                 try:
-                    from .token_count import snapshot_token_stats  # type: ignore
+                    from .token_count import extend_snapshot_token_stats  # type: ignore
 
-                    snap["token_stats"] = snapshot_token_stats(snap)
+                    snap["token_stats"] = extend_snapshot_token_stats(snap, tail_messages)
                 except Exception:
                     pass
                 last_seq = tail[-1]["event_seq"]

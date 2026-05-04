@@ -1,5 +1,10 @@
 from eggthreads import ThreadsDB, create_root_thread
-from eggthreads.token_count import count_text_tokens, live_llm_tps_for_invoke
+from eggthreads.token_count import (
+    count_text_tokens,
+    extend_snapshot_token_stats,
+    live_llm_tps_for_invoke,
+    snapshot_token_stats,
+)
 
 
 def test_count_text_tokens_zero_for_empty_string():
@@ -24,3 +29,20 @@ def test_live_llm_tps_for_invoke_counts_text_and_reasoning(tmp_path, monkeypatch
     tps = live_llm_tps_for_invoke(db, invoke, end_ts=1735689600.0)
     assert isinstance(tps, float)
     assert tps > 0
+
+
+def test_extend_snapshot_token_stats_matches_full_recompute():
+    snapshot = {
+        "messages": [
+            {"msg_id": "u1", "role": "user", "content": "hello"},
+            {"msg_id": "a1", "role": "assistant", "content": "hi", "model_key": "m1"},
+        ]
+    }
+    snapshot["token_stats"] = snapshot_token_stats(snapshot)
+    tail = [
+        {"msg_id": "u2", "role": "user", "content": "next"},
+        {"msg_id": "a2", "role": "assistant", "content": "answer", "model_key": "m1"},
+    ]
+    snapshot["messages"].extend(tail)
+
+    assert extend_snapshot_token_stats(snapshot, tail) == snapshot_token_stats(snapshot)

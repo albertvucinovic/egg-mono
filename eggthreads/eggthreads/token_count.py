@@ -414,6 +414,7 @@ def _model_key_from_message(msg: Dict[str, Any]) -> Optional[str]:
 def _token_stats_for_messages(
     messages: List[Dict[str, Any]],
     *,
+    base_index: int = 0,
     base_context_tokens: int = 0,
     base_prev_call_input_tokens: Optional[int] = None,
     base_prev_call_model_key: Optional[str] = None,
@@ -452,11 +453,12 @@ def _token_stats_for_messages(
             include_in_context.append(False)
             continue
 
-        pm = _tokens_for_message(m, idx)
+        absolute_idx = int(base_index) + idx
+        pm = _tokens_for_message(m, absolute_idx)
 
         msg_id = m.get("msg_id")
         if not isinstance(msg_id, str) or not msg_id:
-            msg_id = f"idx-{idx}"
+            msg_id = f"idx-{absolute_idx}"
 
         per_message[msg_id] = {
             "index": pm.index,
@@ -480,9 +482,10 @@ def _token_stats_for_messages(
     running = 0
     for idx, m in enumerate(msgs):
         if isinstance(m, dict):
+            absolute_idx = int(base_index) + idx
             msg_id = m.get("msg_id")
             if not isinstance(msg_id, str) or not msg_id:
-                msg_id = f"idx-{idx}"
+                msg_id = f"idx-{absolute_idx}"
             if include_in_context[idx]:
                 running += int(per_message[msg_id]["total_tokens"])
         prefix_ctx.append(running)
@@ -566,7 +569,7 @@ def _token_stats_for_messages(
 
         msg_id = m.get("msg_id")
         if not isinstance(msg_id, str) or not msg_id:
-            msg_id = f"idx-{idx}"
+            msg_id = f"idx-{int(base_index) + idx}"
         msg_stats = per_message.get(msg_id, {})
         out_tok = int(msg_stats.get("total_tokens", 0))
         reason_tok = int(msg_stats.get("reasoning_tokens", 0))
@@ -618,6 +621,39 @@ def snapshot_token_stats(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(msgs, list):
         msgs = []
     return _token_stats_for_messages([m for m in msgs if isinstance(m, dict)])
+
+
+def extend_snapshot_token_stats(snapshot: Dict[str, Any], tail_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Extend cached snapshot token stats with appended snapshot messages.
+
+    This is for the append-only ``create_snapshot()`` path: old messages keep
+    their cached per-message token counts, while only the new tail is tokenized.
+    The output shape is identical to :func:`snapshot_token_stats`.
+    """
+
+    if not tail_messages:
+        ts = snapshot.get("token_stats") if isinstance(snapshot.get("token_stats"), dict) else None
+        return dict(ts) if isinstance(ts, dict) else snapshot_token_stats(snapshot)
+
+    base = snapshot.get("token_stats") if isinstance(snapshot.get("token_stats"), dict) else None
+    messages = snapshot.get("messages") or []
+    if not isinstance(messages, list):
+        messages = []
+    if not isinstance(base, dict):
+        old_len = max(0, len(messages) - len(tail_messages))
+        base = _token_stats_for_messages([m for m in messages[:old_len] if isinstance(m, dict)])
+
+    au = base.get("api_usage") if isinstance(base.get("api_usage"), dict) else {}
+    base_prev_by_model = au.get("last_call_input_tokens_by_model") if isinstance(au.get("last_call_input_tokens_by_model"), dict) else None
+    tail_stats = _token_stats_for_messages(
+        [m for m in tail_messages if isinstance(m, dict)],
+        base_index=max(0, len(messages) - len(tail_messages)),
+        base_context_tokens=int(base.get("context_tokens") or 0),
+        base_prev_call_input_tokens=au.get("last_call_input_tokens") if isinstance(au.get("last_call_input_tokens"), int) else None,
+        base_prev_call_model_key=au.get("last_call_model_key") if isinstance(au.get("last_call_model_key"), str) else None,
+        base_prev_call_input_tokens_by_model=base_prev_by_model,
+    )
+    return _merge_token_stats(base, tail_stats)
 
 
 def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
@@ -1175,6 +1211,7 @@ __all__ = [
     "live_llm_tps_for_invoke",
     "tool_message_tps_for_call",
     "snapshot_token_stats",
+    "extend_snapshot_token_stats",
     "streaming_token_stats",
     "total_token_stats",
 ]
