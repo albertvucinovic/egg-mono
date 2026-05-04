@@ -87,6 +87,7 @@ except Exception:  # pragma: no cover - environment dependent
 
 _ENCODING_NAME = "cl100k_base"
 _encoding = None  # type: ignore[var-annotated]
+_LIVE_LLM_TPS_CACHE: Dict[Tuple[str, int], Tuple[Optional[float], int]] = {}
 
 
 def _get_encoding():
@@ -239,6 +240,17 @@ def live_llm_tps_for_invoke(
     """Approximate live TPS for an in-progress LLM invoke."""
     if not isinstance(invoke_id, str) or not invoke_id:
         return None
+    try:
+        max_chunk_seq = db.max_chunk_seq(invoke_id)
+    except Exception:
+        max_chunk_seq = -1
+
+    cache_key = (invoke_id, max_chunk_seq)
+    cached = _LIVE_LLM_TPS_CACHE.get(cache_key)
+    if cached is not None:
+        start_ts, tokens = cached
+        return _tps_from_tokens(tokens, start_ts, end_ts=end_ts)
+
     start_ts = _first_delta_ts(db, invoke_id)
     if start_ts is None:
         return None
@@ -288,6 +300,11 @@ def live_llm_tps_for_invoke(
             for tcid, args in tool_call_args.items()
         ]
     tokens = int(_tokens_for_message(msg, 0).total_tokens)
+
+    _LIVE_LLM_TPS_CACHE[cache_key] = (start_ts, tokens)
+    for key in list(_LIVE_LLM_TPS_CACHE.keys()):
+        if key[0] == invoke_id and key != cache_key:
+            del _LIVE_LLM_TPS_CACHE[key]
 
     return _tps_from_tokens(tokens, start_ts, end_ts=end_ts)
 

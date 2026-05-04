@@ -31,6 +31,30 @@ def test_live_llm_tps_for_invoke_counts_text_and_reasoning(tmp_path, monkeypatch
     assert tps > 0
 
 
+def test_live_llm_tps_for_invoke_reuses_cache_for_unchanged_deltas(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ThreadsDB()
+    db.init_schema()
+    tid = create_root_thread(db, name="t")
+    invoke = "inv-cache"
+    db.append_event("open", tid, "stream.open", {"stream_kind": "llm"}, msg_id="m1", invoke_id=invoke)
+    db.append_event("delta", tid, "stream.delta", {"text": "hello"}, invoke_id=invoke, chunk_seq=0)
+    db.conn.execute("UPDATE events SET ts='2024-01-01T00:00:00.000Z' WHERE event_id='delta'")
+
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        first = live_llm_tps_for_invoke(db, invoke, end_ts=1735689600.0)
+        statements.clear()
+        second = live_llm_tps_for_invoke(db, invoke, end_ts=1735689601.0)
+    finally:
+        db.conn.set_trace_callback(None)
+
+    assert isinstance(first, float)
+    assert isinstance(second, float)
+    assert not any("SELECT payload_json FROM events" in stmt for stmt in statements)
+
+
 def test_extend_snapshot_token_stats_matches_full_recompute():
     snapshot = {
         "messages": [
