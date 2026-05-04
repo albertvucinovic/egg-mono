@@ -61,6 +61,26 @@ class PanelsMixin:
             return f"${fv:.4f} cost"
         return ""
 
+    def _live_llm_tps_cached(self, invoke: str) -> Optional[float]:
+        """Return live LLM TPS with a short cache to avoid O(deltas) scans per UI tick."""
+        if not invoke:
+            return None
+        now = time.monotonic()
+        cache = getattr(self, '_live_tps_cache', None)
+        if isinstance(cache, dict) and cache.get('invoke') == invoke:
+            try:
+                if (now - float(cache.get('at') or 0.0)) < 0.5:
+                    return cache.get('value')
+            except Exception:
+                pass
+        try:
+            from eggthreads import live_llm_tps_for_invoke
+            tps = live_llm_tps_for_invoke(self.db, str(invoke))
+        except Exception:
+            tps = None
+        self._live_tps_cache = {'invoke': invoke, 'at': now, 'value': tps}
+        return tps
+
     def _live_print(self, *args, **kwargs) -> None:
         """Print to console, routing through DiffRenderer when the live loop is active."""
         renderer = getattr(self, '_renderer', None)
@@ -261,11 +281,7 @@ class PanelsMixin:
         kind = ls.get('stream_kind') or 'stream'
         if kind == 'llm':
             tps_str = ""
-            try:
-                from eggthreads import live_llm_tps_for_invoke
-                tps = live_llm_tps_for_invoke(self.db, str(invoke))
-            except Exception:
-                tps = None
+            tps = self._live_llm_tps_cached(str(invoke))
             if isinstance(tps, (int, float)) and tps > 0:
                 tps_str = self._fmt_header_metric(tps, 'tps')
             inner = f"llm {tps_str}" if tps_str else "llm"
@@ -307,11 +323,7 @@ class PanelsMixin:
             return ""
         if ls.get('stream_kind') != 'llm':
             return ""
-        try:
-            from eggthreads import live_llm_tps_for_invoke
-            tps = live_llm_tps_for_invoke(self.db, str(ls.get('active_invoke') or ''))
-        except Exception:
-            tps = None
+        tps = self._live_llm_tps_cached(str(ls.get('active_invoke') or ''))
         if not isinstance(tps, (int, float)) or tps <= 0:
             return ""
         return self._fmt_header_metric(tps, 'tps')

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict, List, Optional, Set
 
 from eggthreads import list_children_with_meta, list_root_threads, list_threads, get_thread_status, get_thread_statuses_bulk
@@ -298,6 +299,35 @@ class FormattingMixin:
 
         On any error or when not available, (None, {}) is returned.
         """
+        now = time.monotonic()
+        active_invoke = ""
+        try:
+            ls = getattr(self, '_live_state', {}) or {}
+            if ls.get('active_invoke'):
+                active_invoke = str(ls.get('active_invoke') or '')
+        except Exception:
+            active_invoke = ""
+        try:
+            th = self.db.get_thread(self.current_thread)
+            snapshot_seq = int(getattr(th, 'snapshot_last_event_seq', -1) or -1) if th else -1
+            max_event_seq = int(self.db.max_event_seq(self.current_thread))
+        except Exception:
+            snapshot_seq = -1
+            max_event_seq = -1
+
+        cache = getattr(self, '_token_stats_cache', None)
+        cache_key = (self.current_thread, snapshot_seq, max_event_seq, active_invoke)
+        if isinstance(cache, dict) and cache.get('key') == cache_key:
+            # Avoid repeatedly scanning stream deltas while the event log is
+            # unchanged.  Idle stats can be reused for longer; active streams
+            # get a short refresh window so live headers remain responsive.
+            ttl = 0.5 if active_invoke else 2.0
+            try:
+                if (now - float(cache.get('at') or 0.0)) < ttl:
+                    return cache.get('value', (None, {}))
+            except Exception:
+                pass
+
         ctx_tokens: Optional[int] = None
         api_usage: Dict[str, Any] = {}
         try:
@@ -314,6 +344,11 @@ class FormattingMixin:
         except Exception:
             ctx_tokens = None
             api_usage = {}
+        self._token_stats_cache = {
+            'key': cache_key,
+            'at': now,
+            'value': (ctx_tokens, api_usage),
+        }
         return ctx_tokens, api_usage
 
     def compose_chat_panel_text(self) -> str:

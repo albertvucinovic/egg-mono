@@ -111,6 +111,22 @@ class TestUpdatePanels:
         assert "Autoapproval[On]" in egg_app.system_output.title
 
 
+
+    def test_live_tps_is_cached_briefly(self, egg_app, monkeypatch):
+        """Multiple header reads in one UI tick should reuse live TPS."""
+        calls = {"count": 0}
+        egg_app._live_state = {"active_invoke": "invoke-tps", "stream_kind": "llm"}
+
+        def fake_live_tps(db, invoke):
+            calls["count"] += 1
+            return 12.0
+
+        monkeypatch.setattr("eggthreads.live_llm_tps_for_invoke", fake_live_tps)
+
+        assert egg_app.current_stream_tps()
+        assert egg_app.current_stream_tps()
+        assert calls["count"] == 1
+
 class TestRenderGroup:
     """Tests for render_group()."""
 

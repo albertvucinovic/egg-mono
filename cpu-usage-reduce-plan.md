@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 1.1 through 1.4 completed except Phase 1.5; REPL polling, snapshot logging, tool stream chunk allocation, and web live TPS fixes committed.
-- Last updated: after Phase 1.3 tool stream chunk sequence fix.
-- Recommended next action: continue with Phase 1.5 TUI live stats throttling/cache.
+- Status: Phase 1 quick wins completed; ready for Phase 2 reducer design.
+- Last updated: after Phase 1.5 TUI live stats cache/throttle fix.
+- Recommended next action: start Phase 2.1 reducer design before changing brittle event-state code.
 
 ## Progress log
 
@@ -41,6 +41,7 @@ A meaningful step is any completed unit such as:
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
 - Phase 1.1 completed: added a shared 50ms sleep to Docker Python REPL eval polling and removed duplicate Bash Docker REPL sleeps in `eggthreads/eggthreads/session.py`. Tests run: `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed) and `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected). Full `test_session_config.py` hit an environment issue because `/workspace/.egg` is read-only in this runtime, not because of this change.
 - Phase 1.3 completed: added optional chunk-sequence allocation to tool stream delta helpers and used local allocators in Bash and generic tool streaming paths, avoiding per-delta `MAX(chunk_seq)` queries. Added `test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence`. Tests run: `python -m pytest eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_emits_preview_then_indicator eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence eggthreads/tests/test_tool_timeout.py -q` (22 passed).
+- Phase 1.5 completed: added short-lived TUI caches for `current_token_stats()` and live LLM TPS so unchanged event logs do not rescan token/delta state every UI tick. Added focused tests for both caches. Tests run: `python -m pytest egg/tests/test_formatting.py egg/tests/test_panels.py egg/tests/test_streaming_tui.py -q` (64 passed).
 
 ## High-level strategy
 
@@ -126,14 +127,18 @@ A meaningful step is any completed unit such as:
 
 ### 1.5 Throttle/cache live stats in TUI panel updates
 
-- [ ] Inspect `egg/egg/app.py`, `egg/egg/panels.py`, `egg/egg/formatting.py`, and `egg/egg/streaming.py`.
-  - Known issue: panel loop calls `current_token_stats()` frequently; that can call `total_token_stats()` and scan streaming tail.
-- [ ] Add a small cache/throttle for token stats/TPS while preserving prompt responsiveness.
-  - Prefer event-ingestion dirty flags from `EventWatcher` over simple time-based polling if the change stays small.
-  - If starting with throttle, use a short interval such as 250–500ms during streaming and longer while idle.
-- [ ] Ensure typing/rendering latency does not regress.
-- [ ] Run TUI streaming tests.
-- [ ] Update this plan.
+- [x] Inspect `egg/egg/app.py`, `egg/egg/panels.py`, `egg/egg/formatting.py`, and `egg/egg/streaming.py`.
+  - Confirmed panel loop can call `current_token_stats()` frequently, and live TPS helpers call `live_llm_tps_for_invoke()` which scans stream deltas.
+- [x] Add a small cache/throttle for token stats/TPS while preserving prompt responsiveness.
+  - Added `FormattingMixin.current_token_stats()` cache keyed by `(thread_id, snapshot_last_event_seq, max_event_seq, active_invoke)`.
+  - Cache TTL is short while streaming (0.5s) and longer while idle (2.0s), so unchanged event logs do not rescan every UI tick.
+  - Added `PanelsMixin._live_llm_tps_cached()` with 0.5s TTL and reused it from system/chat header TPS paths.
+- [x] Ensure typing/rendering latency does not regress.
+  - Change only reuses values for unchanged event-log/cache keys; input rendering remains immediate.
+- [x] Run TUI streaming tests.
+  - `python -m pytest egg/tests/test_formatting.py egg/tests/test_panels.py egg/tests/test_streaming_tui.py -q` (64 passed).
+- [x] Update this plan.
+  - Files touched: `egg/egg/formatting.py`, `egg/egg/panels.py`, `egg/tests/test_formatting.py`, `egg/tests/test_panels.py`, `cpu-usage-reduce-plan.md`.
 
 ## Phase 2 — Reduce repeated event-log scans
 
@@ -318,7 +323,7 @@ Record results here as work proceeds.
 - Web idle CPU baseline: not measured yet.
 - Long stream CPU baseline: not measured yet.
 - Scheduler many-thread baseline: not measured yet.
-- After Phase 1 results: not measured yet.
+- After Phase 1 results: quick wins completed and focused tests pass; CPU not formally measured yet.
 - After Phase 2 results: not measured yet.
 - After Phase 3 results: not measured yet.
 - After Phase 4 results: not measured yet.

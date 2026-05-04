@@ -189,6 +189,22 @@ class TestCurrentTokenStats:
         assert ctx is None or api is None or isinstance(api, dict)
 
 
+
+    def test_caches_unchanged_token_stats_briefly(self, egg_app, monkeypatch):
+        """Repeated panel ticks should not rescan token stats when events are unchanged."""
+        calls = {"count": 0}
+
+        def fake_total_token_stats(db, thread_id, llm=None):
+            calls["count"] += 1
+            return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
+
+        monkeypatch.setattr("eggthreads.total_token_stats", fake_total_token_stats)
+        monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 3)
+
+        assert egg_app.current_token_stats()[0] == 7
+        assert egg_app.current_token_stats()[0] == 7
+        assert calls["count"] == 1
+
 class TestTruncateForChatPanel:
     """Tests for truncate_for_chat_panel()."""
 
