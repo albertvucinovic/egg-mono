@@ -30,15 +30,16 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 1.2 and 1.4 completed; snapshot logging overhead and web live TPS fixes committed.
-- Last updated: after Phase 1.2 snapshot logging overhead fix.
-- Recommended next action: continue with Phase 1.1 REPL/session busy polling or Phase 1.3 tool stream chunk sequence queries.
+- Status: Phase 1.1, 1.2, and 1.4 completed; REPL polling, snapshot logging, and web live TPS fixes committed.
+- Last updated: after Phase 1.1 REPL/session polling fix.
+- Recommended next action: continue with Phase 1.3 tool stream chunk sequence queries.
 
 ## Progress log
 
 - Initial plan created in `cpu-usage-reduce-plan.md`.
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
+- Phase 1.1 completed: added a shared 50ms sleep to Docker Python REPL eval polling and removed duplicate Bash Docker REPL sleeps in `eggthreads/eggthreads/session.py`. Tests run: `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed) and `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected). Full `test_session_config.py` hit an environment issue because `/workspace/.egg` is read-only in this runtime, not because of this change.
 
 ## High-level strategy
 
@@ -71,14 +72,18 @@ A meaningful step is any completed unit such as:
 
 ### 1.1 Fix REPL/session busy polling
 
-- [ ] Inspect Docker Python REPL request/response loop in `eggthreads/eggthreads/session.py`.
-  - Known risk from analysis: `_execute_python_docker()` appears to check response files in a loop without sleeping when no response exists.
-- [ ] Add the smallest latency-preserving wait strategy.
-  - Preferred: file notification/inotify if simple and dependency-free enough.
-  - Acceptable first fix: tiny adaptive sleep/backoff when no response exists, with immediate check after servicing tool requests.
-- [ ] Remove duplicate sleeps in the Bash Docker path if confirmed.
-- [ ] Run focused session/REPL tests.
-- [ ] Update this plan with exact files touched, tests run, CPU/latency observation, and any remaining risk.
+- [x] Inspect Docker Python REPL request/response loop in `eggthreads/eggthreads/session.py`.
+  - Confirmed `_execute_python_docker()` checked response files in a loop without sleeping when no response existed.
+- [x] Add the smallest latency-preserving wait strategy.
+  - Added shared `_DOCKER_EVAL_POLL_SEC = 0.05` fallback sleep after timeout check and after servicing tool requests. This matches the container-side `sessiond` polling cadence and avoids a host-side busy spin while keeping expected eval latency around the existing 50ms poll granularity.
+- [x] Remove duplicate sleeps in the Bash Docker path if confirmed.
+  - Confirmed and replaced the two consecutive `time.sleep(0.05)` calls with one shared sleep.
+- [x] Run focused session/REPL tests.
+  - `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed).
+  - `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected).
+  - Full `test_session_config.py` was attempted but `test_docker_session_status_skeleton_when_available` failed because this runtime has read-only `/workspace/.egg`; record as environment issue.
+- [x] Update this plan with exact files touched, tests run, CPU/latency observation, and any remaining risk.
+  - Files touched: `eggthreads/eggthreads/session.py`, `cpu-usage-reduce-plan.md`.
 
 ### 1.2 Remove avoidable snapshot logging overhead
 
@@ -314,6 +319,7 @@ Record results here as work proceeds.
 ## Known risks / open questions
 
 - Some current tests may implicitly rely on exact event ordering and snapshot timing; preserve or explicitly document any change.
+- Current runtime has read-only `/workspace/.egg`; Docker session tests that create `.egg/rlm_sessions` under repo root can fail for environment reasons. Prefer tests that use `tmp_path`/memory provider unless verifying Docker directly.
 - Event batching must not hide deltas long enough to hurt perceived streaming latency.
 - Derived caches must never become authoritative; always support full rebuild from event log.
 - Web and TUI can run against the same DB from different processes, so in-process notifications are not enough by themselves.

@@ -1056,6 +1056,9 @@ def _service_tool_requests(bridge_dir: Path) -> None:
                 pass
 
 
+_DOCKER_EVAL_POLL_SEC = 0.05
+
+
 def _execute_python_docker(
     db: ThreadsDB,
     runtime_thread_id: str,
@@ -1093,6 +1096,7 @@ def _execute_python_docker(
             return f"Error: Docker Python REPL failed: {payload.get('error') or 'unknown error'}"
         if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
             return "Error: Docker Python REPL timed out."
+        time.sleep(_DOCKER_EVAL_POLL_SEC)
 
 
 def _execute_bash_docker(
@@ -1133,8 +1137,7 @@ def _execute_bash_docker(
             return f"Error: Docker Bash REPL failed: {payload.get('error') or 'unknown error'}"
         if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
             return "Error: Docker Bash REPL timed out."
-        time.sleep(0.05)
-        time.sleep(0.05)
+        time.sleep(_DOCKER_EVAL_POLL_SEC)
 
 
 # ---------------------------------------------------------------------------
