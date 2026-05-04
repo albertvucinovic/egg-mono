@@ -503,6 +503,48 @@ def test_emit_limited_tool_stream_delta_emits_preview_then_indicator(tmp_path, m
     assert payloads[1]["tool"]["text"].startswith("abcde")
     assert "continuing without streaming" in payloads[1]["tool"]["text"]
 
+
+def test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence(tmp_path, monkeypatch) -> None:
+    """Callers can avoid per-delta MAX(chunk_seq) queries by passing an allocator."""
+    monkeypatch.chdir(tmp_path)
+    from eggthreads import ThreadsDB, create_root_thread
+    from eggthreads.runner import ToolStreamPreviewLimiter, emit_limited_tool_stream_delta
+
+    db = ThreadsDB()
+    db.init_schema()
+    tid = create_root_thread(db, name="Root")
+    invoke = "invoke-tool-seq"
+    seq = 40
+
+    def next_seq() -> int:
+        nonlocal seq
+        seq += 1
+        return seq
+
+    def fail_max_chunk_seq(_invoke_id: str) -> int:
+        raise AssertionError("max_chunk_seq should not be called when allocator is supplied")
+
+    monkeypatch.setattr(db, "max_chunk_seq", fail_max_chunk_seq)
+
+    ok = emit_limited_tool_stream_delta(
+        db,
+        ToolStreamPreviewLimiter(max_lines=100, max_chars=100),
+        "hello",
+        thread_id=tid,
+        invoke_id=invoke,
+        tool_call_id="tc1",
+        tool_name="bash",
+        heartbeat=lambda: True,
+        next_chunk_seq=next_seq,
+    )
+
+    assert ok is True
+    row = db.conn.execute(
+        "SELECT chunk_seq FROM events WHERE thread_id=? AND type='stream.delta'",
+        (tid,),
+    ).fetchone()
+    assert row[0] == 41
+
 def test_env_path(monkeypatch) -> None:
     """_env_path returns trimmed env var or default."""
     # Set environment variable

@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 1.1, 1.2, and 1.4 completed; REPL polling, snapshot logging, and web live TPS fixes committed.
-- Last updated: after Phase 1.1 REPL/session polling fix.
-- Recommended next action: continue with Phase 1.3 tool stream chunk sequence queries.
+- Status: Phase 1.1 through 1.4 completed except Phase 1.5; REPL polling, snapshot logging, tool stream chunk allocation, and web live TPS fixes committed.
+- Last updated: after Phase 1.3 tool stream chunk sequence fix.
+- Recommended next action: continue with Phase 1.5 TUI live stats throttling/cache.
 
 ## Progress log
 
@@ -40,6 +40,7 @@ A meaningful step is any completed unit such as:
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
 - Phase 1.1 completed: added a shared 50ms sleep to Docker Python REPL eval polling and removed duplicate Bash Docker REPL sleeps in `eggthreads/eggthreads/session.py`. Tests run: `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed) and `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected). Full `test_session_config.py` hit an environment issue because `/workspace/.egg` is read-only in this runtime, not because of this change.
+- Phase 1.3 completed: added optional chunk-sequence allocation to tool stream delta helpers and used local allocators in Bash and generic tool streaming paths, avoiding per-delta `MAX(chunk_seq)` queries. Added `test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence`. Tests run: `python -m pytest eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_emits_preview_then_indicator eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence eggthreads/tests/test_tool_timeout.py -q` (22 passed).
 
 ## High-level strategy
 
@@ -98,13 +99,19 @@ A meaningful step is any completed unit such as:
 
 ### 1.3 Avoid per-tool-delta `MAX(chunk_seq)` queries
 
-- [ ] Inspect tool streaming helpers in `eggthreads/eggthreads/runner.py`.
-  - Known risk from analysis: `emit_tool_stream_delta()` calls `db.max_chunk_seq(invoke_id) + 1` for each tool-output stream event.
-- [ ] Reuse a local chunk sequence allocator for tool streams, matching the LLM streaming path.
-- [ ] Keep event ordering and `events_delta_unique` invariant intact.
-- [ ] Add/update focused test if existing coverage does not catch chunk sequence continuity.
-- [ ] Run tool streaming/tool timeout tests.
-- [ ] Update this plan.
+- [x] Inspect tool streaming helpers in `eggthreads/eggthreads/runner.py`.
+  - Confirmed `emit_tool_stream_delta()` used `db.max_chunk_seq(invoke_id) + 1` for each tool-output stream event.
+- [x] Reuse a local chunk sequence allocator for tool streams, matching the LLM streaming path.
+  - Added optional `chunk_seq`/`next_chunk_seq` plumbing and local allocators in Bash and generic tool streaming paths.
+  - Backward-compatible helper behavior remains: if no allocator is supplied, helper still falls back to `db.max_chunk_seq(invoke_id) + 1`.
+- [x] Keep event ordering and `events_delta_unique` invariant intact.
+  - Local allocators initialize from current `db.max_chunk_seq(invoke_id)` once per stream path and increment per emitted delta.
+- [x] Add/update focused test if existing coverage does not catch chunk sequence continuity.
+  - Added `test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence` to assert the helper does not call `max_chunk_seq` when an allocator is supplied.
+- [x] Run tool streaming/tool timeout tests.
+  - `python -m pytest eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_emits_preview_then_indicator eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence eggthreads/tests/test_tool_timeout.py -q` (22 passed).
+- [x] Update this plan.
+  - Files touched: `eggthreads/eggthreads/runner.py`, `eggthreads/tests/test_headless_subtree_scheduler.py`, `cpu-usage-reduce-plan.md`.
 
 ### 1.4 Fix silent live TPS issue in web stats route
 

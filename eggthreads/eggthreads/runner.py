@@ -6,7 +6,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 from pathlib import Path
 try:
     from eggllm import LLMClient
@@ -312,6 +312,7 @@ def emit_tool_stream_delta(
     text: str = "",
     current_model: Optional[str] = None,
     suppressed: bool = False,
+    chunk_seq: Optional[int] = None,
 ) -> None:
     """Append one tool-output stream.delta event."""
     payload_tool: Dict[str, Any] = {
@@ -328,7 +329,7 @@ def emit_tool_stream_delta(
         thread_id=thread_id,
         type_='stream.delta',
         invoke_id=invoke_id,
-        chunk_seq=db.max_chunk_seq(invoke_id) + 1,
+        chunk_seq=chunk_seq if chunk_seq is not None else db.max_chunk_seq(invoke_id) + 1,
         payload=payload,
     )
 
@@ -449,6 +450,7 @@ def emit_limited_tool_stream_delta(
     current_model: Optional[str] = None,
     heartbeat,
     suppressed_counter: Optional[Dict[str, int]] = None,
+    next_chunk_seq: Optional[Callable[[], int]] = None,
 ) -> bool:
     """Emit bounded live preview for a tool-output chunk.
 
@@ -470,6 +472,7 @@ def emit_limited_tool_stream_delta(
             tool_name=tool_name,
             current_model=current_model,
             suppressed=True,
+            chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
         )
         if suppressed_counter is not None:
             suppressed_counter['count'] = int(suppressed_counter.get('count') or 0) + 1
@@ -486,6 +489,7 @@ def emit_limited_tool_stream_delta(
                 tool_name=tool_name,
                 current_model=current_model,
                 suppressed=True,
+                chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
             )
     if not preview_text:
         return True
@@ -499,6 +503,7 @@ def emit_limited_tool_stream_delta(
         tool_name=tool_name,
         text=preview_text,
         current_model=current_model,
+        chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
     )
     return True
 
@@ -1983,6 +1988,12 @@ class ThreadRunner:
         interrupted_by_lease = False
         # True iff we timed out waiting for the command to complete.
         timed_out = False
+        chunk_seq = self.db.max_chunk_seq(invoke_id)
+
+        def _next_chunk_seq() -> int:
+            nonlocal chunk_seq
+            chunk_seq += 1
+            return chunk_seq
 
         # Shared timeout resolution: LLM-specified > config > global default.
         tool_timeout_sec = resolve_tool_timeout_sec(
@@ -2126,6 +2137,7 @@ class ThreadRunner:
                     current_model=current_model,
                     heartbeat=_heartbeat,
                     suppressed_counter=suppressed_counter,
+                    next_chunk_seq=_next_chunk_seq,
                 )
                 if not ok:
                     cancelled = True
@@ -2397,6 +2409,13 @@ class ThreadRunner:
                 cancelled = False
                 stream_limiter = ToolStreamPreviewLimiter()
                 suppressed_counter = {'count': 0}
+                chunk_seq = self.db.max_chunk_seq(invoke_id)
+
+                def _next_chunk_seq() -> int:
+                    nonlocal chunk_seq
+                    chunk_seq += 1
+                    return chunk_seq
+
                 for i in range(0, len(out), CH):
                     part = out[i : i + CH]
                     # Respect the per-thread lease while emitting only a
@@ -2421,6 +2440,7 @@ class ThreadRunner:
                         current_model=current_model,
                         heartbeat=_heartbeat,
                         suppressed_counter=suppressed_counter,
+                        next_chunk_seq=_next_chunk_seq,
                     )
                     if not ok:
                         cancelled = True
