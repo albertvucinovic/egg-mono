@@ -10,10 +10,10 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 
 from eggthreads import (
-    SnapshotBuilder,
     ThreadsDB,
     append_message,
     build_tool_call_states,
+    create_snapshot,
     interrupt_thread,
 )
 
@@ -32,26 +32,19 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
     if not t:
         return None  # Signal thread not found
 
-    # Build fresh snapshot from ALL events (not cached snapshot_json)
-    cur = fresh_db.conn.execute(
-        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
-        (thread_id,)
-    )
-    events = cur.fetchall()
+    # Use the cached snapshot plus create_snapshot()'s incremental tail path.
+    # This preserves cross-process freshness without rebuilding from the full
+    # event log on every /messages request.
+    snap = create_snapshot(fresh_db, thread_id)
 
-    builder = SnapshotBuilder()
-    snap = builder.build(events)
-
-    # Get per-message token stats from cached snapshot (if available)
+    # Get per-message token stats from the refreshed snapshot.
     token_stats = {}
     per_message_tokens = {}
-    if t.snapshot_json:
-        try:
-            cached_snap = json.loads(t.snapshot_json)
-            token_stats = cached_snap.get("token_stats", {})
-            per_message_tokens = token_stats.get("per_message", {}) if isinstance(token_stats, dict) else {}
-        except:
-            pass
+    try:
+        token_stats = snap.get("token_stats", {}) if isinstance(snap, dict) else {}
+        per_message_tokens = token_stats.get("per_message", {}) if isinstance(token_stats, dict) else {}
+    except Exception:
+        pass
 
     messages = []
     for msg in snap.get("messages", []):

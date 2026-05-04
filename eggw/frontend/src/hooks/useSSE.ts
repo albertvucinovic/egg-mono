@@ -217,8 +217,21 @@ export function useSSE(threadId: string | null) {
         addSystemLog("Tool approval processed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["threadSettings", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.approval:", err);
+      }
+    });
+
+    // Handle model changes that affect the settings/header dropdown.
+    es.addEventListener("model.switch", () => {
+      try {
+        addSystemLog("Model changed", "info");
+        queryClient.invalidateQueries({ queryKey: ["threadSettings", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+      } catch (err) {
+        console.error("Failed to parse model.switch:", err);
       }
     });
 

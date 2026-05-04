@@ -92,7 +92,6 @@ export default function ThreadPage() {
     queryKey: ["threadSettings", threadId],
     queryFn: () => fetchThreadSettings(threadId),
     enabled: !!threadId,
-    refetchInterval: 1000,
   });
 
   // Model change mutation

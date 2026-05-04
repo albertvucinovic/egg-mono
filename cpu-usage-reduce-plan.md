@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 3.2 token caching completed: append-only snapshot token stats extend cached per-message stats, and unchanged live LLM TPS calls reuse cached token totals by invoke/chunk sequence.
-- Last updated: after Phase 3.2 live LLM TPS cache.
-- Recommended next action: move to Phase 4.1 web backend shared event fanout inspection/design, unless profiling shows another Phase 3 token hot path first.
+- Status: Phase 4.2 web route cost quick wins completed: `/messages` uses incremental snapshot refresh, and frontend thread settings polling was replaced with SSE invalidations.
+- Last updated: after Phase 4.2 `/messages` and thread settings polling changes.
+- Recommended next action: return to Phase 4.1 shared SSE fanout design with a safer plan/tests, or inspect remaining web route costs if easier to measure.
 
 ## Progress log
 
@@ -45,6 +45,8 @@ A meaningful step is any completed unit such as:
 - Phase 3.1 append-only snapshot path implemented: `create_snapshot()` now reuses an existing valid snapshot when all events after `snapshot_last_event_seq` are `msg.create`, appending those messages and recomputing snapshot token stats; any `msg.edit`, `msg.delete`, control, stream, config, or tool event in the tail falls back to the existing full rebuild. Added tests proving the incremental path avoids `SnapshotBuilder.build()` and that edits still fall back to full rebuild. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py egg/tests/test_model_inheritance.py egg/tests/test_integration_workflow.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (74 passed).
 - Phase 3.2 initial token-stat extension completed: added `extend_snapshot_token_stats()` so append-only `create_snapshot()` tokenizes only new tail messages and merges with cached snapshot token stats, preserving API usage/cached-input metadata and per-message indices. Added equivalence test against full recomputation and verified `create_snapshot()` calls the extension with only the tail. Tests run: `python -m pytest eggthreads/tests/test_token_count_public.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py egg/tests/test_model_inheritance.py egg/tests/test_integration_workflow.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py eggw/tests/test_api.py::TestTokenStats -q` (80 passed).
 - Phase 3.2 live LLM TPS cache completed: `live_llm_tps_for_invoke()` now caches `(start_ts, token_count)` by `(invoke_id, max_chunk_seq)` so repeated UI/web reads for unchanged streams do not rescan all `stream.delta` payloads. Added trace-based regression test showing the second unchanged call avoids the delta payload query. Tests run: `python -m pytest eggthreads/tests/test_token_count_public.py eggthreads/tests/test_snapshot_builder.py egg/tests/test_formatting.py egg/tests/test_panels.py egg/tests/test_streaming_tui.py eggw/tests/test_api.py::TestTokenStats -q` (76 passed).
+- Phase 4.1 attempted shared SSE fanout implementation, but the TestClient SSE regression hung even after fixing an initial subscriber hashability bug; reverted the code change and recorded this as a failed attempt/risk instead of keeping a brittle rewrite. No functional code from the failed fanout attempt remains.
+- Phase 4.2 web route cost quick wins completed: `/api/threads/{thread_id}/messages` now calls `create_snapshot()` on a fresh DB connection, reusing the Phase 3 append-only incremental snapshot path instead of always running `SnapshotBuilder` over the full event log; added a regression test that fails if the append-only second `/messages` call invokes a full rebuild. Removed 1-second `threadSettings` polling from the thread page and system panel, and added SSE invalidation for `tool_call.approval` and `model.switch`. Tests run: `python -m pytest eggw/tests/test_api.py::TestMessageOperations eggw/tests/test_api.py::TestToolCalls eggw/tests/test_api.py::TestTokenStats egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (29 passed).
 - Added manager/worker recovery tooling goal: a manager-side `continue_subthread` command/tool should be able to repair or continue a child/descendant subthread after LLM/runner failures (for example a 503 that ends with no assistant content), analogous to the user `/continue` command. No code changed in this step.
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
@@ -267,8 +269,10 @@ A meaningful step is any completed unit such as:
 
 ### 4.1 Web backend shared event fanout
 
-- [ ] Inspect `eggw/eggw/routes/events.py` and current `EventWatcher` usage.
+- [x] Inspect `eggw/eggw/routes/events.py` and current `EventWatcher` usage.
+  - Current SSE endpoint creates one dedicated DB connection and `EventWatcher` polling loop per browser tab.
 - [ ] Design one watcher per active thread/root with subscriber queues for SSE/WebSocket.
+  - Attempted direct implementation was reverted after SSE TestClient hang; needs a narrower design/test harness before retry.
 - [ ] Keep reconnect/replay semantics intact:
   - if stream is in progress, replay from stream open,
   - otherwise start at current max seq.
@@ -278,10 +282,12 @@ A meaningful step is any completed unit such as:
 
 ### 4.2 Web route costs
 
-- [ ] Replace `/messages` fresh full snapshot rebuild with cached snapshot + tail reconciliation.
-- [ ] Replace 1-second `threadSettings` polling with SSE invalidation on relevant events.
+- [x] Replace `/messages` fresh full snapshot rebuild with cached snapshot + tail reconciliation.
+  - `/messages` now uses `create_snapshot()` on a fresh DB, which applies the Phase 3 incremental append-only path and falls back to full rebuild when needed.
+- [x] Replace 1-second `threadSettings` polling with SSE invalidation on relevant events.
+  - Removed `refetchInterval: 1000`; SSE invalidates settings on `tool_call.approval` and `model.switch`, while direct mutations still refetch/invalidate.
 - [ ] Ensure multiple components do not independently trigger the same expensive stats route.
-- [ ] Update this plan.
+- [x] Update this plan.
 
 ### 4.3 TUI dirty/event-driven panels
 
@@ -365,10 +371,11 @@ Record results here as work proceeds.
 - After Phase 1 results: quick wins completed and focused tests pass; CPU not formally measured yet.
 - After Phase 2 results: Phase 2.2 reducer migration has trace-based SQL/query-count tests for the cached RA/thread-state path and `build_tool_call_states()` now reuses the reducer; Phase 2.3 batched scheduler max-event/open-lease/scheduling-setting queries and recursive subtree collection. No real CPU benchmark yet.
 - After Phase 3 results: Phase 3.1 append-only snapshot path avoids full `SnapshotBuilder` rebuild for pure `msg.create` tails; Phase 3.2 token-stat extension avoids re-tokenizing old snapshot messages in that path and live LLM TPS repeats avoid delta payload rescans while unchanged. No real CPU benchmark yet.
-- After Phase 4 results: not measured yet.
+- After Phase 4 results: `/messages` no longer forces full snapshot rebuild for append-only tails; frontend thread settings no longer poll every second. Shared SSE fanout attempted then reverted due TestClient hang; needs safer design. No real CPU benchmark yet.
 
 ## Known risks / open questions
 
+- Shared SSE fanout is trickier than it looks: a direct in-route fanout attempt caused the existing TestClient SSE regression to hang, so retry only with a narrow test harness and careful cancellation/replay semantics.
 - Some current tests may implicitly rely on exact event ordering and snapshot timing; preserve or explicitly document any change.
 - Current runtime has read-only `/workspace/.egg`; Docker session tests that create `.egg/rlm_sessions` under repo root can fail for environment reasons. Prefer tests that use `tmp_path`/memory provider unless verifying Docker directly.
 - Event batching must not hide deltas long enough to hurt perceived streaming latency.

@@ -184,6 +184,38 @@ class TestMessageOperations:
         assert len(data) >= 1
         assert any(m["content"] == "Test message" for m in data)
 
+    def test_get_messages_uses_incremental_snapshot_cache(self, client, monkeypatch):
+        """Repeated /messages calls should not force a full snapshot rebuild."""
+        create_resp = client.post("/api/threads", json={"name": "Test Thread"})
+        thread_id = create_resp.json()["id"]
+
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="msg.create",
+            msg_id=os.urandom(10).hex(),
+            payload={"role": "user", "content": "first"},
+        )
+        assert client.get(f"/api/threads/{thread_id}/messages").status_code == 200
+
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="msg.create",
+            msg_id=os.urandom(10).hex(),
+            payload={"role": "user", "content": "second"},
+        )
+
+        def fail_full_rebuild(self, events):
+            raise AssertionError("full snapshot rebuild should not run for append-only /messages tail")
+
+        monkeypatch.setattr("eggthreads.api.SnapshotBuilder.build", fail_full_rebuild)
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        assert [m["content"] for m in response.json()] == ["first", "second"]
+
 
 class TestEventStreaming:
     """Test SSE event shaping for streaming UI clients."""

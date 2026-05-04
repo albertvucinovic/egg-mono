@@ -42,7 +42,6 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["threadSettings", currentThreadId],
     queryFn: () => fetchThreadSettings(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 1000,
   });
 
   // Helper to get state display info
