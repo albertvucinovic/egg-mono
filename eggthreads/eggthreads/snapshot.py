@@ -56,11 +56,13 @@ class SnapshotBuilder:
                 payload = {}
             if payload.get('skipped_on_continue'):
                 msg_id = _get(e, "msg_id")
-                logger.info(f"Found msg.edit with skipped_on_continue, msg_id={msg_id!r}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Found msg.edit with skipped_on_continue, msg_id=%r", msg_id)
                 if msg_id:
                     skipped_msg_ids.add(msg_id)
 
-        logger.info(f"skipped_msg_ids = {skipped_msg_ids}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("skipped_msg_ids = %r", skipped_msg_ids)
 
         messages: List[Dict[str, Any]] = []
 
@@ -71,10 +73,16 @@ class SnapshotBuilder:
                 continue
 
             msg_id = _get(e, "msg_id")
-            logger.info(f"Processing msg.create with msg_id={msg_id!r}, in skipped={msg_id in skipped_msg_ids if msg_id else 'N/A'}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Processing msg.create with msg_id=%r, in skipped=%r",
+                    msg_id,
+                    msg_id in skipped_msg_ids if msg_id else 'N/A',
+                )
             # Skip messages that have been marked as skipped_on_continue
             if msg_id and msg_id in skipped_msg_ids:
-                logger.info(f"  -> SKIPPING this message")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Skipping msg.create with msg_id=%r", msg_id)
                 continue
 
             pj = _get(e, "payload_json")

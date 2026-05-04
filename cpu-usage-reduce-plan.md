@@ -30,14 +30,15 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 1.4 completed; live TPS stats route correctness fix committed.
-- Last updated: after Phase 1.4 web stats fix.
-- Recommended next action: continue with Phase 1.1 REPL/session busy polling or Phase 1.2 snapshot logging overhead.
+- Status: Phase 1.2 and 1.4 completed; snapshot logging overhead and web live TPS fixes committed.
+- Last updated: after Phase 1.2 snapshot logging overhead fix.
+- Recommended next action: continue with Phase 1.1 REPL/session busy polling or Phase 1.3 tool stream chunk sequence queries.
 
 ## Progress log
 
 - Initial plan created in `cpu-usage-reduce-plan.md`.
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
+- Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
 
 ## High-level strategy
 
@@ -81,11 +82,14 @@ A meaningful step is any completed unit such as:
 
 ### 1.2 Remove avoidable snapshot logging overhead
 
-- [ ] Inspect `eggthreads/eggthreads/snapshot.py` logging.
-  - Known risk: per-event `logger.info(f"...")` eager f-strings inside snapshot rebuild.
-- [ ] Convert to guarded/lazy debug logging or remove noisy info logs if tests indicate no dependency.
-- [ ] Run snapshot/continue/thread tests.
-- [ ] Update this plan.
+- [x] Inspect `eggthreads/eggthreads/snapshot.py` logging.
+  - Confirmed per-event `logger.info(f"...")` eager f-strings inside snapshot rebuild.
+- [x] Convert to guarded/lazy debug logging or remove noisy info logs if tests indicate no dependency.
+  - Converted the per-event logs to `logger.debug(..., args)` guarded by `logger.isEnabledFor(logging.DEBUG)`.
+- [x] Run snapshot/continue/thread tests.
+  - `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
+- [x] Update this plan.
+  - Files touched: `eggthreads/eggthreads/snapshot.py`, `cpu-usage-reduce-plan.md`.
 
 ### 1.3 Avoid per-tool-delta `MAX(chunk_seq)` queries
 
