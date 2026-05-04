@@ -697,6 +697,7 @@ def _start_docker_container(
     cmd = [
         "docker", "run", "-d", "--init",
         "--name", container_name,
+        "--cpus", "4",
         "--user", f"{os.getuid()}",
         "--network", network,
         "--label", "egg.kind=rlm-session",

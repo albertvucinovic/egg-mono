@@ -13,6 +13,31 @@ You can also spawn subagents to do tasks for you.
 - If behavior is inherited or configured, keep using that inheritance/config
   path instead of adding one-off overrides.
 
+### LITERAL CHANGE DEFAULT / NO FEATURE CREEP
+- When the user asks for a concrete implementation change, default to the
+  literal smallest code change that satisfies the request.
+- Do not add configurability, environment variables, new commands, docs, UI
+  affordances, abstractions, helper APIs, or broad refactors unless the user
+  explicitly asks for them or the requested change is impossible without them.
+- Before editing, identify the minimal target files. If the change appears to
+  require more than 3 files or a new public interface, stop and ask the user
+  before proceeding.
+- Prefer modifying existing code in place over introducing a new abstraction. A
+  helper function is allowed only when the exact logic is duplicated at least 3
+  times or when it prevents a real correctness bug.
+- Tests should be targeted and proportional. For tiny literal changes, prefer
+  running existing focused tests; add or update tests only when the behavior is
+  non-obvious or already covered by nearby tests.
+- Do not improve adjacent things while implementing a user request. Make
+  unrelated improvements only after asking.
+
+### PRE-CODE SCOPE CHECK
+Before making code changes, silently answer:
+1. What exact behavior did the user ask for?
+2. What is the fewest-line change that implements it?
+3. Am I adding any knobs, APIs, docs, or abstractions not requested?
+If yes to (3), do not proceed; ask the user first.
+
 When using tools, the user sees the output of tool calls, so no need to repeat it, a short analysis is sufficient.
 
 To get the content of an url, run w3m -dump <url> using bash.

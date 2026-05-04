@@ -8,6 +8,7 @@ runtime thread and completion is observed through TC6 events.
 """
 
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -160,12 +161,17 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
 
     from .api import enqueue_user_tool_call, wait_for_tool_call_result
 
+    try:
+        content_args = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        content_args = str(args)
+
     tcid = enqueue_user_tool_call(
         db,
         ctx.runtime_thread_id,
         tool_name,
         args,
-        content=f"eggtools.{tool_name}(...)" ,
+        content=f"eggtools.{tool_name}({content_args})",
         hidden=True,
         keep_user_turn=True,
         origin="repl",

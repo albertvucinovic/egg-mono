@@ -429,7 +429,7 @@ class DockerProvider:
         extra_args = settings.get("extra_args", [])
         # Build docker run command
         # --init ensures signals are properly forwarded to the container's main process
-        cmd = ["docker", "run", "--rm", "--init", "--user", f"{os.getuid()}"]
+        cmd = ["docker", "run", "--rm", "--init", "--cpus", "4", "--user", f"{os.getuid()}"]
         # Add container name if provided (allows explicit stopping on interrupt)
         if container_name:
             cmd.extend(["--name", container_name])
