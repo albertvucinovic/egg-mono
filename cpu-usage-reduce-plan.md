@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 3.1 snapshot semantics documented with focused tests for edit/delete/provider-field behavior; incremental snapshot implementation not started.
-- Last updated: after Phase 3.1 snapshot semantic guardrail tests.
-- Recommended next action: implement the smallest append-only incremental path in `create_snapshot()` for pure new `msg.create` events after `snapshot_last_event_seq`, falling back to full rebuild for edits/deletes/continue/control events.
+- Status: Phase 3.1 append-only incremental snapshot path implemented for pure new `msg.create` tails; full rebuild remains the fallback for edits/deletes/control/non-message events.
+- Last updated: after Phase 3.1 append-only `create_snapshot()` implementation.
+- Recommended next action: inspect `eggthreads/eggthreads/token_count.py` for per-message token count caching opportunities in Phase 3.2, or profile snapshot/token hot paths first if possible.
 
 ## Progress log
 
@@ -42,6 +42,7 @@ A meaningful step is any completed unit such as:
 - Phase 2.3 scheduling settings batching completed: added `_thread_scheduling_bulk()` and `_sort_by_priority_map()` so scheduler priority sorting and sticky reservation thresholds reuse one batched latest-`thread.scheduling` lookup per loop instead of per-thread queries. Added focused scheduler settings bulk test. Tests run: `python -m pytest eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_events_and_open_streams.py eggthreads/tests/test_scheduler_slots.py egg/tests/test_ctrlc_pending_stream_boundary.py -q` (77 passed).
 - Phase 2.2 follow-up migration completed: changed public `build_tool_call_states()` to delegate to the cached reducer and return deep-copied state objects, avoiding duplicate event folds while preventing callers from mutating cached reducer state. Added cache-safety regression test. Tests run: `python -m pytest eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_events_and_open_streams.py eggthreads/tests/test_scheduler_slots.py eggthreads/tests/test_tool_call_id_normalization.py eggthreads/tests/test_generic_user_tool_call_api.py eggthreads/tests/test_user_command_api.py egg/tests/test_ctrlc_pending_stream_boundary.py -q` (110 passed).
 - Phase 3.1 semantic guardrail tests added: `SnapshotBuilder` now has focused coverage that normal `msg.edit` updates content while preserving provider-specific fields, and `msg.delete` excludes the deleted message. This documents current/intended full-rebuild semantics before adding an incremental path and fixes the documented `msg.delete` behavior. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py egg/tests/test_model_inheritance.py egg/tests/test_integration_workflow.py -q` (50 passed).
+- Phase 3.1 append-only snapshot path implemented: `create_snapshot()` now reuses an existing valid snapshot when all events after `snapshot_last_event_seq` are `msg.create`, appending those messages and recomputing snapshot token stats; any `msg.edit`, `msg.delete`, control, stream, config, or tool event in the tail falls back to the existing full rebuild. Added tests proving the incremental path avoids `SnapshotBuilder.build()` and that edits still fall back to full rebuild. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py egg/tests/test_model_inheritance.py egg/tests/test_integration_workflow.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (74 passed).
 - Added manager/worker recovery tooling goal: a manager-side `continue_subthread` command/tool should be able to repair or continue a child/descendant subthread after LLM/runner failures (for example a 503 that ends with no assistant content), analogous to the user `/continue` command. No code changed in this step.
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
@@ -231,13 +232,15 @@ A meaningful step is any completed unit such as:
   - token stats,
   - `short_recap` extraction.
   - Added focused tests for edit/delete/provider-field semantics before changing snapshot update strategy. `short_recap` extraction remains runner-owned after snapshot rebuild.
-- [ ] Implement an incremental path for normal `msg.create` after `snapshot_last_event_seq`.
-- [ ] Keep full rebuild for:
+- [x] Implement an incremental path for normal `msg.create` after `snapshot_last_event_seq`.
+  - `create_snapshot()` appends pure `msg.create` tails to the cached snapshot and falls back to full rebuild otherwise.
+- [x] Keep full rebuild for:
   - `msg.edit`,
   - `msg.delete`,
   - `control.interrupt` / continue,
   - unknown/corrupt state,
   - tests that require exact rebuild.
+  - Added edit fallback test.
 - [x] Ensure snapshots remain faithful enough for provider request reconstruction.
   - Guarded by provider-field preservation test for edited messages.
 - [x] Run snapshot, continue, model inheritance, and integration workflow tests.
@@ -354,7 +357,7 @@ Record results here as work proceeds.
 - Scheduler many-thread baseline: not measured yet.
 - After Phase 1 results: quick wins completed and focused tests pass; CPU not formally measured yet.
 - After Phase 2 results: Phase 2.2 reducer migration has trace-based SQL/query-count tests for the cached RA/thread-state path and `build_tool_call_states()` now reuses the reducer; Phase 2.3 batched scheduler max-event/open-lease/scheduling-setting queries and recursive subtree collection. No real CPU benchmark yet.
-- After Phase 3 results: not measured yet.
+- After Phase 3 results: Phase 3.1 append-only snapshot path avoids full `SnapshotBuilder` rebuild for pure `msg.create` tails; no real CPU benchmark yet.
 - After Phase 4 results: not measured yet.
 
 ## Known risks / open questions

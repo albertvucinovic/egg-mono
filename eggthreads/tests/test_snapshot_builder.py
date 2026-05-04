@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 
 from eggthreads import SnapshotBuilder
+import eggthreads as ts
 
 
 def _msg_create(event_seq: int, msg_id: str, payload: dict) -> dict:
@@ -141,3 +142,44 @@ def test_snapshot_excludes_deleted_messages() -> None:
     ])
 
     assert [m["msg_id"] for m in snapshot["messages"]] == ["keep"]
+
+
+def test_create_snapshot_appends_msg_create_tail_incrementally(tmp_path, monkeypatch) -> None:
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+
+    first_id = ts.append_message(db, tid, "user", "first")
+    ts.create_snapshot(db, tid)
+    first_row = db.get_thread(tid)
+    assert first_row is not None
+    first_seq = first_row.snapshot_last_event_seq
+
+    second_id = ts.append_message(db, tid, "assistant", "second", extra={"provider_specific": {"signature": "abc"}})
+
+    def fail_full_rebuild(self, events):
+        raise AssertionError("full snapshot rebuild should not run for append-only msg.create tail")
+
+    monkeypatch.setattr("eggthreads.api.SnapshotBuilder.build", fail_full_rebuild)
+    snapshot = ts.create_snapshot(db, tid)
+
+    assert [m["msg_id"] for m in snapshot["messages"]] == [first_id, second_id]
+    assert snapshot["messages"][-1]["provider_specific"] == {"signature": "abc"}
+    assert "token_stats" in snapshot
+    assert db.get_thread(tid).snapshot_last_event_seq > first_seq
+
+
+def test_create_snapshot_falls_back_to_full_rebuild_for_edits(tmp_path) -> None:
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+
+    msg_id = ts.append_message(db, tid, "user", "old", extra={"provider_specific": {"signature": "abc"}})
+    ts.create_snapshot(db, tid)
+    ts.edit_message(db, tid, msg_id, "new")
+
+    snapshot = ts.create_snapshot(db, tid)
+    message = snapshot["messages"][0]
+
+    assert message["content"] == "new"
+    assert message["provider_specific"] == {"signature": "abc"}

@@ -1167,6 +1167,46 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
     Returns:
         The snapshot JSON string.
     """
+    th = db.get_thread(thread_id)
+    if th and th.snapshot_json and th.snapshot_last_event_seq >= 0:
+        try:
+            snap = json.loads(th.snapshot_json)
+            messages = snap.get("messages")
+            if not isinstance(snap, dict) or not isinstance(messages, list):
+                raise ValueError("invalid snapshot")
+            cur = db.conn.execute(
+                "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
+                (thread_id, int(th.snapshot_last_event_seq)),
+            )
+            tail = cur.fetchall()
+            if tail and all(row["type"] == "msg.create" for row in tail):
+                messages = list(messages)
+                for ev in tail:
+                    try:
+                        payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+                    except Exception:
+                        payload = {}
+                    msg = dict(payload) if isinstance(payload, dict) else {}
+                    msg["msg_id"] = ev["msg_id"]
+                    msg["role"] = msg.get("role")
+                    ts_val = ev["ts"]
+                    if ts_val is not None:
+                        msg["ts"] = ts_val
+                    messages.append(msg)
+                snap["messages"] = messages
+                try:
+                    from .token_count import snapshot_token_stats  # type: ignore
+
+                    snap["token_stats"] = snapshot_token_stats(snap)
+                except Exception:
+                    pass
+                last_seq = tail[-1]["event_seq"]
+                db.conn.execute("UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?",
+                                (json.dumps(snap), last_seq, thread_id))
+                return snap
+        except Exception:
+            pass
+
     cur = db.conn.execute("SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC", (thread_id,))
     evs = cur.fetchall()
     builder = SnapshotBuilder()
