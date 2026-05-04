@@ -30,13 +30,14 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: planning only; no CPU-reduction code has been changed yet.
-- Last updated: initial plan creation.
-- Recommended next action: start Phase 0 baseline measurements, then take the Phase 1 quick wins one at a time.
+- Status: Phase 1.4 completed; live TPS stats route correctness fix committed.
+- Last updated: after Phase 1.4 web stats fix.
+- Recommended next action: continue with Phase 1.1 REPL/session busy polling or Phase 1.2 snapshot logging overhead.
 
 ## Progress log
 
 - Initial plan created in `cpu-usage-reduce-plan.md`.
+- Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 
 ## High-level strategy
 
@@ -98,11 +99,14 @@ A meaningful step is any completed unit such as:
 
 ### 1.4 Fix silent live TPS issue in web stats route
 
-- [ ] Inspect `eggw/eggw/routes/stats.py`.
-  - Known correctness issue: route references `datetime` without importing it; exception is swallowed and live TPS becomes `None`.
-- [ ] Add the missing import or use an existing shared time helper if local and simple.
-- [ ] Run focused web route tests.
-- [ ] Update this plan.
+- [x] Inspect `eggw/eggw/routes/stats.py`.
+  - Confirmed correctness issue: route referenced `datetime` without importing it; exception was swallowed and live TPS became `None`.
+- [x] Add the missing import or use an existing shared time helper if local and simple.
+  - Used timezone-aware `datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")` locally.
+- [x] Run focused web route tests.
+  - `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
+- [x] Update this plan.
+  - Files touched: `eggw/eggw/routes/stats.py`, `eggw/tests/test_api.py`, `cpu-usage-reduce-plan.md`.
 
 ### 1.5 Throttle/cache live stats in TUI panel updates
 

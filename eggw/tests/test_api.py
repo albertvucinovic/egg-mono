@@ -377,6 +377,44 @@ class TestTokenStats:
         assert "output_tokens" in data
         assert "total_tokens" in data
 
+    def test_get_stats_includes_live_llm_tps(self, client):
+        """Stats endpoint reports live TPS for an active LLM stream."""
+        create_resp = client.post("/api/threads", json={"name": "Live TPS Test"})
+        thread_id = create_resp.json()["id"]
+        invoke_id = "invoke-live-tps"
+
+        assert core_state.db.try_open_stream(
+            thread_id,
+            invoke_id,
+            "2999-01-01 00:00:00",
+            owner="test",
+            purpose="llm",
+        )
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="stream.open",
+            msg_id=os.urandom(10).hex(),
+            invoke_id=invoke_id,
+            payload={"stream_kind": "llm", "model_key": "test-model"},
+        )
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="stream.delta",
+            invoke_id=invoke_id,
+            chunk_seq=1,
+            payload={"text": "hello world " * 80, "model_key": "test-model"},
+        )
+        # Give live TPS a non-zero elapsed duration.
+        time.sleep(0.3)
+
+        response = client.get(f"/api/threads/{thread_id}/stats")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data["streaming_tps"], (int, float))
+        assert data["streaming_tps"] > 0
+
 
 class TestSSEEvents:
     """Test Server-Sent Events streaming."""
