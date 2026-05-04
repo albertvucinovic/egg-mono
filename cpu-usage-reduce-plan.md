@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 1 quick wins completed; ready for Phase 2 reducer design.
-- Last updated: after Phase 1.5 TUI live stats cache/throttle fix.
-- Recommended next action: start Phase 2.1 reducer design before changing brittle event-state code.
+- Status: Phase 2.1 reducer design completed; ready to implement behind existing APIs one caller at a time.
+- Last updated: after Phase 2.1 reducer design notes.
+- Recommended next action: implement reducer privately in `eggthreads/eggthreads/tool_state.py`, initially preserving existing public APIs and migrating `discover_runner_actionable_cached()` / `thread_state()` only after golden tests pass.
 
 ## Progress log
 
@@ -42,6 +42,7 @@ A meaningful step is any completed unit such as:
 - Phase 1.1 completed: added a shared 50ms sleep to Docker Python REPL eval polling and removed duplicate Bash Docker REPL sleeps in `eggthreads/eggthreads/session.py`. Tests run: `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed) and `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected). Full `test_session_config.py` hit an environment issue because `/workspace/.egg` is read-only in this runtime, not because of this change.
 - Phase 1.3 completed: added optional chunk-sequence allocation to tool stream delta helpers and used local allocators in Bash and generic tool streaming paths, avoiding per-delta `MAX(chunk_seq)` queries. Added `test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence`. Tests run: `python -m pytest eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_emits_preview_then_indicator eggthreads/tests/test_headless_subtree_scheduler.py::test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence eggthreads/tests/test_tool_timeout.py -q` (22 passed).
 - Phase 1.5 completed: added short-lived TUI caches for `current_token_stats()` and live LLM TPS so unchanged event logs do not rescan token/delta state every UI tick. Added focused tests for both caches. Tests run: `python -m pytest egg/tests/test_formatting.py egg/tests/test_panels.py egg/tests/test_streaming_tui.py -q` (64 passed).
+- Phase 2.1 completed: documented the event reducer design in this plan. Decision: keep reducer private to `eggthreads/eggthreads/tool_state.py` first, cache by `(str(db.path), thread_id, max_event_seq)`, initially derive skipped ids, LLM boundary, messages after boundary, tool states, next actionable, and coarse non-lease state. No code behavior changed in this step.
 
 ## High-level strategy
 
@@ -144,30 +145,37 @@ A meaningful step is any completed unit such as:
 
 ### 2.1 Design a single per-thread event reducer
 
-- [ ] Inventory all callers that reconstruct state from events.
-  - `build_tool_call_states()`.
-  - `_last_stream_close_seq()`.
-  - `_iter_messages_after()`.
-  - `discover_runner_actionable()`.
-  - `thread_state()`.
-  - child status/wait helpers.
-  - web tool/state routes.
-- [ ] Write down the reducer output shape before coding.
-  - Candidate fields:
+- [x] Inventory all callers that reconstruct state from events.
+  - Hot core callers: `build_tool_call_states()`, `_last_stream_close_seq()`, `_iter_messages_after()`, `discover_runner_actionable()`, `thread_state()`.
+  - Wait/status callers: `wait_for_tool_call_result*`, `_thread_wait_complete()`, `wait_for_threads()`, `get_child_thread_status*()`.
+  - UI/API callers: `egg/egg/approval.py`, `egg/egg/input.py`, `eggw/routes/tools.py`, `eggw/routes/threads.py`, `eggw/routes/messages.py`, `eggw/routes/events.py`.
+  - Token stats remain separate for now; do not combine with reducer until Phase 3.
+- [x] Write down the reducer output shape before coding.
+  - Initial private reducer output should be a dataclass in `eggthreads/eggthreads/tool_state.py` with:
+    - `thread_id`,
     - `max_event_seq`,
     - `skipped_msg_ids`,
     - `last_llm_boundary_seq`,
-    - `messages_after_boundary`,
-    - `tool_call_states`,
-    - `next_runner_actionable`,
-    - `coarse_thread_state`,
-    - `pending_approval_summary`,
-    - `recent_error_summary` if cheap.
-- [ ] Decide cache key and invalidation.
-  - Candidate key: `(str(db.path), thread_id, max_event_seq)`.
-  - Cache must be process-local and rebuildable.
-- [ ] Add golden tests before replacing multiple callers.
-- [ ] Update this plan with design decisions before implementation.
+    - `messages_after_boundary` as event dicts for `msg.create` only,
+    - `tool_call_states` as the existing `Dict[str, ToolCallState]`,
+    - `next_runner_actionable` as existing `Optional[RunnerActionable]`,
+    - `coarse_thread_state_without_lease` as one of `running`, `waiting_tool_approval`, `waiting_output_approval`, `waiting_user`.
+  - Keep recent errors and token stats out of the first reducer to avoid broad scope.
+- [x] Decide cache key and invalidation.
+  - Use process-local cache key `(str(db.path), thread_id, max_event_seq)`, where `max_event_seq` comes from `db.max_event_seq(thread_id)`.
+  - Evict older entries for the same `(db.path, thread_id)` after storing a new one.
+  - Cache is rebuildable and never authoritative; event log stays source of truth.
+- [x] Add golden tests before replacing multiple callers.
+  - Before implementation, add focused equivalence tests comparing reducer-backed outputs against current public behavior for representative histories:
+    - simple user RA1,
+    - assistant tool call waiting for approval,
+    - approved assistant tool call RA2,
+    - user-originated tool call RA3,
+    - continue/skipped messages,
+    - interrupted/purpose=`llm` boundary.
+  - Do not migrate web/routes until these core tests pass.
+- [x] Update this plan with design decisions before implementation.
+  - Design decision: first implementation may reuse existing helper logic internally if necessary, but the target is one event pass. Prefer correctness-preserving incremental migration over a large rewrite.
 
 ### 2.2 Implement reducer behind existing APIs
 
