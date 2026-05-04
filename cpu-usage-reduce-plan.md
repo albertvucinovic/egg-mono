@@ -30,15 +30,17 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 2.3 first scheduler bulk-query pass completed; subtree collection and scheduler per-loop max-event/open-lease checks are batched.
-- Last updated: after Phase 2.3 scheduler bulk query pass.
-- Recommended next action: profile scheduler loops with many threads; if still hot, batch scheduling priority/settings lookups or migrate the next measured `build_tool_call_states()` caller to the reducer.
+- Status: Phase 2.3 scheduler bulk-query pass completed and `build_tool_call_states()` now delegates to the cached reducer with cache-safe copies.
+- Last updated: after migrating `build_tool_call_states()` to the reducer.
+- Recommended next action: profile scheduler loops with many threads; if still hot, migrate the next measured event-log scan caller to the reducer or move to Phase 3.1 snapshot semantics documentation.
 
 ## Progress log
 
 - Initial plan created in `cpu-usage-reduce-plan.md`.
 - Phase 2.2 initial migration completed: added private `_ThreadEventReduction` / `_reduce_thread_events()` in `eggthreads/eggthreads/tool_state.py`, keyed by `(str(db.path), thread_id, max_event_seq)`, deriving skipped ids, LLM boundary, messages after boundary, tool states, next RA, and coarse no-lease thread state from one loaded event list. Added golden equivalence tests in `eggthreads/tests/test_tool_state_runner_actionable.py` for simple RA1, assistant TC1 approval wait, approved assistant RA2, user RA3, continue/skipped messages, and purpose=`llm` interrupts. Migrated `discover_runner_actionable_cached()` and `thread_state()` to the reducer while leaving public APIs unchanged. Tests run: `python -m pytest eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_events_and_open_streams.py eggthreads/tests/test_scheduler_slots.py egg/tests/test_ctrlc_pending_stream_boundary.py -q` (74 passed).
 - Phase 2.3 first scheduler bulk-query pass completed: changed `SubtreeScheduler._collect_subtree()` to prefer one recursive CTE with waiting-time filtering and a cycle guard, with deque BFS fallback; batched scheduler-loop `max_event_seq` and active open-lease checks via `_max_event_seqs_bulk()` / `_active_open_threads_bulk()` instead of per-thread queries. Added focused bulk helper tests. Tests run: `python -m pytest eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_events_and_open_streams.py eggthreads/tests/test_scheduler_slots.py egg/tests/test_ctrlc_pending_stream_boundary.py -q` (76 passed).
+- Phase 2.3 scheduling settings batching completed: added `_thread_scheduling_bulk()` and `_sort_by_priority_map()` so scheduler priority sorting and sticky reservation thresholds reuse one batched latest-`thread.scheduling` lookup per loop instead of per-thread queries. Added focused scheduler settings bulk test. Tests run: `python -m pytest eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_events_and_open_streams.py eggthreads/tests/test_scheduler_slots.py egg/tests/test_ctrlc_pending_stream_boundary.py -q` (77 passed).
+- Phase 2.2 follow-up migration completed: changed public `build_tool_call_states()` to delegate to the cached reducer and return deep-copied state objects, avoiding duplicate event folds while preventing callers from mutating cached reducer state. Added cache-safety regression test. Tests run: `python -m pytest eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_events_and_open_streams.py eggthreads/tests/test_scheduler_slots.py eggthreads/tests/test_tool_call_id_normalization.py eggthreads/tests/test_generic_user_tool_call_api.py eggthreads/tests/test_user_command_api.py egg/tests/test_ctrlc_pending_stream_boundary.py -q` (110 passed).
 - Added manager/worker recovery tooling goal: a manager-side `continue_subthread` command/tool should be able to repair or continue a child/descendant subthread after LLM/runner failures (for example a 503 that ends with no assistant content), analogous to the user `/continue` command. No code changed in this step.
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
@@ -190,6 +192,7 @@ A meaningful step is any completed unit such as:
   - Added private reducer in `eggthreads/eggthreads/tool_state.py`; no new public module/API.
 - [x] Migrate one caller at a time.
   - Migrated `discover_runner_actionable_cached()` and `thread_state()` first because they are hottest.
+  - Migrated `build_tool_call_states()` to reuse the reducer and return cache-safe copies.
   - Then migrate web/tool/status routes if needed.
 - [x] Keep old behavior covered by tests.
   - Added reducer-vs-public golden tests for RA1, RA2, RA3, TC1 wait, continue/skipped messages, and LLM interrupt boundaries.
@@ -206,7 +209,7 @@ A meaningful step is any completed unit such as:
   - max event seq by thread,
   - active open streams,
   - scheduling priorities/settings.
-  - Priority/settings are still per-thread; leave for a later measured pass because changing `_sort_by_priority()` semantics is a separate concern.
+  - Scheduling priorities/settings are now loaded with `_thread_scheduling_bulk()` and consumed by `_sort_by_priority_map()` plus sticky threshold checks.
 - [x] Replace `q.pop(0)` BFS with `collections.deque` if still applicable.
   - Done in the fallback BFS path.
 - [x] Preserve sticky scheduling semantics and lease-expiration behavior.
@@ -346,7 +349,7 @@ Record results here as work proceeds.
 - Long stream CPU baseline: not measured yet.
 - Scheduler many-thread baseline: not measured yet.
 - After Phase 1 results: quick wins completed and focused tests pass; CPU not formally measured yet.
-- After Phase 2 results: Phase 2.2 initial reducer migration has trace-based SQL/query-count tests for the cached RA/thread-state path; Phase 2.3 batched scheduler max-event/open-lease queries and recursive subtree collection. No real CPU benchmark yet.
+- After Phase 2 results: Phase 2.2 reducer migration has trace-based SQL/query-count tests for the cached RA/thread-state path and `build_tool_call_states()` now reuses the reducer; Phase 2.3 batched scheduler max-event/open-lease/scheduling-setting queries and recursive subtree collection. No real CPU benchmark yet.
 - After Phase 3 results: not measured yet.
 - After Phase 4 results: not measured yet.
 

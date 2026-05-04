@@ -61,6 +61,12 @@ def runner_actionable_resource_class(ra: Optional[RunnerActionable]) -> str:
     return "llm" if ra is not None and ra.kind == "RA1_llm" else "tool"
 
 
+@dataclass(frozen=True)
+class _SchedulerThreadSettings:
+    priority: Any = 0
+    threshold: Any = None
+
+
 # Thresholds above which a tool output is considered "long" and should
 # be stashed to disk with a preview sent to the LLM instead of the full
 # content. Matches the existing "prompt the user" thresholds so
@@ -2980,6 +2986,63 @@ def _active_open_threads_bulk(db: ThreadsDB, thread_ids: List[str]) -> Set[str]:
     return out
 
 
+def _thread_scheduling_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, _SchedulerThreadSettings]:
+    """Return latest scheduler priority/threshold settings for threads."""
+    out = {tid: _SchedulerThreadSettings() for tid in thread_ids}
+    for batch in _thread_id_batches(thread_ids):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        try:
+            cur = db.conn.execute(
+                f"""
+                SELECT e.thread_id, e.payload_json
+                  FROM events e
+                  JOIN (
+                        SELECT thread_id, MAX(event_seq) AS event_seq
+                          FROM events
+                         WHERE type='thread.scheduling'
+                           AND thread_id IN ({placeholders})
+                         GROUP BY thread_id
+                       ) latest
+                    ON latest.thread_id = e.thread_id
+                   AND latest.event_seq = e.event_seq
+                """,
+                tuple(batch),
+            )
+            for row in cur.fetchall():
+                try:
+                    payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                out[str(row[0])] = _SchedulerThreadSettings(
+                    priority=payload.get("priority", 0),
+                    threshold=payload.get("threshold"),
+                )
+        except Exception:
+            continue
+    return out
+
+
+def _sort_by_priority_map(
+    threads: List[str],
+    mode: str,
+    settings_by_thread: Dict[str, _SchedulerThreadSettings],
+) -> List[str]:
+    """Sort threads using already-loaded scheduling settings."""
+    threads_with_priority = [
+        (tid, settings_by_thread.get(tid, _SchedulerThreadSettings()).priority or 0)
+        for tid in threads
+    ]
+    if mode == "alphabetical":
+        threads_with_priority.sort(key=lambda x: (-x[1], x[0]))
+    else:
+        threads_with_priority.sort(key=lambda x: -x[1])
+    return [tid for tid, _ in threads_with_priority]
+
+
 class SubtreeScheduler:
     """Async orchestrator: watches a root thread and runs runnable threads within its subtree, up to concurrency limit."""
 
@@ -3059,8 +3122,6 @@ class SubtreeScheduler:
         return out
 
     async def run_forever(self, poll_sec: float = 0.5):
-        from .api import is_thread_runnable, get_thread_scheduling
-
         if _no_api_calls_mode(self.cfg):
             # This banner fires inside run_forever, which under an interactive
             # TUI (e.g. egg) runs after the renderer has taken over stdout —
@@ -3118,6 +3179,7 @@ class SubtreeScheduler:
             all_threads = self._collect_subtree(self.root)
             max_event_seqs = _max_event_seqs_bulk(self.db, all_threads)
             active_open_threads = _active_open_threads_bulk(self.db, all_threads)
+            scheduling_settings = _thread_scheduling_bulk(self.db, all_threads)
 
             # Update idle tracking and expire reservations (sticky scheduling)
             if self.cfg.sticky_scheduling:
@@ -3145,7 +3207,7 @@ class SubtreeScheduler:
                     if tid not in last_run_end:
                         continue  # Not idle yet
                     # Use per-thread threshold if set, otherwise global default
-                    settings = get_thread_scheduling(self.db, tid)
+                    settings = scheduling_settings.get(tid, _SchedulerThreadSettings())
                     threshold = settings.threshold if settings.threshold is not None else self.cfg.sticky_idle_threshold_sec
                     if (now - last_run_end[tid]) > threshold:
                         expired.add(tid)
@@ -3154,7 +3216,7 @@ class SubtreeScheduler:
                     last_run_end.pop(tid, None)
 
             # Apply priority sorting
-            all_threads = _sort_by_priority(all_threads, self.cfg.priority_mode, self.db)
+            all_threads = _sort_by_priority_map(all_threads, self.cfg.priority_mode, scheduling_settings)
 
             # Calculate available LLM/tool slots for scheduling.  Tool work
             # does not consume LLM slots; an optional separate tool cap can

@@ -1694,3 +1694,25 @@ def test_scheduler_bulk_active_open_threads_excludes_expired_leases(tmp_path):
     assert db.try_open_stream(expired, _unique_id(), expired_until, owner="test")
 
     assert _active_open_threads_bulk(db, [root, active, expired]) == {active}
+
+
+def test_scheduler_bulk_thread_scheduling_matches_public_settings(tmp_path):
+    from eggthreads.runner import _sort_by_priority_map, _thread_scheduling_bulk
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    low = ts.create_child_thread(db, root, name="low")
+    high = ts.create_child_thread(db, root, name="high")
+
+    ts.set_thread_scheduling(db, low, priority=1, threshold=2.5)
+    ts.set_thread_scheduling(db, high, priority=9)
+
+    settings = _thread_scheduling_bulk(db, [root, low, high])
+
+    assert settings[root].priority == 0
+    assert settings[root].threshold is None
+    assert settings[low].priority == 1
+    assert settings[low].threshold == 2.5
+    assert settings[high].priority == 9
+    assert settings[high].threshold is None
+    assert _sort_by_priority_map([low, high, root], "none", settings) == [high, low, root]

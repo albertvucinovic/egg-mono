@@ -598,3 +598,30 @@ def test_thread_state_reuses_reducer_after_actionable_cache(tmp_path):
     assert event_queries == [
         f"SELECT MAX(event_seq) FROM events WHERE thread_id='{tid}'"
     ]
+
+
+def test_build_tool_call_states_returns_cache_safe_copies(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-state-copy"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event(
+        "msg-user",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "content": "cmd",
+            "tool_calls": [
+                {"id": "tc_copy", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user",
+    )
+
+    first = eggthreads.build_tool_call_states(db, tid)
+    first["tc_copy"].approval_decision = "granted"
+
+    second = eggthreads.build_tool_call_states(db, tid)
+
+    assert second["tc_copy"].approval_decision is None
+    assert second["tc_copy"].state == "TC1"
