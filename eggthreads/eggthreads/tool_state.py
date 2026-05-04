@@ -82,6 +82,422 @@ class RunnerActionable:
     tool_calls: Optional[List[ToolCallState]] = None
 
 
+@dataclass
+class _ThreadEventReduction:
+    thread_id: str
+    max_event_seq: int
+    skipped_msg_ids: set[str]
+    last_llm_boundary_seq: int
+    messages_after_boundary: List[Dict[str, Any]]
+    tool_call_states: Dict[str, ToolCallState]
+    next_runner_actionable: Optional[RunnerActionable]
+    coarse_thread_state_without_lease: str
+
+
+def _payload(ev: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        pj = ev.get("payload_json")
+        payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _event_seq_value(ev: Dict[str, Any]) -> int:
+    try:
+        return int(ev.get("event_seq"))
+    except Exception:
+        return -1
+
+
+_REDUCER_CACHE: Dict[Tuple[str, str, int], _ThreadEventReduction] = {}
+
+
+def _reduce_thread_events(db: ThreadsDB, thread_id: str) -> _ThreadEventReduction:
+    """Reduce a thread's event log once into the hot state views.
+
+    This is private and rebuildable: SQLite events remain the source of truth.
+    The cache is keyed by database path, thread id, and max event sequence, so
+    any appended event naturally invalidates the previous reduction.
+    """
+
+    try:
+        max_seq = db.max_event_seq(thread_id)
+    except Exception:
+        max_seq = -1
+
+    db_path = str(db.path)
+    cache_key = (db_path, thread_id, max_seq)
+    cached = _REDUCER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    events: List[Dict[str, Any]] = []
+    if max_seq >= 0:
+        cur = db.conn.execute(
+            "SELECT * FROM events WHERE thread_id=? AND event_seq<=? ORDER BY event_seq ASC",
+            (thread_id, max_seq),
+        )
+        events = [dict(row) for row in cur.fetchall()]
+
+    reduction = _reduce_loaded_thread_events(thread_id, max_seq, events)
+    _REDUCER_CACHE[cache_key] = reduction
+
+    for key in list(_REDUCER_CACHE.keys()):
+        if key[0] == db_path and key[1] == thread_id and key != cache_key:
+            del _REDUCER_CACHE[key]
+
+    return reduction
+
+
+def _reduce_loaded_thread_events(
+    thread_id: str,
+    max_event_seq: int,
+    events: List[Dict[str, Any]],
+) -> _ThreadEventReduction:
+    records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
+
+    skipped_msg_ids: set[str] = set()
+    msg_seq_by_id: Dict[str, int] = {}
+    user_seqs: list[int] = []
+    latest_interrupt_seq: Optional[int] = None
+    latest_interrupt_payload: Dict[str, Any] = {}
+
+    for ev, payload, ev_seq in records:
+        ev_type = ev.get("type")
+        if ev_type == "msg.edit":
+            msg_id = ev.get("msg_id")
+            if msg_id and payload.get("skipped_on_continue"):
+                skipped_msg_ids.add(str(msg_id))
+            continue
+        if ev_type == "control.interrupt":
+            latest_interrupt_seq = ev_seq
+            latest_interrupt_payload = payload
+        elif ev_type == "msg.create":
+            msg_id = ev.get("msg_id")
+            if msg_id:
+                msg_seq_by_id.setdefault(str(msg_id), ev_seq)
+            if payload.get("role") == "user":
+                user_seqs.append(ev_seq)
+
+    continue_boundary_seq: Optional[int] = None
+    continue_interrupt_seq: Optional[int] = None
+    if latest_interrupt_seq is not None and latest_interrupt_payload.get("purpose") == "continue":
+        continue_interrupt_seq = latest_interrupt_seq
+        continue_from_msg_id = latest_interrupt_payload.get("continue_from_msg_id")
+        if continue_from_msg_id:
+            continue_boundary_seq = msg_seq_by_id.get(str(continue_from_msg_id))
+
+    states: Dict[str, ToolCallState] = {}
+
+    # First fold: messages that declare tool calls. Later messages with the
+    # same tool_call id intentionally replace earlier ones, matching the old
+    # replay behavior for reused-looking provider ids.
+    for ev, payload, ev_seq in records:
+        if ev.get("type") != "msg.create":
+            continue
+        msg_id = ev.get("msg_id") or ""
+        if msg_id and str(msg_id) in skipped_msg_ids:
+            continue
+        role = payload.get("role")
+        tcs = payload.get("tool_calls") or []
+        if not isinstance(tcs, list) or not tcs:
+            continue
+        for idx, tc in enumerate(tcs):
+            if not isinstance(tc, dict):
+                continue
+            tcid = tc.get("id") or f"{msg_id}:{idx}"
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name") or ""
+            args = fn.get("arguments") if "function" in tc else tc.get("arguments")
+            states[tcid] = ToolCallState(
+                thread_id=thread_id,
+                tool_call_id=str(tcid),
+                parent_msg_id=str(msg_id),
+                parent_event_seq=ev_seq,
+                parent_role=str(role) if isinstance(role, str) else None,
+                index=idx,
+                name=str(name),
+                arguments=args,
+            )
+
+    global_auto_approval = False
+    global_intervals: list[tuple[int, Optional[int]]] = []
+    current_global_start: Optional[int] = None
+
+    def _should_skip_tc_event(ev_seq: int, tcid: Optional[str]) -> bool:
+        if continue_boundary_seq is None or continue_interrupt_seq is None:
+            return False
+        if ev_seq <= continue_boundary_seq or ev_seq > continue_interrupt_seq:
+            return False
+        if tcid and tcid in states:
+            tc = states[tcid]
+            if tc.parent_event_seq >= continue_boundary_seq:
+                return True
+        return False
+
+    for ev, payload, ev_seq in records:
+        ev_type = ev.get("type")
+
+        if ev_type == "tool_call.approval":
+            decision = payload.get("decision")
+            if decision == "global_approval":
+                global_auto_approval = True
+                current_global_start = ev_seq
+                continue
+            if decision == "revoke_global_approval":
+                if global_auto_approval and current_global_start is not None:
+                    global_intervals.append((current_global_start, ev_seq))
+                global_auto_approval = False
+                current_global_start = None
+                continue
+
+            if decision == "all-in-turn":
+                prev_user_seq = -1
+                next_user_seq = None
+                for user_seq in user_seqs:
+                    if user_seq <= ev_seq:
+                        prev_user_seq = user_seq
+                    elif next_user_seq is None:
+                        next_user_seq = user_seq
+                        break
+                for tc in states.values():
+                    if tc.approval_decision is not None:
+                        continue
+                    if tc.parent_event_seq < prev_user_seq:
+                        continue
+                    if next_user_seq is not None and tc.parent_event_seq >= next_user_seq:
+                        continue
+                    tc.approval_decision = "granted"
+            else:
+                tcid = payload.get("tool_call_id")
+                if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
+                    if isinstance(decision, str):
+                        states[tcid].approval_decision = decision
+        elif ev_type == "tool_call.execution_started":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
+                tc = states[tcid]
+                if ev_seq > tc.parent_event_seq:
+                    tc.execution_started = True
+        elif ev_type == "tool_call.summary":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
+                tc = states[tcid]
+                if ev_seq > tc.parent_event_seq:
+                    summary = payload.get("summary")
+                    if isinstance(summary, str):
+                        tc.summary = summary
+        elif ev_type == "tool_call.finished":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
+                tc = states[tcid]
+                if ev_seq > tc.parent_event_seq:
+                    reason = payload.get("reason")
+                    if isinstance(reason, str):
+                        tc.finished_reason = reason
+                    out = payload.get("output")
+                    if out is not None:
+                        tc.finished_output = str(out)
+        elif ev_type == "tool_call.output_approval":
+            tcid = payload.get("tool_call_id")
+            if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
+                tc = states[tcid]
+                if ev_seq > tc.parent_event_seq:
+                    decision = payload.get("decision")
+                    if isinstance(decision, str):
+                        tc.output_decision = decision
+                    tc.last_output_approval_payload = payload
+        elif ev_type == "msg.create":
+            if payload.get("role") != "tool":
+                continue
+            tcid = payload.get("tool_call_id")
+            msg_id = ev.get("msg_id")
+            if msg_id and str(msg_id) in skipped_msg_ids:
+                continue
+            if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
+                tc = states[tcid]
+                if ev_seq > tc.parent_event_seq:
+                    tc.published = True
+
+    if global_auto_approval and current_global_start is not None:
+        global_intervals.append((current_global_start, None))
+
+    def _has_global_approval(ev_seq: int) -> bool:
+        for start, end in global_intervals:
+            if ev_seq < start:
+                continue
+            if end is not None and ev_seq > end:
+                continue
+            return True
+        return False
+
+    for tc in states.values():
+        if tc.approval_decision is None and _has_global_approval(tc.parent_event_seq):
+            tc.approval_decision = "granted"
+
+    last_llm_boundary_seq = _last_llm_boundary_from_records(records, skipped_msg_ids, msg_seq_by_id)
+    messages_after_records = [
+        (ev, payload, ev_seq)
+        for ev, payload, ev_seq in records
+        if ev.get("type") == "msg.create"
+        and ev_seq > last_llm_boundary_seq
+        and not (ev.get("msg_id") and str(ev.get("msg_id")) in skipped_msg_ids)
+    ]
+    messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
+    next_runner_actionable = _next_runner_actionable_from_reduction(
+        thread_id,
+        states,
+        messages_after_records,
+    )
+    if next_runner_actionable is not None:
+        coarse_state = "running"
+    elif any(tc.state == "TC1" for tc in states.values()):
+        coarse_state = "waiting_tool_approval"
+    elif any(tc.state == "TC4" for tc in states.values()):
+        coarse_state = "waiting_output_approval"
+    else:
+        coarse_state = "waiting_user"
+
+    return _ThreadEventReduction(
+        thread_id=thread_id,
+        max_event_seq=max_event_seq,
+        skipped_msg_ids=skipped_msg_ids,
+        last_llm_boundary_seq=last_llm_boundary_seq,
+        messages_after_boundary=messages_after_boundary,
+        tool_call_states=states,
+        next_runner_actionable=next_runner_actionable,
+        coarse_thread_state_without_lease=coarse_state,
+    )
+
+
+def _last_llm_boundary_from_records(
+    records: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
+    skipped_msg_ids: set[str],
+    msg_seq_by_id: Dict[str, int],
+) -> int:
+    last_close = -1
+    llm_invokes: set[str] = set()
+    last_assistant_seq = -1
+
+    for ev, payload, ev_seq in records:
+        ev_type = ev.get("type")
+        inv = ev.get("invoke_id")
+        if ev_type == "stream.open":
+            if payload.get("stream_kind") == "llm" and isinstance(inv, str) and inv:
+                llm_invokes.add(inv)
+        elif ev_type == "stream.delta":
+            if (
+                "text" in payload
+                or "reason" in payload
+                or "reasoning_summary" in payload
+                or "tool_call" in payload
+            ):
+                if isinstance(inv, str) and inv:
+                    llm_invokes.add(inv)
+        elif ev_type == "stream.close" and isinstance(inv, str) and inv in llm_invokes:
+            last_close = ev_seq
+        elif ev_type == "control.interrupt":
+            old_inv = payload.get("old_invoke_id")
+            purpose = payload.get("purpose")
+            if purpose == "llm":
+                last_close = ev_seq
+                continue
+            if purpose == "continue":
+                continue_from_msg_id = payload.get("continue_from_msg_id")
+                if continue_from_msg_id:
+                    msg_seq = msg_seq_by_id.get(str(continue_from_msg_id))
+                    if msg_seq is not None:
+                        last_close = msg_seq - 1
+                        continue
+                last_close = ev_seq
+                continue
+            if isinstance(old_inv, str) and old_inv in llm_invokes:
+                last_close = ev_seq
+        elif ev_type == "msg.create":
+            msg_id = ev.get("msg_id")
+            skipped = msg_id and str(msg_id) in skipped_msg_ids
+            if payload.get("role") == "assistant" and not bool(payload.get("no_api")) and not skipped:
+                last_assistant_seq = ev_seq
+
+    if last_close == -1 and last_assistant_seq != -1:
+        last_close = last_assistant_seq
+    return last_close
+
+
+def _next_runner_actionable_from_reduction(
+    thread_id: str,
+    states: Dict[str, ToolCallState],
+    messages_after_records: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
+) -> Optional[RunnerActionable]:
+    user_tcs = [
+        tc for tc in states.values()
+        if tc.parent_role == "user" and tc.state in ("TC2.1", "TC2.2", "TC5")
+    ]
+    if user_tcs:
+        user_tcs.sort(key=lambda tc: tc.parent_event_seq)
+        msg_id = user_tcs[0].parent_msg_id
+        parent_seq = user_tcs[0].parent_event_seq
+        tcs_for_msg = [tc for tc in user_tcs if tc.parent_msg_id == msg_id]
+        return RunnerActionable(
+            kind="RA3_tools_user",
+            thread_id=thread_id,
+            triggering_event_seq=parent_seq,
+            msg_id=msg_id,
+            tool_calls=tcs_for_msg,
+        )
+
+    assistant_tcs = [
+        tc for tc in states.values()
+        if tc.parent_role == "assistant" and tc.state in ("TC2.1", "TC2.2", "TC5")
+    ]
+    if assistant_tcs:
+        assistant_tcs.sort(key=lambda tc: tc.parent_event_seq)
+        msg_id = assistant_tcs[0].parent_msg_id
+        parent_seq = assistant_tcs[0].parent_event_seq
+        tcs_for_msg = [tc for tc in assistant_tcs if tc.parent_msg_id == msg_id]
+        return RunnerActionable(
+            kind="RA2_tools_assistant",
+            thread_id=thread_id,
+            triggering_event_seq=parent_seq,
+            msg_id=msg_id,
+            tool_calls=tcs_for_msg,
+        )
+
+    has_unpublished_assistant_tool = any(
+        tc.parent_role == "assistant" and not tc.published
+        for tc in states.values()
+    )
+    if has_unpublished_assistant_tool:
+        return None
+
+    for ev, payload, ev_seq in messages_after_records:
+        msg_id = ev.get("msg_id") or ""
+        role = payload.get("role")
+        keep_user_turn = bool(payload.get("keep_user_turn"))
+        no_api = bool(payload.get("no_api"))
+        tool_calls = payload.get("tool_calls") or []
+
+        if role == "user" and not tool_calls and not keep_user_turn and not no_api:
+            return RunnerActionable(
+                kind="RA1_llm",
+                thread_id=thread_id,
+                triggering_event_seq=ev_seq,
+                msg_id=msg_id,
+                tool_calls=None,
+            )
+        if role == "tool" and not no_api and not keep_user_turn:
+            return RunnerActionable(
+                kind="RA1_llm",
+                thread_id=thread_id,
+                triggering_event_seq=ev_seq,
+                msg_id=msg_id,
+                tool_calls=None,
+            )
+
+    return None
+
+
 def _iter_events(db: ThreadsDB, thread_id: str) -> Iterable[Dict[str, Any]]:
     cur = db.conn.execute(
         "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
@@ -610,42 +1026,10 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
         yield ev
 
 
-_RA_CACHE: Dict[Tuple[str, int], Optional[RunnerActionable]] = {}
-
-
 def discover_runner_actionable_cached(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
-    """Cached wrapper around :func:`discover_runner_actionable`.
+    """Return the next actionable item using the cached thread reducer."""
 
-    The underlying implementation walks the full event log and
-    reconstructs tool-call state, which is relatively expensive.  For a
-    given thread the result only changes when new events are appended,
-    so we key the cache by ``(thread_id, max_event_seq)`` and reuse the
-    previously computed value when possible.
-
-    The cache is deliberately local to this module (process-local, not
-    persisted) and is safe to keep very small: on each write we evict
-    any older entry for the same ``thread_id``.
-    """
-
-    try:
-        max_seq = db.max_event_seq(thread_id)
-    except Exception:
-        max_seq = -1
-
-    cache_key = (thread_id, max_seq)
-    if cache_key in _RA_CACHE:
-        return _RA_CACHE[cache_key]
-
-    result = discover_runner_actionable(db, thread_id)
-    _RA_CACHE[cache_key] = result
-
-    # Evict stale entries for this thread so the cache does not grow
-    # unbounded if long-lived processes see many generations.
-    for k in list(_RA_CACHE.keys()):
-        if k[0] == thread_id and k != cache_key:
-            del _RA_CACHE[k]
-
-    return result
+    return _reduce_thread_events(db, thread_id).next_runner_actionable
 
 
 def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[RunnerActionable]:
@@ -791,17 +1175,4 @@ def thread_state(db: ThreadsDB, thread_id: str) -> str:
         except Exception:
             return "running"
 
-    # Any actionable RA -> running
-    if discover_runner_actionable_cached(db, thread_id) is not None:
-        return "running"
-
-    # Otherwise, inspect tool call states
-    all_states = build_tool_call_states(db, thread_id)
-    any_tc1 = any(tc.state == "TC1" for tc in all_states.values())
-    any_tc4 = any(tc.state == "TC4" for tc in all_states.values())
-
-    if any_tc1:
-        return "waiting_tool_approval"
-    if any_tc4:
-        return "waiting_output_approval"
-    return "waiting_user"
+    return _reduce_thread_events(db, thread_id).coarse_thread_state_without_lease

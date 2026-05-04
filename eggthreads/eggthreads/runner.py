@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -2935,6 +2936,50 @@ def _sort_by_priority(threads: List[str], mode: str, db: ThreadsDB) -> List[str]
     return [tid for tid, _ in threads_with_priority]
 
 
+def _thread_id_batches(thread_ids: List[str], batch_size: int = 900):
+    for idx in range(0, len(thread_ids), batch_size):
+        yield thread_ids[idx:idx + batch_size]
+
+
+def _max_event_seqs_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, int]:
+    """Return max event sequence per thread with one batched scan."""
+    out = {tid: -1 for tid in thread_ids}
+    for batch in _thread_id_batches(thread_ids):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        try:
+            cur = db.conn.execute(
+                f"SELECT thread_id, MAX(event_seq) FROM events WHERE thread_id IN ({placeholders}) GROUP BY thread_id",
+                tuple(batch),
+            )
+            for row in cur.fetchall():
+                value = row[1]
+                out[str(row[0])] = int(value) if value is not None else -1
+        except Exception:
+            continue
+    return out
+
+
+def _active_open_threads_bulk(db: ThreadsDB, thread_ids: List[str]) -> Set[str]:
+    """Return thread ids with currently active leases."""
+    out: Set[str] = set()
+    now_iso = _utcnow_iso()
+    for batch in _thread_id_batches(thread_ids):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        try:
+            cur = db.conn.execute(
+                f"SELECT thread_id FROM open_streams WHERE lease_until > ? AND thread_id IN ({placeholders})",
+                (now_iso, *batch),
+            )
+            out.update(str(row[0]) for row in cur.fetchall())
+        except Exception:
+            continue
+    return out
+
+
 class SubtreeScheduler:
     """Async orchestrator: watches a root thread and runs runnable threads within its subtree, up to concurrency limit."""
 
@@ -2974,19 +3019,39 @@ class SubtreeScheduler:
         self._tasks.difference_update(tasks)
 
     def _collect_subtree(self, thread_id: str) -> List[str]:
-        # BFS through children table
+        now_iso = _utcnow_iso()
+        try:
+            cur = self.db.conn.execute(
+                """
+                WITH RECURSIVE subtree(thread_id, depth, path) AS (
+                    SELECT ? AS thread_id, 0 AS depth, ? AS path
+                    UNION ALL
+                    SELECT c.child_id, subtree.depth + 1, subtree.path || c.child_id || '/'
+                      FROM children c
+                      JOIN subtree ON c.parent_id = subtree.thread_id
+                     WHERE (c.waiting_until IS NULL OR c.waiting_until <= ?)
+                       AND instr(subtree.path, '/' || c.child_id || '/') = 0
+                )
+                SELECT thread_id FROM subtree ORDER BY depth, path
+                """,
+                (thread_id, f"/{thread_id}/", now_iso),
+            )
+            return [str(row[0]) for row in cur.fetchall()]
+        except Exception:
+            pass
+
+        # Fallback BFS through children table.
         out: List[str] = []
-        q = [thread_id]
+        q: deque[str] = deque([thread_id])
         seen = set()
         while q:
-            t = q.pop(0)
+            t = q.popleft()
             if t in seen:
                 continue
             seen.add(t)
             # Respect waiting_until: only include children that are not waiting or waiting_until <= now
             out.append(t)
             cur = self.db.conn.execute("SELECT child_id, waiting_until FROM children WHERE parent_id=?", (t,))
-            now_iso = _utcnow_iso()
             for row in cur.fetchall():
                 wu = row["waiting_until"]
                 if wu is None or wu <= now_iso:
@@ -3051,6 +3116,8 @@ class SubtreeScheduler:
 
         while True:
             all_threads = self._collect_subtree(self.root)
+            max_event_seqs = _max_event_seqs_bulk(self.db, all_threads)
+            active_open_threads = _active_open_threads_bulk(self.db, all_threads)
 
             # Update idle tracking and expire reservations (sticky scheduling)
             if self.cfg.sticky_scheduling:
@@ -3122,7 +3189,7 @@ class SubtreeScheduler:
                 # is_thread_runnable()/discover_runner_actionable logic
                 # on completely idle threads.
                 try:
-                    max_seq = self.db.max_event_seq(tid)
+                    max_seq = max_event_seqs.get(tid, -1)
                 except Exception:
                     max_seq = -1
                 if max_seq == last_checked_seq.get(tid, -1):
@@ -3135,15 +3202,8 @@ class SubtreeScheduler:
                 # instance is already running the thread.
                 # NOTE: We do NOT update watermark here - when lease expires,
                 # we want to re-check the thread.
-                try:
-                    row = self.db.current_open(tid)
-                    if row:
-                        lease_until = row['lease_until']
-                        now_iso = _utcnow_iso()
-                        if lease_until and lease_until > now_iso:
-                            continue  # Another process has the lease
-                except Exception:
-                    pass  # On error, proceed with normal check
+                if tid in active_open_threads:
+                    continue
 
                 ra = discover_runner_actionable_cached(self.db, tid)
                 if ra is not None:

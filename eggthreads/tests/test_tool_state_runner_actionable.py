@@ -40,6 +40,197 @@ def _append_event(db, tid: str, type_: str, payload: Dict[str, Any], *, msg_id: 
     db.append_event(event_id=eid, thread_id=tid, type_=type_, payload=payload, msg_id=msg_id)
 
 
+def _tool_state_signature(tc):
+    return {
+        "thread_id": tc.thread_id,
+        "tool_call_id": tc.tool_call_id,
+        "parent_msg_id": tc.parent_msg_id,
+        "parent_event_seq": tc.parent_event_seq,
+        "parent_role": tc.parent_role,
+        "index": tc.index,
+        "name": tc.name,
+        "arguments": tc.arguments,
+        "approval_decision": tc.approval_decision,
+        "execution_started": tc.execution_started,
+        "finished_reason": tc.finished_reason,
+        "finished_output": tc.finished_output,
+        "output_decision": tc.output_decision,
+        "summary": tc.summary,
+        "published": tc.published,
+        "last_output_approval_payload": tc.last_output_approval_payload,
+        "state": tc.state,
+    }
+
+
+def _ra_signature(ra):
+    if ra is None:
+        return None
+    return {
+        "kind": ra.kind,
+        "thread_id": ra.thread_id,
+        "triggering_event_seq": ra.triggering_event_seq,
+        "msg_id": ra.msg_id,
+        "tool_calls": [
+            _tool_state_signature(tc) for tc in (ra.tool_calls or [])
+        ] if ra.tool_calls is not None else None,
+    }
+
+
+def _assert_reducer_matches_public_state(db, tid: str) -> None:
+    from eggthreads.tool_state import (
+        _iter_messages_after,
+        _last_stream_close_seq,
+        _reduce_thread_events,
+        build_tool_call_states,
+        discover_runner_actionable,
+    )
+
+    reduced = _reduce_thread_events(db, tid)
+
+    expected_states = {
+        key: _tool_state_signature(value)
+        for key, value in build_tool_call_states(db, tid).items()
+    }
+    actual_states = {
+        key: _tool_state_signature(value)
+        for key, value in reduced.tool_call_states.items()
+    }
+    assert actual_states == expected_states
+
+    expected_boundary = _last_stream_close_seq(db, tid)
+    assert reduced.last_llm_boundary_seq == expected_boundary
+
+    expected_message_seqs = [
+        int(ev["event_seq"]) for ev in _iter_messages_after(db, tid, expected_boundary)
+    ]
+    actual_message_seqs = [int(ev["event_seq"]) for ev in reduced.messages_after_boundary]
+    assert actual_message_seqs == expected_message_seqs
+
+    assert _ra_signature(reduced.next_runner_actionable) == _ra_signature(
+        discover_runner_actionable(db, tid)
+    )
+
+
+def test_thread_event_reducer_matches_simple_user_ra1(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-ra1"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+
+    _assert_reducer_matches_public_state(db, tid)
+
+
+def test_thread_event_reducer_matches_assistant_waiting_for_tool_approval(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-wait-tool"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event(
+        "msg-asst",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "tc_wait", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-asst",
+    )
+
+    _assert_reducer_matches_public_state(db, tid)
+
+
+def test_thread_event_reducer_matches_approved_assistant_tool_ra2(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-ra2"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event(
+        "msg-asst",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "tc_asst", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-asst",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_asst", "decision": "granted"})
+
+    _assert_reducer_matches_public_state(db, tid)
+
+
+def test_thread_event_reducer_matches_user_tool_ra3(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-ra3"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event(
+        "msg-user",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "content": "cmd",
+            "tool_calls": [
+                {"id": "tc_user", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_user", "decision": "granted"})
+
+    _assert_reducer_matches_public_state(db, tid)
+
+
+def test_thread_event_reducer_matches_continue_skipped_messages(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-continue"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    db.append_event(
+        "msg-asst",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "content": "partial",
+            "tool_calls": [
+                {"id": "tc_skip", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-asst",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_skip", "decision": "granted"})
+    db.append_event("skip-asst", tid, "msg.edit", {"skipped_on_continue": True}, msg_id="m-asst")
+    db.append_event(
+        "continue",
+        tid,
+        "control.interrupt",
+        {"reason": "continue", "purpose": "continue", "continue_from_msg_id": "m-user"},
+    )
+
+    _assert_reducer_matches_public_state(db, tid)
+
+
+def test_thread_event_reducer_matches_llm_interrupt_boundary(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-llm-interrupt"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    db.append_event("interrupt", tid, "control.interrupt", {"reason": "cancel", "purpose": "llm"})
+
+    _assert_reducer_matches_public_state(db, tid)
+
+
 def test_build_tool_call_states_user_all_in_turn(tmp_path):
     """User-originated tool_calls with all-in-turn approval reach TC2.1.
 
@@ -361,3 +552,49 @@ def test_tool_call_lifecycle_events_before_parent_message_are_ignored(tmp_path):
     assert tc.output_decision is None
     assert tc.published is False
     assert tc.state == "TC2.1"
+
+
+def test_discover_runner_actionable_cached_reuses_single_reducer_query(tmp_path):
+    from eggthreads.tool_state import discover_runner_actionable_cached
+
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-query-count"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        assert discover_runner_actionable_cached(db, tid).kind == "RA1_llm"
+        first_count = len([stmt for stmt in statements if " FROM events" in stmt])
+        assert first_count == 2
+
+        statements.clear()
+        assert discover_runner_actionable_cached(db, tid).kind == "RA1_llm"
+        second_count = len([stmt for stmt in statements if " FROM events" in stmt])
+        assert second_count == 1
+    finally:
+        db.conn.set_trace_callback(None)
+
+
+def test_thread_state_reuses_reducer_after_actionable_cache(tmp_path):
+    from eggthreads.tool_state import discover_runner_actionable_cached, thread_state
+
+    db = _make_db(tmp_path)
+    tid = "thread-state-query-count"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+
+    assert discover_runner_actionable_cached(db, tid).kind == "RA1_llm"
+
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        assert thread_state(db, tid) == "running"
+    finally:
+        db.conn.set_trace_callback(None)
+
+    event_queries = [stmt for stmt in statements if " FROM events" in stmt]
+    assert event_queries == [
+        f"SELECT MAX(event_seq) FROM events WHERE thread_id='{tid}'"
+    ]

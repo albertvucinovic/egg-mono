@@ -1659,3 +1659,38 @@ def test_runner_persists_partial_tool_call_on_provider_transport_error(tmp_path)
     assert assistant["tool_calls"][0]["id"] == "call_partial"
     assert assistant["tool_calls"][0]["function"]["arguments"] == '{"script":"echo hi"}'
     assert not any("LLM/runner error" in str(p.get("content", "")) for p in payloads)
+
+
+def test_scheduler_bulk_max_event_seqs(tmp_path):
+    from eggthreads.runner import _max_event_seqs_bulk
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
+    empty = ts.create_child_thread(db, root, name="empty")
+
+    _make_thread_runnable(db, root)
+    _make_thread_runnable(db, child)
+    _append_event(db, child, "msg.create", {"role": "assistant", "content": "done"}, msg_id=_unique_id())
+
+    seqs = _max_event_seqs_bulk(db, [root, child, empty])
+
+    assert seqs[root] == db.max_event_seq(root)
+    assert seqs[child] == db.max_event_seq(child)
+    assert seqs[empty] == -1
+
+
+def test_scheduler_bulk_active_open_threads_excludes_expired_leases(tmp_path):
+    from eggthreads.runner import _active_open_threads_bulk
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    active = ts.create_child_thread(db, root, name="active")
+    expired = ts.create_child_thread(db, root, name="expired")
+
+    active_until = (_utcnow() + timedelta(minutes=1)).strftime(ISO_FORMAT)
+    expired_until = (_utcnow() - timedelta(minutes=1)).strftime(ISO_FORMAT)
+    assert db.try_open_stream(active, _unique_id(), active_until, owner="test")
+    assert db.try_open_stream(expired, _unique_id(), expired_until, owner="test")
+
+    assert _active_open_threads_bulk(db, [root, active, expired]) == {active}
