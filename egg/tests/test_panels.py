@@ -158,6 +158,25 @@ class TestUpdatePanels:
         assert egg_app.current_stream_tps()
         assert calls["count"] == 1
 
+    def test_chat_header_tps_uses_snapshot_seq_cache(self, egg_app, monkeypatch):
+        """Idle header TPS reads should not reparse snapshot messages."""
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "done", extra={"tps": 8.0})
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        egg_app._live_state = {"active_invoke": None, "stream_kind": None}
+        calls = {"count": 0}
+
+        def fake_snapshot_messages(db, thread_id):
+            calls["count"] += 1
+            return [{"role": "assistant", "content": "done", "tps": 8.0}]
+
+        monkeypatch.setattr("egg.panels.snapshot_messages", fake_snapshot_messages)
+
+        assert egg_app.current_chat_header_tps() == "8.0 tps"
+        assert egg_app.current_chat_header_tps() == "8.0 tps"
+        assert calls["count"] == 1
+
 class TestRenderGroup:
     """Tests for render_group()."""
 

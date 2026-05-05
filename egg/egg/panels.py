@@ -413,6 +413,16 @@ class PanelsMixin:
             return live_tps
 
         try:
+            th = self.db.get_thread(self.current_thread)
+            snapshot_seq = int(getattr(th, 'snapshot_last_event_seq', -1) or -1) if th else -1
+        except Exception:
+            snapshot_seq = -1
+        cache = getattr(self, '_chat_header_tps_cache', None)
+        cache_key = (self.current_thread, snapshot_seq)
+        if isinstance(cache, dict) and cache.get('key') == cache_key:
+            return str(cache.get('value') or "")
+
+        try:
             msgs = snapshot_messages(self.db, self.current_thread)
         except Exception:
             msgs = []
@@ -428,7 +438,10 @@ class PanelsMixin:
                 continue
             if fv <= 0:
                 continue
-            return self._fmt_header_metric(fv, 'tps')
+            value = self._fmt_header_metric(fv, 'tps')
+            self._chat_header_tps_cache = {'key': cache_key, 'value': value}
+            return value
+        self._chat_header_tps_cache = {'key': cache_key, 'value': ""}
         return ""
 
     def render_group(self) -> Group:
