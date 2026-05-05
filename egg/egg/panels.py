@@ -89,6 +89,64 @@ class PanelsMixin:
         else:
             self.console.print(*args, **kwargs)
 
+    def _system_status_key(self) -> Any:
+        """Cheap key for System panel sandbox/autoapproval title state."""
+        cur = self.db.conn.execute(
+            """
+            WITH RECURSIVE ancestors(thread_id) AS (
+                SELECT ?
+                UNION ALL
+                SELECT c.parent_id
+                FROM children c
+                JOIN ancestors a ON c.child_id = a.thread_id
+            )
+            SELECT COUNT(*), COALESCE(MAX(event_seq), 0)
+            FROM events
+            WHERE type IN (?, ?) AND thread_id IN (SELECT thread_id FROM ancestors)
+            """,
+            (self.current_thread, 'sandbox.config', 'tool_call.approval'),
+        )
+        cfg_event_count, cfg_event_max_seq = cur.fetchone()
+        return (
+            self.current_thread,
+            int(cfg_event_count or 0),
+            int(cfg_event_max_seq or 0),
+        )
+
+    def _compute_children_panel_status_key(self) -> Any:
+        """Cheap key for Children panel tree/status state."""
+        cur = self.db.conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM children"
+        )
+        child_count, child_max_rowid = cur.fetchone()
+        cur = self.db.conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(event_seq), 0) FROM events WHERE type IN (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                'msg.create',
+                'msg.edit',
+                'msg.delete',
+                'model.switch',
+                'stream.open',
+                'stream.close',
+                'tool_call.approval',
+                'tool_call.output_approval',
+            ),
+        )
+        relevant_event_count, relevant_event_max_seq = cur.fetchone()
+        cur = self.db.conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(lease_until), '') FROM open_streams"
+        )
+        open_count, open_max_lease = cur.fetchone()
+        return (
+            self.current_thread,
+            int(child_count or 0),
+            int(child_max_rowid or 0),
+            int(relevant_event_count or 0),
+            int(relevant_event_max_seq or 0),
+            int(open_count or 0),
+            str(open_max_lease or ''),
+        )
+
     def _get_static_box(self) -> Any:
         """Get the box style to use for static console panels.
 
@@ -179,39 +237,56 @@ class PanelsMixin:
             # Leave existing title unchanged on any error.
             pass
 
-        # Update System panel title to reflect sandbox status so the
-        # user always has a prominent, persistent indicator.
+        system_status_key = None
         try:
-            from eggthreads import get_thread_sandbox_status
+            system_status_key = self._system_status_key()
+        except Exception:
+            system_status_key = None
 
-            sb = get_thread_sandbox_status(self.db, self.current_thread)
-        except Exception:
-            sb = {}
-        try:
-            effective = bool(sb.get('effective'))
-        except Exception:
-            effective = False
-        if effective:
-            provider = sb.get('provider', 'docker')
-            # Map provider to display name
-            if provider == 'docker':
-                display = 'Docker'
-            elif provider == 'srt':
-                display = 'srt'
-            elif provider == 'bwrap':
-                display = 'Bwrap'
-            else:
-                display = provider
-            sandbox_part = f"[green]Sandboxing[{display}][/green]"
+        cache = getattr(self, '_system_status_cache', None)
+        if system_status_key is not None and isinstance(cache, dict) and cache.get('key') == system_status_key:
+            sandbox_part = str(cache.get('sandbox_part') or "[red]Sandboxing[OFF][/red]")
+            auto_part = str(cache.get('auto_part') or "[green]Autoapproval[Off][/green]")
         else:
-            sandbox_part = "[red]Sandboxing[OFF][/red]"
+            # Update System panel title to reflect sandbox status so the
+            # user always has a prominent, persistent indicator.
+            try:
+                from eggthreads import get_thread_sandbox_status
 
-        try:
-            from eggthreads import get_thread_auto_approval_status
-            auto_approval = bool(get_thread_auto_approval_status(self.db, self.current_thread))
-        except Exception:
-            auto_approval = False
-        auto_part = "[red]Autoapproval[On][/red]" if auto_approval else "[green]Autoapproval[Off][/green]"
+                sb = get_thread_sandbox_status(self.db, self.current_thread)
+            except Exception:
+                sb = {}
+            try:
+                effective = bool(sb.get('effective'))
+            except Exception:
+                effective = False
+            if effective:
+                provider = sb.get('provider', 'docker')
+                # Map provider to display name
+                if provider == 'docker':
+                    display = 'Docker'
+                elif provider == 'srt':
+                    display = 'srt'
+                elif provider == 'bwrap':
+                    display = 'Bwrap'
+                else:
+                    display = provider
+                sandbox_part = f"[green]Sandboxing[{display}][/green]"
+            else:
+                sandbox_part = "[red]Sandboxing[OFF][/red]"
+
+            try:
+                from eggthreads import get_thread_auto_approval_status
+                auto_approval = bool(get_thread_auto_approval_status(self.db, self.current_thread))
+            except Exception:
+                auto_approval = False
+            auto_part = "[red]Autoapproval[On][/red]" if auto_approval else "[green]Autoapproval[Off][/green]"
+            if system_status_key is not None:
+                self._system_status_cache = {
+                    'key': system_status_key,
+                    'sandbox_part': sandbox_part,
+                    'auto_part': auto_part,
+                }
         # NO_API_CALLS read-only mode: shown in the header only when active
         # (following the Streaming-indicator convention — no clutter when off).
         try:
@@ -232,16 +307,19 @@ class PanelsMixin:
         # (sandbox, auto-approval) lives in the title border, body is empty.
         self.system_output.set_content("")
 
-        # Children panel: refresh at most once every 2 seconds
+        # Children panel: refresh only when the thread topology/status key
+        # changes. This keeps idle ticks from rescanning all threads while
+        # still updating immediately for child creation and stream/status
+        # changes that affect the rendered tree.
         try:
-            now = time.time()
-            if now - self._last_children_refresh >= 2.0:
+            status_key = self._compute_children_panel_status_key()
+            if getattr(self, '_children_panel_cached_status_key', None) != status_key:
                 try:
                     subtree_text = self.format_tree(self.current_thread)
                 except Exception:
                     subtree_text = "(error rendering children tree)"
                 self.children_output.set_content(subtree_text)
-                self._last_children_refresh = now
+                self._children_panel_cached_status_key = status_key
         except Exception:
             pass
 

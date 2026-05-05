@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 4.2 web route cost quick wins completed: `/messages` uses incremental snapshot refresh, and frontend thread settings polling was replaced with SSE invalidations.
-- Last updated: after Phase 4.2 `/messages` and thread settings polling changes.
-- Recommended next action: return to Phase 4.1 shared SSE fanout design with a safer plan/tests, or inspect remaining web route costs if easier to measure.
+- Status: Phase 4.3 TUI dirty-panel quick wins completed: children tree formatting and system sandbox/autoapproval status helpers now run only when their cheap DB keys change, not on idle ticks.
+- Last updated: after Phase 4.3 children/system panel cache-key changes.
+- Recommended next action: continue Phase 4.3 by inspecting remaining TUI per-tick work, or take targeted web/TUI CPU measurements before deeper rendering changes.
 
 ## Progress log
 
@@ -47,6 +47,10 @@ A meaningful step is any completed unit such as:
 - Phase 3.2 live LLM TPS cache completed: `live_llm_tps_for_invoke()` now caches `(start_ts, token_count)` by `(invoke_id, max_chunk_seq)` so repeated UI/web reads for unchanged streams do not rescan all `stream.delta` payloads. Added trace-based regression test showing the second unchanged call avoids the delta payload query. Tests run: `python -m pytest eggthreads/tests/test_token_count_public.py eggthreads/tests/test_snapshot_builder.py egg/tests/test_formatting.py egg/tests/test_panels.py egg/tests/test_streaming_tui.py eggw/tests/test_api.py::TestTokenStats -q` (76 passed).
 - Phase 4.1 attempted shared SSE fanout implementation, but the TestClient SSE regression hung even after fixing an initial subscriber hashability bug; reverted the code change and recorded this as a failed attempt/risk instead of keeping a brittle rewrite. No functional code from the failed fanout attempt remains.
 - Phase 4.2 web route cost quick wins completed: `/api/threads/{thread_id}/messages` now calls `create_snapshot()` on a fresh DB connection, reusing the Phase 3 append-only incremental snapshot path instead of always running `SnapshotBuilder` over the full event log; added a regression test that fails if the append-only second `/messages` call invokes a full rebuild. Removed 1-second `threadSettings` polling from the thread page and system panel, and added SSE invalidation for `tool_call.approval` and `model.switch`. Tests run: `python -m pytest eggw/tests/test_api.py::TestMessageOperations eggw/tests/test_api.py::TestToolCalls eggw/tests/test_api.py::TestTokenStats egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (29 passed).
+- Phase 4.2 duplicate stats polling quick win completed: the thread page remains the single owner of live `/stats` polling during LLM streaming, while `SystemPanel` now shares the same React Query cache and only refetches manually/SSE. This avoids two independent expensive stats requests per second when the system panel is visible. Tests run: `cd eggw/frontend && npx tsc --noEmit` (passed).
+- Phase 4.1 retry design narrowed and deferred: a shared SSE fanout can be tested at the helper level with multiple subscribers sharing one poll, but the existing TestClient SSE route regression still hangs (`python -m pytest eggw/tests/test_api.py::TestEventStreaming::test_sse_replays_active_tool_stream_with_preview_limit_indicator -q`, timed out after 60s). Do not reattempt the route swap until there is a non-hanging SSE harness or real-server test. No code kept from this retry.
+- Phase 4.3 children panel cache-key quick win completed: replaced the time-based 2s children tree refresh with a cheap key over current thread, child table count/max rowid, relevant event count/max seq, and open-stream count/max lease. This avoids rescanning/formatting all threads during idle ticks while still refreshing on topology, message/status, approval, and stream changes.
+- Phase 4.3 system status cache-key quick win completed: cached the System panel sandbox/autoapproval title parts behind a cheap key over current thread plus `sandbox.config`/`tool_call.approval` event count/max seq, avoiding per-tick helper scans while preserving updates on relevant config events. Tests run: `python -m pytest egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (66 passed).
 - Added manager/worker recovery tooling goal: a manager-side `continue_subthread` command/tool should be able to repair or continue a child/descendant subthread after LLM/runner failures (for example a 503 that ends with no assistant content), analogous to the user `/continue` command. No code changed in this step.
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
@@ -286,17 +290,19 @@ A meaningful step is any completed unit such as:
   - `/messages` now uses `create_snapshot()` on a fresh DB, which applies the Phase 3 incremental append-only path and falls back to full rebuild when needed.
 - [x] Replace 1-second `threadSettings` polling with SSE invalidation on relevant events.
   - Removed `refetchInterval: 1000`; SSE invalidates settings on `tool_call.approval` and `model.switch`, while direct mutations still refetch/invalidate.
-- [ ] Ensure multiple components do not independently trigger the same expensive stats route.
+- [x] Ensure multiple components do not independently trigger the same expensive stats route.
+  - The thread page is now the only live-polling owner for `queryKey: ["stats", threadId]`; `SystemPanel` shares the cached query and relies on SSE/manual invalidation.
 - [x] Update this plan.
 
 ### 4.3 TUI dirty/event-driven panels
 
-- [ ] Identify which panel values need which events.
+- [x] Identify which panel values need which events.
   - token stats: `stream.delta`, `stream.close`, `msg.create`, snapshot changes.
   - sandbox status: `sandbox.config`.
   - tool approvals: `tool_call.*`, relevant `msg.create`.
   - tree: child/thread creation/deletion events or commands.
 - [ ] Replace per-tick DB recomputation with cached values invalidated by watcher/commands.
+  - First quick wins: children tree now uses a cheap DB key and only reruns `format_tree()` when topology/status inputs change; System panel sandbox/autoapproval title parts are cached behind relevant config-event keys.
 - [ ] Keep immediate input echo and stream rendering.
 - [ ] Run TUI tests and manually check interactive feel if possible.
 - [ ] Update this plan.
@@ -371,7 +377,7 @@ Record results here as work proceeds.
 - After Phase 1 results: quick wins completed and focused tests pass; CPU not formally measured yet.
 - After Phase 2 results: Phase 2.2 reducer migration has trace-based SQL/query-count tests for the cached RA/thread-state path and `build_tool_call_states()` now reuses the reducer; Phase 2.3 batched scheduler max-event/open-lease/scheduling-setting queries and recursive subtree collection. No real CPU benchmark yet.
 - After Phase 3 results: Phase 3.1 append-only snapshot path avoids full `SnapshotBuilder` rebuild for pure `msg.create` tails; Phase 3.2 token-stat extension avoids re-tokenizing old snapshot messages in that path and live LLM TPS repeats avoid delta payload rescans while unchanged. No real CPU benchmark yet.
-- After Phase 4 results: `/messages` no longer forces full snapshot rebuild for append-only tails; frontend thread settings no longer poll every second. Shared SSE fanout attempted then reverted due TestClient hang; needs safer design. No real CPU benchmark yet.
+- After Phase 4 results: `/messages` no longer forces full snapshot rebuild for append-only tails; frontend thread settings no longer poll every second; visible system panel no longer starts a second live `/stats` polling loop; TUI children tree formatting and System panel sandbox/autoapproval helper scans no longer run on idle ticks. Shared SSE fanout attempted then reverted due TestClient hang; needs safer design. No real CPU benchmark yet.
 
 ## Known risks / open questions
 

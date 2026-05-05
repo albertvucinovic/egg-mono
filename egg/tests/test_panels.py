@@ -37,10 +37,6 @@ class TestUpdatePanels:
 
     def test_updates_children_output(self, egg_app, monkeypatch):
         """Should update children_output with tree view."""
-        import time
-        # Force refresh by setting last refresh to old time
-        egg_app._last_children_refresh = 0
-
         set_content_calls = []
         original_set_content = egg_app.children_output.set_content
         def mock_set_content(text):
@@ -51,6 +47,21 @@ class TestUpdatePanels:
         egg_app.update_panels()
 
         assert len(set_content_calls) >= 1
+
+    def test_children_tree_is_not_reformatted_when_status_key_unchanged(self, egg_app, monkeypatch):
+        """Idle panel ticks should not rescan the full thread tree."""
+        calls = {"count": 0}
+
+        def fake_format_tree(thread_id):
+            calls["count"] += 1
+            return f"tree for {thread_id[-8:]}"
+
+        monkeypatch.setattr(egg_app, "format_tree", fake_format_tree)
+
+        egg_app.update_panels()
+        egg_app.update_panels()
+
+        assert calls["count"] == 1
 
     def test_shows_approval_panel_when_pending(self, egg_app):
         """Should show approval panel when pending prompt exists."""
@@ -109,6 +120,26 @@ class TestUpdatePanels:
         egg_app.update_panels()
 
         assert "Autoapproval[On]" in egg_app.system_output.title
+
+    def test_system_status_helpers_are_cached_while_config_events_unchanged(self, egg_app, monkeypatch):
+        """Idle panel ticks should not re-read sandbox/autoapproval state."""
+        calls = {"sandbox": 0, "auto": 0}
+
+        def fake_sandbox_status(db, tid):
+            calls["sandbox"] += 1
+            return {'effective': False}
+
+        def fake_auto_status(db, tid):
+            calls["auto"] += 1
+            return False
+
+        monkeypatch.setattr("eggthreads.get_thread_sandbox_status", fake_sandbox_status)
+        monkeypatch.setattr("eggthreads.get_thread_auto_approval_status", fake_auto_status)
+
+        egg_app.update_panels()
+        egg_app.update_panels()
+
+        assert calls == {"sandbox": 1, "auto": 1}
 
 
 
