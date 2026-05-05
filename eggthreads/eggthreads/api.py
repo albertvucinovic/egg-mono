@@ -1063,6 +1063,53 @@ def continue_thread(
         diagnosis=diagnosis,
     )
 
+def continue_child_thread(
+    db: ThreadsDB,
+    manager_thread_id: str,
+    child_thread_id: str,
+    msg_id: Optional[str] = None,
+) -> ContinueResult:
+    """Continue/repair a descendant thread owned by a manager thread."""
+
+    manager = (manager_thread_id or "").strip()
+    child = (child_thread_id or "").strip()
+    if not manager:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message="manager_thread_id is required",
+        )
+    if not child:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message="child_thread_id is required",
+        )
+    if db.get_thread(manager) is None:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message=f"manager thread not found: {manager}",
+        )
+    if db.get_thread(child) is None:
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message=f"child thread not found: {child}",
+        )
+    if not is_descendant_thread(db, manager, child):
+        return ContinueResult(
+            success=False,
+            continue_from_msg_id=None,
+            skipped_msg_ids=[],
+            message="target thread must be a child or descendant of the calling thread",
+        )
+    return continue_thread(db, child, msg_id=msg_id)
+
 
 async def continue_thread_async(
     db: ThreadsDB,

@@ -30,8 +30,8 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 4.3 TUI dirty-panel quick wins completed: children tree formatting and system sandbox/autoapproval status helpers now run only when their cheap DB keys change, not on idle ticks.
-- Last updated: after Phase 4.3 children/system panel cache-key changes.
+- Status: Manager/worker recovery tooling goal completed: `continue_subthread` is available for manager-owned descendants.
+- Last updated: after manager-side `continue_subthread` API/tool implementation.
 - Recommended next action: continue Phase 4.3 by inspecting remaining TUI per-tick work, or take targeted web/TUI CPU measurements before deeper rendering changes.
 
 ## Progress log
@@ -52,6 +52,7 @@ A meaningful step is any completed unit such as:
 - Phase 4.3 children panel cache-key quick win completed: replaced the time-based 2s children tree refresh with a cheap key over current thread, child table count/max rowid, relevant event count/max seq, and open-stream count/max lease. This avoids rescanning/formatting all threads during idle ticks while still refreshing on topology, message/status, approval, and stream changes.
 - Phase 4.3 system status cache-key quick win completed: cached the System panel sandbox/autoapproval title parts behind a cheap key over current thread plus `sandbox.config`/`tool_call.approval` event count/max seq, avoiding per-tick helper scans while preserving updates on relevant config events. Tests run: `python -m pytest egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (66 passed).
 - Added manager/worker recovery tooling goal: a manager-side `continue_subthread` command/tool should be able to repair or continue a child/descendant subthread after LLM/runner failures (for example a 503 that ends with no assistant content), analogous to the user `/continue` command. No code changed in this step.
+- Manager/worker recovery tooling goal completed: added `continue_child_thread()` API plus model-visible `continue_subthread` tool. It validates that the target is a descendant of the calling manager, delegates to existing `continue_thread()` semantics, and returns structured JSON including diagnosis when available. Tests run: `python -m pytest eggthreads/tests/test_send_message_to_child.py -q` (8 passed).
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
 - Phase 1.1 completed: added a shared 50ms sleep to Docker Python REPL eval polling and removed duplicate Bash Docker REPL sleeps in `eggthreads/eggthreads/session.py`. Tests run: `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed) and `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected). Full `test_session_config.py` hit an environment issue because `/workspace/.egg` is read-only in this runtime, not because of this change.
@@ -70,7 +71,8 @@ A meaningful step is any completed unit such as:
 
 ## Manager/worker recovery tooling goal
 
-- [ ] Add a manager-side `continue_subthread` tool/command for repairing or continuing a child/descendant subthread after LLM/runner errors that leave no assistant content, analogous to the user `/continue` command. It should target only descendants the manager owns, preserve event-log semantics, and avoid spawning duplicate LLM/tool work.
+- [x] Add a manager-side `continue_subthread` tool/command for repairing or continuing a child/descendant subthread after LLM/runner errors that leave no assistant content, analogous to the user `/continue` command. It should target only descendants the manager owns, preserve event-log semantics, and avoid spawning duplicate LLM/tool work.
+  - Implemented as `continue_child_thread()` plus the `continue_subthread` tool, reusing existing `continue_thread()` event semantics and active-lease checks.
 
 ## Phase 0 — Baseline and guardrails
 

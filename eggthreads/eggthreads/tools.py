@@ -968,6 +968,48 @@ def create_default_tools() -> ToolRegistry:
         local_only=False,
     )
 
+    def _continue_subthread(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .api import continue_child_thread
+
+        manager_id = (args.get('_thread_id') or args.get('manager_thread_id') or '').strip()
+        child_id = (args.get('child_thread_id') or args.get('thread_id') or '').strip()
+        msg_id = _clean_optional_text(args.get('msg_id'))
+        result = continue_child_thread(ThreadsDB(), manager_id, child_id, msg_id=msg_id)
+        payload = {
+            "success": result.success,
+            "thread_id": child_id,
+            "continue_from_msg_id": result.continue_from_msg_id,
+            "skipped_msg_ids": result.skipped_msg_ids,
+            "message": result.message,
+        }
+        if result.diagnosis is not None:
+            payload["diagnosis"] = {
+                "is_healthy": result.diagnosis.is_healthy,
+                "issues": result.diagnosis.issues,
+                "suggested_continue_point": result.diagnosis.suggested_continue_point,
+                "details": result.diagnosis.details,
+            }
+        return _json.dumps(payload, indent=2, sort_keys=True)
+
+    reg.register(
+        name='continue_subthread',
+        description=(
+            'Repair or continue a child/descendant subthread after LLM/runner failures, analogous to the user /continue command. '
+            'The target must be a descendant of the calling thread and must not have an active lease.'
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "child_thread_id": {"type": "string", "description": "Target child or descendant thread id."},
+                "msg_id": {"type": "string", "description": "Optional message id to continue from; omit for auto-diagnosis."},
+            },
+            "required": ["child_thread_id"],
+        },
+        impl=_continue_subthread,
+        local_only=False,
+    )
+
     def _get_child_status(args: Dict[str, Any]):
         from .db import ThreadsDB
         from .api import get_child_thread_statuses

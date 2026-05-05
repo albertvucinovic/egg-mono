@@ -73,3 +73,59 @@ def test_send_message_to_child_registered_and_exposed():
     tools = create_default_tools()
     names = {spec["function"]["name"] for spec in tools.tools_spec()}
     assert "send_message_to_child" in names
+
+
+def test_continue_child_thread_api_continues_descendant(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "initial")
+    assistant_msg = ts.append_message(db, child, "assistant", "bad partial")
+    ts.append_message(db, child, "system", "LLM/runner error: provider exploded")
+    ts.create_snapshot(db, child)
+
+    result = ts.continue_child_thread(db, parent, child, msg_id=assistant_msg)
+
+    assert result.success is True
+    assert result.continue_from_msg_id == assistant_msg
+    messages = json.loads(db.get_thread(child).snapshot_json)["messages"]
+    assert [m["content"] for m in messages] == ["initial", "bad partial"]
+
+
+def test_continue_child_thread_api_rejects_non_descendant(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    other = ts.create_root_thread(db, name="other")
+
+    result = ts.continue_child_thread(db, parent, other)
+
+    assert result.success is False
+    assert "descendant" in result.message
+
+
+def test_continue_subthread_tool_uses_current_thread_context(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "initial")
+    assistant_msg = ts.append_message(db, child, "assistant", "bad partial")
+    ts.append_message(db, child, "system", "LLM/runner error: provider exploded")
+    ts.create_snapshot(db, child)
+
+    out = create_default_tools().execute(
+        "continue_subthread",
+        {"child_thread_id": child, "msg_id": assistant_msg},
+        thread_id=parent,
+    )
+    payload = json.loads(out)
+
+    assert payload["success"] is True
+    assert payload["continue_from_msg_id"] == assistant_msg
+
+
+def test_continue_subthread_registered_and_exposed():
+    tools = create_default_tools()
+    names = {spec["function"]["name"] for spec in tools.tools_spec()}
+    assert "continue_subthread" in names
