@@ -310,7 +310,15 @@ class FormattingMixin:
         try:
             th = self.db.get_thread(self.current_thread)
             snapshot_seq = int(getattr(th, 'snapshot_last_event_seq', -1) or -1) if th else -1
-            max_event_seq = int(self.db.max_event_seq(self.current_thread))
+            if active_invoke:
+                max_event_seq = int(self.db.max_event_seq(self.current_thread))
+            else:
+                # When idle, ``total_token_stats()`` is driven by the cached
+                # snapshot plus rare post-snapshot message/control events. Use
+                # the snapshot sequence as the stable key so unrelated events
+                # (for example model/config/tool approval changes) do not
+                # force token-stat rescans every tick.
+                max_event_seq = snapshot_seq
         except Exception:
             snapshot_seq = -1
             max_event_seq = -1
