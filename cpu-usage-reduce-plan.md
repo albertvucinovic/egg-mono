@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 4.3 TUI dirty-panel quick wins continued: idle token stats now keep a stable snapshot-based cache key for unrelated config events.
-- Last updated: after Phase 4.3 idle token stats cache-key refinement.
-- Recommended next action: continue Phase 4.3 by inspecting remaining TUI per-tick work, or take targeted web/TUI CPU measurements before deeper rendering changes.
+- Status: Phase 4.4 reality check completed: differential terminal rendering, panel render caches, stream-as-transient-buffer, stream row cache, and stream-delta coalescing already exist; remaining 4.4 work is true incremental stream wrapping and avoiding full scrollback list copies during paint.
+- Last updated: after Phase 4.4 code-state inspection.
+- Recommended next action: measure a long active stream before changing rendering again; if it is still hot, implement true incremental stream row wrapping in `FullScreenDiffRenderer` as the next narrow 4.4 step.
 
 ## Progress log
 
@@ -55,6 +55,7 @@ A meaningful step is any completed unit such as:
 - Manager/worker recovery tooling goal completed: added `continue_child_thread()` API plus model-visible `continue_subthread` tool. It validates that the target is a descendant of the calling manager, delegates to existing `continue_thread()` semantics, and returns structured JSON including diagnosis when available. Tests run: `python -m pytest eggthreads/tests/test_send_message_to_child.py -q` (8 passed).
 - Phase 4.3 chat header TPS cache quick win completed: `current_chat_header_tps()` now caches completed-message TPS by `(thread_id, snapshot_last_event_seq)` so idle header redraws do not repeatedly parse snapshot messages. Live stream TPS still uses the existing short live cache. Tests run: `python -m pytest egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (67 passed).
 - Phase 4.3 idle token stats cache-key refinement completed: when no stream is active, `current_token_stats()` keys its short cache by `(thread_id, snapshot_last_event_seq, snapshot_last_event_seq, active_invoke)` instead of current max event seq, so unrelated non-snapshot events such as model/config changes do not force repeated token-stat rescans while idle. Streaming still keys on current max event seq for live responsiveness. Tests run: `python -m pytest egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (68 passed).
+- Phase 4.4 code-state inspection completed: `eggdisplay/eggdisplay/renderers.py` already has `InlineDiffRenderer` line diffs and `FullScreenDiffRenderer` alt-screen row diffs against `_prev_viewport`; full-screen mode already models permanent `_scrollback`, transient `_stream_buffer`, live rows, in-app scroll, stream row caching by `(width, stream_version)`, and terminal-control sanitization. `egg/egg/streaming.py` already coalesces stream renderer appends to 50ms / 64k-char flushes. `OutputPanel` / `InputPanel` already cache renderables, and the app loop only calls `renderer.update()` when panels/input are dirty. Remaining 4.4 gaps: every changed stream flush still reparses the whole accumulated `_stream_buffer`, and `_paint()` still copies `list(self._scrollback) + stream_rows` before slicing the visible viewport. Tests run: `python -m pytest eggdisplay/tests/test_renderers_terminal_safety.py egg/tests/test_streaming_tui.py::test_stream_appends_are_coalesced_for_renderer -q` (10 passed).
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
 - Phase 1.1 completed: added a shared 50ms sleep to Docker Python REPL eval polling and removed duplicate Bash Docker REPL sleeps in `eggthreads/eggthreads/session.py`. Tests run: `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed) and `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected). Full `test_session_config.py` hit an environment issue because `/workspace/.egg` is read-only in this runtime, not because of this change.
@@ -313,14 +314,20 @@ A meaningful step is any completed unit such as:
 
 ### 4.4 Incremental terminal rendering
 
-- [ ] Inspect `eggdisplay/eggdisplay/renderers.py` full-screen stream buffer and paint logic.
+- [x] Inspect `eggdisplay/eggdisplay/renderers.py` full-screen stream buffer and paint logic.
+  - Existing state: `InlineDiffRenderer` does live-region line diffs; `FullScreenDiffRenderer` owns the alt-screen viewport and row-diffs against `_prev_viewport`; full-screen mode separates permanent `_scrollback`, transient `_stream_buffer`, and `_live_lines`; stream rows are cached by `(width, stream_version)` so scrolling without new stream text does not reparse the stream buffer; terminal output is synchronized and sanitized.
+  - App-level state: `OutputPanel` / `InputPanel` cache rendered Rich panels, the app loop only calls `renderer.update()` when panels/input are dirty, and stream appends are coalesced before reaching the renderer.
 - [ ] Avoid reparsing the entire accumulated stream buffer on every flush.
+  - Current gap: when new stream text is flushed, `_stream_version` changes and `_stream_rows()` rebuilds rows from the full `_stream_buffer` via `_stream_rows_from_ansi()`.
   - Maintain incremental wrapped rows with current style/column state.
   - Rebuild only on terminal-width changes.
 - [ ] Avoid copying full scrollback on each paint; slice visible rows by index.
-- [ ] Render only dirty panels where feasible.
-- [ ] Run `eggdisplay` tests and TUI streaming tests.
-- [ ] Update this plan.
+  - Current gap: `_paint()` builds `non_live = list(self._scrollback) + stream_rows` before slicing the visible viewport, although terminal output itself is already viewport-sized and row-diffed.
+- [x] Render only dirty panels where feasible.
+  - Already covered by panel render caches plus app-level dirty checks plus renderer row diffs. This is not a semantic panel compositor, but the existing layered caches avoid most unchanged-panel work.
+- [x] Run `eggdisplay` tests and TUI streaming tests for the inspection.
+  - `python -m pytest eggdisplay/tests/test_renderers_terminal_safety.py egg/tests/test_streaming_tui.py::test_stream_appends_are_coalesced_for_renderer -q` (10 passed).
+- [x] Update this plan after the inspection.
 
 ## Phase 5 — Optional Go sidecars only after profiling
 
@@ -381,7 +388,7 @@ Record results here as work proceeds.
 - After Phase 1 results: quick wins completed and focused tests pass; CPU not formally measured yet.
 - After Phase 2 results: Phase 2.2 reducer migration has trace-based SQL/query-count tests for the cached RA/thread-state path and `build_tool_call_states()` now reuses the reducer; Phase 2.3 batched scheduler max-event/open-lease/scheduling-setting queries and recursive subtree collection. No real CPU benchmark yet.
 - After Phase 3 results: Phase 3.1 append-only snapshot path avoids full `SnapshotBuilder` rebuild for pure `msg.create` tails; Phase 3.2 token-stat extension avoids re-tokenizing old snapshot messages in that path and live LLM TPS repeats avoid delta payload rescans while unchanged. No real CPU benchmark yet.
-- After Phase 4 results: `/messages` no longer forces full snapshot rebuild for append-only tails; frontend thread settings no longer poll every second; visible system panel no longer starts a second live `/stats` polling loop; TUI children tree formatting, System panel sandbox/autoapproval helper scans, completed-message header TPS snapshot parsing, and idle token-stat rescans on unrelated config events no longer run on idle ticks. Shared SSE fanout attempted then reverted due TestClient hang; needs safer design. No real CPU benchmark yet.
+- After Phase 4 results: `/messages` no longer forces full snapshot rebuild for append-only tails; frontend thread settings no longer poll every second; visible system panel no longer starts a second live `/stats` polling loop; TUI children tree formatting, System panel sandbox/autoapproval helper scans, completed-message header TPS snapshot parsing, and idle token-stat rescans on unrelated config events no longer run on idle ticks. Shared SSE fanout attempted then reverted due TestClient hang; needs safer design. Phase 4.4 inspection found that differential terminal rendering is already substantially implemented: line/row diffs, panel render caches, stream-as-transient-buffer, stream row cache for unchanged buffers, and 50ms stream append coalescing. Remaining rendering work is narrower: true incremental stream wrapping on append and avoiding full scrollback list copies before viewport slicing. No real CPU benchmark yet.
 
 ## Known risks / open questions
 
@@ -391,5 +398,6 @@ Record results here as work proceeds.
 - Event batching must not hide deltas long enough to hurt perceived streaming latency.
 - Derived caches must never become authoritative; always support full rebuild from event log.
 - Web and TUI can run against the same DB from different processes, so in-process notifications are not enough by themselves.
+- Phase 4.4 should not be treated as unimplemented: broad differential rendering already exists. Further changes should target measured long-stream hot spots only, especially full `_stream_buffer` reparsing on each flushed append.
 - Adding indexes can improve reads but slow stream-heavy writes; measure before and after.
 - Go sidecars may add IPC latency and deployment complexity; only introduce them after Python-side fixes are insufficient.
