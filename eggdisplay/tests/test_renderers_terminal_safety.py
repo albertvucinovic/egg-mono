@@ -189,22 +189,39 @@ def test_fullscreen_scroll_reuses_stream_row_cache() -> None:
     r = TinyTerminalRenderer(width=8, height=4)
     r._live_lines = ["LIVE"]
 
-    calls = []
-    original = r._stream_rows_from_ansi
-
-    def counted(ansi_text: str, width: int):
-        calls.append((len(ansi_text), width))
-        return original(ansi_text, width)
-
-    r._stream_rows_from_ansi = counted  # type: ignore[method-assign]
     r.stream_begin()
     r.stream_append("\n".join(f"reason-{i}" for i in range(50)))
-    calls.clear()
+    before = list(r._stream_rows_state.rows)
     r.stream_append("\nmore")
+    after_append = list(r._stream_rows_state.rows)
 
     r.scroll(1)
     r.scroll(1)
 
-    assert len(calls) == 1
+    assert len(after_append) > len(before)
+    assert r._stream_rows_state.rows == after_append
+
+
+def test_fullscreen_stream_rows_append_incrementally() -> None:
+    r = TinyTerminalRenderer(width=8, height=4)
+
+    def fail_full_reparse(_ansi_text: str, _width: int):  # pragma: no cover - should not be called
+        raise AssertionError("stream append should not reparse the full buffer")
+
+    r._stream_rows_from_ansi = fail_full_reparse  # type: ignore[method-assign]
+    r.stream_begin()
+    r.stream_append("abcd")
+    r.stream_append("efgh")
+
+    assert r._stream_rows(4) == ["abcd", "efgh"]
+
+
+def test_fullscreen_incremental_stream_rows_match_full_rebuild_for_markup() -> None:
+    r = TinyTerminalRenderer(width=4, height=4)
+    r.stream_begin()
+    r.stream_append("[red]abcd[/red]\n")
+    r.stream_append("ef")
+
+    assert r._stream_rows(4) == r._stream_rows_from_ansi(r._stream_buffer, 4)
 
 

@@ -21,6 +21,7 @@ import io
 import re
 import shutil
 import sys
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from rich.console import Console
@@ -44,6 +45,20 @@ except ImportError:  # pragma: no cover - compatibility with older Rich
             else:
                 spans.append((index, index + 1, cell_len(char)))
         return spans, cell_len(text)
+
+
+@dataclass
+class _StreamRowsState:
+    """Incremental parser state for ``FullScreenDiffRenderer`` stream rows."""
+
+    width: int = 0
+    rows: List[str] = field(default_factory=list)
+    current: str = ""
+    col: int = 0
+    active_sgr: str = ""
+    logical_start_rows_len: int = 0
+    logical_has_content: bool = False
+    render_empty_current: bool = False
 
 
 class _DiffRendererBase:
@@ -380,10 +395,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         # is active must not re-parse the whole ANSI stream buffer for every
         # wheel event/PageUp; the cache is invalidated only when the stream
         # buffer changes or the terminal width changes.
-        self._stream_version: int = 0
-        self._stream_rows_cache_width: int = 0
-        self._stream_rows_cache_version: int = -1
-        self._stream_rows_cache: List[str] = []
+        self._stream_rows_state = _StreamRowsState()
 
     # -- context manager ----------------------------------------------------
 
@@ -495,7 +507,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     def stream_begin(self) -> None:
         """Start a new streaming session; clear any prior in-flight buffer."""
         self._stream_buffer = ""
-        self._stream_version += 1
+        self._stream_rows_state = _StreamRowsState(width=self._viewport_w or self._term_width())
         self._paint(self._viewport_w or self._term_width())
 
     def stream_append(self, text) -> None:
@@ -509,11 +521,14 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         """
         if text is None or text == "":
             return
-        ansi = self._rich_print_to_str(text, end="")
+        if isinstance(text, str) and "[" not in text and "\x1b" not in text:
+            ansi = self._sanitize_rendered_ansi(text)
+        else:
+            ansi = self._rich_print_to_str(text, end="")
         if not ansi:
             return
         self._stream_buffer += ansi
-        self._stream_version += 1
+        self._append_stream_rows(ansi, self._viewport_w or self._term_width())
         self._paint(self._viewport_w or self._term_width())
 
     def stream_end(self) -> None:
@@ -524,7 +539,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         live stream is replaced with the finalized rendering.
         """
         self._stream_buffer = ""
-        self._stream_version += 1
+        self._stream_rows_state = _StreamRowsState(width=self._viewport_w or self._term_width())
         self._paint(self._viewport_w or self._term_width())
 
     # -- internal -----------------------------------------------------------
@@ -532,16 +547,105 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     def _stream_rows(self, width: int) -> List[str]:
         """Split the in-flight stream buffer into terminal-width visual rows."""
         width = int(width or 0)
-        if (
-            self._stream_rows_cache_width == width
-            and self._stream_rows_cache_version == self._stream_version
-        ):
-            return self._stream_rows_cache
-        rows = self._stream_rows_from_ansi(self._stream_buffer, width)
-        self._stream_rows_cache_width = width
-        self._stream_rows_cache_version = self._stream_version
-        self._stream_rows_cache = rows
-        return rows
+        state = self._stream_rows_state
+        if state.width != width:
+            state = _StreamRowsState(width=width)
+            self._stream_rows_state = state
+            self._append_stream_rows(self._stream_buffer, width)
+        if not state.render_empty_current and (not state.logical_has_content or state.col <= 0):
+            return list(state.rows)
+        return state.rows + [state.current + ("\x1b[0m" if state.active_sgr else "")]
+
+    def _append_stream_rows(self, ansi_text: str, width: int) -> None:
+        """Append ANSI-rendered stream text to the cached wrapped rows."""
+        if not ansi_text or width <= 0:
+            return
+
+        state = self._stream_rows_state
+        width = int(width)
+        if state.width != width:
+            state = _StreamRowsState(width=width)
+            self._stream_rows_state = state
+
+        def _sgr_is_reset(seq: str) -> bool:
+            if not self._CSI_SGR_RE.fullmatch(seq):
+                return False
+            params = seq[2:-1]
+            if not params:
+                return True
+            try:
+                return any(int(p or "0") == 0 for p in params.split(";"))
+            except Exception:
+                return False
+
+        def _emit_current() -> None:
+            state.rows.append(state.current + ("\x1b[0m" if state.active_sgr else ""))
+            state.current = state.active_sgr
+            state.col = 0
+            state.logical_has_content = False
+            state.render_empty_current = False
+
+        def append_text_by_cells(text: str) -> None:
+            if not text:
+                return
+            try:
+                spans, _total_width = split_graphemes(text)
+            except Exception:
+                spans = [(i, i + 1, 1) for i in range(len(text))]
+            for start, end, cells in spans:
+                cluster = text[start:end]
+                cells = max(0, int(cells or 0))
+                if cells > 0 and state.col > 0 and state.col + cells > width:
+                    _emit_current()
+                state.current += cluster
+                state.col += cells
+                state.logical_has_content = True
+                state.render_empty_current = True
+                if state.col >= width:
+                    _emit_current()
+
+        i = 0
+        n = len(ansi_text)
+        while i < n:
+            ch = ansi_text[i]
+            if ch == "\n":
+                if state.col > 0 or state.logical_has_content or len(state.rows) == state.logical_start_rows_len:
+                    state.rows.append(state.current + ("\x1b[0m" if state.active_sgr else ""))
+                state.current = state.active_sgr
+                state.col = 0
+                state.logical_start_rows_len = len(state.rows)
+                state.logical_has_content = False
+                state.render_empty_current = True
+                i += 1
+                continue
+            if ch == "\x1b":
+                m = self._ANSI_RE.match(ansi_text, i)
+                if m is not None:
+                    seq = m.group()
+                    state.current += seq
+                    state.logical_has_content = True
+                    state.render_empty_current = True
+                    if self._CSI_SGR_RE.fullmatch(seq):
+                        if _sgr_is_reset(seq):
+                            previous_active_sgr = state.active_sgr
+                            state.active_sgr = ""
+                            if state.col <= 0 and state.current == previous_active_sgr + seq:
+                                state.current = ""
+                                state.logical_has_content = False
+                                state.render_empty_current = False
+                        else:
+                            state.active_sgr += seq
+                    i = m.end()
+                    continue
+            next_special = n
+            next_ansi = ansi_text.find("\x1b", i)
+            next_newline = ansi_text.find("\n", i)
+            if next_ansi != -1:
+                next_special = min(next_special, next_ansi)
+            if next_newline != -1:
+                next_special = min(next_special, next_newline)
+            append_text_by_cells(ansi_text[i:next_special])
+            i = next_special
 
     def _max_scroll_offset(self, width: int) -> int:
         """Return the largest valid in-app scroll offset for current content."""
