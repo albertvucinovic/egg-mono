@@ -134,9 +134,17 @@ class PanelsMixin:
         )
         relevant_event_count, relevant_event_max_seq = cur.fetchone()
         cur = self.db.conn.execute(
-            "SELECT COUNT(*), COALESCE(MAX(lease_until), '') FROM open_streams"
+            """
+            SELECT COUNT(*), COALESCE(GROUP_CONCAT(open_key, '|'), '')
+            FROM (
+                SELECT thread_id || ':' || invoke_id || ':' || COALESCE(purpose, '') AS open_key
+                FROM open_streams
+                WHERE lease_until > datetime('now')
+                ORDER BY thread_id, invoke_id
+            )
+            """
         )
-        open_count, open_max_lease = cur.fetchone()
+        open_count, open_key = cur.fetchone()
         return (
             self.current_thread,
             int(child_count or 0),
@@ -144,7 +152,7 @@ class PanelsMixin:
             int(relevant_event_count or 0),
             int(relevant_event_max_seq or 0),
             int(open_count or 0),
-            str(open_max_lease or ''),
+            str(open_key or ''),
         )
 
     def _get_static_box(self) -> Any:
@@ -158,6 +166,14 @@ class PanelsMixin:
 
     def update_panels(self) -> None:
         """Update all UI panels with current state."""
+        try:
+            input_active = (
+                getattr(self.input_panel, '_cached_render', None) is not None
+                and bool(self.input_panel.is_dirty())
+            )
+        except Exception:
+            input_active = False
+
         # In inline mode the Chat Messages panel body mirrors the
         # conversation + streaming (HEAD behaviour). In full-screen
         # mode the same content lives in the DiffRenderer's static
@@ -312,14 +328,22 @@ class PanelsMixin:
         # still updating immediately for child creation and stream/status
         # changes that affect the rendered tree.
         try:
-            status_key = self._compute_children_panel_status_key()
-            if getattr(self, '_children_panel_cached_status_key', None) != status_key:
-                try:
-                    subtree_text = self.format_tree(self.current_thread)
-                except Exception:
-                    subtree_text = "(error rendering children tree)"
-                self.children_output.set_content(subtree_text)
-                self._children_panel_cached_status_key = status_key
+            cached_children_key = getattr(self, '_children_panel_cached_status_key', None)
+            if input_active and cached_children_key is not None:
+                # Prefer input echo over refreshing the tree while the user is
+                # typing. Background tool leases can make this key change every
+                # heartbeat; rebuilding a large tree in that path causes visible
+                # multi-second input lag. The next idle tick refreshes it.
+                pass
+            else:
+                status_key = self._compute_children_panel_status_key()
+                if cached_children_key != status_key:
+                    try:
+                        subtree_text = self.format_tree(self.current_thread)
+                    except Exception:
+                        subtree_text = "(error rendering children tree)"
+                    self.children_output.set_content(subtree_text)
+                    self._children_panel_cached_status_key = status_key
         except Exception:
             pass
 

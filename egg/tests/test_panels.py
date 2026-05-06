@@ -63,6 +63,46 @@ class TestUpdatePanels:
 
         assert calls["count"] == 1
 
+    def test_typing_does_not_reformat_children_tree(self, egg_app, monkeypatch):
+        """Input echo should not wait on expensive children tree refreshes."""
+        calls = {"count": 0}
+
+        def fake_format_tree(thread_id):
+            calls["count"] += 1
+            return f"tree {calls['count']} for {thread_id[-8:]}"
+
+        monkeypatch.setattr(egg_app, "format_tree", fake_format_tree)
+
+        egg_app.update_panels()
+        assert calls["count"] == 1
+        egg_app.input_panel.render()
+
+        egg_app.input_panel.editor.editor.insert_text("x")
+
+        def changed_status_key():
+            return ("changed-by-background-heartbeat", calls["count"])
+
+        monkeypatch.setattr(egg_app, "_compute_children_panel_status_key", changed_status_key)
+        egg_app.update_panels()
+
+        assert calls["count"] == 1
+
+    def test_children_status_key_ignores_lease_heartbeat_extension(self, egg_app):
+        """Children tree cache key should not churn on lease_until heartbeats."""
+        from datetime import datetime, timedelta, timezone
+
+        tid = egg_app.current_thread
+        invoke = "invoke-stable-key"
+        lease_1 = (datetime.now(timezone.utc) + timedelta(seconds=20)).strftime("%Y-%m-%d %H:%M:%S")
+        lease_2 = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+        assert egg_app.db.try_open_stream(tid, invoke, lease_1, owner="test", purpose="tool")
+        key_1 = egg_app._compute_children_panel_status_key()
+        assert egg_app.db.heartbeat(tid, invoke, lease_2)
+        key_2 = egg_app._compute_children_panel_status_key()
+
+        assert key_1 == key_2
+
     def test_shows_approval_panel_when_pending(self, egg_app):
         """Should show approval panel when pending prompt exists."""
         egg_app._pending_prompt = {'kind': 'exec'}
