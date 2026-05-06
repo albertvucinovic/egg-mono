@@ -757,20 +757,31 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         # The live region is always pinned to the bottom of the viewport;
         # scrolling only affects the history area (scrollback + in-flight
         # stream) above it.
-        non_live = list(self._scrollback) + stream_rows
-        live = list(self._live_lines)
+        scrollback_len = len(self._scrollback)
+        stream_len = len(stream_rows)
+        non_live_len = scrollback_len + stream_len
+        live = self._live_lines
         live_h = min(len(live), vh)
         non_live_h = max(0, vh - live_h)
 
-        max_offset = max(0, len(non_live) - non_live_h)
+        max_offset = max(0, non_live_len - non_live_h)
         if self._scroll_offset > max_offset:
             self._scroll_offset = max_offset
         offset = self._scroll_offset
 
         if non_live_h > 0:
-            end = len(non_live) - offset
+            end = non_live_len - offset
             start = max(0, end - non_live_h)
-            non_live_visible = non_live[start:end]
+            non_live_visible: List[str] = []
+            if start < scrollback_len:
+                scrollback_end = min(end, scrollback_len)
+                if scrollback_end > start:
+                    non_live_visible.extend(self._scrollback[start:scrollback_end])
+            if end > scrollback_len:
+                stream_start = max(0, start - scrollback_len)
+                stream_end = end - scrollback_len
+                if stream_end > stream_start:
+                    non_live_visible.extend(stream_rows[stream_start:stream_end])
             if len(non_live_visible) < non_live_h:
                 non_live_visible = [""] * (non_live_h - len(non_live_visible)) + non_live_visible
         else:

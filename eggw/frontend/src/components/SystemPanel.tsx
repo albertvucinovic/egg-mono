@@ -21,7 +21,6 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     currentThreadId,
     systemLogs,
     clearSystemLogs,
-    isStreaming,
     streamingKind,
   } = useAppStore();
 
@@ -43,6 +42,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["threadSettings", currentThreadId],
     queryFn: () => fetchThreadSettings(currentThreadId!),
     enabled: !!currentThreadId,
+    refetchInterval: 1000,
   });
 
   // Helper to get state display info
@@ -70,12 +70,14 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     enabled: !!currentThreadId && currentThreadData?.has_children,
   });
 
-  // Fetch token stats for current thread. The thread page owns live polling;
-  // this panel shares the same query cache and only refetches manually/SSE.
+  const { isStreaming } = useAppStore();
+
+  // Fetch token stats for current thread - poll only during LLM streaming.
   const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ["stats", currentThreadId],
     queryFn: () => fetchTokenStats(currentThreadId!),
     enabled: !!currentThreadId,
+    refetchInterval: isStreaming && streamingKind === "llm" ? 1000 : false,
   });
 
   // Navigate to thread helper

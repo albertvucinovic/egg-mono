@@ -1,8 +1,6 @@
 """Token statistics API routes for eggw backend."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, HTTPException
 
 from eggthreads import live_llm_tps_for_invoke, total_token_stats
@@ -38,7 +36,7 @@ async def get_token_stats(thread_id: str):
     streaming_tps = None
     try:
         row_open = core.db.current_open(thread_id)
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         if (
             row_open is not None
             and row_open["purpose"] == "llm"
