@@ -10,6 +10,10 @@ VENV_DIR="$MONO_ROOT/venv"
 # Configuration - can be overridden via environment variables
 BACKEND_PORT="${EGGW_BACKEND_PORT:-8000}"
 FRONTEND_PORT="${EGGW_FRONTEND_PORT:-3000}"
+RELOAD_EXIT_CODE=75
+RELOAD_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/eggw-reload.XXXXXX")"
+export EGGW_RELOAD_EXIT_CODE="$RELOAD_EXIT_CODE"
+export EGGW_RELOAD_STATE_FILE="$RELOAD_STATE_FILE"
 
 # Function to check if a port is available
 is_port_available() {
@@ -101,6 +105,8 @@ cleanup() {
 
     # Extra fallback for anything still attached to this shell.
     jobs -pr | xargs -r kill 2>/dev/null || true
+
+    rm -f "${EGGW_RELOAD_STATE_FILE:-}" 2>/dev/null || true
 }
 
 on_sigint() {
@@ -188,7 +194,17 @@ echo "╚═══════════════════════�
 echo ""
 
 # Wait for either process to exit
-wait -n $BACKEND_PID $FRONTEND_PID 2>/dev/null || true
+set +e
+wait -n $BACKEND_PID $FRONTEND_PID 2>/dev/null
+status=$?
+set -e
+
+if [ "$status" -eq "$RELOAD_EXIT_CODE" ] && [ -s "$RELOAD_STATE_FILE" ]; then
+    export EGGW_RELOAD_THREAD_ID="$(cat "$RELOAD_STATE_FILE")"
+    rm -f "$RELOAD_STATE_FILE"
+    cleanup
+    exec "$SCRIPT_DIR/eggw.sh" "$@"
+fi
 
 # If we get here, one of the processes died
 echo "One of the servers stopped unexpectedly"

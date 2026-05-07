@@ -407,6 +407,54 @@ class TestCommands:
         data = response.json()
         assert data["success"] is True
         assert "Available commands" in data["message"]
+        assert "/reload" in data["message"]
+
+    def test_reload_requires_eggw_wrapper(self, client, monkeypatch):
+        """/reload reports a clear error when not launched by eggw.sh."""
+        monkeypatch.delenv("EGGW_RELOAD_STATE_FILE", raising=False)
+        create_resp = client.post("/api/threads", json={"name": "Reload Test"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/reload"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "eggw.sh" in data["message"]
+
+    def test_reload_writes_thread_id_and_schedules_exit(self, client, tmp_path, monkeypatch):
+        """/reload writes the current thread for the eggw.sh restart handoff."""
+        state_file = tmp_path / "reload-state"
+        monkeypatch.setenv("EGGW_RELOAD_STATE_FILE", str(state_file))
+        monkeypatch.setenv("EGGW_RELOAD_EXIT_CODE", "75")
+        created = []
+
+        class DummyTask:
+            pass
+
+        def fake_create_task(coro):
+            created.append(coro)
+            coro.close()
+            return DummyTask()
+
+        monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+        create_resp = client.post("/api/threads", json={"name": "Reload Test"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/reload"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["action"] == "reload"
+        assert state_file.read_text(encoding="utf-8").strip() == thread_id
+        assert len(created) == 1
 
     def test_tools_status_reflects_thread_tool_allowlist(self, client):
         """/toolsStatus should report effective tools after set_thread_tool_allowlist."""
