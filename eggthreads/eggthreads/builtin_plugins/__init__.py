@@ -6,5 +6,6 @@ from .execution import ExecutionPlugin
 from .session import SessionPlugin
 from .skills import SkillsPlugin
 from .subagents import SubagentsPlugin
+from .web import WebPlugin
 
-__all__ = ["ExecutionPlugin", "SessionPlugin", "SkillsPlugin", "SubagentsPlugin"]
+__all__ = ["ExecutionPlugin", "SessionPlugin", "SkillsPlugin", "SubagentsPlugin", "WebPlugin"]

@@ -121,22 +121,11 @@ class ToolRegistry:
         return impl(args)
 
 
-def _register_builtin_tools(reg: ToolRegistry) -> None:
-    """Register Egg's current built-in tools into ``reg``.
-
-    Later phases split these registrations into feature-bundle plugins. Keeping
-    the current implementation behind this function lets the plugin manager own
-    registry construction without changing tool behavior yet.
-    """
-
-    _populate_default_tools(reg)
-
-
 def create_tool_registry() -> ToolRegistry:
     """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
 
-    from .builtin_plugins import ExecutionPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin
-    from .plugins import FunctionPlugin, ToolPluginContext, register_plugins
+    from .builtin_plugins import ExecutionPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, WebPlugin
+    from .plugins import ToolPluginContext, register_plugins
 
     reg = ToolRegistry()
     register_plugins(
@@ -146,7 +135,7 @@ def create_tool_registry() -> ToolRegistry:
             ExecutionPlugin(),
             SessionPlugin(),
             SubagentsPlugin(),
-            FunctionPlugin("legacy_builtin_tools", "0", lambda context: _register_builtin_tools(context.tool_registry)),
+            WebPlugin(),
         ],
     )
     return reg
@@ -169,120 +158,4 @@ def create_default_tools() -> ToolRegistry:
         ToolRegistry with default tools registered.
     """
     return create_tool_registry()
-
-
-def _populate_default_tools(reg: ToolRegistry) -> None:
-    import os, json as _json
-
-    # web_search / fetch_url backed by a pluggable WebBackend.
-    # Default backend is SearXNG; override with EGG_WEB_BACKEND=tavily
-    # to use Tavily's API instead.
-    from .web import WebBackendError, get_backend as _get_web_backend
-
-    # Default result count: 10 (roughly SearXNG's natural "one page"
-    # once engines are deduplicated). Override per-process via
-    # EGG_WEB_MAX_RESULTS, or per-call via the tool's max_results arg.
-    _WEB_RESULTS_CAP = 25
-
-    def _resolve_max_results(args: Dict[str, Any]) -> int:
-        raw = args.get('max_results')
-        if raw is None:
-            raw = os.environ.get('EGG_WEB_MAX_RESULTS')
-        try:
-            n = int(raw) if raw is not None and str(raw).strip() != '' else 10
-        except (TypeError, ValueError):
-            n = 10
-        if n < 1:
-            n = 1
-        if n > _WEB_RESULTS_CAP:
-            n = _WEB_RESULTS_CAP
-        return n
-
-    def _web_search(args: Dict[str, Any]):
-        query = str(args.get('query') or '').strip()
-        if not query:
-            return 'Error: "query" is required.'
-        n = _resolve_max_results(args)
-        try:
-            backend = _get_web_backend()
-            results = backend.search(query, max_results=n)
-        except WebBackendError as e:
-            return f"Error: {e}"
-        except Exception as e:
-            return f"Error: web_search failed: {e}"
-        if not results:
-            return "No results."
-        lines = []
-        for r in results:
-            if not (r.title or r.url):
-                continue
-            snippet = (r.snippet or '').strip().replace('\n', ' ')
-            if len(snippet) > 200:
-                snippet = snippet[:200].rstrip() + '…'
-            if snippet:
-                lines.append(f"- {r.title}  {r.url}\n    {snippet}")
-            else:
-                lines.append(f"- {r.title}  {r.url}")
-        return "\n".join(lines)
-
-    def _fetch_url(args: Dict[str, Any]):
-        url = str(args.get('url') or '').strip()
-        if not url:
-            return 'Error: "url" is required.'
-        try:
-            backend = _get_web_backend()
-            return backend.fetch(url)
-        except WebBackendError as e:
-            return f"Error: {e}"
-        except Exception as e:
-            return f"Error: fetch_url failed: {e}"
-
-    _search_schema = {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search query."},
-            "max_results": {
-                "type": "integer",
-                "description": (
-                    "Maximum number of results to return "
-                    f"(default 10, max {_WEB_RESULTS_CAP})."
-                ),
-                "minimum": 1,
-                "maximum": _WEB_RESULTS_CAP,
-            },
-        },
-        "required": ["query"],
-    }
-    _fetch_schema = {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "URL to fetch."},
-        },
-        "required": ["url"],
-    }
-
-    reg.register(
-        name='web_search',
-        description=(
-            'Perform a web search and return results with titles, URLs, and short snippets. '
-            f'Defaults to 10 results (cap {_WEB_RESULTS_CAP}); pass max_results to adjust. '
-            'Backend is selected via EGG_WEB_BACKEND (default: searxng).'
-        ),
-        parameters_schema=_search_schema,
-        impl=_web_search,
-    )
-    reg.register(
-        name='fetch_url',
-        description=(
-            'Fetch and extract readable markdown from a URL. Use this when you '
-            'already know the page URL.'
-        ),
-        parameters_schema=_fetch_schema,
-        impl=_fetch_url,
-    )
-
-    # Note: agent-oriented tools like popContext/spawn_agent are excluded from default registry
-    # to prevent unintended tool calls in basic chats. The UI layer can register them explicitly.
-
-    return None
 

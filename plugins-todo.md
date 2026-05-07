@@ -196,7 +196,7 @@ Suggested built-in tool plugins:
   - Tools: `spawn_agent`, `spawn_agent_auto`, `wait`, `send_message_to_child`, `continue_subthread`, `get_child_status`.
   - Commands later: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, `/waitForThreads`, possibly `/listChildren`, `/parentThread`, `/continue`.
   - Shared service: spawn child, spawn auto-approved child, wait for children, send child guidance, continue child, format child status.
-- [ ] `web` plugin
+- [x] `web` plugin
   - Tools: `web_search`, `fetch_url`.
   - Commands later: `/startSearxng`, `/stopSearxng`.
   - Shared service: backend selection/status and SearXNG lifecycle helpers.
@@ -233,6 +233,10 @@ Status notes:
 - 2026-05-07: `create_tool_registry()` now registers `SubagentsPlugin()` before the temporary legacy registrar.
 - 2026-05-07: Removed `spawn_agent`, `spawn_agent_auto`, `wait`, `send_message_to_child`, `continue_subthread`, and `get_child_status` registration from the legacy monolithic tool population path.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_spawn_capabilities_session.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
+- 2026-05-07: Added `eggthreads.builtin_plugins.web` with `WebPlugin`, shared max-results handling, `web_search_tool()`, and `fetch_url_tool()`.
+- 2026-05-07: `create_tool_registry()` now registers all built-in tool plugins directly and the temporary legacy registrar was removed.
+- 2026-05-07: Removed `web_search` and `fetch_url` registration from the legacy monolithic tool population path.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_web_searxng.py eggthreads/tests/test_tavily_tools.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_spawn_capabilities_session.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py`.
 
 ## Phase 3 — Tool execution context and richer tool interface
 
