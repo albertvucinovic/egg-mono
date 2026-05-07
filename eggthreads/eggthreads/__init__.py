@@ -87,6 +87,7 @@ from .api import (
     # Continue thread API
     ContinueResult,
     continue_thread,
+    continue_child_thread,
     continue_thread_async,
     find_continue_point,
     is_thread_continuable,
@@ -220,7 +221,7 @@ __all__ = [
     # Context limit API
     'set_context_limit', 'get_context_limit',
     # Continue thread API
-    'ContinueResult', 'continue_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
+    'ContinueResult', 'continue_thread', 'continue_child_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
     # Thread diagnosis
     'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text',
     # Thread scheduling API

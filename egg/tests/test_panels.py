@@ -37,10 +37,6 @@ class TestUpdatePanels:
 
     def test_updates_children_output(self, egg_app, monkeypatch):
         """Should update children_output with tree view."""
-        import time
-        # Force refresh by setting last refresh to old time
-        egg_app._last_children_refresh = 0
-
         set_content_calls = []
         original_set_content = egg_app.children_output.set_content
         def mock_set_content(text):
@@ -51,6 +47,61 @@ class TestUpdatePanels:
         egg_app.update_panels()
 
         assert len(set_content_calls) >= 1
+
+    def test_children_tree_is_not_reformatted_when_status_key_unchanged(self, egg_app, monkeypatch):
+        """Idle panel ticks should not rescan the full thread tree."""
+        calls = {"count": 0}
+
+        def fake_format_tree(thread_id):
+            calls["count"] += 1
+            return f"tree for {thread_id[-8:]}"
+
+        monkeypatch.setattr(egg_app, "format_tree", fake_format_tree)
+
+        egg_app.update_panels()
+        egg_app.update_panels()
+
+        assert calls["count"] == 1
+
+    def test_typing_does_not_reformat_children_tree(self, egg_app, monkeypatch):
+        """Input echo should not wait on expensive children tree refreshes."""
+        calls = {"count": 0}
+
+        def fake_format_tree(thread_id):
+            calls["count"] += 1
+            return f"tree {calls['count']} for {thread_id[-8:]}"
+
+        monkeypatch.setattr(egg_app, "format_tree", fake_format_tree)
+
+        egg_app.update_panels()
+        assert calls["count"] == 1
+        egg_app.input_panel.render()
+
+        egg_app.input_panel.editor.editor.insert_text("x")
+
+        def changed_status_key():
+            return ("changed-by-background-heartbeat", calls["count"])
+
+        monkeypatch.setattr(egg_app, "_compute_children_panel_status_key", changed_status_key)
+        egg_app.update_panels()
+
+        assert calls["count"] == 1
+
+    def test_children_status_key_ignores_lease_heartbeat_extension(self, egg_app):
+        """Children tree cache key should not churn on lease_until heartbeats."""
+        from datetime import datetime, timedelta, timezone
+
+        tid = egg_app.current_thread
+        invoke = "invoke-stable-key"
+        lease_1 = (datetime.now(timezone.utc) + timedelta(seconds=20)).strftime("%Y-%m-%d %H:%M:%S")
+        lease_2 = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+        assert egg_app.db.try_open_stream(tid, invoke, lease_1, owner="test", purpose="tool")
+        key_1 = egg_app._compute_children_panel_status_key()
+        assert egg_app.db.heartbeat(tid, invoke, lease_2)
+        key_2 = egg_app._compute_children_panel_status_key()
+
+        assert key_1 == key_2
 
     def test_shows_approval_panel_when_pending(self, egg_app):
         """Should show approval panel when pending prompt exists."""
@@ -110,6 +161,61 @@ class TestUpdatePanels:
 
         assert "Autoapproval[On]" in egg_app.system_output.title
 
+    def test_system_status_helpers_are_cached_while_config_events_unchanged(self, egg_app, monkeypatch):
+        """Idle panel ticks should not re-read sandbox/autoapproval state."""
+        calls = {"sandbox": 0, "auto": 0}
+
+        def fake_sandbox_status(db, tid):
+            calls["sandbox"] += 1
+            return {'effective': False}
+
+        def fake_auto_status(db, tid):
+            calls["auto"] += 1
+            return False
+
+        monkeypatch.setattr("eggthreads.get_thread_sandbox_status", fake_sandbox_status)
+        monkeypatch.setattr("eggthreads.get_thread_auto_approval_status", fake_auto_status)
+
+        egg_app.update_panels()
+        egg_app.update_panels()
+
+        assert calls == {"sandbox": 1, "auto": 1}
+
+
+
+    def test_live_tps_is_cached_briefly(self, egg_app, monkeypatch):
+        """Multiple header reads in one UI tick should reuse live TPS."""
+        calls = {"count": 0}
+        egg_app._live_state = {"active_invoke": "invoke-tps", "stream_kind": "llm"}
+
+        def fake_live_tps(db, invoke):
+            calls["count"] += 1
+            return 12.0
+
+        monkeypatch.setattr("eggthreads.live_llm_tps_for_invoke", fake_live_tps)
+
+        assert egg_app.current_stream_tps()
+        assert egg_app.current_stream_tps()
+        assert calls["count"] == 1
+
+    def test_chat_header_tps_uses_snapshot_seq_cache(self, egg_app, monkeypatch):
+        """Idle header TPS reads should not reparse snapshot messages."""
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "done", extra={"tps": 8.0})
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        egg_app._live_state = {"active_invoke": None, "stream_kind": None}
+        calls = {"count": 0}
+
+        def fake_snapshot_messages(db, thread_id):
+            calls["count"] += 1
+            return [{"role": "assistant", "content": "done", "tps": 8.0}]
+
+        monkeypatch.setattr("egg.panels.snapshot_messages", fake_snapshot_messages)
+
+        assert egg_app.current_chat_header_tps() == "8.0 tps"
+        assert egg_app.current_chat_header_tps() == "8.0 tps"
+        assert calls["count"] == 1
 
 class TestRenderGroup:
     """Tests for render_group()."""

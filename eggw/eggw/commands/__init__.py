@@ -52,6 +52,7 @@ from .utility import (
     cmd_enter_mode,
     cmd_toggle_borders,
     cmd_quit,
+    cmd_reload,
     cmd_theme,
     cmd_start_searxng,
     cmd_stop_searxng,
@@ -113,6 +114,7 @@ __all__ = [
     "cmd_enter_mode",
     "cmd_toggle_borders",
     "cmd_quit",
+    "cmd_reload",
     "cmd_theme",
     "cmd_start_searxng",
     "cmd_stop_searxng",
@@ -239,6 +241,8 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return cmd_theme(command_arg)
         elif command_name == "quit":
             return cmd_quit()
+        elif command_name == "reload":
+            return cmd_reload(thread_id)
         elif command_name == "redraw":
             return CommandResponse(success=True, message="Redraw is not needed in eggw; the browser UI updates automatically.")
         elif command_name == "displayMode":

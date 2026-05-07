@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from eggconfig import get_models_path
@@ -108,6 +109,15 @@ app.include_router(commands_router)
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(autocomplete_router)
+
+
+@app.get("/")
+async def root_redirect():
+    """Redirect to the reloaded thread when eggw.sh restarts after /reload."""
+    thread_id = (os.environ.get("EGGW_RELOAD_THREAD_ID") or "").strip()
+    if thread_id:
+        return RedirectResponse(url=f"/{thread_id}")
+    return {"status": "ok", "app": "eggw"}
 
 
 if __name__ == "__main__":

@@ -37,8 +37,13 @@ class SnapshotBuilder:
         # Convert to list so we can scan twice (for msg.edit and msg.create)
         events_list = list(events)
 
-        # First, collect msg_ids that have been marked as skipped
+        # First, collect message-level mutations.  ``skipped_on_continue``
+        # is intentionally separate from content edits: skipped messages are
+        # removed from the snapshot, while normal edits patch the original
+        # msg.create payload in place so provider-specific fields survive.
         skipped_msg_ids: set = set()
+        deleted_msg_ids: set = set()
+        edits_by_msg_id: Dict[str, Dict[str, Any]] = {}
 
         def _get(row, key):
             if isinstance(row, dict):
@@ -47,20 +52,32 @@ class SnapshotBuilder:
 
         for e in events_list:
             t = _get(e, "type")
-            if t != "msg.edit":
+            if t not in ("msg.edit", "msg.delete"):
                 continue
+            msg_id = _get(e, "msg_id")
+            if not msg_id:
+                continue
+
+            if t == "msg.delete":
+                deleted_msg_ids.add(msg_id)
+                continue
+
             pj = _get(e, "payload_json")
             try:
                 payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
             except Exception:
                 payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
             if payload.get('skipped_on_continue'):
-                msg_id = _get(e, "msg_id")
-                logger.info(f"Found msg.edit with skipped_on_continue, msg_id={msg_id!r}")
-                if msg_id:
-                    skipped_msg_ids.add(msg_id)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Found msg.edit with skipped_on_continue, msg_id=%r", msg_id)
+                skipped_msg_ids.add(msg_id)
+                continue
+            edits_by_msg_id.setdefault(msg_id, {}).update(payload)
 
-        logger.info(f"skipped_msg_ids = {skipped_msg_ids}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("skipped_msg_ids = %r", skipped_msg_ids)
 
         messages: List[Dict[str, Any]] = []
 
@@ -71,10 +88,17 @@ class SnapshotBuilder:
                 continue
 
             msg_id = _get(e, "msg_id")
-            logger.info(f"Processing msg.create with msg_id={msg_id!r}, in skipped={msg_id in skipped_msg_ids if msg_id else 'N/A'}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Processing msg.create with msg_id=%r, in skipped=%r",
+                    msg_id,
+                    msg_id in skipped_msg_ids if msg_id else 'N/A',
+                )
             # Skip messages that have been marked as skipped_on_continue
-            if msg_id and msg_id in skipped_msg_ids:
-                logger.info(f"  -> SKIPPING this message")
+            # or deleted by a later msg.delete event.
+            if msg_id and (msg_id in skipped_msg_ids or msg_id in deleted_msg_ids):
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Skipping msg.create with msg_id=%r", msg_id)
                 continue
 
             pj = _get(e, "payload_json")
@@ -89,8 +113,10 @@ class SnapshotBuilder:
             # Snapshot messages are still considered a UI-friendly cache,
             # but they must remain faithful enough to reconstruct provider
             # requests for advanced models.
-            role = payload.get("role")
             msg: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {}
+            if msg_id in edits_by_msg_id:
+                msg.update(edits_by_msg_id[msg_id])
+            role = msg.get("role")
             msg["msg_id"] = msg_id
             msg["role"] = role
             # Preserve the original event timestamp if available so UIs

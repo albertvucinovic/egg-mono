@@ -61,6 +61,26 @@ class PanelsMixin:
             return f"${fv:.4f} cost"
         return ""
 
+    def _live_llm_tps_cached(self, invoke: str) -> Optional[float]:
+        """Return live LLM TPS with a short cache to avoid O(deltas) scans per UI tick."""
+        if not invoke:
+            return None
+        now = time.monotonic()
+        cache = getattr(self, '_live_tps_cache', None)
+        if isinstance(cache, dict) and cache.get('invoke') == invoke:
+            try:
+                if (now - float(cache.get('at') or 0.0)) < 0.5:
+                    return cache.get('value')
+            except Exception:
+                pass
+        try:
+            from eggthreads import live_llm_tps_for_invoke
+            tps = live_llm_tps_for_invoke(self.db, str(invoke))
+        except Exception:
+            tps = None
+        self._live_tps_cache = {'invoke': invoke, 'at': now, 'value': tps}
+        return tps
+
     def _live_print(self, *args, **kwargs) -> None:
         """Print to console, routing through DiffRenderer when the live loop is active."""
         renderer = getattr(self, '_renderer', None)
@@ -68,6 +88,72 @@ class PanelsMixin:
             renderer.print_above(*args, **kwargs)
         else:
             self.console.print(*args, **kwargs)
+
+    def _system_status_key(self) -> Any:
+        """Cheap key for System panel sandbox/autoapproval title state."""
+        cur = self.db.conn.execute(
+            """
+            WITH RECURSIVE ancestors(thread_id) AS (
+                SELECT ?
+                UNION ALL
+                SELECT c.parent_id
+                FROM children c
+                JOIN ancestors a ON c.child_id = a.thread_id
+            )
+            SELECT COUNT(*), COALESCE(MAX(event_seq), 0)
+            FROM events
+            WHERE type IN (?, ?) AND thread_id IN (SELECT thread_id FROM ancestors)
+            """,
+            (self.current_thread, 'sandbox.config', 'tool_call.approval'),
+        )
+        cfg_event_count, cfg_event_max_seq = cur.fetchone()
+        return (
+            self.current_thread,
+            int(cfg_event_count or 0),
+            int(cfg_event_max_seq or 0),
+        )
+
+    def _compute_children_panel_status_key(self) -> Any:
+        """Cheap key for Children panel tree/status state."""
+        cur = self.db.conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM children"
+        )
+        child_count, child_max_rowid = cur.fetchone()
+        cur = self.db.conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(event_seq), 0) FROM events WHERE type IN (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                'msg.create',
+                'msg.edit',
+                'msg.delete',
+                'model.switch',
+                'stream.open',
+                'stream.close',
+                'tool_call.approval',
+                'tool_call.output_approval',
+            ),
+        )
+        relevant_event_count, relevant_event_max_seq = cur.fetchone()
+        cur = self.db.conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(GROUP_CONCAT(open_key, '|'), '')
+            FROM (
+                SELECT thread_id || ':' || invoke_id || ':' || COALESCE(purpose, '') AS open_key
+                FROM open_streams
+                WHERE lease_until > datetime('now')
+                ORDER BY thread_id, invoke_id
+            )
+            """
+        )
+        open_count, open_key = cur.fetchone()
+        return (
+            self.current_thread,
+            int(child_count or 0),
+            int(child_max_rowid or 0),
+            int(relevant_event_count or 0),
+            int(relevant_event_max_seq or 0),
+            int(open_count or 0),
+            str(open_key or ''),
+        )
 
     def _get_static_box(self) -> Any:
         """Get the box style to use for static console panels.
@@ -80,6 +166,14 @@ class PanelsMixin:
 
     def update_panels(self) -> None:
         """Update all UI panels with current state."""
+        try:
+            input_active = (
+                getattr(self.input_panel, '_cached_render', None) is not None
+                and bool(self.input_panel.is_dirty())
+            )
+        except Exception:
+            input_active = False
+
         # In inline mode the Chat Messages panel body mirrors the
         # conversation + streaming (HEAD behaviour). In full-screen
         # mode the same content lives in the DiffRenderer's static
@@ -159,39 +253,56 @@ class PanelsMixin:
             # Leave existing title unchanged on any error.
             pass
 
-        # Update System panel title to reflect sandbox status so the
-        # user always has a prominent, persistent indicator.
+        system_status_key = None
         try:
-            from eggthreads import get_thread_sandbox_status
+            system_status_key = self._system_status_key()
+        except Exception:
+            system_status_key = None
 
-            sb = get_thread_sandbox_status(self.db, self.current_thread)
-        except Exception:
-            sb = {}
-        try:
-            effective = bool(sb.get('effective'))
-        except Exception:
-            effective = False
-        if effective:
-            provider = sb.get('provider', 'docker')
-            # Map provider to display name
-            if provider == 'docker':
-                display = 'Docker'
-            elif provider == 'srt':
-                display = 'srt'
-            elif provider == 'bwrap':
-                display = 'Bwrap'
-            else:
-                display = provider
-            sandbox_part = f"[green]Sandboxing[{display}][/green]"
+        cache = getattr(self, '_system_status_cache', None)
+        if system_status_key is not None and isinstance(cache, dict) and cache.get('key') == system_status_key:
+            sandbox_part = str(cache.get('sandbox_part') or "[red]Sandboxing[OFF][/red]")
+            auto_part = str(cache.get('auto_part') or "[green]Autoapproval[Off][/green]")
         else:
-            sandbox_part = "[red]Sandboxing[OFF][/red]"
+            # Update System panel title to reflect sandbox status so the
+            # user always has a prominent, persistent indicator.
+            try:
+                from eggthreads import get_thread_sandbox_status
 
-        try:
-            from eggthreads import get_thread_auto_approval_status
-            auto_approval = bool(get_thread_auto_approval_status(self.db, self.current_thread))
-        except Exception:
-            auto_approval = False
-        auto_part = "[red]Autoapproval[On][/red]" if auto_approval else "[green]Autoapproval[Off][/green]"
+                sb = get_thread_sandbox_status(self.db, self.current_thread)
+            except Exception:
+                sb = {}
+            try:
+                effective = bool(sb.get('effective'))
+            except Exception:
+                effective = False
+            if effective:
+                provider = sb.get('provider', 'docker')
+                # Map provider to display name
+                if provider == 'docker':
+                    display = 'Docker'
+                elif provider == 'srt':
+                    display = 'srt'
+                elif provider == 'bwrap':
+                    display = 'Bwrap'
+                else:
+                    display = provider
+                sandbox_part = f"[green]Sandboxing[{display}][/green]"
+            else:
+                sandbox_part = "[red]Sandboxing[OFF][/red]"
+
+            try:
+                from eggthreads import get_thread_auto_approval_status
+                auto_approval = bool(get_thread_auto_approval_status(self.db, self.current_thread))
+            except Exception:
+                auto_approval = False
+            auto_part = "[red]Autoapproval[On][/red]" if auto_approval else "[green]Autoapproval[Off][/green]"
+            if system_status_key is not None:
+                self._system_status_cache = {
+                    'key': system_status_key,
+                    'sandbox_part': sandbox_part,
+                    'auto_part': auto_part,
+                }
         # NO_API_CALLS read-only mode: shown in the header only when active
         # (following the Streaming-indicator convention — no clutter when off).
         try:
@@ -212,16 +323,27 @@ class PanelsMixin:
         # (sandbox, auto-approval) lives in the title border, body is empty.
         self.system_output.set_content("")
 
-        # Children panel: refresh at most once every 2 seconds
+        # Children panel: refresh only when the thread topology/status key
+        # changes. This keeps idle ticks from rescanning all threads while
+        # still updating immediately for child creation and stream/status
+        # changes that affect the rendered tree.
         try:
-            now = time.time()
-            if now - self._last_children_refresh >= 2.0:
-                try:
-                    subtree_text = self.format_tree(self.current_thread)
-                except Exception:
-                    subtree_text = "(error rendering children tree)"
-                self.children_output.set_content(subtree_text)
-                self._last_children_refresh = now
+            cached_children_key = getattr(self, '_children_panel_cached_status_key', None)
+            if input_active and cached_children_key is not None:
+                # Prefer input echo over refreshing the tree while the user is
+                # typing. Background tool leases can make this key change every
+                # heartbeat; rebuilding a large tree in that path causes visible
+                # multi-second input lag. The next idle tick refreshes it.
+                pass
+            else:
+                status_key = self._compute_children_panel_status_key()
+                if cached_children_key != status_key:
+                    try:
+                        subtree_text = self.format_tree(self.current_thread)
+                    except Exception:
+                        subtree_text = "(error rendering children tree)"
+                    self.children_output.set_content(subtree_text)
+                    self._children_panel_cached_status_key = status_key
         except Exception:
             pass
 
@@ -261,11 +383,7 @@ class PanelsMixin:
         kind = ls.get('stream_kind') or 'stream'
         if kind == 'llm':
             tps_str = ""
-            try:
-                from eggthreads import live_llm_tps_for_invoke
-                tps = live_llm_tps_for_invoke(self.db, str(invoke))
-            except Exception:
-                tps = None
+            tps = self._live_llm_tps_cached(str(invoke))
             if isinstance(tps, (int, float)) and tps > 0:
                 tps_str = self._fmt_header_metric(tps, 'tps')
             inner = f"llm {tps_str}" if tps_str else "llm"
@@ -307,11 +425,7 @@ class PanelsMixin:
             return ""
         if ls.get('stream_kind') != 'llm':
             return ""
-        try:
-            from eggthreads import live_llm_tps_for_invoke
-            tps = live_llm_tps_for_invoke(self.db, str(ls.get('active_invoke') or ''))
-        except Exception:
-            tps = None
+        tps = self._live_llm_tps_cached(str(ls.get('active_invoke') or ''))
         if not isinstance(tps, (int, float)) or tps <= 0:
             return ""
         return self._fmt_header_metric(tps, 'tps')
@@ -321,6 +435,16 @@ class PanelsMixin:
         live_tps = self.current_stream_tps()
         if live_tps:
             return live_tps
+
+        try:
+            th = self.db.get_thread(self.current_thread)
+            snapshot_seq = int(getattr(th, 'snapshot_last_event_seq', -1) or -1) if th else -1
+        except Exception:
+            snapshot_seq = -1
+        cache = getattr(self, '_chat_header_tps_cache', None)
+        cache_key = (self.current_thread, snapshot_seq)
+        if isinstance(cache, dict) and cache.get('key') == cache_key:
+            return str(cache.get('value') or "")
 
         try:
             msgs = snapshot_messages(self.db, self.current_thread)
@@ -338,7 +462,10 @@ class PanelsMixin:
                 continue
             if fv <= 0:
                 continue
-            return self._fmt_header_metric(fv, 'tps')
+            value = self._fmt_header_metric(fv, 'tps')
+            self._chat_header_tps_cache = {'key': cache_key, 'value': value}
+            return value
+        self._chat_header_tps_cache = {'key': cache_key, 'value': ""}
         return ""
 
     def render_group(self) -> Group:

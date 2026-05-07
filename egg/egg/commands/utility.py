@@ -4,6 +4,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import threading
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -171,6 +172,28 @@ class UtilityCommandsMixin:
     def cmd_quit(self, arg: str) -> None:
         """Handle /quit command - exit the application."""
         self.running = False
+
+    def cmd_reload(self, arg: str) -> None:
+        """Handle /reload command - restart egg.sh and reopen current thread."""
+        thread_id = getattr(self, 'current_thread', '')
+        if not thread_id:
+            self.log_system('/reload failed: no current thread.')
+            return
+
+        os.environ['EGG_RELOAD_THREAD_ID'] = thread_id
+        self._reload_via_shell = False
+        state_file = os.environ.get('EGG_RELOAD_STATE_FILE')
+        if state_file:
+            try:
+                Path(state_file).write_text(f'{thread_id}\n', encoding='utf-8')
+                self._reload_via_shell = True
+            except Exception as e:
+                self.log_system(f'/reload failed to save thread id for egg.sh: {e}; using direct restart.')
+        else:
+            self.log_system('/reload: no egg.sh state file; using direct restart.')
+
+        self._reload_requested = True
+        self.cmd_quit(arg)
 
     def cmd_enterMode(self, arg: str) -> None:
         """Handle /enterMode command - set enter key behavior."""

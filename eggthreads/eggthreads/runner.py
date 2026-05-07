@@ -4,9 +4,10 @@ import asyncio
 import json
 import os
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 from pathlib import Path
 try:
     from eggllm import LLMClient
@@ -58,6 +59,12 @@ def runner_actionable_resource_class(ra: Optional[RunnerActionable]) -> str:
     """
 
     return "llm" if ra is not None and ra.kind == "RA1_llm" else "tool"
+
+
+@dataclass(frozen=True)
+class _SchedulerThreadSettings:
+    priority: Any = 0
+    threshold: Any = None
 
 
 # Thresholds above which a tool output is considered "long" and should
@@ -312,6 +319,7 @@ def emit_tool_stream_delta(
     text: str = "",
     current_model: Optional[str] = None,
     suppressed: bool = False,
+    chunk_seq: Optional[int] = None,
 ) -> None:
     """Append one tool-output stream.delta event."""
     payload_tool: Dict[str, Any] = {
@@ -328,7 +336,7 @@ def emit_tool_stream_delta(
         thread_id=thread_id,
         type_='stream.delta',
         invoke_id=invoke_id,
-        chunk_seq=db.max_chunk_seq(invoke_id) + 1,
+        chunk_seq=chunk_seq if chunk_seq is not None else db.max_chunk_seq(invoke_id) + 1,
         payload=payload,
     )
 
@@ -449,6 +457,7 @@ def emit_limited_tool_stream_delta(
     current_model: Optional[str] = None,
     heartbeat,
     suppressed_counter: Optional[Dict[str, int]] = None,
+    next_chunk_seq: Optional[Callable[[], int]] = None,
 ) -> bool:
     """Emit bounded live preview for a tool-output chunk.
 
@@ -470,6 +479,7 @@ def emit_limited_tool_stream_delta(
             tool_name=tool_name,
             current_model=current_model,
             suppressed=True,
+            chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
         )
         if suppressed_counter is not None:
             suppressed_counter['count'] = int(suppressed_counter.get('count') or 0) + 1
@@ -486,6 +496,7 @@ def emit_limited_tool_stream_delta(
                 tool_name=tool_name,
                 current_model=current_model,
                 suppressed=True,
+                chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
             )
     if not preview_text:
         return True
@@ -499,6 +510,7 @@ def emit_limited_tool_stream_delta(
         tool_name=tool_name,
         text=preview_text,
         current_model=current_model,
+        chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
     )
     return True
 
@@ -1983,6 +1995,12 @@ class ThreadRunner:
         interrupted_by_lease = False
         # True iff we timed out waiting for the command to complete.
         timed_out = False
+        chunk_seq = self.db.max_chunk_seq(invoke_id)
+
+        def _next_chunk_seq() -> int:
+            nonlocal chunk_seq
+            chunk_seq += 1
+            return chunk_seq
 
         # Shared timeout resolution: LLM-specified > config > global default.
         tool_timeout_sec = resolve_tool_timeout_sec(
@@ -2126,6 +2144,7 @@ class ThreadRunner:
                     current_model=current_model,
                     heartbeat=_heartbeat,
                     suppressed_counter=suppressed_counter,
+                    next_chunk_seq=_next_chunk_seq,
                 )
                 if not ok:
                     cancelled = True
@@ -2397,6 +2416,13 @@ class ThreadRunner:
                 cancelled = False
                 stream_limiter = ToolStreamPreviewLimiter()
                 suppressed_counter = {'count': 0}
+                chunk_seq = self.db.max_chunk_seq(invoke_id)
+
+                def _next_chunk_seq() -> int:
+                    nonlocal chunk_seq
+                    chunk_seq += 1
+                    return chunk_seq
+
                 for i in range(0, len(out), CH):
                     part = out[i : i + CH]
                     # Respect the per-thread lease while emitting only a
@@ -2421,6 +2447,7 @@ class ThreadRunner:
                         current_model=current_model,
                         heartbeat=_heartbeat,
                         suppressed_counter=suppressed_counter,
+                        next_chunk_seq=_next_chunk_seq,
                     )
                     if not ok:
                         cancelled = True
@@ -2464,11 +2491,25 @@ class ThreadRunner:
                 # decision is "omit" for LLM context).
                 if finished_reason == 'interrupted':
                     # Prefer an explicit preview when decision='partial';
-                    # otherwise fall back to the full finished_output.
+                    # otherwise fall back to a bounded preview of the partial
+                    # output. Never publish the full finished_output into the
+                    # tool message: published tool messages are eligible for
+                    # provider context unless no_api, and interrupted tools can
+                    # still produce very large partial output.
                     if decision == 'partial' and preview:
                         content = str(preview)
                     elif finished_output:
-                        content = finished_output
+                        try:
+                            content, _saved = stash_tool_output_and_build_preview(
+                                self.db,
+                                self.thread_id,
+                                str(tc.tool_call_id),
+                                finished_output,
+                            )
+                        except Exception:
+                            content = finished_output[:PREVIEW_MAX_CHARS]
+                            if len(finished_output) > PREVIEW_MAX_CHARS:
+                                content = content.rstrip() + "\n\n...[output truncated for preview]..."
                     else:
                         content = str(preview or "Output omitted.")
                     # Append a clear note so it is obvious this output is
@@ -2915,6 +2956,107 @@ def _sort_by_priority(threads: List[str], mode: str, db: ThreadsDB) -> List[str]
     return [tid for tid, _ in threads_with_priority]
 
 
+def _thread_id_batches(thread_ids: List[str], batch_size: int = 900):
+    for idx in range(0, len(thread_ids), batch_size):
+        yield thread_ids[idx:idx + batch_size]
+
+
+def _max_event_seqs_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, int]:
+    """Return max event sequence per thread with one batched scan."""
+    out = {tid: -1 for tid in thread_ids}
+    for batch in _thread_id_batches(thread_ids):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        try:
+            cur = db.conn.execute(
+                f"SELECT thread_id, MAX(event_seq) FROM events WHERE thread_id IN ({placeholders}) GROUP BY thread_id",
+                tuple(batch),
+            )
+            for row in cur.fetchall():
+                value = row[1]
+                out[str(row[0])] = int(value) if value is not None else -1
+        except Exception:
+            continue
+    return out
+
+
+def _active_open_threads_bulk(db: ThreadsDB, thread_ids: List[str]) -> Set[str]:
+    """Return thread ids with currently active leases."""
+    out: Set[str] = set()
+    now_iso = _utcnow_iso()
+    for batch in _thread_id_batches(thread_ids):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        try:
+            cur = db.conn.execute(
+                f"SELECT thread_id FROM open_streams WHERE lease_until > ? AND thread_id IN ({placeholders})",
+                (now_iso, *batch),
+            )
+            out.update(str(row[0]) for row in cur.fetchall())
+        except Exception:
+            continue
+    return out
+
+
+def _thread_scheduling_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, _SchedulerThreadSettings]:
+    """Return latest scheduler priority/threshold settings for threads."""
+    out = {tid: _SchedulerThreadSettings() for tid in thread_ids}
+    for batch in _thread_id_batches(thread_ids):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        try:
+            cur = db.conn.execute(
+                f"""
+                SELECT e.thread_id, e.payload_json
+                  FROM events e
+                  JOIN (
+                        SELECT thread_id, MAX(event_seq) AS event_seq
+                          FROM events
+                         WHERE type='thread.scheduling'
+                           AND thread_id IN ({placeholders})
+                         GROUP BY thread_id
+                       ) latest
+                    ON latest.thread_id = e.thread_id
+                   AND latest.event_seq = e.event_seq
+                """,
+                tuple(batch),
+            )
+            for row in cur.fetchall():
+                try:
+                    payload = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                out[str(row[0])] = _SchedulerThreadSettings(
+                    priority=payload.get("priority", 0),
+                    threshold=payload.get("threshold"),
+                )
+        except Exception:
+            continue
+    return out
+
+
+def _sort_by_priority_map(
+    threads: List[str],
+    mode: str,
+    settings_by_thread: Dict[str, _SchedulerThreadSettings],
+) -> List[str]:
+    """Sort threads using already-loaded scheduling settings."""
+    threads_with_priority = [
+        (tid, settings_by_thread.get(tid, _SchedulerThreadSettings()).priority or 0)
+        for tid in threads
+    ]
+    if mode == "alphabetical":
+        threads_with_priority.sort(key=lambda x: (-x[1], x[0]))
+    else:
+        threads_with_priority.sort(key=lambda x: -x[1])
+    return [tid for tid, _ in threads_with_priority]
+
+
 class SubtreeScheduler:
     """Async orchestrator: watches a root thread and runs runnable threads within its subtree, up to concurrency limit."""
 
@@ -2954,19 +3096,39 @@ class SubtreeScheduler:
         self._tasks.difference_update(tasks)
 
     def _collect_subtree(self, thread_id: str) -> List[str]:
-        # BFS through children table
+        now_iso = _utcnow_iso()
+        try:
+            cur = self.db.conn.execute(
+                """
+                WITH RECURSIVE subtree(thread_id, depth, path) AS (
+                    SELECT ? AS thread_id, 0 AS depth, ? AS path
+                    UNION ALL
+                    SELECT c.child_id, subtree.depth + 1, subtree.path || c.child_id || '/'
+                      FROM children c
+                      JOIN subtree ON c.parent_id = subtree.thread_id
+                     WHERE (c.waiting_until IS NULL OR c.waiting_until <= ?)
+                       AND instr(subtree.path, '/' || c.child_id || '/') = 0
+                )
+                SELECT thread_id FROM subtree ORDER BY depth, path
+                """,
+                (thread_id, f"/{thread_id}/", now_iso),
+            )
+            return [str(row[0]) for row in cur.fetchall()]
+        except Exception:
+            pass
+
+        # Fallback BFS through children table.
         out: List[str] = []
-        q = [thread_id]
+        q: deque[str] = deque([thread_id])
         seen = set()
         while q:
-            t = q.pop(0)
+            t = q.popleft()
             if t in seen:
                 continue
             seen.add(t)
             # Respect waiting_until: only include children that are not waiting or waiting_until <= now
             out.append(t)
             cur = self.db.conn.execute("SELECT child_id, waiting_until FROM children WHERE parent_id=?", (t,))
-            now_iso = _utcnow_iso()
             for row in cur.fetchall():
                 wu = row["waiting_until"]
                 if wu is None or wu <= now_iso:
@@ -2974,8 +3136,6 @@ class SubtreeScheduler:
         return out
 
     async def run_forever(self, poll_sec: float = 0.5):
-        from .api import is_thread_runnable, get_thread_scheduling
-
         if _no_api_calls_mode(self.cfg):
             # This banner fires inside run_forever, which under an interactive
             # TUI (e.g. egg) runs after the renderer has taken over stdout —
@@ -3031,6 +3191,9 @@ class SubtreeScheduler:
 
         while True:
             all_threads = self._collect_subtree(self.root)
+            max_event_seqs = _max_event_seqs_bulk(self.db, all_threads)
+            active_open_threads = _active_open_threads_bulk(self.db, all_threads)
+            scheduling_settings = _thread_scheduling_bulk(self.db, all_threads)
 
             # Update idle tracking and expire reservations (sticky scheduling)
             if self.cfg.sticky_scheduling:
@@ -3058,7 +3221,7 @@ class SubtreeScheduler:
                     if tid not in last_run_end:
                         continue  # Not idle yet
                     # Use per-thread threshold if set, otherwise global default
-                    settings = get_thread_scheduling(self.db, tid)
+                    settings = scheduling_settings.get(tid, _SchedulerThreadSettings())
                     threshold = settings.threshold if settings.threshold is not None else self.cfg.sticky_idle_threshold_sec
                     if (now - last_run_end[tid]) > threshold:
                         expired.add(tid)
@@ -3067,7 +3230,7 @@ class SubtreeScheduler:
                     last_run_end.pop(tid, None)
 
             # Apply priority sorting
-            all_threads = _sort_by_priority(all_threads, self.cfg.priority_mode, self.db)
+            all_threads = _sort_by_priority_map(all_threads, self.cfg.priority_mode, scheduling_settings)
 
             # Calculate available LLM/tool slots for scheduling.  Tool work
             # does not consume LLM slots; an optional separate tool cap can
@@ -3102,7 +3265,7 @@ class SubtreeScheduler:
                 # is_thread_runnable()/discover_runner_actionable logic
                 # on completely idle threads.
                 try:
-                    max_seq = self.db.max_event_seq(tid)
+                    max_seq = max_event_seqs.get(tid, -1)
                 except Exception:
                     max_seq = -1
                 if max_seq == last_checked_seq.get(tid, -1):
@@ -3115,15 +3278,8 @@ class SubtreeScheduler:
                 # instance is already running the thread.
                 # NOTE: We do NOT update watermark here - when lease expires,
                 # we want to re-check the thread.
-                try:
-                    row = self.db.current_open(tid)
-                    if row:
-                        lease_until = row['lease_until']
-                        now_iso = _utcnow_iso()
-                        if lease_until and lease_until > now_iso:
-                            continue  # Another process has the lease
-                except Exception:
-                    pass  # On error, proceed with normal check
+                if tid in active_open_threads:
+                    continue
 
                 ra = discover_runner_actionable_cached(self.db, tid)
                 if ra is not None:

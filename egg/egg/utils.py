@@ -52,7 +52,7 @@ Commands:
     /startSearxng — start the local SearXNG docker container (used by web_search / fetch_url)
     /stopSearxng — stop the local SearXNG docker container
   Other:
-    /enterMode <send|newline>, /cost, /paste, /quit
+    /enterMode <send|newline>, /cost, /paste, /reload, /quit
     /setContextLimit [limit]
     /help
 """

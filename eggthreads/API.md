@@ -1016,10 +1016,8 @@ Create a ToolRegistry with the default set of tools.
 Returns a registry pre-populated with common tools:
 - bash: Execute shell commands
 - python: Execute Python scripts
-- javascript: Browser JavaScript execution (placeholder)
 - spawn_agent: Create child threads for delegation
 - spawn_agent_auto: Create auto-approved child threads
-- replace_between: File text replacement
 - web_search: Web search via the configured backend (SearXNG by default)
 - fetch_url: Fetch and extract readable markdown for a URL
 - wait: Synchronize on child thread completion

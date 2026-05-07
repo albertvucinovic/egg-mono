@@ -105,6 +105,74 @@ def _make_thread_not_runnable(db: ThreadsDB, thread_id: str) -> None:
     )
 
 
+class _NeverLLM:
+    async def astream_chat(self, messages, **kwargs):  # pragma: no cover - should not be called
+        raise AssertionError("LLM should not be called")
+
+
+def test_interrupted_tool_publication_uses_preview_not_full_output(tmp_path):
+    """Interrupted tool output fallback must not publish full large output."""
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    tcid = "tc-interrupted-large"
+    full_output = "z" * 9000
+
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="msg.create",
+        msg_id="assistant-tool-msg",
+        payload={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": tcid, "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tcid, "decision": "granted"},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": tcid},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.finished",
+        payload={"tool_call_id": tcid, "reason": "interrupted", "output": full_output},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.output_approval",
+        payload={"tool_call_id": tcid, "decision": "whole", "preview": ""},
+    )
+
+    async def run_once():
+        runner = ts.ThreadRunner(db, root, llm=_NeverLLM(), config=RunnerConfig())
+        assert await runner.run_once() is True
+
+    asyncio.run(run_once())
+
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE type='msg.create' AND msg_id IS NOT NULL ORDER BY event_seq DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row[0])
+    assert payload["role"] == "tool"
+    assert payload["tool_call_id"] == tcid
+    assert payload["content"] != full_output
+    assert len(payload["content"]) < len(full_output)
+    assert "Output incomplete - interrupted" in payload["content"]
+
+
 class TestSlotManagement:
     """Tests for scheduler slot availability and watermark behavior."""
 
@@ -1659,3 +1727,60 @@ def test_runner_persists_partial_tool_call_on_provider_transport_error(tmp_path)
     assert assistant["tool_calls"][0]["id"] == "call_partial"
     assert assistant["tool_calls"][0]["function"]["arguments"] == '{"script":"echo hi"}'
     assert not any("LLM/runner error" in str(p.get("content", "")) for p in payloads)
+
+
+def test_scheduler_bulk_max_event_seqs(tmp_path):
+    from eggthreads.runner import _max_event_seqs_bulk
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
+    empty = ts.create_child_thread(db, root, name="empty")
+
+    _make_thread_runnable(db, root)
+    _make_thread_runnable(db, child)
+    _append_event(db, child, "msg.create", {"role": "assistant", "content": "done"}, msg_id=_unique_id())
+
+    seqs = _max_event_seqs_bulk(db, [root, child, empty])
+
+    assert seqs[root] == db.max_event_seq(root)
+    assert seqs[child] == db.max_event_seq(child)
+    assert seqs[empty] == -1
+
+
+def test_scheduler_bulk_active_open_threads_excludes_expired_leases(tmp_path):
+    from eggthreads.runner import _active_open_threads_bulk
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    active = ts.create_child_thread(db, root, name="active")
+    expired = ts.create_child_thread(db, root, name="expired")
+
+    active_until = (_utcnow() + timedelta(minutes=1)).strftime(ISO_FORMAT)
+    expired_until = (_utcnow() - timedelta(minutes=1)).strftime(ISO_FORMAT)
+    assert db.try_open_stream(active, _unique_id(), active_until, owner="test")
+    assert db.try_open_stream(expired, _unique_id(), expired_until, owner="test")
+
+    assert _active_open_threads_bulk(db, [root, active, expired]) == {active}
+
+
+def test_scheduler_bulk_thread_scheduling_matches_public_settings(tmp_path):
+    from eggthreads.runner import _sort_by_priority_map, _thread_scheduling_bulk
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    low = ts.create_child_thread(db, root, name="low")
+    high = ts.create_child_thread(db, root, name="high")
+
+    ts.set_thread_scheduling(db, low, priority=1, threshold=2.5)
+    ts.set_thread_scheduling(db, high, priority=9)
+
+    settings = _thread_scheduling_bulk(db, [root, low, high])
+
+    assert settings[root].priority == 0
+    assert settings[root].threshold is None
+    assert settings[low].priority == 1
+    assert settings[low].threshold == 2.5
+    assert settings[high].priority == 9
+    assert settings[high].threshold is None
+    assert _sort_by_priority_map([low, high, root], "none", settings) == [high, low, root]

@@ -189,6 +189,44 @@ class TestCurrentTokenStats:
         assert ctx is None or api is None or isinstance(api, dict)
 
 
+
+    def test_caches_unchanged_token_stats_briefly(self, egg_app, monkeypatch):
+        """Repeated panel ticks should not rescan token stats when events are unchanged."""
+        calls = {"count": 0}
+
+        def fake_total_token_stats(db, thread_id, llm=None):
+            calls["count"] += 1
+            return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
+
+        monkeypatch.setattr("eggthreads.total_token_stats", fake_total_token_stats)
+        monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 3)
+
+        assert egg_app.current_token_stats()[0] == 7
+        assert egg_app.current_token_stats()[0] == 7
+        assert calls["count"] == 1
+
+    def test_idle_token_stats_cache_ignores_unrelated_event_seq_changes(self, egg_app, monkeypatch):
+        """Idle token stats should not rescan for config-only event changes."""
+        calls = {"count": 0}
+
+        def fake_total_token_stats(db, thread_id, llm=None):
+            calls["count"] += 1
+            return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
+
+        monkeypatch.setattr("eggthreads.total_token_stats", fake_total_token_stats)
+        monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 999)
+
+        egg_app.current_token_stats()
+        egg_app.db.append_event(
+            event_id="model-switch-cache-test",
+            thread_id=egg_app.current_thread,
+            type_="model.switch",
+            payload={"model_key": "other"},
+        )
+        egg_app.current_token_stats()
+
+        assert calls["count"] == 1
+
 class TestTruncateForChatPanel:
     """Tests for truncate_for_chat_panel()."""
 

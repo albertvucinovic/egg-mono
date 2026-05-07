@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import List, Optional
@@ -473,6 +474,7 @@ Utility:
   /togglePanel <name>            - Show/hide a panel
   /toggleBorders                 - Toggle panel borders
   /enterMode <send|newline>      - Set Enter key behavior
+  /reload                        - Restart eggw and reopen this thread
   /authStatus                    - Show ChatGPT OAuth status
   /login                         - Start ChatGPT OAuth login
   /logout                        - Clear ChatGPT OAuth token
@@ -547,6 +549,42 @@ def cmd_quit() -> CommandResponse:
     return CommandResponse(
         success=True,
         message="Quit command not applicable in web UI",
+    )
+
+
+def cmd_reload(thread_id: str) -> CommandResponse:
+    """Handle /reload command - restart eggw.sh and reopen current thread."""
+    state_file = os.environ.get("EGGW_RELOAD_STATE_FILE")
+    if not state_file:
+        return CommandResponse(
+            success=False,
+            message="/reload is only available when launched via eggw.sh",
+        )
+
+    try:
+        Path(state_file).write_text(f"{thread_id}\n", encoding="utf-8")
+    except Exception as e:
+        return CommandResponse(
+            success=False,
+            message=f"/reload failed to save thread id: {e}",
+        )
+
+    async def _exit_for_reload() -> None:
+        await asyncio.sleep(0.1)
+        os._exit(int(os.environ.get("EGGW_RELOAD_EXIT_CODE", "75")))
+
+    try:
+        asyncio.create_task(_exit_for_reload())
+    except Exception as e:
+        return CommandResponse(
+            success=False,
+            message=f"/reload failed to schedule restart: {e}",
+        )
+
+    return CommandResponse(
+        success=True,
+        message="Reloading eggw and reopening this thread...",
+        data={"action": "reload", "thread_id": thread_id},
     )
 
 

@@ -130,10 +130,8 @@ def create_default_tools() -> ToolRegistry:
     Returns a registry pre-populated with common tools:
     - bash: Execute shell commands
     - python: Execute Python scripts
-    - javascript: Browser JavaScript execution (placeholder)
     - spawn_agent: Create child threads for delegation
     - spawn_agent_auto: Create auto-approved child threads
-    - replace_between: File text replacement
     - web_search: Web search via the configured backend (SearXNG by default)
     - fetch_url: Fetch and extract readable markdown for a URL
     - wait: Synchronize on child thread completion
@@ -143,7 +141,6 @@ def create_default_tools() -> ToolRegistry:
     """
     import asyncio, subprocess, sys, os, json as _json, time as _time
     from io import StringIO
-    from pathlib import Path
 
     reg = ToolRegistry()
 
@@ -567,23 +564,6 @@ def create_default_tools() -> ToolRegistry:
         impl=_session_stop,
     )
 
-    # javascript (placeholder for remote-debugging execution; here we only echo input)
-    def _javascript(args: Dict[str, Any]):
-        script = args.get('script', '')
-        url = args.get('url', '')
-        return _json.dumps({"script": script[:200], "url": url})
-
-    reg.register(
-        name='javascript',
-        description='Execute JavaScript in a browser via remote debugging (app layer should implement).',
-        parameters_schema={
-            "type": "object",
-            "properties": {"script": {"type": "string"}, "url": {"type": "string"}},
-            "required": ["script"],
-        },
-        impl=_javascript,
-    )
-
     def _clean_optional_text(value: Any) -> str | None:
         if isinstance(value, str):
             value = value.strip()
@@ -968,6 +948,48 @@ def create_default_tools() -> ToolRegistry:
         local_only=False,
     )
 
+    def _continue_subthread(args: Dict[str, Any]):
+        from .db import ThreadsDB
+        from .api import continue_child_thread
+
+        manager_id = (args.get('_thread_id') or args.get('manager_thread_id') or '').strip()
+        child_id = (args.get('child_thread_id') or args.get('thread_id') or '').strip()
+        msg_id = _clean_optional_text(args.get('msg_id'))
+        result = continue_child_thread(ThreadsDB(), manager_id, child_id, msg_id=msg_id)
+        payload = {
+            "success": result.success,
+            "thread_id": child_id,
+            "continue_from_msg_id": result.continue_from_msg_id,
+            "skipped_msg_ids": result.skipped_msg_ids,
+            "message": result.message,
+        }
+        if result.diagnosis is not None:
+            payload["diagnosis"] = {
+                "is_healthy": result.diagnosis.is_healthy,
+                "issues": result.diagnosis.issues,
+                "suggested_continue_point": result.diagnosis.suggested_continue_point,
+                "details": result.diagnosis.details,
+            }
+        return _json.dumps(payload, indent=2, sort_keys=True)
+
+    reg.register(
+        name='continue_subthread',
+        description=(
+            'Repair or continue a child/descendant subthread after LLM/runner failures, analogous to the user /continue command. '
+            'The target must be a descendant of the calling thread and must not have an active lease.'
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "child_thread_id": {"type": "string", "description": "Target child or descendant thread id."},
+                "msg_id": {"type": "string", "description": "Optional message id to continue from; omit for auto-diagnosis."},
+            },
+            "required": ["child_thread_id"],
+        },
+        impl=_continue_subthread,
+        local_only=False,
+    )
+
     def _get_child_status(args: Dict[str, Any]):
         from .db import ThreadsDB
         from .api import get_child_thread_statuses
@@ -1029,41 +1051,6 @@ def create_default_tools() -> ToolRegistry:
         },
         impl=_get_child_status,
         local_only=False,
-    )
-
-    # replace_between
-    def _replace_between(args: Dict[str, Any]):
-        file_path = args.get('file_path', '')
-        start_text = args.get('start_text', '')
-        end_text = args.get('end_text', '')
-        new_text = args.get('new_text', '')
-        p = Path(file_path)
-        content = p.read_text() if p.exists() else ''
-        sidx = content.find(start_text)
-        if sidx == -1:
-            return "Error: start_text not found."
-        eidx = content.find(end_text, sidx + len(start_text))
-        if eidx == -1:
-            return "Error: end_text not found after start_text."
-        new_content = content[:sidx] + new_text + content[eidx + len(end_text):]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(new_content)
-        return "Success: replaced region."
-
-    reg.register(
-        name='replace_between',
-        description='Replace the first region between two exact string boundaries (start_text and the first subsequent end_text) with new_text. Exact literal matching only (no regex). The boundaries themselves are also replaced. Works across line breaks.',
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "start_text": {"type": "string"},
-                "end_text": {"type": "string"},
-                "new_text": {"type": "string"},
-            },
-            "required": ["file_path", "start_text", "end_text", "new_text"],
-        },
-        impl=_replace_between,
     )
 
     # web_search / fetch_url backed by a pluggable WebBackend.

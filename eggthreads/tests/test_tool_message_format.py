@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from eggthreads import ThreadRunner  # type: ignore
+from eggthreads.runner import PREVIEW_MAX_CHARS, stash_tool_output_and_build_preview
 
 
 class _DummyRunner(ThreadRunner):  # type: ignore[misc]
@@ -220,6 +221,41 @@ class TestRA3ToolMessageFormat:
         user_msgs = [m for m in out if m.get("role") == "user"]
         assert len(user_msgs) == 1
         assert user_msgs[0]["content"] == "$$secret"
+
+
+class TestInterruptedToolOutputPublication:
+    """Interrupted tool output publication must not fall back to full output."""
+
+    def test_interrupted_output_fallback_is_bounded_preview(self, tmp_path) -> None:
+        import eggthreads as ts
+
+        db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+        db.init_schema()
+        tid = ts.create_root_thread(db, name="root")
+        tcid = "tc-interrupted-large"
+        large_output = "z" * (PREVIEW_MAX_CHARS + 500)
+
+        content, _saved = stash_tool_output_and_build_preview(db, tid, tcid, large_output)
+        if not content.rstrip().endswith("Output incomplete - interrupted"):
+            content = content.rstrip() + "\n\nOutput incomplete - interrupted"
+
+        assert content != large_output
+        assert len(content) < len(large_output)
+
+        msgs = [
+            {"role": "user", "content": "run tool"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": tcid, "function": {"name": "bash", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": tcid, "content": content},
+        ]
+        out = _sanitize(msgs)
+
+        tool_msg = next(m for m in out if m.get("role") == "tool")
+        assert tool_msg["content"] == content
+        assert tool_msg["content"] != large_output
 
 
 class TestToolCallIdNormalization:
