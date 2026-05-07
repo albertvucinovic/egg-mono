@@ -242,7 +242,7 @@ Status notes:
 
 Goal: remove hidden magic args and support future async/streaming/cancellable plugin tools.
 
-- [ ] Introduce `ToolContext`.
+- [x] Introduce `ToolContext`.
   - Suggested fields:
     - `db`
     - `thread_id`
@@ -253,7 +253,7 @@ Goal: remove hidden magic args and support future async/streaming/cancellable pl
     - `cancel_check`
     - `working_dir`
     - sandbox/session handles or accessors
-- [ ] Keep backward compatibility for existing `impl(args)` tools while adding context-aware execution.
+- [x] Keep backward compatibility for existing `impl(args)` tools while adding context-aware execution.
 - [ ] Stop injecting new private keys where possible.
   - Legacy private keys may stay temporarily:
     - `_thread_id`
@@ -271,6 +271,13 @@ Goal: remove hidden magic args and support future async/streaming/cancellable pl
   - sandbox provider execution;
   - Docker/container cleanup.
 - [ ] Commit after each compatibility-preserving substep.
+
+Status notes:
+- 2026-05-07: Added `ToolContext` with db/thread/invoke/origin/model/timeout/cancel/working-dir/raw context fields.
+- 2026-05-07: Added `accepts_context=True` registration option; legacy tools still receive only `impl(args)`.
+- 2026-05-07: Exported `ToolContext` from `eggthreads`.
+- 2026-05-07: Added context-aware tool coverage to `eggthreads/tests/test_plugin_tool_registry.py`.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py`.
 
 ## Phase 4 — Command registry and internal command plugins
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Mapping
 
 
 def resolve_tool_timeout_arg(
@@ -29,6 +30,25 @@ def resolve_tool_timeout_arg(
 
 
 
+@dataclass(frozen=True)
+class ToolContext:
+    """Execution context for context-aware tool implementations.
+
+    Existing tools still receive only their decoded argument dict. New tools can
+    opt in to receiving this object by registering with ``accepts_context=True``.
+    """
+
+    db: Any = None
+    thread_id: str | None = None
+    invoke_id: str | None = None
+    origin: str | None = None
+    initial_model_key: str | None = None
+    timeout_sec: float | None = None
+    cancel_check: Callable[[], bool] | None = None
+    working_dir: Any = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
 class ToolRegistry:
     """Simple registry for OpenAI function-call compatible tools.
 
@@ -39,7 +59,15 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, Dict[str, Any]] = {}
 
-    def register(self, name: str, description: str, parameters_schema: Dict[str, Any], impl: Callable[[Dict[str, Any]], Any], local_only: bool = False):
+    def register(
+        self,
+        name: str,
+        description: str,
+        parameters_schema: Dict[str, Any],
+        impl: Callable[..., Any],
+        local_only: bool = False,
+        accepts_context: bool = False,
+    ):
         """Register a tool.
 
         Args:
@@ -51,6 +79,9 @@ class ToolRegistry:
                 tools_spec(), but can still be executed via execute(). This is
                 useful for UI-only helpers like spawn_agent or wait that should
                 not be called directly by the model.
+            accepts_context: If True, impl is called as ``impl(args, ctx)``
+                where ctx is a ToolContext. Existing tools should leave this
+                False and continue to receive only ``args``.
         """
         self._tools[name] = {
             "spec": {
@@ -63,6 +94,7 @@ class ToolRegistry:
             },
             "impl": impl,
             "local_only": local_only,
+            "accepts_context": accepts_context,
         }
 
     def tools_spec(self) -> List[Dict[str, Any]]:
@@ -118,6 +150,20 @@ class ToolRegistry:
         if cancel_check is not None and "_cancel_check" not in args:
             args["_cancel_check"] = cancel_check
 
+        tool_ctx = ToolContext(
+            db=context.get("db"),
+            thread_id=thread_id,
+            invoke_id=context.get("invoke_id"),
+            origin=context.get("origin"),
+            initial_model_key=init_m,
+            timeout_sec=resolve_tool_timeout_arg(args),
+            cancel_check=cancel_check,
+            working_dir=context.get("working_dir"),
+            raw=dict(context),
+        )
+
+        if entry.get("accepts_context"):
+            return impl(args, tool_ctx)
         return impl(args)
 
 
