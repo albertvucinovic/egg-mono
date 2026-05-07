@@ -21,20 +21,18 @@ def test_memory_repl_generated_tool_wrapper_supports_from_import(tmp_path, monke
     ts.enable_thread_session(db, parent, provider="memory")
     runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
     ts.set_thread_tools_enabled(db, runtime, True)
-    ts.set_thread_tool_allowlist(db, runtime, ["replace_between"])
-    (tmp_path / "sample.txt").write_text("hello old bye", encoding="utf-8")
+    ts.set_thread_tool_allowlist(db, runtime, ["python_repl"])
 
     out = ts.execute_python_repl(
         db,
         parent,
-        "from eggtools import replace_between\n"
-        "print(replace_between(file_path='sample.txt', start_text='old', end_text=' bye', new_text='new bye'))",
+        "from eggtools import python_repl\n"
+        "print(python_repl(code='pass', _thread_id=''))",
         timeout_sec=5,
         drive_runtime_tools=True,
     )
 
-    assert "Success: replaced region." in out
-    assert (tmp_path / "sample.txt").read_text(encoding="utf-8") == "hello new bye"
+    assert "Error: python_repl requires thread context." in out
     assert "ImportError" not in out
 
 
@@ -52,16 +50,16 @@ def test_docker_runtime_eggtools_generated_wrapper_supports_from_import(tmp_path
         sys.modules["eggtools"] = module
         spec.loader.exec_module(module)
 
-        from eggtools import replace_between  # type: ignore
+        from eggtools import python_repl  # type: ignore
 
-        assert callable(replace_between)
-        assert replace_between.__name__ == "replace_between"
+        assert callable(python_repl)
+        assert python_repl.__name__ == "python_repl"
         try:
-            replace_between({"file_path": "x"})
+            python_repl()
         except TypeError as e:
-            assert "positional" in str(e)
+            assert "code" in str(e)
         else:
-            raise AssertionError("generated wrapper should not accept dict positional calls")
+            raise AssertionError("generated wrapper should require schema-required args")
     finally:
         sys.modules.pop("eggtools", None)
         if old_module is not None:

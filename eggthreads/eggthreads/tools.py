@@ -130,10 +130,8 @@ def create_default_tools() -> ToolRegistry:
     Returns a registry pre-populated with common tools:
     - bash: Execute shell commands
     - python: Execute Python scripts
-    - javascript: Browser JavaScript execution (placeholder)
     - spawn_agent: Create child threads for delegation
     - spawn_agent_auto: Create auto-approved child threads
-    - replace_between: File text replacement
     - web_search: Web search via the configured backend (SearXNG by default)
     - fetch_url: Fetch and extract readable markdown for a URL
     - wait: Synchronize on child thread completion
@@ -143,7 +141,6 @@ def create_default_tools() -> ToolRegistry:
     """
     import asyncio, subprocess, sys, os, json as _json, time as _time
     from io import StringIO
-    from pathlib import Path
 
     reg = ToolRegistry()
 
@@ -565,23 +562,6 @@ def create_default_tools() -> ToolRegistry:
             },
         },
         impl=_session_stop,
-    )
-
-    # javascript (placeholder for remote-debugging execution; here we only echo input)
-    def _javascript(args: Dict[str, Any]):
-        script = args.get('script', '')
-        url = args.get('url', '')
-        return _json.dumps({"script": script[:200], "url": url})
-
-    reg.register(
-        name='javascript',
-        description='Execute JavaScript in a browser via remote debugging (app layer should implement).',
-        parameters_schema={
-            "type": "object",
-            "properties": {"script": {"type": "string"}, "url": {"type": "string"}},
-            "required": ["script"],
-        },
-        impl=_javascript,
     )
 
     def _clean_optional_text(value: Any) -> str | None:
@@ -1071,41 +1051,6 @@ def create_default_tools() -> ToolRegistry:
         },
         impl=_get_child_status,
         local_only=False,
-    )
-
-    # replace_between
-    def _replace_between(args: Dict[str, Any]):
-        file_path = args.get('file_path', '')
-        start_text = args.get('start_text', '')
-        end_text = args.get('end_text', '')
-        new_text = args.get('new_text', '')
-        p = Path(file_path)
-        content = p.read_text() if p.exists() else ''
-        sidx = content.find(start_text)
-        if sidx == -1:
-            return "Error: start_text not found."
-        eidx = content.find(end_text, sidx + len(start_text))
-        if eidx == -1:
-            return "Error: end_text not found after start_text."
-        new_content = content[:sidx] + new_text + content[eidx + len(end_text):]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(new_content)
-        return "Success: replaced region."
-
-    reg.register(
-        name='replace_between',
-        description='Replace the first region between two exact string boundaries (start_text and the first subsequent end_text) with new_text. Exact literal matching only (no regex). The boundaries themselves are also replaced. Works across line breaks.',
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "start_text": {"type": "string"},
-                "end_text": {"type": "string"},
-                "new_text": {"type": "string"},
-            },
-            "required": ["file_path", "start_text", "end_text", "new_text"],
-        },
-        impl=_replace_between,
     )
 
     # web_search / fetch_url backed by a pluggable WebBackend.
