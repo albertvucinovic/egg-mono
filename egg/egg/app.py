@@ -658,6 +658,10 @@ async def run_cli() -> int:
     app = EggDisplayApp()
     await app.run()
     if getattr(app, '_reload_requested', False):
+        if not getattr(app, '_reload_via_shell', False):
+            egg_sh = Path(__file__).resolve().parents[1] / 'egg.sh'
+            if egg_sh.is_file():
+                os.execv(str(egg_sh), [str(egg_sh), *_sys.argv[1:]])
         try:
             return int(os.environ.get('EGG_RELOAD_EXIT_CODE', '75'))
         except Exception:
