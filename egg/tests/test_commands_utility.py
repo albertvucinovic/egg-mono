@@ -39,6 +39,7 @@ class TestCmdHelp:
         assert any("/sessionStatus" in str(call) for call in app.printed)
         assert any("/pythonRepl" in str(call) for call in app.printed)
         assert any("/skill" in str(call) for call in app.printed)
+        assert any("/reload" in str(call) for call in app.printed)
 
 
 class TestCmdSkills:
@@ -188,6 +189,28 @@ class TestCmdQuit:
 
         egg_app.cmd_quit("")
 
+        assert egg_app.running is False
+
+
+class TestCmdReload:
+    """Tests for cmd_reload()."""
+
+    def test_requires_egg_sh_state_file(self, egg_app, monkeypatch):
+        monkeypatch.delenv("EGG_RELOAD_STATE_FILE", raising=False)
+
+        egg_app.cmd_reload("")
+
+        assert any("egg.sh" in msg for msg in egg_app._system_log)
+
+    def test_writes_current_thread_and_stops(self, egg_app, tmp_path, monkeypatch):
+        state_file = tmp_path / "reload-state"
+        monkeypatch.setenv("EGG_RELOAD_STATE_FILE", str(state_file))
+        egg_app.running = True
+
+        egg_app.cmd_reload("")
+
+        assert state_file.read_text(encoding="utf-8").strip() == egg_app.current_thread
+        assert egg_app._reload_requested is True
         assert egg_app.running is False
 
 

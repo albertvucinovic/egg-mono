@@ -160,12 +160,17 @@ class EggDisplayApp(
         # a persistent warning when tools are running without a
         # sandbox.
         self._sandbox_status: Dict[str, Any] = {}
-        self.current_thread: str = create_root_thread(self.db, name='Root', models_path=str(MODELS_PATH))
-        append_message(self.db, self.current_thread, 'system', self.system_prompt)
-        create_snapshot(self.db, self.current_thread)
+        self._reload_requested: bool = False
+        reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
+        if reload_thread and self.db.get_thread(reload_thread):
+            self.current_thread = reload_thread
+        else:
+            self.current_thread = create_root_thread(self.db, name='Root', models_path=str(MODELS_PATH))
+            append_message(self.db, self.current_thread, 'system', self.system_prompt)
+            create_snapshot(self.db, self.current_thread)
 
         self.active_schedulers: Dict[str, Dict[str, Any]] = {}
-        self.start_scheduler(self.current_thread)
+        self.start_scheduler(self.thread_root_id(self.current_thread))
 
         # Display mode: "inline" (HEAD-style, native terminal scroll, tiny
         # diffs, stream goes into Chat Messages panel) or "full" (alt-screen
@@ -640,13 +645,19 @@ class EggDisplayApp(
                 pass
 
 
-async def run_cli():
+async def run_cli() -> int:
     app = EggDisplayApp()
     await app.run()
+    if getattr(app, '_reload_requested', False):
+        try:
+            return int(os.environ.get('EGG_RELOAD_EXIT_CODE', '75'))
+        except Exception:
+            return 75
+    return 0
 
 
 def main():
-    asyncio.run(run_cli())
+    raise SystemExit(asyncio.run(run_cli()))
 
 
 if __name__ == '__main__':

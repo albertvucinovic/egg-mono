@@ -36,7 +36,7 @@ EGG_COMMAND_COMPLETIONS: List[str] = [
     '/skills', '/skill',
     '/schedulers', '/enterMode', '/toggleAutoApproval',
     '/toolsOn', '/toolsOff', '/disableTool', '/enableTool', '/toolsStatus', '/toolInfo',
-    '/toolsSecrets', '/toggleSandboxing', '/quit', '/paste',
+    '/toolsSecrets', '/toggleSandboxing', '/quit', '/reload', '/paste',
     '/setSandboxConfiguration', '/getSandboxingConfig',
     *SESSION_COMMAND_COMPLETIONS,
     '/setContextLimit', '/setThreadPriority',

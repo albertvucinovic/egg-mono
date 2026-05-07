@@ -24,4 +24,21 @@ elif [ -f "$MONO_ROOT/.env" ]; then
     set -a && source "$MONO_ROOT/.env" && set +a
 fi
 
-cd "$CALLER_CWD" && PYTHONSAFEPATH=1 python -c "from egg.app import main; main()" "$@"
+RELOAD_EXIT_CODE=75
+RELOAD_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/egg-reload.XXXXXX")"
+export EGG_RELOAD_EXIT_CODE
+export EGG_RELOAD_STATE_FILE
+
+set +e
+(cd "$CALLER_CWD" && PYTHONSAFEPATH=1 python -c "from egg.app import main; main()" "$@")
+status=$?
+set -e
+
+if [ "$status" -eq "$RELOAD_EXIT_CODE" ] && [ -s "$RELOAD_STATE_FILE" ]; then
+    export EGG_RELOAD_THREAD_ID="$(cat "$RELOAD_STATE_FILE")"
+    rm -f "$RELOAD_STATE_FILE"
+    exec "$SCRIPT_DIR/egg.sh" "$@"
+fi
+
+rm -f "$RELOAD_STATE_FILE"
+exit "$status"
