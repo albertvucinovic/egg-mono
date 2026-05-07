@@ -283,6 +283,19 @@ class TestEnterModeWorkflow:
         egg_app.cmd_enterMode("newline")
         assert egg_app.enter_sends is False
 
+    def test_reload_stops_app_when_submitted_with_enter(self, egg_app, tmp_path, monkeypatch):
+        """Submitting /reload should break the main loop, not only request mode rebuild."""
+        state_file = tmp_path / "reload-state"
+        monkeypatch.setenv("EGG_RELOAD_STATE_FILE", str(state_file))
+        egg_app.running = True
+        egg_app.input_panel.editor.editor.set_text("/reload")
+
+        egg_app.handle_key("\r")
+
+        assert egg_app.running is False
+        assert egg_app._reload_requested is True
+        assert state_file.read_text(encoding="utf-8").strip() == egg_app.current_thread
+
 
 class TestEnterModeDefaults:
     """Tests for default enter mode."""

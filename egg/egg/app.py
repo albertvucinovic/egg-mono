@@ -162,8 +162,10 @@ class EggDisplayApp(
         self._sandbox_status: Dict[str, Any] = {}
         self._reload_requested: bool = False
         reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
+        reloaded_existing_thread = False
         if reload_thread and self.db.get_thread(reload_thread):
             self.current_thread = reload_thread
+            reloaded_existing_thread = True
         else:
             self.current_thread = create_root_thread(self.db, name='Root', models_path=str(MODELS_PATH))
             append_message(self.db, self.current_thread, 'system', self.system_prompt)
@@ -171,6 +173,8 @@ class EggDisplayApp(
 
         self.active_schedulers: Dict[str, Dict[str, Any]] = {}
         self.start_scheduler(self.thread_root_id(self.current_thread))
+        if reloaded_existing_thread:
+            self.log_system(f"Reloaded Egg on thread {self.current_thread[-8:]}.")
 
         # Display mode: "inline" (HEAD-style, native terminal scroll, tiny
         # diffs, stream goes into Chat Messages panel) or "full" (alt-screen
@@ -440,6 +444,9 @@ class EggDisplayApp(
         if text.startswith('/paste'):
             self.handle_command(text)
             return False
+        if text.startswith('/reload'):
+            self.handle_command(text)
+            return False
         if text.startswith('/'):
             self.handle_command(text)
             return True
@@ -588,6 +595,8 @@ class EggDisplayApp(
                 # Exited the with block. If the inner loop set
                 # _pending_mode_change, loop and rebuild the renderer.
                 # Otherwise the user asked to quit; break the outer loop.
+                if not self.running:
+                    break
                 if not self._pending_mode_change:
                     break
         except (KeyboardInterrupt, asyncio.CancelledError):

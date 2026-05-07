@@ -192,7 +192,7 @@ class UtilityCommandsMixin:
             return
 
         self._reload_requested = True
-        self.running = False
+        self.cmd_quit(arg)
 
     def cmd_enterMode(self, arg: str) -> None:
         """Handle /enterMode command - set enter key behavior."""
