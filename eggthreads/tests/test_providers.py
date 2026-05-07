@@ -147,11 +147,15 @@ def test_docker_provider_wrap_argv(eggthreads):
         assert wrapped[1] == "run"
         assert wrapped[2] == "--rm"
         assert wrapped[3] == "--init"  # For proper signal forwarding
-        assert wrapped[4] == "--user"
-        #wrapped[5] is the id of the user, which we do not know so skipping
-        assert wrapped[6] == "--network"
-        assert wrapped[7] == "none"
-        assert wrapped[8] == "-v"
+        assert "--cpus" in wrapped
+        assert wrapped[wrapped.index("--cpus") + 1] == "4"
+        assert "--user" in wrapped
+        assert wrapped.index("--user") + 1 < len(wrapped)
+        # wrapped[user_idx + 1] is the id of the user, which we do not know so skipping
+        assert "--network" in wrapped
+        network_idx = wrapped.index("--network")
+        assert wrapped[network_idx + 1] == "none"
+        assert "-v" in wrapped
         # Current directory mounted
         assert "-w" in wrapped
         #assert "python:3.12-slim" in wrapped # we no longer know which image is used depends on what exists
