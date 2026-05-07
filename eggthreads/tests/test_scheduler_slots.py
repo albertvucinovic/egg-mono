@@ -105,6 +105,74 @@ def _make_thread_not_runnable(db: ThreadsDB, thread_id: str) -> None:
     )
 
 
+class _NeverLLM:
+    async def astream_chat(self, messages, **kwargs):  # pragma: no cover - should not be called
+        raise AssertionError("LLM should not be called")
+
+
+def test_interrupted_tool_publication_uses_preview_not_full_output(tmp_path):
+    """Interrupted tool output fallback must not publish full large output."""
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    tcid = "tc-interrupted-large"
+    full_output = "z" * 9000
+
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="msg.create",
+        msg_id="assistant-tool-msg",
+        payload={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": tcid, "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tcid, "decision": "granted"},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": tcid},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.finished",
+        payload={"tool_call_id": tcid, "reason": "interrupted", "output": full_output},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.output_approval",
+        payload={"tool_call_id": tcid, "decision": "whole", "preview": ""},
+    )
+
+    async def run_once():
+        runner = ts.ThreadRunner(db, root, llm=_NeverLLM(), config=RunnerConfig())
+        assert await runner.run_once() is True
+
+    asyncio.run(run_once())
+
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE type='msg.create' AND msg_id IS NOT NULL ORDER BY event_seq DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row[0])
+    assert payload["role"] == "tool"
+    assert payload["tool_call_id"] == tcid
+    assert payload["content"] != full_output
+    assert len(payload["content"]) < len(full_output)
+    assert "Output incomplete - interrupted" in payload["content"]
+
+
 class TestSlotManagement:
     """Tests for scheduler slot availability and watermark behavior."""
 

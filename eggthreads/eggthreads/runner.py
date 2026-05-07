@@ -2491,11 +2491,25 @@ class ThreadRunner:
                 # decision is "omit" for LLM context).
                 if finished_reason == 'interrupted':
                     # Prefer an explicit preview when decision='partial';
-                    # otherwise fall back to the full finished_output.
+                    # otherwise fall back to a bounded preview of the partial
+                    # output. Never publish the full finished_output into the
+                    # tool message: published tool messages are eligible for
+                    # provider context unless no_api, and interrupted tools can
+                    # still produce very large partial output.
                     if decision == 'partial' and preview:
                         content = str(preview)
                     elif finished_output:
-                        content = finished_output
+                        try:
+                            content, _saved = stash_tool_output_and_build_preview(
+                                self.db,
+                                self.thread_id,
+                                str(tc.tool_call_id),
+                                finished_output,
+                            )
+                        except Exception:
+                            content = finished_output[:PREVIEW_MAX_CHARS]
+                            if len(finished_output) > PREVIEW_MAX_CHARS:
+                                content = content.rstrip() + "\n\n...[output truncated for preview]..."
                     else:
                         content = str(preview or "Output omitted.")
                     # Append a clear note so it is obvious this output is
