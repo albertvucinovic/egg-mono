@@ -119,6 +119,13 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
         }
         addSystemLog(response.message || "Command completed", "success");
 
+        if (response.data?.action === "reload") {
+          setTimeout(() => {
+            window.location.href = response.data?.thread_id ? `/${response.data.thread_id}` : window.location.href;
+          }, 1000);
+          return;
+        }
+
         // Handle specific command responses
         if (response.data?.child_id) {
           // Spawned a child thread - refresh thread list but stay on parent
