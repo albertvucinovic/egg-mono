@@ -120,13 +120,18 @@ The preferred API may become a single `plugin.register(context)` entry point whe
 
 Goal: make sure the codebase starts from a known, committed state.
 
-- [ ] Confirm the current default tools no longer include removed placeholder/unsafe tools.
+- [x] Confirm the current default tools no longer include removed placeholder/unsafe tools.
   - Expected removed tools: `replace_between`, `javascript`.
   - Suggested check: instantiate `create_default_tools()` and assert those names are absent.
-- [ ] Run focused tool-wrapper tests.
+- [x] Run focused tool-wrapper tests.
   - Suggested: `pytest -q eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
-- [ ] Commit the existing removals if they are present but uncommitted.
-- [ ] Keep `plugins-todo.md` updated with the current status after the commit.
+- [x] Commit the existing removals if they are present but uncommitted.
+- [x] Keep `plugins-todo.md` updated with the current status after the commit.
+
+Status notes:
+- 2026-05-07: `create_default_tools()` no longer registers `replace_between` or `javascript`.
+- 2026-05-07: `pytest -q eggthreads/tests/test_repl_dynamic_tool_wrappers.py` passed.
+- 2026-05-07: removal commit already exists as `ffa6814 removing replace_between and javascript tools`.
 
 ## Phase 1 — Internal plugin manager skeleton
 
