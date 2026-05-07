@@ -203,6 +203,7 @@ if [ -s "$RELOAD_STATE_FILE" ]; then
     export EGGW_RELOAD_THREAD_ID="$(cat "$RELOAD_STATE_FILE")"
     rm -f "$RELOAD_STATE_FILE"
     cleanup
+    cd "$CALLER_CWD"
     exec "$SCRIPT_DIR/eggw.sh" "$@"
 fi
 
