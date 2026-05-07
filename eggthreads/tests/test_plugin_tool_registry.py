@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import eggthreads as ts
 from eggthreads.plugins import FunctionPlugin, ToolPluginContext, register_plugins
 from eggthreads.tools import ToolCapabilities, ToolContext, ToolRegistry, create_default_tools, create_tool_registry
@@ -153,3 +156,92 @@ def test_execution_tools_advertise_current_capabilities() -> None:
     assert isinstance(python_capabilities, ToolCapabilities)
     assert python_capabilities.supports_streaming is False
     assert python_capabilities.supports_cancellation is True
+
+
+def test_execute_async_awaits_async_tool() -> None:
+    registry = ToolRegistry()
+
+    async def impl(args: dict[str, object]) -> str:
+        await asyncio.sleep(0)
+        return f"async-{args['value']}"
+
+    registry.register(
+        "async_tool",
+        "Async tool",
+        {"type": "object", "properties": {"value": {"type": "string"}}},
+        impl,
+    )
+
+    assert asyncio.run(registry.execute_async("async_tool", {"value": "ok"})) == "async-ok"
+
+
+def test_execute_async_preserves_context_aware_tools() -> None:
+    registry = ToolRegistry()
+    seen: dict[str, object] = {}
+
+    async def impl(args: dict[str, object], ctx: ToolContext) -> str:
+        await asyncio.sleep(0)
+        seen["args"] = args
+        seen["ctx"] = ctx
+        return "async-context-ok"
+
+    registry.register(
+        "async_context_tool",
+        "Async context tool",
+        {"type": "object", "properties": {}},
+        impl,
+        accepts_context=True,
+    )
+
+    out = asyncio.run(
+        registry.execute_async(
+            "async_context_tool",
+            {},
+            thread_id="thread-1",
+            tool_timeout_sec=5,
+        )
+    )
+
+    assert out == "async-context-ok"
+    assert seen["args"] == {}
+    ctx = seen["ctx"]
+    assert isinstance(ctx, ToolContext)
+    assert ctx.thread_id == "thread-1"
+    assert ctx.timeout_sec == 5
+
+
+def test_execute_sync_runs_async_tool_without_running_loop() -> None:
+    registry = ToolRegistry()
+
+    async def impl(args: dict[str, object]) -> str:
+        await asyncio.sleep(0)
+        return "sync-bridge-ok"
+
+    registry.register(
+        "async_tool",
+        "Async tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    assert registry.execute("async_tool", {}) == "sync-bridge-ok"
+
+
+def test_execute_async_runs_sync_tool_in_worker_thread() -> None:
+    registry = ToolRegistry()
+    main_thread_id = threading.get_ident()
+    seen: dict[str, object] = {}
+
+    def impl(args: dict[str, object]) -> str:
+        seen["thread_id"] = threading.get_ident()
+        return f"sync-{args['value']}"
+
+    registry.register(
+        "sync_tool",
+        "Sync tool",
+        {"type": "object", "properties": {"value": {"type": "string"}}},
+        impl,
+    )
+
+    assert asyncio.run(registry.execute_async("sync_tool", {"value": "ok"})) == "sync-ok"
+    assert seen["thread_id"] != main_thread_id

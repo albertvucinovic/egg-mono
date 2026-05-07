@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping
@@ -82,6 +84,7 @@ class ToolRegistry:
 
     - tools_spec() returns the JSON schema list to pass to the LLM
     - execute(name, arguments) dispatches to the registered callable
+    - execute_async(name, arguments) dispatches and awaits async callables
     """
 
     def __init__(self):
@@ -139,7 +142,12 @@ class ToolRegistry:
         """
         return [d["spec"] for d in self._tools.values() if not d.get("local_only")]
 
-    def execute(self, name: str, arguments: Any, **context: Any) -> Any:
+    def _prepare_call(
+        self,
+        name: str,
+        arguments: Any,
+        context: Mapping[str, Any],
+    ) -> tuple[Callable[..., Any], Dict[str, Any], ToolContext | None]:
         entry = self._tools.get(name)
         if not entry:
             raise KeyError(f"Unknown tool: {name}")
@@ -201,9 +209,48 @@ class ToolRegistry:
             raw=dict(context),
         )
 
-        if accepts_context:
+        return impl, args, tool_ctx if accepts_context else None
+
+    def _call(self, name: str, arguments: Any, context: Mapping[str, Any]) -> Any:
+        impl, args, tool_ctx = self._prepare_call(name, arguments, context)
+        if tool_ctx is not None:
             return impl(args, tool_ctx)
         return impl(args)
+
+    @staticmethod
+    async def _await_result(result: Any) -> Any:
+        return await result
+
+    @classmethod
+    def _run_awaitable_sync(cls, result: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(cls._await_result(result))
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError("Cannot synchronously execute an async tool while an event loop is running; use execute_async().")
+
+    def execute(self, name: str, arguments: Any, **context: Any) -> Any:
+        result = self._call(name, arguments, context)
+        if inspect.isawaitable(result):
+            return self._run_awaitable_sync(result)
+        return result
+
+    async def execute_async(self, name: str, arguments: Any, **context: Any) -> Any:
+        impl, args, tool_ctx = self._prepare_call(name, arguments, context)
+        if inspect.iscoroutinefunction(impl):
+            result = impl(args, tool_ctx) if tool_ctx is not None else impl(args)
+        else:
+            result = await asyncio.to_thread(
+                impl,
+                args,
+                tool_ctx,
+            ) if tool_ctx is not None else await asyncio.to_thread(impl, args)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
 
 def create_tool_registry() -> ToolRegistry:

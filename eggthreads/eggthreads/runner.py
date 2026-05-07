@@ -2311,10 +2311,9 @@ class ThreadRunner:
                     invoke_id=invoke_id,
                     payload={'tool_call_id': tc.tool_call_id},
                 )
-                # Run tools in a background thread to avoid blocking the
-                # asyncio event loop, which is especially important for
-                # tools like `wait` that may sleep and poll.
-                loop = asyncio.get_running_loop()
+                # ToolRegistry supports both sync and async tool
+                # implementations. Synchronous tools run in a worker thread;
+                # async tools are awaited directly.
                 # Shared timeout resolution: LLM-specified > config > global default.
                 tool_timeout_sec = resolve_tool_timeout_sec(
                     tc.arguments,
@@ -2377,19 +2376,16 @@ class ThreadRunner:
                 summary_task = asyncio.create_task(_summary_watcher())
 
                 try:
-                    full_result = await loop.run_in_executor(
-                        None,
-                        # Pass thread_id and initial_model_key so tools
-                        # like spawn_agent can infer their parent and
-                        # inherit the model when not explicitly set.
-                        lambda: self.tools.execute(
-                            tc.name,
-                            tc.arguments,
-                            thread_id=self.thread_id,
-                            initial_model_key=current_model,
-                            tool_timeout_sec=tool_timeout_sec,
-                            cancel_check=cancel_check,
-                        ),
+                    full_result = await self.tools.execute_async(
+                        tc.name,
+                        tc.arguments,
+                        thread_id=self.thread_id,
+                        invoke_id=invoke_id,
+                        origin='runner',
+                        initial_model_key=current_model,
+                        tool_timeout_sec=tool_timeout_sec,
+                        cancel_check=cancel_check,
+                        db=self.db,
                     )
                 except Exception as e:
                     full_result = f"ERROR: {e}"

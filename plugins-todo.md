@@ -261,7 +261,7 @@ Goal: remove hidden magic args and support future async/streaming/cancellable pl
     - `_tool_timeout_sec`
     - `_cancel_check`
     - `_egg_tool_timeout_sec`
-- [ ] Add async execution support.
+- [x] Add async execution support.
   - A tool may provide sync or async implementation.
 - [x] Add streaming/cancellation capability metadata.
 - [ ] Move bash execution out of the runner special case once the richer interface can express:
@@ -286,6 +286,9 @@ Status notes:
 - 2026-05-07: Marked built-in `bash` as streaming+cancellable and `python` as cancellable.
 - 2026-05-07: Added tests proving capabilities are stored as registry metadata and not exposed in LLM tool schemas.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py`.
+- 2026-05-07: Added `ToolRegistry.execute_async()` for async tool implementations while preserving sync `execute()` compatibility.
+- 2026-05-07: Runner now uses `execute_async()` for non-bash tools; sync tools run in a worker thread and async tools are awaited directly.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_spawn_capabilities_session.py eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py eggthreads/tests/test_tool_timeout.py`.
 
 ## Phase 4 — Command registry and internal command plugins
 
