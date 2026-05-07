@@ -20,6 +20,28 @@ from eggthreads import (
 )
 
 
+def _render_command_registry_help(registry) -> str:
+    """Render slash-command help from CommandRegistry metadata."""
+    lines: List[str] = ["Commands:"]
+    categories: Dict[str, List[Any]] = {}
+    for spec in registry.specs():
+        categories.setdefault(spec.category or "general", []).append(spec)
+
+    for category, specs in categories.items():
+        title = category.replace("_", " ").title()
+        lines.append(f"  {title}:")
+        for spec in specs:
+            usage = spec.usage or f"/{spec.name}"
+            if spec.aliases:
+                aliases = ", ".join(f"/{alias}" for alias in spec.aliases)
+                usage = f"{usage} (aliases: {aliases})"
+            if spec.description:
+                lines.append(f"    {usage} — {spec.description}")
+            else:
+                lines.append(f"    {usage}")
+    return "\n".join(lines)
+
+
 def _find_searxng_dir() -> Optional[Path]:
     """Locate the SearXNG docker-compose directory.
 
@@ -89,8 +111,14 @@ class UtilityCommandsMixin:
         # console (above the live panels) and keep the System panel
         # message short.
         try:
+            registry = getattr(self, "command_registry", None)
+            if registry is None:
+                from eggthreads.command_catalog import create_default_command_registry
+
+                registry = create_default_command_registry()
+            help_text = _render_command_registry_help(registry)
             self.log_system('Help (see console for full).')
-            self.console_print_block('Help', COMMANDS_TEXT.strip(), border_style='blue')
+            self.console_print_block('Help', help_text, border_style='blue')
         except Exception:
             # Fallback: at least log it.
             self.log_system(COMMANDS_TEXT)

@@ -41,6 +41,32 @@ class TestCmdHelp:
         assert any("/skill" in str(call) for call in app.printed)
         assert any("/reload" in str(call) for call in app.printed)
 
+    def test_help_uses_command_registry_metadata(self):
+        from egg.commands.utility import UtilityCommandsMixin
+        from eggthreads.command_catalog import CommandRegistry, CommandSpec
+
+        class App(HelpOnlyApp, UtilityCommandsMixin):
+            pass
+
+        registry = CommandRegistry()
+        registry.register(
+            CommandSpec(
+                name="pluginCommand",
+                category="plugins",
+                usage="/pluginCommand <arg>",
+                description="Plugin provided command.",
+                handler=lambda ctx, arg: None,
+            )
+        )
+        app = App()
+        app.command_registry = registry
+
+        app.cmd_help("")
+
+        rendered = str(app.printed)
+        assert "/pluginCommand <arg>" in rendered
+        assert "Plugin provided command." in rendered
+
 
 class TestCmdSkills:
     """Tests for skill document commands."""
