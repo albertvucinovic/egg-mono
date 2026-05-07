@@ -137,12 +137,16 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
 def create_tool_registry() -> ToolRegistry:
     """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
 
+    from .builtin_plugins import SkillsPlugin
     from .plugins import FunctionPlugin, ToolPluginContext, register_plugins
 
     reg = ToolRegistry()
     register_plugins(
         ToolPluginContext(tool_registry=reg),
-        [FunctionPlugin("builtin_tools", "0", lambda context: _register_builtin_tools(context.tool_registry))],
+        [
+            SkillsPlugin(),
+            FunctionPlugin("legacy_builtin_tools", "0", lambda context: _register_builtin_tools(context.tool_registry)),
+        ],
     )
     return reg
 
@@ -169,42 +173,6 @@ def create_default_tools() -> ToolRegistry:
 def _populate_default_tools(reg: ToolRegistry) -> None:
     import asyncio, subprocess, sys, os, json as _json, time as _time
     from io import StringIO
-
-    def _skill(args: Dict[str, Any]):
-        from .skills import render_skill_tool_output
-
-        name = args.get('name')
-        if name is None:
-            # Accept a raw positional argument for local/tool bridge callers.
-            name = args.get('_arg')
-        query = args.get('query')
-        return render_skill_tool_output(
-            str(name) if name is not None else None,
-            query=str(query) if query is not None else None,
-        )
-
-    reg.register(
-        name='skill',
-        description=(
-            'List available Egg skill documents, search skills, or load one skill by name. '
-            'Skills are markdown instructions/examples/snippets; this tool is read-only '
-            'and does not install new runtime APIs.'
-        ),
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Optional skill name to load, for example 'rlm'. Omit to list skills.",
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Optional plain substring search over skill names, descriptions, and documents.",
-                },
-            },
-        },
-        impl=_skill,
-    )
 
     # bash
     def _bash(args: Dict[str, Any]):

@@ -179,7 +179,7 @@ This phase should create feature modules that can later register both tools and 
 
 Suggested built-in tool plugins:
 
-- [ ] `skills` plugin
+- [x] `skills` plugin
   - Tools: `skill`.
   - Commands later: `/skills`, `/skill`.
   - Shared service: list/search/load skill documents.
@@ -215,6 +215,12 @@ Suggested tests by group:
 - Execution/REPL: `pytest -q eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py eggthreads/tests/test_repl_bridge.py`.
 - Web: `pytest -q eggthreads/tests/test_web_searxng.py eggthreads/tests/test_tavily_tools.py`.
 - Subagents: `pytest -q eggthreads/tests/test_spawn_capabilities_session.py eggthreads/tests/test_repl_bridge.py`.
+
+Status notes:
+- 2026-05-07: Added `eggthreads.builtin_plugins.skills` with `SkillsPlugin`, `register_skill_tool()`, and shared `render_skill_request()` service.
+- 2026-05-07: `create_tool_registry()` now registers `SkillsPlugin()` plus the temporary legacy built-in tool registrar.
+- 2026-05-07: Removed `skill` registration from the legacy monolithic tool population path.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_skills_tool.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
 
 ## Phase 3 — Tool execution context and richer tool interface
 
