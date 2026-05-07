@@ -296,7 +296,7 @@ Goal: replace mixin-name dispatch with a runtime command registry.
 
 Commands should be registered by the same feature plugins that register related tools/providers/policies. Do not create command-only modules that duplicate tool behavior unless the command is purely UI/display related.
 
-- [ ] Add `CommandRegistry`, `CommandSpec`, and `CommandResult`.
+- [x] Add `CommandRegistry`, `CommandSpec`, and `CommandResult`.
   - Suggested `CommandSpec` fields:
     - `name`
     - `aliases`
@@ -311,7 +311,7 @@ Commands should be registered by the same feature plugins that register related 
     - `switched_thread`
     - `start_schedulers`
     - `message`
-- [ ] Add `CommandContext`.
+- [x] Add `CommandContext`.
   - Include stable operations instead of requiring raw app access:
     - `db`
     - `current_thread`
@@ -322,7 +322,7 @@ Commands should be registered by the same feature plugins that register related 
     - model/client/system prompt accessors
   - Built-in UI-only commands may receive an app escape hatch if necessary.
 - [ ] Make `/help` generated from command metadata.
-- [ ] Make autocomplete use command registry metadata and completion callbacks.
+- [x] Make autocomplete use command registry metadata and completion callbacks.
 - [ ] Add input-prefix handler registry for `$` and `$$`.
   - This decouples shell commands from hardcoded app input handling.
 - [ ] Migrate commands in small groups:
@@ -343,6 +343,13 @@ Commands should be registered by the same feature plugins that register related 
   - Example: web commands should share SearXNG/backend helpers with web tools.
 - [ ] Remove obsolete mixin dispatch only after all commands are registered.
 - [ ] Commit after each command group.
+
+Status notes:
+- 2026-05-07: Added `CommandRegistry`, `CommandSpec`, `CommandResult`, and `CommandContext` in `eggthreads.command_catalog`.
+- 2026-05-07: Added `create_default_command_registry()` with built-in command metadata and thin adapters to existing UI mixin handlers.
+- 2026-05-07: Egg TUI `/command` dispatch now uses the command registry instead of direct `getattr(self, f"cmd_{cmd}")` lookup; command implementations still live in the existing mixins until group migrations.
+- 2026-05-07: Root command autocomplete now reads command names from the default command registry; command-specific completion callbacks are wired as a fallback for commands without existing hardcoded completers.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_completion.py egg/tests/test_commands_utility.py`, `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_thread.py egg/tests/test_commands_tools.py egg/tests/test_commands_session.py egg/tests/test_commands_display.py egg/tests/test_commands_model.py egg/tests/test_commands_sandbox.py egg/tests/test_approval.py`, and `pytest -q eggthreads/tests/test_plugin_tool_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins
 

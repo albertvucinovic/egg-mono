@@ -47,6 +47,7 @@ from eggthreads import (  # type: ignore
     get_sandbox_status,
 )
 from eggthreads.event_watcher import EventWatcher  # type: ignore
+from eggthreads.command_catalog import CommandContext, create_default_command_registry  # type: ignore
 
 # eggdisplay UI components
 from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer  # type: ignore
@@ -161,6 +162,7 @@ class EggDisplayApp(
         # sandbox.
         self._sandbox_status: Dict[str, Any] = {}
         self._reload_requested: bool = False
+        self.command_registry = create_default_command_registry()
         reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
         reloaded_existing_thread = False
         if reload_thread and self.db.get_thread(reload_thread):
@@ -457,21 +459,34 @@ class EggDisplayApp(
         return True
 
     def handle_command(self, text: str) -> None:
-        """Dispatch /command to the appropriate cmd_* method from mixins."""
+        """Dispatch /command through the command registry."""
         parts = text[1:].split(None, 1)
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
 
-        # Look up the command method
-        handler = getattr(self, f'cmd_{cmd}', None)
-        if handler is not None:
-            # Special case: spawnChildThread needs the original text for logging
-            if cmd == 'spawnChildThread':
-                handler(arg, text=text)
-            else:
-                handler(arg)
-        else:
+        registry = getattr(self, 'command_registry', None)
+        if registry is None:
             self.log_system(f'Unknown command: /{cmd}')
+            return
+
+        try:
+            registry.get(cmd)
+        except KeyError:
+            self.log_system(f'Unknown command: /{cmd}')
+            return
+
+        ctx = CommandContext(
+            db=self.db,
+            current_thread=self.current_thread,
+            set_current_thread=lambda tid: setattr(self, 'current_thread', tid),
+            log_system=self.log_system,
+            console_print_block=self.console_print_block,
+            start_scheduler=self.start_scheduler,
+            llm_client=self.llm_client,
+            system_prompt=self.system_prompt,
+            app=self,
+        )
+        registry.execute(cmd, ctx, arg)
 
     # ---------------- Main loop ----------------
     async def run(self):

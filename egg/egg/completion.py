@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable, List, Dict, Optional
+from typing import Any, Iterable, List, Dict, Mapping, Optional
 
 import re
 
@@ -32,9 +32,11 @@ except Exception:
     list_children_with_meta = None  # type: ignore
 
 from eggthreads.command_catalog import (  # type: ignore
-    EGG_COMMAND_COMPLETIONS,
+    CommandContext,
     SESSION_ON_COMPLETIONS,
     SESSION_TARGET_COMPLETIONS,
+    create_default_command_registry,
+    command_completion_names,
 )
 
 
@@ -151,6 +153,7 @@ class EggCompleter(Completer):
         self.get_current_thread = get_current_thread
         self.llm = llm
         self.model_completer = ModelCompleter(llm)
+        self.command_registry = create_default_command_registry()
 
     # ---- Helpers --------------------------------------------------------
     def _get_filesystem_suggestions(self, prefix: str):
@@ -221,6 +224,14 @@ class EggCompleter(Completer):
             tid = self.get_current_thread()
         except Exception:
             pass
+
+        # 1) Delegate /model completion to the original completer
+        if text.startswith('/') and ' ' not in text:
+            prefix = text
+            for command in command_completion_names(self.command_registry):
+                if command.startswith(prefix):
+                    yield Completion(command, start_position=-len(prefix))
+            return
 
         # 1) Delegate /model completion to the original completer
         if text.startswith('/model '):
@@ -513,6 +524,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         prefix = line[:col]
     except Exception:
         prefix = line
+    command_registry = create_default_command_registry()
 
     def _last_token(s: str) -> str:
         # Strip trailing whitespace to find the last token even if cursor is after a space
@@ -616,7 +628,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         sp = prefix.find(' ')
         if sp == -1:
             # Complete command name
-            return _mk_items([c for c in EGG_COMMAND_COMPLETIONS if c.startswith(prefix)], prefix)
+            return _mk_items([c for c in command_completion_names(command_registry) if c.startswith(prefix)], prefix)
 
         cmd = prefix[:sp]
         sub = prefix[sp+1:]  # raw arg text
@@ -804,6 +816,24 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 cont = [o for o in opts if atok in o and o not in pref]
                 opts = pref + cont
             return _mk_items(opts, arg_tok)
+
+        try:
+            ctx = CommandContext(db=db, current_thread=get_current_thread(), llm_client=llm)
+        except Exception:
+            ctx = CommandContext(db=db, llm_client=llm)
+        try:
+            registry_items = command_registry.complete(cmd, ctx, sub)
+        except KeyError:
+            registry_items = []
+        if registry_items:
+            out_items: List[Dict[str, str]] = []
+            string_items: List[str] = []
+            for item in registry_items:
+                if isinstance(item, str):
+                    string_items.append(item)
+                elif isinstance(item, Mapping):
+                    out_items.append(dict(item))
+            return out_items + _mk_items(string_items, arg_tok)
 
         # /setThreadPriority: suggest parameter names and thread IDs
         if cmd == '/setThreadPriority':

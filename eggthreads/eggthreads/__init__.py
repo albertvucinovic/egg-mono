@@ -188,11 +188,17 @@ from .repl_bridge import (
     call_tool as repl_bridge_call_tool,
 )
 from .command_catalog import (
+    CommandContext,
+    CommandRegistry,
+    CommandResult,
+    CommandSpec,
     SESSION_COMMAND_COMPLETIONS,
     SESSION_ON_COMPLETIONS,
     SESSION_TARGET_COMPLETIONS,
     EGG_COMMAND_COMPLETIONS,
     EGGW_COMMAND_COMPLETIONS,
+    command_completion_names,
+    create_default_command_registry,
 )
 
 from .tools import ToolCapabilities, ToolContext, ToolRegistry, create_default_tools, create_tool_registry
@@ -260,7 +266,9 @@ __all__ = [
     'EvalContext', 'ReplBridgeError', 'ReplToolTimeout',
     'create_eval_context', 'resolve_eval_context', 'dispose_eval_context',
     'repl_bridge_call_tool',
+    'CommandContext', 'CommandRegistry', 'CommandResult', 'CommandSpec',
     'SESSION_COMMAND_COMPLETIONS', 'SESSION_ON_COMPLETIONS', 'SESSION_TARGET_COMPLETIONS',
     'EGG_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',
+    'command_completion_names', 'create_default_command_registry',
 ]
 from .event_watcher import EventWatcher

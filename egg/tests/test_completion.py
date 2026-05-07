@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from egg.completion import ModelCompleter, EggCompleter, get_autocomplete_items
+import egg.completion as completion_mod
 
 
 class MockDocument:
@@ -256,6 +257,34 @@ class TestGetAutocompleteItems:
         assert '/pythonRepl' in displays
         assert '/skills' in displays
         assert '/skill' in displays
+
+    def test_root_commands_come_from_command_registry(self, isolated_db, monkeypatch):
+        from eggthreads.command_catalog import CommandRegistry, CommandSpec
+
+        registry = CommandRegistry()
+        registry.register(CommandSpec(name="pluginCommand", handler=lambda ctx, arg: None))
+        monkeypatch.setattr(completion_mod, "create_default_command_registry", lambda: registry)
+
+        items = get_autocomplete_items("/plugin", 7, isolated_db, lambda: "tid", None)
+
+        assert [item["display"] for item in items] == ["/pluginCommand"]
+
+    def test_uses_command_registry_completion_callbacks(self, isolated_db, monkeypatch):
+        from eggthreads.command_catalog import CommandRegistry, CommandSpec
+
+        registry = CommandRegistry()
+        registry.register(
+            CommandSpec(
+                name="pluginCommand",
+                handler=lambda ctx, arg: None,
+                complete=lambda ctx, arg: ["alpha", {"display": "Beta", "insert": "beta"}],
+            )
+        )
+        monkeypatch.setattr(completion_mod, "create_default_command_registry", lambda: registry)
+
+        items = get_autocomplete_items("/pluginCommand a", 16, isolated_db, lambda: "tid", None)
+
+        assert {item["display"] for item in items} == {"alpha", "Beta"}
 
     def test_returns_skill_name_completions(self, isolated_db):
         """Should suggest packaged skill names for /skill."""

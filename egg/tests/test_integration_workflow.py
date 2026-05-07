@@ -8,6 +8,41 @@ from unittest.mock import MagicMock, AsyncMock
 import pytest
 
 
+class TestCommandRegistryDispatch:
+    """Tests for /command dispatch through the registry."""
+
+    def test_handle_command_uses_command_registry(self, egg_app):
+        called = []
+
+        class Registry:
+            def get(self, name):
+                called.append(("get", name))
+                return object()
+
+            def execute(self, name, ctx, arg):
+                called.append(("execute", name, arg, ctx.current_thread, ctx.app is egg_app))
+
+        egg_app.command_registry = Registry()
+
+        egg_app.handle_command("/example value")
+
+        assert called == [
+            ("get", "example"),
+            ("execute", "example", "value", egg_app.current_thread, True),
+        ]
+
+    def test_handle_command_reports_unknown_registry_command(self, egg_app):
+        class Registry:
+            def get(self, name):
+                raise KeyError(name)
+
+        egg_app.command_registry = Registry()
+
+        egg_app.handle_command("/missing")
+
+        assert any("Unknown command: /missing" in msg for msg in egg_app._system_log)
+
+
 class TestMessageSubmissionWorkflow:
     """Tests for message submission workflow."""
 
