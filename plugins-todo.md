@@ -218,19 +218,19 @@ Suggested tests by group:
 
 Status notes:
 - 2026-05-07: Added `eggthreads.builtin_plugins.skills` with `SkillsPlugin`, `register_skill_tool()`, and shared `render_skill_request()` service.
-- 2026-05-07: `create_tool_registry()` now registers `SkillsPlugin()` plus the temporary legacy built-in tool registrar.
+- 2026-05-07: `create_tool_registry()` registered `SkillsPlugin()` plus the temporary legacy built-in tool registrar at this step.
 - 2026-05-07: Removed `skill` registration from the legacy monolithic tool population path.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_skills_tool.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
 - 2026-05-07: Added `eggthreads.builtin_plugins.execution` with `ExecutionPlugin`, shared subprocess helpers, `execute_bash_tool()`, and `execute_python_tool()`.
-- 2026-05-07: `create_tool_registry()` now registers `ExecutionPlugin()` before the temporary legacy registrar.
+- 2026-05-07: `create_tool_registry()` registered `ExecutionPlugin()` before the temporary legacy registrar at this step.
 - 2026-05-07: Removed `bash` and `python` registration from the legacy monolithic tool population path.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py`.
 - 2026-05-07: Added `eggthreads.builtin_plugins.session` with `SessionPlugin`, REPL tool adapters, shared session status formatting, and shared runtime target resolution.
-- 2026-05-07: `create_tool_registry()` now registers `SessionPlugin()` before the temporary legacy registrar.
+- 2026-05-07: `create_tool_registry()` registered `SessionPlugin()` before the temporary legacy registrar at this step.
 - 2026-05-07: Removed `python_repl`, `bash_repl`, `session_status`, `session_reset`, and `session_stop` registration from the legacy monolithic tool population path.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
 - 2026-05-07: Added `eggthreads.builtin_plugins.subagents` with `SubagentsPlugin`, shared spawn/session attenuation helpers, child messaging/continue/status helpers, and `wait_tool()`.
-- 2026-05-07: `create_tool_registry()` now registers `SubagentsPlugin()` before the temporary legacy registrar.
+- 2026-05-07: `create_tool_registry()` registered `SubagentsPlugin()` before the temporary legacy registrar at this step.
 - 2026-05-07: Removed `spawn_agent`, `spawn_agent_auto`, `wait`, `send_message_to_child`, `continue_subthread`, and `get_child_status` registration from the legacy monolithic tool population path.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_spawn_capabilities_session.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
 - 2026-05-07: Added `eggthreads.builtin_plugins.web` with `WebPlugin`, shared max-results handling, `web_search_tool()`, and `fetch_url_tool()`.
