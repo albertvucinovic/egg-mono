@@ -187,7 +187,7 @@ Suggested built-in tool plugins:
   - Tools: `bash`, `python`.
   - Keep runner's special bash path for now if needed.
   - Commands/input later: `$`, `$$` shell command handlers may reuse bash enqueue/execution helpers.
-- [ ] `session` or `rlm_session` plugin
+- [x] `session` or `rlm_session` plugin
   - Tools: `python_repl`, `bash_repl`, `session_status`, `session_reset`, `session_stop`.
   - Commands later: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, `/bashRepl`.
   - Providers later: memory/Docker/containerd/VM session providers.
@@ -225,6 +225,10 @@ Status notes:
 - 2026-05-07: `create_tool_registry()` now registers `ExecutionPlugin()` before the temporary legacy registrar.
 - 2026-05-07: Removed `bash` and `python` registration from the legacy monolithic tool population path.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py`.
+- 2026-05-07: Added `eggthreads.builtin_plugins.session` with `SessionPlugin`, REPL tool adapters, shared session status formatting, and shared runtime target resolution.
+- 2026-05-07: `create_tool_registry()` now registers `SessionPlugin()` before the temporary legacy registrar.
+- 2026-05-07: Removed `python_repl`, `bash_repl`, `session_status`, `session_reset`, and `session_stop` registration from the legacy monolithic tool population path.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
 
 ## Phase 3 — Tool execution context and richer tool interface
 
