@@ -183,7 +183,7 @@ Suggested built-in tool plugins:
   - Tools: `skill`.
   - Commands later: `/skills`, `/skill`.
   - Shared service: list/search/load skill documents.
-- [ ] `execution` plugin
+- [x] `execution` plugin
   - Tools: `bash`, `python`.
   - Keep runner's special bash path for now if needed.
   - Commands/input later: `$`, `$$` shell command handlers may reuse bash enqueue/execution helpers.
@@ -221,6 +221,10 @@ Status notes:
 - 2026-05-07: `create_tool_registry()` now registers `SkillsPlugin()` plus the temporary legacy built-in tool registrar.
 - 2026-05-07: Removed `skill` registration from the legacy monolithic tool population path.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_skills_tool.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
+- 2026-05-07: Added `eggthreads.builtin_plugins.execution` with `ExecutionPlugin`, shared subprocess helpers, `execute_bash_tool()`, and `execute_python_tool()`.
+- 2026-05-07: `create_tool_registry()` now registers `ExecutionPlugin()` before the temporary legacy registrar.
+- 2026-05-07: Removed `bash` and `python` registration from the legacy monolithic tool population path.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py`.
 
 ## Phase 3 — Tool execution context and richer tool interface
 

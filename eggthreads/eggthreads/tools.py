@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, List
 
-from .terminal_safety import looks_like_terminal_control_text, sanitize_terminal_text
-
 
 def resolve_tool_timeout_arg(
     args: Dict[str, Any],
@@ -137,7 +135,7 @@ def _register_builtin_tools(reg: ToolRegistry) -> None:
 def create_tool_registry() -> ToolRegistry:
     """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
 
-    from .builtin_plugins import SkillsPlugin
+    from .builtin_plugins import ExecutionPlugin, SkillsPlugin
     from .plugins import FunctionPlugin, ToolPluginContext, register_plugins
 
     reg = ToolRegistry()
@@ -145,6 +143,7 @@ def create_tool_registry() -> ToolRegistry:
         ToolPluginContext(tool_registry=reg),
         [
             SkillsPlugin(),
+            ExecutionPlugin(),
             FunctionPlugin("legacy_builtin_tools", "0", lambda context: _register_builtin_tools(context.tool_registry)),
         ],
     )
@@ -171,187 +170,7 @@ def create_default_tools() -> ToolRegistry:
 
 
 def _populate_default_tools(reg: ToolRegistry) -> None:
-    import asyncio, subprocess, sys, os, json as _json, time as _time
-    from io import StringIO
-
-    # bash
-    def _bash(args: Dict[str, Any]):
-        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
-        from .api import get_thread_working_directory
-        from .db import ThreadsDB
-        import subprocess
-        import time as _time
-
-        script = args.get('script', '')
-        # Timeout priority: LLM-specified > RunnerConfig/default > None.
-        timeout = resolve_tool_timeout_arg(args)
-        # Cancel check callback - returns True if command should be cancelled
-        cancel_check = args.get('_cancel_check')
-        # Mirror the async runner: build an explicit argv and optionally
-        # wrap it in the sandbox instead of relying on shell=True.
-        base_argv = ['/bin/bash', '-lc', script]
-
-        # Honour per-thread sandbox settings when available.
-        tid = (args.get('_thread_id') or '').strip()
-        cwd = None
-        if tid:
-            try:
-                db = ThreadsDB()
-                sb = get_thread_sandbox_config(db, tid)
-                from .api import _ensure_thread_working_directory
-                cwd = _ensure_thread_working_directory(db, tid)
-                argv = wrap_argv_for_sandbox_with_settings(
-                    base_argv,
-                    enabled=sb.enabled,
-                    settings={**dict(sb.settings or {}), "_egg_thread_context": {"thread_id": tid, "db_path": str(db.path)}},
-                    working_dir=cwd,
-                    provider=sb.provider,
-                )
-            except Exception:
-                argv = base_argv
-        else:
-            # No thread context: default behaviour (use default policy).
-            from .sandbox import wrap_argv_for_sandbox
-            argv = wrap_argv_for_sandbox(base_argv)
-
-        # Use Popen for interruptible execution
-        start_time = _time.time()
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
-        try:
-            while proc.poll() is None:
-                # Check for cancellation (e.g., Ctrl+C in UI)
-                if cancel_check and cancel_check():
-                    proc.kill()
-                    proc.wait()
-                    return "--- INTERRUPTED ---\nCommand was interrupted by user"
-                # Check for timeout
-                if timeout and (_time.time() - start_time) >= timeout:
-                    proc.kill()
-                    proc.wait()
-                    return f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds"
-                _time.sleep(0.1)  # Poll interval
-            stdout_bytes, stderr_bytes = proc.communicate()
-        except Exception as e:
-            proc.kill()
-            proc.wait()
-            return f"--- ERROR ---\n{e}"
-
-        out = ''
-        stdout = stdout_bytes.decode(errors='replace') if isinstance(stdout_bytes, (bytes, bytearray)) else (stdout_bytes or "")
-        stderr = stderr_bytes.decode(errors='replace') if isinstance(stderr_bytes, (bytes, bytearray)) else (stderr_bytes or "")
-        if stdout:
-            body = sanitize_terminal_text(stdout.strip()) if looks_like_terminal_control_text(stdout) else stdout.strip()
-            out += f"--- STDOUT ---\n{body}\n"
-        if stderr:
-            body = sanitize_terminal_text(stderr.strip()) if looks_like_terminal_control_text(stderr) else stderr.strip()
-            out += f"--- STDERR ---\n{body}\n"
-        return out.strip() or "--- The command executed successfully and produced no output ---"
-
-    reg.register(
-        name='bash',
-        description='Execute a bash script and return combined stdout/stderr. Use timeout_sec to limit execution time.',
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "script": {"type": "string", "description": "The bash script to execute."},
-                "timeout_sec": {"type": "number", "description": "Maximum seconds to allow the script to run before killing it."},
-            },
-            "required": ["script"],
-        },
-        impl=_bash,
-    )
-
-    # python
-    def _python(args: Dict[str, Any]):
-        """Execute Python in a subprocess (sandboxed when enabled).
-
-        We intentionally avoid ``exec()`` in-process because sandboxing
-        must be enforceable and because in-process execution can mutate
-        global interpreter state.
-        """
-
-        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
-        from .api import get_thread_working_directory
-        from .db import ThreadsDB
-        import subprocess, sys
-        import time as _time
-
-        script = args.get('script', '')
-        thread_id = (args.get('_thread_id') or '').strip()
-        # Timeout priority: LLM-specified > RunnerConfig/default > None.
-        timeout = resolve_tool_timeout_arg(args)
-        # Cancel check callback - returns True if command should be cancelled
-        cancel_check = args.get('_cancel_check')
-
-        # Build argv for python -c.
-        base_argv = ['python3', '-c', script]
-
-        cwd = None
-        # Apply sandbox wrapper, respecting per-thread sandbox config.
-        if thread_id:
-            try:
-                db = ThreadsDB()
-                sb = get_thread_sandbox_config(db, thread_id)
-                from .api import _ensure_thread_working_directory
-                cwd = _ensure_thread_working_directory(db, thread_id)
-                argv = wrap_argv_for_sandbox_with_settings(
-                    base_argv,
-                    enabled=sb.enabled,
-                    settings={**dict(sb.settings or {}), "_egg_thread_context": {"thread_id": thread_id, "db_path": str(db.path)}},
-                    working_dir=cwd,
-                    provider=sb.provider,
-                )
-            except Exception:
-                argv = base_argv
-        else:
-            from .sandbox import wrap_argv_for_sandbox
-            argv = wrap_argv_for_sandbox(base_argv)
-
-        # Use Popen for interruptible execution
-        start_time = _time.time()
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
-        try:
-            while proc.poll() is None:
-                # Check for cancellation (e.g., Ctrl+C in UI)
-                if cancel_check and cancel_check():
-                    proc.kill()
-                    proc.wait()
-                    return "--- INTERRUPTED ---\nScript was interrupted by user"
-                # Check for timeout
-                if timeout and (_time.time() - start_time) >= timeout:
-                    proc.kill()
-                    proc.wait()
-                    return f"--- TIMEOUT ---\nScript timed out after {timeout} seconds"
-                _time.sleep(0.1)  # Poll interval
-            stdout_bytes, stderr_bytes = proc.communicate()
-        except Exception as e:
-            proc.kill()
-            proc.wait()
-            return f"--- ERROR ---\n{e}"
-
-        out = ''
-        stdout = stdout_bytes.decode(errors='replace') if isinstance(stdout_bytes, (bytes, bytearray)) else (stdout_bytes or "")
-        stderr = stderr_bytes.decode(errors='replace') if isinstance(stderr_bytes, (bytes, bytearray)) else (stderr_bytes or "")
-        if stdout:
-            body = sanitize_terminal_text(stdout.strip()) if looks_like_terminal_control_text(stdout) else stdout.strip()
-            out += f"--- STDOUT ---\n{body}\n"
-        if stderr:
-            body = sanitize_terminal_text(stderr.strip()) if looks_like_terminal_control_text(stderr) else stderr.strip()
-            out += f"--- STDERR ---\n{body}\n"
-        return out.strip() or "--- The script executed successfully and produced no output ---"
-
-    reg.register(
-        name='python',
-        description='Execute a Python script and return combined stdout/stderr. Use timeout_sec to limit execution time.',
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "script": {"type": "string", "description": "The Python script to execute."},
-                "timeout_sec": {"type": "number", "description": "Maximum seconds to allow the script to run before killing it."},
-            },
-        },
-        impl=_python,
-    )
+    import os, json as _json
 
     def _python_repl(args: Dict[str, Any]):
         from .db import ThreadsDB
