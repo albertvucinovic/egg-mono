@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 from ..plugins import PluginContext
 from ..terminal_safety import looks_like_terminal_control_text, sanitize_terminal_text
-from ..tools import ToolRegistry, resolve_tool_timeout_arg
+from ..tools import ToolCapabilities, ToolRegistry, resolve_tool_timeout_arg
 
 
 def _format_subprocess_output(
@@ -132,6 +132,7 @@ def register_execution_tools(registry: ToolRegistry) -> None:
             "required": ["script"],
         },
         impl=execute_bash_tool,
+        capabilities=ToolCapabilities(supports_streaming=True, supports_cancellation=True),
     )
 
     registry.register(
@@ -145,6 +146,7 @@ def register_execution_tools(registry: ToolRegistry) -> None:
             },
         },
         impl=execute_python_tool,
+        capabilities=ToolCapabilities(supports_cancellation=True),
     )
 
 

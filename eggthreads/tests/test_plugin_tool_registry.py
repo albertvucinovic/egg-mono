@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import eggthreads as ts
 from eggthreads.plugins import FunctionPlugin, ToolPluginContext, register_plugins
-from eggthreads.tools import ToolContext, ToolRegistry, create_default_tools, create_tool_registry
+from eggthreads.tools import ToolCapabilities, ToolContext, ToolRegistry, create_default_tools, create_tool_registry
 
 
 def _tool_names(registry: ToolRegistry) -> list[str]:
@@ -114,3 +114,42 @@ def test_legacy_tool_still_receives_private_context_args() -> None:
         "_tool_timeout_sec": 10,
         "_cancel_check": cancel_check,
     }
+
+
+def test_tool_capabilities_are_registry_metadata_not_tool_schema() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        "capable_tool",
+        "Capable tool",
+        {"type": "object", "properties": {}},
+        lambda args: "ok",
+        capabilities={"supports_streaming": True, "supports_cancellation": True, "mode": "test"},
+    )
+
+    capabilities = registry._tools["capable_tool"]["capabilities"]
+    assert isinstance(capabilities, ToolCapabilities)
+    assert capabilities.supports_streaming is True
+    assert capabilities.supports_cancellation is True
+    assert capabilities.metadata == {"mode": "test"}
+    assert capabilities.to_dict() == {
+        "mode": "test",
+        "supports_streaming": True,
+        "supports_cancellation": True,
+    }
+
+    spec = registry.tools_spec()[0]["function"]
+    assert "capabilities" not in spec
+
+
+def test_execution_tools_advertise_current_capabilities() -> None:
+    registry = create_tool_registry()
+
+    bash_capabilities = registry._tools["bash"]["capabilities"]
+    assert isinstance(bash_capabilities, ToolCapabilities)
+    assert bash_capabilities.supports_streaming is True
+    assert bash_capabilities.supports_cancellation is True
+
+    python_capabilities = registry._tools["python"]["capabilities"]
+    assert isinstance(python_capabilities, ToolCapabilities)
+    assert python_capabilities.supports_streaming is False
+    assert python_capabilities.supports_cancellation is True

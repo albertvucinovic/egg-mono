@@ -263,7 +263,7 @@ Goal: remove hidden magic args and support future async/streaming/cancellable pl
     - `_egg_tool_timeout_sec`
 - [ ] Add async execution support.
   - A tool may provide sync or async implementation.
-- [ ] Add streaming/cancellation capability metadata.
+- [x] Add streaming/cancellation capability metadata.
 - [ ] Move bash execution out of the runner special case once the richer interface can express:
   - live stdout/stderr streaming;
   - timeout summaries;
@@ -280,6 +280,11 @@ Status notes:
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py`.
 - 2026-05-07: Context-aware tools no longer receive newly injected private context args; legacy tools still do for compatibility.
 - 2026-05-07: Added explicit test coverage for both context-aware arg cleanliness and legacy private arg injection.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py`.
+- 2026-05-07: Added `ToolCapabilities` registry metadata with `supports_streaming`, `supports_cancellation`, and extra metadata.
+- 2026-05-07: Exported `ToolCapabilities` from `eggthreads`.
+- 2026-05-07: Marked built-in `bash` as streaming+cancellable and `python` as cancellable.
+- 2026-05-07: Added tests proving capabilities are stored as registry metadata and not exposed in LLM tool schemas.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py`.
 
 ## Phase 4 — Command registry and internal command plugins

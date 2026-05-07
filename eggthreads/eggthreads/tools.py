@@ -49,6 +49,34 @@ class ToolContext:
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ToolCapabilities:
+    """Metadata describing optional tool execution capabilities."""
+
+    supports_streaming: bool = False
+    supports_cancellation: bool = False
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_value(cls, value: "ToolCapabilities | Mapping[str, Any] | None") -> "ToolCapabilities":
+        if isinstance(value, ToolCapabilities):
+            return value
+        if not value:
+            return cls()
+        known = {"supports_streaming", "supports_cancellation"}
+        return cls(
+            supports_streaming=bool(value.get("supports_streaming", False)),
+            supports_cancellation=bool(value.get("supports_cancellation", False)),
+            metadata={k: v for k, v in value.items() if k not in known},
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = dict(self.metadata)
+        data["supports_streaming"] = self.supports_streaming
+        data["supports_cancellation"] = self.supports_cancellation
+        return data
+
+
 class ToolRegistry:
     """Simple registry for OpenAI function-call compatible tools.
 
@@ -67,6 +95,7 @@ class ToolRegistry:
         impl: Callable[..., Any],
         local_only: bool = False,
         accepts_context: bool = False,
+        capabilities: ToolCapabilities | Mapping[str, Any] | None = None,
     ):
         """Register a tool.
 
@@ -82,7 +111,11 @@ class ToolRegistry:
             accepts_context: If True, impl is called as ``impl(args, ctx)``
                 where ctx is a ToolContext. Existing tools should leave this
                 False and continue to receive only ``args``.
+            capabilities: Optional metadata describing execution features such
+                as live streaming or cancellation support. This is registry
+                metadata only; it is not exposed in the LLM tool schema.
         """
+        tool_capabilities = ToolCapabilities.from_value(capabilities)
         self._tools[name] = {
             "spec": {
                 "type": "function",
@@ -95,6 +128,7 @@ class ToolRegistry:
             "impl": impl,
             "local_only": local_only,
             "accepts_context": accepts_context,
+            "capabilities": tool_capabilities,
         }
 
     def tools_spec(self) -> List[Dict[str, Any]]:
