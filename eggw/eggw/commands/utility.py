@@ -571,7 +571,7 @@ def cmd_reload(thread_id: str) -> CommandResponse:
 
     async def _exit_for_reload() -> None:
         await asyncio.sleep(0.1)
-        raise SystemExit(int(os.environ.get("EGGW_RELOAD_EXIT_CODE", "75")))
+        os._exit(int(os.environ.get("EGGW_RELOAD_EXIT_CODE", "75")))
 
     try:
         asyncio.create_task(_exit_for_reload())

@@ -199,7 +199,7 @@ wait -n $BACKEND_PID $FRONTEND_PID 2>/dev/null
 status=$?
 set -e
 
-if [ "$status" -eq "$RELOAD_EXIT_CODE" ] && [ -s "$RELOAD_STATE_FILE" ]; then
+if [ -s "$RELOAD_STATE_FILE" ]; then
     export EGGW_RELOAD_THREAD_ID="$(cat "$RELOAD_STATE_FILE")"
     rm -f "$RELOAD_STATE_FILE"
     cleanup
