@@ -137,26 +137,33 @@ Status notes:
 
 Goal: introduce plugin-shaped registration without external discovery.
 
-- [ ] Add a small plugin manager module.
+- [x] Add a small plugin manager module.
   - Suggested location: `eggthreads/eggthreads/plugins.py` or package `eggthreads/eggthreads/plugins/`.
   - Responsibilities:
     - store built-in plugin objects;
     - expose deterministic registration order;
     - expose registries for tools first, then later commands/providers/policies;
     - support feature-bundle plugins that can register tools, commands, completions, providers, policies, hooks, and help snippets from one plugin object.
-- [ ] Add a minimal `EggPlugin` protocol/dataclass.
+- [x] Add a minimal `EggPlugin` protocol/dataclass.
   - Keep it lightweight; avoid abstract base complexity unless needed.
   - Include plugin metadata and an optional single `register(context)` method so related extension points can be registered together.
   - Keep per-registry methods or helpers for tests and simple plugins.
-- [ ] Add a minimal `PluginContext` object.
+- [x] Add a minimal `PluginContext` object.
   - Initially it may only expose the tool registry.
   - Design it to grow to command/input/autocomplete/help/provider/policy/hook registries.
-- [ ] Add a central tool-registry factory.
+- [x] Add a central tool-registry factory.
   - Target name suggestion: `create_tool_registry()`.
   - `create_default_tools()` may remain as compatibility wrapper initially.
-- [ ] Convert `create_default_tools()` to call the new central factory while preserving behavior.
-- [ ] Add tests proving the new factory returns the same tool names/specs as before.
+- [x] Convert `create_default_tools()` to call the new central factory while preserving behavior.
+- [x] Add tests proving the new factory returns the same tool names/specs as before.
 - [ ] Commit.
+
+Status notes:
+- 2026-05-07: Added `eggthreads.plugins` with `EggPlugin`, `PluginContext`, `ToolPluginContext`, `FunctionPlugin`, and `register_plugins()`.
+- 2026-05-07: Added `create_tool_registry()` and made `create_default_tools()` a compatibility wrapper around it.
+- 2026-05-07: Exported `create_tool_registry` from `eggthreads`.
+- 2026-05-07: Added `eggthreads/tests/test_plugin_tool_registry.py`.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
 
 Notes for implementers:
 - Do not add entry-point discovery in this phase.

@@ -123,6 +123,30 @@ class ToolRegistry:
         return impl(args)
 
 
+def _register_builtin_tools(reg: ToolRegistry) -> None:
+    """Register Egg's current built-in tools into ``reg``.
+
+    Later phases split these registrations into feature-bundle plugins. Keeping
+    the current implementation behind this function lets the plugin manager own
+    registry construction without changing tool behavior yet.
+    """
+
+    _populate_default_tools(reg)
+
+
+def create_tool_registry() -> ToolRegistry:
+    """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
+
+    from .plugins import FunctionPlugin, ToolPluginContext, register_plugins
+
+    reg = ToolRegistry()
+    register_plugins(
+        ToolPluginContext(tool_registry=reg),
+        [FunctionPlugin("builtin_tools", "0", lambda context: _register_builtin_tools(context.tool_registry))],
+    )
+    return reg
+
+
 # Default tools similar to chat.sh
 def create_default_tools() -> ToolRegistry:
     """Create a ToolRegistry with the default set of tools.
@@ -139,10 +163,12 @@ def create_default_tools() -> ToolRegistry:
     Returns:
         ToolRegistry with default tools registered.
     """
+    return create_tool_registry()
+
+
+def _populate_default_tools(reg: ToolRegistry) -> None:
     import asyncio, subprocess, sys, os, json as _json, time as _time
     from io import StringIO
-
-    reg = ToolRegistry()
 
     def _skill(args: Dict[str, Any]):
         from .skills import render_skill_tool_output
@@ -1243,5 +1269,5 @@ def create_default_tools() -> ToolRegistry:
     # Note: agent-oriented tools like popContext/spawn_agent are excluded from default registry
     # to prevent unintended tool calls in basic chats. The UI layer can register them explicitly.
 
-    return reg
+    return None
 

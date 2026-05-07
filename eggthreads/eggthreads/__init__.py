@@ -195,7 +195,7 @@ from .command_catalog import (
     EGGW_COMMAND_COMPLETIONS,
 )
 
-from .tools import ToolRegistry, create_default_tools
+from .tools import ToolRegistry, create_default_tools, create_tool_registry
 from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill_index, render_skill_tool_output, search_skills
 
 from .llm import create_llm_client
@@ -238,7 +238,7 @@ __all__ = [
     'wrap_argv_for_sandbox_with_settings', 'get_sandbox_status',
     'set_sandbox_globally_enabled', 'set_sandbox_config',
     'get_thread_sandbox_config', 'set_thread_sandbox_config', 'set_subtree_sandbox_config', 'get_thread_sandbox_status',
-    'ToolRegistry', 'create_default_tools',
+    'ToolRegistry', 'create_default_tools', 'create_tool_registry',
     'Skill', 'get_skill', 'list_skills', 'load_skill_text', 'render_skill_index', 'render_skill_tool_output', 'search_skills',
     'create_llm_client',
     'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'streaming_token_stats', 'total_token_stats', 'EventWatcher',
