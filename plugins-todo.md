@@ -156,7 +156,7 @@ Goal: introduce plugin-shaped registration without external discovery.
   - `create_default_tools()` may remain as compatibility wrapper initially.
 - [x] Convert `create_default_tools()` to call the new central factory while preserving behavior.
 - [x] Add tests proving the new factory returns the same tool names/specs as before.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
 - 2026-05-07: Added `eggthreads.plugins` with `EggPlugin`, `PluginContext`, `ToolPluginContext`, `FunctionPlugin`, and `register_plugins()`.
@@ -164,6 +164,7 @@ Status notes:
 - 2026-05-07: Exported `create_tool_registry` from `eggthreads`.
 - 2026-05-07: Added `eggthreads/tests/test_plugin_tool_registry.py`.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`.
+- 2026-05-07: Committed as `9ff2714 Add internal plugin tool registry seam`.
 
 Notes for implementers:
 - Do not add entry-point discovery in this phase.
