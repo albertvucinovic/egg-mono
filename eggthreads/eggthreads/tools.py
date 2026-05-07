@@ -110,6 +110,7 @@ class ToolRegistry:
         if not entry:
             raise KeyError(f"Unknown tool: {name}")
         impl = entry["impl"]
+        accepts_context = bool(entry.get("accepts_context"))
         if isinstance(arguments, str):
             try:
                 args = json.loads(arguments) if arguments.strip() else {}
@@ -126,7 +127,7 @@ class ToolRegistry:
         # to know "who called me" (e.g. spawn_agent). We use a reserved
         # key name to avoid colliding with user-provided arguments.
         thread_id = context.get("thread_id")
-        if thread_id and "parent_thread_id" not in args and "_thread_id" not in args:
+        if not accepts_context and thread_id and "parent_thread_id" not in args and "_thread_id" not in args:
             args["_thread_id"] = thread_id
 
         # Similarly, propagate the calling thread's model key so other
@@ -134,7 +135,7 @@ class ToolRegistry:
         # longer use this implicit override for model selection; child
         # threads should inherit from their parent thread directly.
         init_m = context.get("initial_model_key")
-        if init_m and "initial_model_key" not in args and "_initial_model_key" not in args:
+        if not accepts_context and init_m and "initial_model_key" not in args and "_initial_model_key" not in args:
             args["_initial_model_key"] = init_m
 
         # Propagate tool timeout for subprocess-based tools
@@ -142,13 +143,17 @@ class ToolRegistry:
         repl_tool_timeout = args.pop("_egg_tool_timeout_sec", None)
         if repl_tool_timeout is not None:
             tool_timeout = repl_tool_timeout
-        if tool_timeout is not None and "_tool_timeout_sec" not in args:
+        if not accepts_context and tool_timeout is not None and "_tool_timeout_sec" not in args:
             args["_tool_timeout_sec"] = tool_timeout
 
         # Propagate cancel check callback for interruptible tools
         cancel_check = context.get("cancel_check")
-        if cancel_check is not None and "_cancel_check" not in args:
+        if not accepts_context and cancel_check is not None and "_cancel_check" not in args:
             args["_cancel_check"] = cancel_check
+
+        timeout_args = dict(args)
+        if tool_timeout is not None and "_tool_timeout_sec" not in timeout_args:
+            timeout_args["_tool_timeout_sec"] = tool_timeout
 
         tool_ctx = ToolContext(
             db=context.get("db"),
@@ -156,13 +161,13 @@ class ToolRegistry:
             invoke_id=context.get("invoke_id"),
             origin=context.get("origin"),
             initial_model_key=init_m,
-            timeout_sec=resolve_tool_timeout_arg(args),
+            timeout_sec=resolve_tool_timeout_arg(timeout_args),
             cancel_check=cancel_check,
             working_dir=context.get("working_dir"),
             raw=dict(context),
         )
 
-        if entry.get("accepts_context"):
+        if accepts_context:
             return impl(args, tool_ctx)
         return impl(args)
 

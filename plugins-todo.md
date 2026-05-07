@@ -254,7 +254,7 @@ Goal: remove hidden magic args and support future async/streaming/cancellable pl
     - `working_dir`
     - sandbox/session handles or accessors
 - [x] Keep backward compatibility for existing `impl(args)` tools while adding context-aware execution.
-- [ ] Stop injecting new private keys where possible.
+- [x] Stop injecting new private keys where possible.
   - Legacy private keys may stay temporarily:
     - `_thread_id`
     - `_initial_model_key`
@@ -277,6 +277,9 @@ Status notes:
 - 2026-05-07: Added `accepts_context=True` registration option; legacy tools still receive only `impl(args)`.
 - 2026-05-07: Exported `ToolContext` from `eggthreads`.
 - 2026-05-07: Added context-aware tool coverage to `eggthreads/tests/test_plugin_tool_registry.py`.
+- 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py`.
+- 2026-05-07: Context-aware tools no longer receive newly injected private context args; legacy tools still do for compatibility.
+- 2026-05-07: Added explicit test coverage for both context-aware arg cleanliness and legacy private arg injection.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_repl_bridge.py`.
 
 ## Phase 4 — Command registry and internal command plugins

@@ -67,13 +67,7 @@ def test_context_aware_tool_receives_tool_context() -> None:
     )
 
     assert out == "context-ok"
-    assert seen["args"] == {
-        "timeout_sec": 3,
-        "_thread_id": "thread-1",
-        "_initial_model_key": "model-1",
-        "_tool_timeout_sec": 10,
-        "_cancel_check": cancel_check,
-    }
+    assert seen["args"] == {"timeout_sec": 3}
     ctx = seen["ctx"]
     assert isinstance(ctx, ToolContext)
     assert ctx.db == "db-handle"
@@ -84,3 +78,39 @@ def test_context_aware_tool_receives_tool_context() -> None:
     assert ctx.timeout_sec == 3
     assert ctx.cancel_check is cancel_check
     assert ctx.working_dir == "/workspace"
+
+
+def test_legacy_tool_still_receives_private_context_args() -> None:
+    registry = ToolRegistry()
+    seen: dict[str, object] = {}
+
+    def impl(args: dict[str, object]) -> str:
+        seen["args"] = args
+        return "legacy-ok"
+
+    def cancel_check() -> bool:
+        return False
+
+    registry.register(
+        "legacy_tool",
+        "Legacy tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    out = registry.execute(
+        "legacy_tool",
+        {},
+        thread_id="thread-1",
+        initial_model_key="model-1",
+        tool_timeout_sec=10,
+        cancel_check=cancel_check,
+    )
+
+    assert out == "legacy-ok"
+    assert seen["args"] == {
+        "_thread_id": "thread-1",
+        "_initial_model_key": "model-1",
+        "_tool_timeout_sec": 10,
+        "_cancel_check": cancel_check,
+    }
