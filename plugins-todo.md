@@ -375,7 +375,7 @@ Commands should be registered by the same feature plugins that register related 
 Modularization checkpoint before continuing Phase 4:
 - [x] Add command registries to `PluginContext` so plugins can register command contributions directly.
 - [x] Move subagent command handlers into `builtin_plugins.subagents` and have `SubagentsPlugin` register them.
-- [ ] Move already-migrated tools-admin command handlers out of `command_catalog.py` into an owning plugin/module before migrating more command groups.
+- [x] Move already-migrated tools-admin command handlers out of `command_catalog.py` into an owning plugin/module before migrating more command groups.
 - [ ] Move already-migrated thread UI command handlers out of `command_catalog.py` into an owning plugin/module before migrating more command groups.
 
 Status notes:
@@ -400,6 +400,7 @@ Status notes:
 - 2026-05-08: Migrated subagent commands `/spawnChildThread`, `/spawnAutoApprovedChildThread`, and `/waitForThreads` into registered command handlers and removed their TUI `cmd_*` compatibility delegates. The spawn commands reuse the `spawn_agent` / `spawn_agent_auto` tool services; `/waitForThreads` still enqueues the shared `wait` tool path.
 - 2026-05-08: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_thread.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
 - 2026-05-08: Strengthened this TODO to make plugin modularization a hard requirement. Added command registry support to `PluginContext` and moved subagent command handlers into `builtin_plugins.subagents`; `SubagentsPlugin` now registers both tools and commands.
+- 2026-05-08: Added `builtin_plugins.tools_admin` with `ToolsAdminPlugin`; tools-admin command handlers now live in that owning plugin and are registered through `PluginContext.command_registry` instead of `command_catalog.py`.
 
 ## Phase 5 — Sandbox provider plugins
 

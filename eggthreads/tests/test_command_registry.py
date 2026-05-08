@@ -155,13 +155,28 @@ def test_core_lifecycle_commands_are_registered_handlers(tmp_path, monkeypatch) 
     assert state_file.read_text(encoding="utf-8").strip() == app.current_thread
 
 
+def test_default_registry_uses_tools_admin_plugin_handlers() -> None:
+    from eggthreads.builtin_plugins import tools_admin
+
+    registry = create_default_command_registry()
+
+    assert registry.get("toolsOn").handler is tools_admin.tools_on_command
+    assert registry.get("toolsOff").handler is tools_admin.tools_off_command
+    assert registry.get("disableTool").handler is tools_admin.disable_tool_command
+    assert registry.get("enableTool").handler is tools_admin.enable_tool_command
+    assert registry.get("toolsStatus").handler is tools_admin.tools_status_command
+    assert registry.get("toolInfo").handler is tools_admin.tool_info_command
+    assert registry.get("toolsSecrets").handler is tools_admin.tools_secrets_command
+    assert registry.get("toggleAutoApproval").handler is tools_admin.toggle_auto_approval_command
+
+
 def test_tools_on_off_commands_are_registered_handlers(monkeypatch) -> None:
     registry = create_default_command_registry()
     calls: list[tuple[str, bool]] = []
     logs: list[str] = []
 
     monkeypatch.setattr(
-        "eggthreads.set_thread_tools_enabled",
+        "eggthreads.builtin_plugins.tools_admin.set_thread_tools_enabled",
         lambda db, tid, enabled: calls.append((tid, enabled)),
     )
 
@@ -182,11 +197,11 @@ def test_enable_disable_tool_commands_are_registered_handlers(monkeypatch) -> No
     logs: list[str] = []
 
     monkeypatch.setattr(
-        "eggthreads.disable_tool_for_thread",
+        "eggthreads.builtin_plugins.tools_admin.disable_tool_for_thread",
         lambda db, tid, name: disabled.append((tid, name)),
     )
     monkeypatch.setattr(
-        "eggthreads.enable_tool_for_thread",
+        "eggthreads.builtin_plugins.tools_admin.enable_tool_for_thread",
         lambda db, tid, name: enabled.append((tid, name)),
     )
 
@@ -215,12 +230,12 @@ def test_tools_secrets_status_and_info_commands_are_registered_handlers(monkeypa
         disabled_tools = set()
 
     monkeypatch.setattr(
-        "eggthreads.set_thread_allow_raw_tool_output",
+        "eggthreads.builtin_plugins.tools_admin.set_thread_allow_raw_tool_output",
         lambda db, tid, value: raw_values.append((tid, value)),
     )
-    monkeypatch.setattr("eggthreads.get_thread_tools_config", lambda db, tid: Config())
+    monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.get_thread_tools_config", lambda db, tid: Config())
     monkeypatch.setattr(
-        "eggthreads.command_catalog._get_available_tools",
+        "eggthreads.builtin_plugins.tools_admin.available_tools",
         lambda: {
             "bash": {"spec": {"name": "bash"}, "local_only": False},
             "python": {"spec": {"name": "python"}, "local_only": False},

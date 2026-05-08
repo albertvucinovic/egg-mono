@@ -16,7 +16,7 @@ class TestToolsAdminCommands:
         def mock_approve(db, tid, decision, reason=None, tool_call_id=None):
             approved.append(decision)
 
-        monkeypatch.setattr("eggthreads.approve_tool_calls_for_thread", mock_approve)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.approve_tool_calls_for_thread", mock_approve)
 
         egg_app.handle_command("/toggleAutoApproval")
 
@@ -24,7 +24,7 @@ class TestToolsAdminCommands:
 
     def test_toggle_auto_approval_logs_status_change(self, egg_app, monkeypatch):
         """Should log the status change."""
-        monkeypatch.setattr("eggthreads.approve_tool_calls_for_thread", lambda *a, **k: None)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.approve_tool_calls_for_thread", lambda *a, **k: None)
 
         egg_app.handle_command("/toggleAutoApproval")
 
@@ -38,7 +38,7 @@ class TestToolsAdminCommands:
         def mock_set(db, tid, value):
             enabled.append((tid, value))
 
-        monkeypatch.setattr("eggthreads.set_thread_tools_enabled", mock_set)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.set_thread_tools_enabled", mock_set)
 
         egg_app.handle_command("/toolsOn")
 
@@ -47,7 +47,7 @@ class TestToolsAdminCommands:
 
     def test_tools_on_logs_success(self, egg_app, monkeypatch):
         """Should log success message."""
-        monkeypatch.setattr("eggthreads.set_thread_tools_enabled", lambda *a: None)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.set_thread_tools_enabled", lambda *a: None)
 
         egg_app.handle_command("/toolsOn")
 
@@ -60,7 +60,7 @@ class TestToolsAdminCommands:
         def mock_set(db, tid, value):
             disabled.append((tid, value))
 
-        monkeypatch.setattr("eggthreads.set_thread_tools_enabled", mock_set)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.set_thread_tools_enabled", mock_set)
 
         egg_app.handle_command("/toolsOff")
 
@@ -69,7 +69,7 @@ class TestToolsAdminCommands:
 
     def test_tools_off_logs_success(self, egg_app, monkeypatch):
         """Should log success message."""
-        monkeypatch.setattr("eggthreads.set_thread_tools_enabled", lambda *a: None)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.set_thread_tools_enabled", lambda *a: None)
 
         egg_app.handle_command("/toolsOff")
 
@@ -82,7 +82,7 @@ class TestToolsAdminCommands:
         def mock_disable(db, tid, name):
             disabled.append((tid, name))
 
-        monkeypatch.setattr("eggthreads.disable_tool_for_thread", mock_disable)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.disable_tool_for_thread", mock_disable)
 
         egg_app.handle_command("/disableTool bash")
 
@@ -97,7 +97,7 @@ class TestToolsAdminCommands:
 
     def test_disable_tool_logs_success(self, egg_app, monkeypatch):
         """Should log success message."""
-        monkeypatch.setattr("eggthreads.disable_tool_for_thread", lambda *a: None)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.disable_tool_for_thread", lambda *a: None)
 
         egg_app.handle_command("/disableTool bash")
 
@@ -110,7 +110,7 @@ class TestToolsAdminCommands:
         def mock_enable(db, tid, name):
             enabled.append((tid, name))
 
-        monkeypatch.setattr("eggthreads.enable_tool_for_thread", mock_enable)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.enable_tool_for_thread", mock_enable)
 
         egg_app.handle_command("/enableTool bash")
 
@@ -132,7 +132,7 @@ class TestToolsAdminCommands:
             allow_raw_tool_output = False
             allowed_tools = None
 
-        monkeypatch.setattr("eggthreads.get_thread_tools_config", lambda db, tid: MockConfig())
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.get_thread_tools_config", lambda db, tid: MockConfig())
 
         egg_app.handle_command("/toolsStatus")
 
@@ -150,9 +150,9 @@ class TestToolsAdminCommands:
             allowed_tools = {"bash"}
 
         printed = []
-        monkeypatch.setattr("eggthreads.get_thread_tools_config", lambda db, tid: MockConfig())
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.get_thread_tools_config", lambda db, tid: MockConfig())
         monkeypatch.setattr(
-            "eggthreads.command_catalog._get_available_tools",
+            "eggthreads.builtin_plugins.tools_admin.available_tools",
             lambda: {
                 "bash": {"spec": {}, "local_only": False},
                 "python": {"spec": {}, "local_only": False},
@@ -179,7 +179,7 @@ class TestToolsAdminCommands:
         def mock_set(db, tid, value):
             set_values.append(value)
 
-        monkeypatch.setattr("eggthreads.set_thread_allow_raw_tool_output", mock_set)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.set_thread_allow_raw_tool_output", mock_set)
 
         egg_app.handle_command("/toolsSecrets on")
 
@@ -192,7 +192,7 @@ class TestToolsAdminCommands:
         def mock_set(db, tid, value):
             set_values.append(value)
 
-        monkeypatch.setattr("eggthreads.set_thread_allow_raw_tool_output", mock_set)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.set_thread_allow_raw_tool_output", mock_set)
 
         egg_app.handle_command("/toolsSecrets off")
 

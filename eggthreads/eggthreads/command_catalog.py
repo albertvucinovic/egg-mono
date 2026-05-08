@@ -3,7 +3,6 @@ from __future__ import annotations
 """Shared UI command/autocomplete catalog for Egg frontends."""
 
 import os
-import json
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
@@ -259,256 +258,6 @@ def _command_db_and_thread(context: CommandContext, command_name: str) -> tuple[
         _log_command_message(context, f"/{command_name} failed: no current thread.")
         return None
     return db, thread_id
-
-
-def _tools_enabled_handler(context: CommandContext, enabled: bool) -> CommandResult:
-    command_name = "toolsOn" if enabled else "toolsOff"
-    target = _command_db_and_thread(context, command_name)
-    if target is None:
-        return CommandResult(clear_input=False)
-    db, thread_id = target
-    try:
-        import eggthreads as _eggthreads  # type: ignore
-
-        _eggthreads.set_thread_tools_enabled(db, thread_id, enabled)
-        if enabled:
-            _log_command_message(context, "Tools enabled for this thread (LLM may call tools).")
-        else:
-            _log_command_message(context, "Tools disabled for this thread (LLM tool calls suppressed).")
-    except Exception as e:
-        _log_command_message(context, f"/{command_name.lower()} error: {e}")
-    return CommandResult(clear_input=True)
-
-
-def _tools_on_handler(context: CommandContext, arg: str) -> CommandResult:
-    return _tools_enabled_handler(context, True)
-
-
-def _tools_off_handler(context: CommandContext, arg: str) -> CommandResult:
-    return _tools_enabled_handler(context, False)
-
-
-def _disable_tool_handler(context: CommandContext, arg: str) -> CommandResult:
-    name = (arg or "").strip()
-    if not name:
-        _log_command_message(context, "Usage: /disabletool <tool_name>")
-        return CommandResult(clear_input=False)
-    target = _command_db_and_thread(context, "disableTool")
-    if target is None:
-        return CommandResult(clear_input=False)
-    db, thread_id = target
-    try:
-        import eggthreads as _eggthreads  # type: ignore
-
-        _eggthreads.disable_tool_for_thread(db, thread_id, name)
-        _log_command_message(context, f"Tool '{name}' disabled for this thread.")
-    except Exception as e:
-        _log_command_message(context, f"/disabletool error: {e}")
-    return CommandResult(clear_input=True)
-
-
-def _enable_tool_handler(context: CommandContext, arg: str) -> CommandResult:
-    name = (arg or "").strip()
-    if not name:
-        _log_command_message(context, "Usage: /enabletool <tool_name>")
-        return CommandResult(clear_input=False)
-    target = _command_db_and_thread(context, "enableTool")
-    if target is None:
-        return CommandResult(clear_input=False)
-    db, thread_id = target
-    try:
-        import eggthreads as _eggthreads  # type: ignore
-
-        _eggthreads.enable_tool_for_thread(db, thread_id, name)
-        _log_command_message(context, f"Tool '{name}' enabled for this thread.")
-    except Exception as e:
-        _log_command_message(context, f"/enabletool error: {e}")
-    return CommandResult(clear_input=True)
-
-
-def _tools_secrets_handler(context: CommandContext, arg: str) -> CommandResult:
-    mode = (arg or "").strip().lower()
-    if mode not in ("on", "off"):
-        _log_command_message(context, "Usage: /toolsSecrets <on|off>  (on = allow raw tool output, off = mask secrets)")
-        return CommandResult(clear_input=False)
-    target = _command_db_and_thread(context, "toolsSecrets")
-    if target is None:
-        return CommandResult(clear_input=False)
-    db, thread_id = target
-    allow_raw = mode == "on"
-    try:
-        import eggthreads as _eggthreads  # type: ignore
-
-        _eggthreads.set_thread_allow_raw_tool_output(db, thread_id, allow_raw)
-        if allow_raw:
-            _log_command_message(context, "Tool output secrets: raw mode ENABLED (secrets will not be masked).")
-        else:
-            _log_command_message(context, "Tool output secrets: masking ENABLED (attempting to mask detected secrets).")
-    except Exception as e:
-        _log_command_message(context, f"/toolsecrets error: {e}")
-    return CommandResult(clear_input=True)
-
-
-def _get_available_tools() -> dict[str, dict[str, Any]]:
-    from .tools import create_default_tools
-
-    registry = create_default_tools()
-    return {
-        name: {
-            "spec": entry["spec"],
-            "local_only": entry.get("local_only", False),
-        }
-        for name, entry in registry._tools.items()
-    }
-
-
-def _tools_status_handler(context: CommandContext, arg: str) -> CommandResult:
-    target = _command_db_and_thread(context, "toolsStatus")
-    if target is None:
-        return CommandResult(clear_input=False)
-    db, thread_id = target
-    try:
-        import eggthreads as _eggthreads  # type: ignore
-
-        cfg = _eggthreads.get_thread_tools_config(db, thread_id)
-        tool_statuses = _eggthreads.get_tool_statuses_for_config(cfg, _get_available_tools())
-    except Exception as e:
-        _log_command_message(context, f"/toolStatus error: {e}")
-        return CommandResult(clear_input=False)
-
-    lines = []
-    tools_status = "ENABLED" if cfg.llm_tools_enabled else "DISABLED"
-    lines.append(f"Tools for LLM: {tools_status}")
-
-    secrets_mode = "raw (secrets visible)" if getattr(cfg, "allow_raw_tool_output", False) else "masked"
-    lines.append(f"Tool output secrets: {secrets_mode}")
-
-    allowed_tools = getattr(cfg, "allowed_tools", None)
-    if allowed_tools is None:
-        lines.append("Tool allowlist: all registered tools")
-    else:
-        allowed_names = ", ".join(sorted(allowed_tools)) or "(none)"
-        lines.append(f"Tool allowlist: {allowed_names}")
-
-    lines.append("")
-    lines.append("Available tools:")
-    for tool_status in tool_statuses:
-        status_parts = [tool_status["status_label"]]
-        if tool_status.get("local_only", False):
-            status_parts.append("local-only")
-        lines.append(f"  {tool_status['name']}: {', '.join(status_parts)}")
-
-    lines.append("")
-    lines.append("Use /disableTool <name> or /enableTool <name> to control individual tools")
-    lines.append("Use /toolInfo <name> to see tool description")
-
-    text = "\n".join(lines)
-    try:
-        _log_command_message(context, "Tools status (see console for full).")
-        if context.console_print_block is not None:
-            context.console_print_block("Tools Status", text, border_style="blue")
-        else:
-            _log_command_message(context, text)
-    except Exception:
-        _log_command_message(context, text)
-    return CommandResult(clear_input=True)
-
-
-def _tool_info_handler(context: CommandContext, arg: str) -> CommandResult:
-    tool_name = (arg or "").strip()
-    if not tool_name:
-        _log_command_message(context, "Usage: /toolInfo <tool_name>")
-        return CommandResult(clear_input=False)
-
-    available_tools = _get_available_tools()
-    tool_info = available_tools.get(tool_name)
-    if not tool_info:
-        for name, info in available_tools.items():
-            if name.lower() == tool_name.lower():
-                tool_info = info
-                tool_name = name
-                break
-
-    if not tool_info:
-        available_names = sorted(available_tools.keys())
-        _log_command_message(context, f"Tool '{tool_name}' not found.\nAvailable tools: {', '.join(available_names)}")
-        return CommandResult(clear_input=False)
-
-    text = "\n".join(
-        [
-            f"Tool: {tool_name}",
-            f"Local-only: {tool_info.get('local_only', False)}",
-            "",
-            "Spec (sent to LLM):",
-            json.dumps(tool_info["spec"], indent=2),
-        ]
-    )
-    try:
-        _log_command_message(context, f"Tool info: {tool_name} (see console for full).")
-        if context.console_print_block is not None:
-            context.console_print_block(f"Tool: {tool_name}", text, border_style="blue")
-        else:
-            _log_command_message(context, text)
-    except Exception:
-        _log_command_message(context, text)
-    return CommandResult(clear_input=True)
-
-
-def _toggle_auto_approval_for_thread(
-    db: Any,
-    thread_id: str,
-    log_message: Callable[[str], None] | None,
-    approve_func: Callable[..., Any],
-) -> None:
-    try:
-        cur = db.conn.execute(
-            "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.approval' ORDER BY event_seq ASC",
-            (thread_id,),
-        )
-        last_decision = None
-        for (payload_json,) in cur.fetchall():
-            try:
-                payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
-            except Exception:
-                payload = {}
-            decision = payload.get("decision")
-            if decision in ("global_approval", "revoke_global_approval"):
-                last_decision = decision
-        enable = last_decision != "global_approval"
-    except Exception:
-        enable = True
-
-    decision = "global_approval" if enable else "revoke_global_approval"
-    try:
-        approve_func(
-            db,
-            thread_id,
-            decision=decision,
-            reason="Toggled by user via /toggleAutoApproval",
-        )
-        if log_message is not None:
-            log_message(
-                "Global tool auto-approval ENABLED for this thread."
-                if enable
-                else "Global tool auto-approval DISABLED for this thread.",
-            )
-    except Exception as e:
-        if log_message is not None:
-            log_message(f"Error toggling auto-approval: {e}")
-
-
-def _toggle_auto_approval_handler(context: CommandContext, arg: str) -> CommandResult:
-    target = _command_db_and_thread(context, "toggleAutoApproval")
-    if target is None:
-        return CommandResult(clear_input=False)
-    db, thread_id = target
-    try:
-        import eggthreads as _eggthreads  # type: ignore
-    except Exception:
-        _log_command_message(context, "Auto-approval toggle not available (eggthreads import failed).")
-        return CommandResult(clear_input=False)
-    _toggle_auto_approval_for_thread(db, thread_id, context.log_system, _eggthreads.approve_tool_calls_for_thread)
-    return CommandResult(clear_input=True)
 
 
 def _schedule_coro(coro_factory: Callable[[], Any] | None) -> None:
@@ -906,14 +655,10 @@ def create_default_command_registry() -> CommandRegistry:
     _register_legacy_command(registry, "logout", category="auth", usage="/logout", description="Clear ChatGPT OAuth tokens.")
     _register_legacy_command(registry, "authStatus", category="auth", usage="/authStatus", description="Show ChatGPT OAuth status.")
 
-    registry.register(CommandSpec("toolsOn", _tools_on_handler, category="tools", usage="/toolsOn", description="Enable LLM tool calls for this thread."))
-    registry.register(CommandSpec("toolsOff", _tools_off_handler, category="tools", usage="/toolsOff", description="Disable LLM tool calls for this thread."))
-    registry.register(CommandSpec("disableTool", _disable_tool_handler, category="tools", usage="/disableTool <name>", description="Disable a specific tool for this thread."))
-    registry.register(CommandSpec("enableTool", _enable_tool_handler, category="tools", usage="/enableTool <name>", description="Enable a specific tool for this thread."))
-    registry.register(CommandSpec("toolsStatus", _tools_status_handler, category="tools", usage="/toolsStatus", description="Show tool configuration and availability."))
-    registry.register(CommandSpec("toolInfo", _tool_info_handler, category="tools", usage="/toolInfo <name>", description="Show a tool schema and metadata."))
-    registry.register(CommandSpec("toolsSecrets", _tools_secrets_handler, category="tools", usage="/toolsSecrets <on|off>", description="Toggle raw tool output in local UI."))
-    registry.register(CommandSpec("toggleAutoApproval", _toggle_auto_approval_handler, category="tools", usage="/toggleAutoApproval", description="Toggle global tool auto-approval."))
+    from .builtin_plugins import ToolsAdminPlugin
+    from .plugins import CommandPluginContext, register_plugins
+
+    register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
     _register_legacy_command(registry, "schedulers", category="tools", usage="/schedulers", description="List active schedulers.")
 
     registry.register(CommandSpec("threads", _threads_list_handler, category="threads", usage="/threads", description="List threads."))
@@ -926,7 +671,6 @@ def create_default_command_registry() -> CommandRegistry:
     registry.register(CommandSpec("continue", _continue_thread_handler, category="threads", usage="/continue [msg_id=<id>]", description="Continue a thread from a specific point."))
 
     from .builtin_plugins import SubagentsPlugin
-    from .plugins import CommandPluginContext, register_plugins
 
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])
 

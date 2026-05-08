@@ -240,7 +240,7 @@ class TestToolEnablingWorkflow:
         disabled = []
         def mock_disable(db, tid, name):
             disabled.append((tid, name))
-        monkeypatch.setattr("eggthreads.disable_tool_for_thread", mock_disable)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.disable_tool_for_thread", mock_disable)
 
         egg_app.handle_command("/disableTool bash")
 
@@ -255,8 +255,8 @@ class TestToolEnablingWorkflow:
             disabled.append(name)
         def mock_enable(db, tid, name):
             enabled.append(name)
-        monkeypatch.setattr("eggthreads.disable_tool_for_thread", mock_disable)
-        monkeypatch.setattr("eggthreads.enable_tool_for_thread", mock_enable)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.disable_tool_for_thread", mock_disable)
+        monkeypatch.setattr("eggthreads.builtin_plugins.tools_admin.enable_tool_for_thread", mock_enable)
 
         egg_app.handle_command("/disableTool bash")
         egg_app.handle_command("/enableTool bash")
