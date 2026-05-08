@@ -377,6 +377,188 @@ def wait_tool(args: Dict[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
+def _command_target(context: Any, command_name: str) -> tuple[Any, str] | None:
+    db = context.db if context.db is not None else getattr(context.app, "db", None)
+    thread_id = context.current_thread or getattr(context.app, "current_thread", None)
+    if db is None or not thread_id:
+        _command_log(context, f"/{command_name} failed: no current thread.")
+        return None
+    return db, thread_id
+
+
+def _command_log(context: Any, message: str) -> None:
+    if context.log_system is not None:
+        context.log_system(message)
+
+
+def _command_start_scheduler(context: Any, thread_id: str) -> None:
+    if context.start_scheduler is not None:
+        context.start_scheduler(thread_id)
+
+
+def _command_append_message(context: Any, *args: Any, **kwargs: Any) -> Any:
+    if context.append_message is not None:
+        return context.append_message(*args, **kwargs)
+    from ..api import append_message
+
+    return append_message(*args, **kwargs)
+
+
+def _command_create_snapshot(context: Any, *args: Any, **kwargs: Any) -> Any:
+    if context.create_snapshot is not None:
+        return context.create_snapshot(*args, **kwargs)
+    from ..api import create_snapshot
+
+    return create_snapshot(*args, **kwargs)
+
+
+def _command_approve_tool_calls(context: Any, *args: Any, **kwargs: Any) -> Any:
+    if context.approve_tool_calls is not None:
+        return context.approve_tool_calls(*args, **kwargs)
+    from ..api import approve_tool_calls_for_thread
+
+    return approve_tool_calls_for_thread(*args, **kwargs)
+
+
+def _command_resolve_thread_selector(context: Any, selector: str) -> str | None:
+    from ..command_catalog import _resolve_thread_selector
+
+    return _resolve_thread_selector(context, selector)
+
+
+def spawn_child_thread_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+    from ..tools import create_default_tools
+
+    target = _command_target(context, "spawnChildThread")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, current_thread = target
+
+    try:
+        child = create_default_tools().execute(
+            "spawn_agent",
+            {
+                "parent_thread_id": current_thread,
+                "context_text": arg or "Spawned task",
+                "label": "spawn",
+                "system_prompt": context.system_prompt or "You are a helpful assistant.",
+            },
+        )
+    except Exception as e:
+        _command_log(context, f"/spawn error: {e}")
+        return CommandResult(clear_input=False)
+    if not isinstance(child, str):
+        _command_log(context, f"/spawn returned non-string thread id: {child!r}")
+        return CommandResult(clear_input=False)
+
+    _command_start_scheduler(context, child)
+    _command_log(context, f"Spawned thread: {child[-8:]}")
+    try:
+        command_text = f"/spawnChildThread {arg}".strip()
+        message = f"Command: {command_text}\n\nOutput:\n{child}"
+        _command_append_message(context, db, current_thread, "user", message, extra={"keep_user_turn": True})
+        _command_create_snapshot(context, db, current_thread)
+    except Exception:
+        pass
+    return CommandResult(clear_input=True, start_schedulers=(child,))
+
+
+def spawn_auto_child_thread_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+    from ..tools import create_default_tools
+
+    target = _command_target(context, "spawnAutoApprovedChildThread")
+    if target is None:
+        return CommandResult(clear_input=False)
+    _, current_thread = target
+
+    try:
+        child = create_default_tools().execute(
+            "spawn_agent_auto",
+            {
+                "parent_thread_id": current_thread,
+                "context_text": arg or "Spawned task",
+                "label": "spawn_auto",
+                "system_prompt": context.system_prompt or "You are a helpful assistant.",
+            },
+        )
+    except Exception as e:
+        _command_log(context, f"/spawn_auto error: {e}")
+        return CommandResult(clear_input=False)
+    if not isinstance(child, str):
+        _command_log(context, f"/spawn_auto returned non-string thread id: {child!r}")
+        return CommandResult(clear_input=False)
+
+    _command_start_scheduler(context, child)
+    _command_log(context, f"Spawned auto-approval thread: {child[-8:]}")
+    return CommandResult(clear_input=True, start_schedulers=(child,))
+
+
+def wait_for_threads_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+
+    target = _command_target(context, "waitForThreads")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, current_thread = target
+
+    arg_text = (arg or "").strip()
+    if not arg_text:
+        _command_log(context, "Usage: /wait <thread-id|suffix|name|recap-fragment>[,more...]")
+        return CommandResult(clear_input=False)
+
+    resolved: list[str] = []
+    for selector in [part for part in re.split(r"[\s,]+", arg_text) if part]:
+        thread_id = _command_resolve_thread_selector(context, selector)
+        if not thread_id:
+            _command_log(context, f"/wait: no thread matches selector '{selector}'")
+            return CommandResult(clear_input=False)
+        resolved.append(thread_id)
+
+    tc_id = os.urandom(8).hex()
+    tool_call = {
+        "id": tc_id,
+        "type": "function",
+        "function": {
+            "name": "wait",
+            "arguments": json.dumps({"thread_ids": resolved}, ensure_ascii=False),
+        },
+    }
+    extra = {
+        "tool_calls": [tool_call],
+        "keep_user_turn": True,
+        "user_command_type": "/wait",
+    }
+    _command_append_message(context, db, current_thread, "user", f"/wait {arg_text}", extra=extra)
+    try:
+        _command_approve_tool_calls(
+            context,
+            db,
+            current_thread,
+            decision="granted",
+            reason="Approved as user-initiated /wait command",
+            tool_call_id=tc_id,
+        )
+    except Exception as e:
+        _command_log(context, f"Error approving tool call for wait command: {e}")
+    try:
+        _command_create_snapshot(context, db, current_thread)
+    except Exception:
+        pass
+    _command_start_scheduler(context, current_thread)
+    _command_log(context, f"Queued /wait for threads: {' '.join([thread_id[-8:] for thread_id in resolved])}.")
+    return CommandResult(clear_input=True, start_schedulers=(current_thread,))
+
+
+def register_subagent_commands(registry: Any) -> None:
+    from ..command_catalog import CommandSpec
+
+    registry.register(CommandSpec("spawnChildThread", spawn_child_thread_command, category="subagents", usage="/spawnChildThread <text>", description="Spawn a child thread."))
+    registry.register(CommandSpec("spawnAutoApprovedChildThread", spawn_auto_child_thread_command, category="subagents", usage="/spawnAutoApprovedChildThread <text>", description="Spawn an auto-approved child thread."))
+    registry.register(CommandSpec("waitForThreads", wait_for_threads_command, category="subagents", usage="/waitForThreads <threads>", description="Wait for child threads."))
+
+
 def register_subagent_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="spawn_agent",
@@ -532,7 +714,10 @@ class SubagentsPlugin:
     version: str = "0"
 
     def register(self, context: PluginContext) -> None:
-        register_subagent_tools(context.tool_registry)
+        if context.tool_registry is not None:
+            register_subagent_tools(context.tool_registry)
+        if context.command_registry is not None:
+            register_subagent_commands(context.command_registry)
 
 
 __all__ = [
@@ -544,8 +729,12 @@ __all__ = [
     "get_child_status_tool",
     "inherited_system_prompt",
     "register_subagent_tools",
+    "register_subagent_commands",
     "send_message_to_child_tool",
+    "spawn_auto_child_thread_command",
     "spawn_agent_auto_tool",
     "spawn_agent_tool",
+    "spawn_child_thread_command",
+    "wait_for_threads_command",
     "wait_tool",
 ]

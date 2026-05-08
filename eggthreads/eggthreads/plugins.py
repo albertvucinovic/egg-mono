@@ -14,7 +14,8 @@ from typing import Any, Callable, Iterable, Protocol
 class PluginContext(Protocol):
     """Registration context exposed to Egg plugins."""
 
-    tool_registry: Any
+    tool_registry: Any | None
+    command_registry: Any | None
 
 
 class EggPlugin(Protocol):
@@ -32,6 +33,15 @@ class ToolPluginContext:
     """Plugin context used while constructing a tool registry."""
 
     tool_registry: Any
+    command_registry: Any | None = None
+
+
+@dataclass(frozen=True)
+class CommandPluginContext:
+    """Plugin context used while constructing a command registry."""
+
+    command_registry: Any
+    tool_registry: Any | None = None
 
 
 def register_plugins(context: PluginContext, plugins: Iterable[EggPlugin]) -> None:
@@ -60,6 +70,7 @@ class FunctionPlugin:
 
 __all__ = [
     "EggPlugin",
+    "CommandPluginContext",
     "FunctionPlugin",
     "PluginContext",
     "ToolPluginContext",

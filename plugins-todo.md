@@ -37,6 +37,29 @@ Keep mechanisms and invariants in core; make strategies pluggable.
 
 ## Plugin bundles and shared implementation rule
 
+**Modularization is the point of this plan. Treat it as a hard requirement, not
+an optional cleanup.** A central registry/catalog module may define registry
+types, generic dispatch helpers, and temporary wiring, but feature behavior must
+live in the feature plugin that owns it.
+
+Rules for command/tool modularization:
+
+- Do not move feature command implementations into `command_catalog.py` or any
+  other central monolith. `command_catalog.py` should stay mostly registry
+  primitives, core lifecycle handlers, and temporary compatibility adapters.
+- A plugin that owns a tool family must also own related slash-command handlers,
+  input-prefix handlers, completions, help snippets, and shared service helpers.
+  Example: subagent command code belongs in `builtin_plugins/subagents.py`, not
+  beside generic command registry code.
+- If a migration temporarily adds feature behavior to a central module, the same
+  task or the immediately following task must move it into the relevant plugin
+  before continuing to new command groups.
+- Tests for migrated features should exercise plugin/registry contributions, not
+  direct calls to removed mixin methods or a parallel central implementation.
+- Prefer one cohesive plugin module with shared service functions over separate
+  “tool implementation” and “command implementation” modules that duplicate
+  behavior.
+
 Plugins are expected to register multiple related extension types at the same time. A plugin should be a feature bundle, not only a tool bundle or only a command bundle.
 
 Examples:
@@ -349,6 +372,12 @@ Commands should be registered by the same feature plugins that register related 
 - [ ] Remove obsolete mixin dispatch only after all commands are registered.
 - [ ] Commit after each command group.
 
+Modularization checkpoint before continuing Phase 4:
+- [x] Add command registries to `PluginContext` so plugins can register command contributions directly.
+- [x] Move subagent command handlers into `builtin_plugins.subagents` and have `SubagentsPlugin` register them.
+- [ ] Move already-migrated tools-admin command handlers out of `command_catalog.py` into an owning plugin/module before migrating more command groups.
+- [ ] Move already-migrated thread UI command handlers out of `command_catalog.py` into an owning plugin/module before migrating more command groups.
+
 Status notes:
 - 2026-05-07: Added `CommandRegistry`, `CommandSpec`, `CommandResult`, and `CommandContext` in `eggthreads.command_catalog`.
 - 2026-05-07: Added `create_default_command_registry()` with built-in command metadata and thin adapters to existing UI mixin handlers.
@@ -370,6 +399,7 @@ Status notes:
 - 2026-05-08: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_thread.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
 - 2026-05-08: Migrated subagent commands `/spawnChildThread`, `/spawnAutoApprovedChildThread`, and `/waitForThreads` into registered command handlers and removed their TUI `cmd_*` compatibility delegates. The spawn commands reuse the `spawn_agent` / `spawn_agent_auto` tool services; `/waitForThreads` still enqueues the shared `wait` tool path.
 - 2026-05-08: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_thread.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-08: Strengthened this TODO to make plugin modularization a hard requirement. Added command registry support to `PluginContext` and moved subagent command handlers into `builtin_plugins.subagents`; `SubagentsPlugin` now registers both tools and commands.
 
 ## Phase 5 — Sandbox provider plugins
 
@@ -623,4 +653,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Continue **Phase 4** with session command migration: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, and `/bashRepl`.
+Continue the **Phase 4 modularization checkpoint** before new command groups: move already-migrated tools-admin and thread UI command handlers out of `command_catalog.py` into owning plugin modules.
