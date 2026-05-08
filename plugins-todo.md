@@ -358,7 +358,7 @@ Commands should be registered by the same feature plugins that register related 
   - [x] tools admin: `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, `/toggleAutoApproval`.
   - [x] thread UI: `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, `/continue`.
   - [x] subagents: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, `/waitForThreads`.
-  - [ ] session: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, `/bashRepl`.
+  - [x] session: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, `/bashRepl`.
   - [ ] sandbox admin: `/toggleSandboxing`, `/setSandboxConfiguration`, `/getSandboxingConfig`.
   - [ ] skills: `/skills`, `/skill`.
   - [ ] web: `/startSearxng`, `/stopSearxng`.
@@ -402,6 +402,9 @@ Status notes:
 - 2026-05-08: Strengthened this TODO to make plugin modularization a hard requirement. Added command registry support to `PluginContext` and moved subagent command handlers into `builtin_plugins.subagents`; `SubagentsPlugin` now registers both tools and commands.
 - 2026-05-08: Added `builtin_plugins.tools_admin` with `ToolsAdminPlugin`; tools-admin command handlers now live in that owning plugin and are registered through `PluginContext.command_registry` instead of `command_catalog.py`.
 - 2026-05-08: Added `builtin_plugins.thread_ui` with `ThreadUiPlugin`; thread UI command handlers and selector helpers now live in that owning plugin and are registered through `PluginContext.command_registry` instead of `command_catalog.py`.
+- 2026-05-08: Migrated session commands `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, and `/bashRepl` into `builtin_plugins.session`; `SessionPlugin` now registers both session tools and commands. Legacy session mixin methods delegate to registry handlers for compatibility until obsolete mixins are removed.
+- 2026-05-08: Session command handlers reuse existing session tool/shared helpers (`format_session_status`, `resolve_session_targets`) and enqueue REPL tools through the shared RA3 `enqueue_user_tool_call` path.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_session.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_session.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins
 
@@ -655,4 +658,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Continue **Phase 4** with session command migration into `builtin_plugins.session`: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, and `/bashRepl`.
+Continue **Phase 4** with sandbox admin command migration into an owning plugin/module: `/toggleSandboxing`, `/setSandboxConfiguration`, and `/getSandboxingConfig`.

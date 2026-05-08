@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Built-in persistent session and REPL tools."""
+"""Built-in persistent session and REPL tools/commands."""
 
 from dataclasses import dataclass
 from typing import Any, Dict
@@ -9,8 +9,13 @@ from ..plugins import PluginContext
 from ..tools import ToolRegistry, resolve_tool_timeout_arg
 
 
-def execute_python_repl_tool(args: Dict[str, Any]) -> str:
+def _thread_db(db: Any = None):
     from ..db import ThreadsDB
+
+    return db if db is not None else ThreadsDB()
+
+
+def execute_python_repl_tool(args: Dict[str, Any]) -> str:
     from ..session import execute_python_repl
 
     thread_id = (args.get("_thread_id") or "").strip()
@@ -22,7 +27,7 @@ def execute_python_repl_tool(args: Dict[str, Any]) -> str:
     timeout_sec = resolve_tool_timeout_arg(args)
     try:
         return execute_python_repl(
-            ThreadsDB(),
+            _thread_db(),
             thread_id,
             str(code),
             repl_name=repl_name,
@@ -34,7 +39,6 @@ def execute_python_repl_tool(args: Dict[str, Any]) -> str:
 
 
 def execute_bash_repl_tool(args: Dict[str, Any]) -> str:
-    from ..db import ThreadsDB
     from ..session import execute_bash_repl
 
     thread_id = (args.get("_thread_id") or "").strip()
@@ -46,7 +50,7 @@ def execute_bash_repl_tool(args: Dict[str, Any]) -> str:
     timeout_sec = resolve_tool_timeout_arg(args)
     try:
         return execute_bash_repl(
-            ThreadsDB(),
+            _thread_db(),
             thread_id,
             str(script),
             repl_name=repl_name,
@@ -57,34 +61,33 @@ def execute_bash_repl_tool(args: Dict[str, Any]) -> str:
         return f"Error: bash_repl failed: {e}"
 
 
-def format_session_status(thread_id: str) -> str:
-    from ..db import ThreadsDB
-    from ..session import find_runtime_thread, get_thread_session_status
+def format_session_status(thread_id: str, db: Any = None) -> str:
+    import eggthreads as _eggthreads
 
-    db = ThreadsDB()
+    db = _thread_db(db)
     lines: list[str] = []
-    st = get_thread_session_status(db, thread_id)
+    st = _eggthreads.get_thread_session_status(db, thread_id)
     lines.append("Current thread session:")
     lines.append(f"  Enabled: {st.enabled}")
     lines.append(f"  Provider: {st.provider}")
     lines.append(f"  Session ID: {st.session_id or '(none)'}")
     lines.append(f"  Status: {st.status}")
-    lines.append(f"  Share REPL channel: {st.share_repl}")
+    lines.append(f"  Share REPL channel: {getattr(st, 'share_repl', False)}")
     if st.container_name:
         lines.append(f"  Container: {st.container_name}")
     if st.message:
         lines.append(f"  Message: {st.message}")
     for language in ("python", "bash"):
-        rt = find_runtime_thread(db, thread_id, language=language)
+        rt = _eggthreads.find_runtime_thread(db, thread_id, language=language)
         if rt is None:
             continue
-        rst = get_thread_session_status(db, rt.runtime_thread_id)
+        rst = _eggthreads.get_thread_session_status(db, rt.runtime_thread_id)
         lines.append("")
         lines.append(f"Runtime {language} ({rt.runtime_thread_id[-8:]}):")
         lines.append(f"  Session ID: {rst.session_id or '(none)'}")
         lines.append(f"  Provider: {rst.provider}")
         lines.append(f"  Status: {rst.status}")
-        lines.append(f"  Share REPL channel: {rst.share_repl}")
+        lines.append(f"  Share REPL channel: {getattr(rst, 'share_repl', False)}")
         if rst.container_name:
             lines.append(f"  Container: {rst.container_name}")
         if rst.message:
@@ -99,18 +102,17 @@ def execute_session_status_tool(args: Dict[str, Any]) -> str:
     return format_session_status(thread_id)
 
 
-def resolve_session_targets(thread_id: str, language: str) -> tuple[Any, list[str]]:
-    from ..db import ThreadsDB
-    from ..session import find_runtime_thread
+def resolve_session_targets(thread_id: str, language: str, db: Any = None) -> tuple[Any, list[str]]:
+    import eggthreads as _eggthreads
 
-    db = ThreadsDB()
+    db = _thread_db(db)
     targets: list[str] = []
     if language in ("python", "bash"):
-        rt = find_runtime_thread(db, thread_id, language=language)
+        rt = _eggthreads.find_runtime_thread(db, thread_id, language=language)
         targets = [rt.runtime_thread_id] if rt is not None else [thread_id]
     elif language in ("runtimes", "runtime", "all"):
         for lang in ("python", "bash"):
-            rt = find_runtime_thread(db, thread_id, language=lang)
+            rt = _eggthreads.find_runtime_thread(db, thread_id, language=lang)
             if rt is not None:
                 targets.append(rt.runtime_thread_id)
         if not targets:
@@ -121,7 +123,7 @@ def resolve_session_targets(thread_id: str, language: str) -> tuple[Any, list[st
 
 
 def execute_session_reset_tool(args: Dict[str, Any]) -> str:
-    from ..session import reset_thread_session
+    import eggthreads as _eggthreads
 
     thread_id = (args.get("_thread_id") or "").strip()
     if not thread_id:
@@ -130,13 +132,13 @@ def execute_session_reset_tool(args: Dict[str, Any]) -> str:
     db, targets = resolve_session_targets(thread_id, language)
     lines = []
     for target in targets:
-        sid = reset_thread_session(db, target, reason="session_reset tool")
+        sid = _eggthreads.reset_thread_session(db, target, reason="session_reset tool")
         lines.append(f"Reset session for {target[-8:]}: {sid}")
     return "\n".join(lines)
 
 
 def execute_session_stop_tool(args: Dict[str, Any]) -> str:
-    from ..session import stop_thread_session
+    import eggthreads as _eggthreads
 
     thread_id = (args.get("_thread_id") or "").strip()
     if not thread_id:
@@ -145,9 +147,246 @@ def execute_session_stop_tool(args: Dict[str, Any]) -> str:
     db, targets = resolve_session_targets(thread_id, language)
     lines = []
     for target in targets:
-        st = stop_thread_session(db, target, reason="session_stop tool")
+        st = _eggthreads.stop_thread_session(db, target, reason="session_stop tool")
         lines.append(f"Stop session for {target[-8:]}: {st.status} ({st.session_id or '(none)'})")
     return "\n".join(lines)
+
+
+def _command_log(context: Any, message: str) -> None:
+    if context.log_system is not None:
+        context.log_system(message)
+
+
+def _command_target(context: Any, command_name: str) -> tuple[Any, str] | None:
+    db = context.db if context.db is not None else getattr(context.app, "db", None)
+    thread_id = context.current_thread or getattr(context.app, "current_thread", None)
+    if db is None or not thread_id:
+        _command_log(context, f"/{command_name} failed: no current thread.")
+        return None
+    return db, thread_id
+
+
+def session_status_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+
+    target = _command_target(context, "sessionStatus")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    try:
+        text = format_session_status(thread_id, db=db)
+        _command_log(context, "Session status (see console for full).")
+        if context.console_print_block is not None:
+            context.console_print_block("Session Status", text, border_style="magenta")
+        else:
+            _command_log(context, text)
+    except Exception as e:
+        _command_log(context, f"/sessionStatus error: {e}")
+        return CommandResult(clear_input=False)
+    return CommandResult(clear_input=True)
+
+
+def session_on_command(context: Any, arg: str):
+    from ..arg_parser import parse_args
+    from ..command_catalog import CommandResult
+    import eggthreads as _eggthreads
+
+    target = _command_target(context, "sessionOn")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    parsed = parse_args(arg or "")
+    provider = parsed.get("provider") or parsed.positional_or(0, "docker") or "docker"
+    image = parsed.get("image") or "egg-rlm-session"
+    share_raw = parsed.get("share_with_children", parsed.get("share", "false")) or "false"
+    share = str(share_raw).strip().lower() in ("1", "true", "yes", "on")
+    share_repl_raw = parsed.get("share_repl", "false") or "false"
+    share_repl = str(share_repl_raw).strip().lower() in ("1", "true", "yes", "on")
+    try:
+        sid = _eggthreads.enable_thread_session(
+            db,
+            thread_id,
+            provider=provider,
+            image=image,
+            share_with_children_default=share,
+            share_repl=share_repl,
+            reason="/sessionOn",
+        )
+        st = _eggthreads.get_thread_session_status(db, thread_id)
+        _command_log(context, f"Session enabled: provider={provider} session={sid[-8:] if sid else '(none)'} status={st.status}")
+    except Exception as e:
+        _command_log(context, f"/sessionOn error: {e}")
+        return CommandResult(clear_input=False)
+    return CommandResult(clear_input=True)
+
+
+def session_off_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+    import eggthreads as _eggthreads
+
+    target = _command_target(context, "sessionOff")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    try:
+        _eggthreads.disable_thread_session(db, thread_id, reason="/sessionOff")
+        _command_log(context, "Session disabled for this thread.")
+    except Exception as e:
+        _command_log(context, f"/sessionOff error: {e}")
+        return CommandResult(clear_input=False)
+    return CommandResult(clear_input=True)
+
+
+def session_stop_command(context: Any, arg: str):
+    from ..arg_parser import parse_args
+    from ..command_catalog import CommandResult
+    import eggthreads as _eggthreads
+
+    target = _command_target(context, "sessionStop")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    parsed = parse_args(arg or "")
+    language = (parsed.get("language") or parsed.positional_or(0, "") or "").strip().lower()
+    try:
+        db, targets = resolve_session_targets(thread_id, language, db=db)
+        statuses = [_eggthreads.stop_thread_session(db, target, reason="/sessionStop") for target in targets]
+        summary = ", ".join(f"{st.session_id or '(none)'}:{st.status}" for st in statuses)
+        _command_log(context, f"Session stop requested: {summary}")
+    except Exception as e:
+        _command_log(context, f"/sessionStop error: {e}")
+        return CommandResult(clear_input=False)
+    return CommandResult(clear_input=True)
+
+
+def session_reset_command(context: Any, arg: str):
+    from ..arg_parser import parse_args
+    from ..command_catalog import CommandResult
+    import eggthreads as _eggthreads
+
+    target = _command_target(context, "sessionReset")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    parsed = parse_args(arg or "")
+    language = (parsed.get("language") or parsed.positional_or(0, "") or "").strip().lower()
+    try:
+        db, targets = resolve_session_targets(thread_id, language, db=db)
+        sids = [_eggthreads.reset_thread_session(db, target, reason="/sessionReset") for target in targets]
+        _command_log(context, f"Session reset: {', '.join(sid[-8:] for sid in sids if sid) or '(none)'}")
+    except Exception as e:
+        _command_log(context, f"/sessionReset error: {e}")
+        return CommandResult(clear_input=False)
+    return CommandResult(clear_input=True)
+
+
+def session_cleanup_command(context: Any, arg: str):
+    from ..arg_parser import parse_args
+    from ..command_catalog import CommandResult
+    import eggthreads as _eggthreads
+    from ..session import _parse_duration_seconds  # type: ignore
+
+    target = _command_target(context, "sessionCleanup")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, _thread_id = target
+    parsed = parse_args(arg or "")
+    mode = (parsed.positional_or(0, "stopped") or "stopped").strip().lower()
+    stopped_only = mode not in ("all", "force")
+    older_than = parsed.get("older_than") or parsed.get("olderThan")
+    try:
+        removed = _eggthreads.cleanup_docker_sessions(
+            db,
+            stopped_only=stopped_only,
+            older_than_sec=_parse_duration_seconds(older_than),
+        )
+        if not removed:
+            _command_log(context, "No matching Docker RLM session containers to clean up.")
+            return CommandResult(clear_input=True)
+        lines = []
+        for item in removed:
+            status = "removed" if item.get("removed") else f"error: {item.get('error', 'unknown')}"
+            lines.append(f"{item.get('name')}: {status}")
+        text = "\n".join(lines)
+        _command_log(context, f"Session cleanup processed {len(removed)} container(s) (see console for details).")
+        if context.console_print_block is not None:
+            context.console_print_block("Session Cleanup", text, border_style="magenta")
+        else:
+            _command_log(context, text)
+    except Exception as e:
+        _command_log(context, f"/sessionCleanup error: {e}")
+        return CommandResult(clear_input=False)
+    return CommandResult(clear_input=True)
+
+
+def _enqueue_repl_command(context: Any, arg: str, *, tool_name: str, arg_name: str, command_name: str, origin: str):
+    import eggthreads as _eggthreads
+    from ..command_catalog import CommandResult
+
+    target = _command_target(context, command_name)
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    text = arg or ""
+    if not text.strip():
+        _command_log(context, f"Usage: /{command_name} <{'python code' if tool_name == 'python_repl' else 'bash script'}>")
+        return CommandResult(clear_input=False)
+    try:
+        tcid = _eggthreads.enqueue_user_tool_call(
+            db,
+            thread_id,
+            tool_name,
+            {arg_name: text},
+            content=f"/{command_name} {text}",
+            hidden=True,
+            keep_user_turn=True,
+            origin=origin,
+            auto_approve=True,
+            approval_reason=f"Approved /{command_name} command",
+        )
+        _eggthreads.create_snapshot(db, thread_id)
+        _command_log(context, f"{'Python' if tool_name == 'python_repl' else 'Bash'} REPL queued as tool call {tcid[-8:]}; scheduler will execute it.")
+        if context.start_scheduler is not None:
+            context.start_scheduler(thread_id)
+    except Exception as e:
+        _command_log(context, f"/{command_name} error: {e}")
+        return CommandResult(clear_input=False)
+    return CommandResult(clear_input=True, start_schedulers=(thread_id,))
+
+
+def python_repl_command(context: Any, arg: str):
+    return _enqueue_repl_command(
+        context,
+        arg,
+        tool_name="python_repl",
+        arg_name="code",
+        command_name="pythonRepl",
+        origin="ui_python_repl",
+    )
+
+
+def bash_repl_command(context: Any, arg: str):
+    return _enqueue_repl_command(
+        context,
+        arg,
+        tool_name="bash_repl",
+        arg_name="script",
+        command_name="bashRepl",
+        origin="ui_bash_repl",
+    )
+
+
+def register_session_commands(registry: Any) -> None:
+    from ..command_catalog import CommandSpec
+
+    registry.register(CommandSpec("sessionStatus", session_status_command, category="session", usage="/sessionStatus", description="Show persistent session status."))
+    registry.register(CommandSpec("sessionOn", session_on_command, category="session", usage="/sessionOn [provider=docker|memory]", description="Enable persistent sessions."))
+    registry.register(CommandSpec("sessionOff", session_off_command, category="session", usage="/sessionOff", description="Disable persistent sessions."))
+    registry.register(CommandSpec("sessionStop", session_stop_command, category="session", usage="/sessionStop [python|bash|all]", description="Stop session runtimes."))
+    registry.register(CommandSpec("sessionReset", session_reset_command, category="session", usage="/sessionReset [python|bash|all]", description="Reset session runtimes."))
+    registry.register(CommandSpec("sessionCleanup", session_cleanup_command, category="session", usage="/sessionCleanup [stopped|all] [older_than=1h]", description="Clean up session containers."))
+    registry.register(CommandSpec("pythonRepl", python_repl_command, category="session", usage="/pythonRepl <code>", description="Run code in the persistent Python REPL."))
+    registry.register(CommandSpec("bashRepl", bash_repl_command, category="session", usage="/bashRepl <script>", description="Run script in the persistent bash REPL."))
 
 
 def register_session_tools(registry: ToolRegistry) -> None:
@@ -221,17 +460,29 @@ class SessionPlugin:
     version: str = "0"
 
     def register(self, context: PluginContext) -> None:
-        register_session_tools(context.tool_registry)
+        if context.tool_registry is not None:
+            register_session_tools(context.tool_registry)
+        if context.command_registry is not None:
+            register_session_commands(context.command_registry)
 
 
 __all__ = [
     "SessionPlugin",
+    "bash_repl_command",
     "execute_bash_repl_tool",
     "execute_python_repl_tool",
     "execute_session_reset_tool",
     "execute_session_status_tool",
     "execute_session_stop_tool",
     "format_session_status",
+    "python_repl_command",
+    "register_session_commands",
     "register_session_tools",
     "resolve_session_targets",
+    "session_cleanup_command",
+    "session_off_command",
+    "session_on_command",
+    "session_reset_command",
+    "session_status_command",
+    "session_stop_command",
 ]

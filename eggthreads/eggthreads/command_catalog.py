@@ -304,19 +304,11 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
     _register_legacy_command(registry, "schedulers", category="tools", usage="/schedulers", description="List active schedulers.")
 
-    from .builtin_plugins import SubagentsPlugin, ThreadUiPlugin
+    from .builtin_plugins import SessionPlugin, SubagentsPlugin, ThreadUiPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ThreadUiPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])
-
-    _register_legacy_command(registry, "sessionStatus", category="session", usage="/sessionStatus", description="Show persistent session status.")
-    _register_legacy_command(registry, "sessionOn", category="session", usage="/sessionOn [provider=docker|memory]", description="Enable persistent sessions.")
-    _register_legacy_command(registry, "sessionOff", category="session", usage="/sessionOff", description="Disable persistent sessions.")
-    _register_legacy_command(registry, "sessionStop", category="session", usage="/sessionStop [python|bash|all]", description="Stop session runtimes.")
-    _register_legacy_command(registry, "sessionReset", category="session", usage="/sessionReset [python|bash|all]", description="Reset session runtimes.")
-    _register_legacy_command(registry, "sessionCleanup", category="session", usage="/sessionCleanup [stopped|all] [older_than=1h]", description="Clean up session containers.")
-    _register_legacy_command(registry, "pythonRepl", category="session", usage="/pythonRepl <code>", description="Run code in the persistent Python REPL.")
-    _register_legacy_command(registry, "bashRepl", category="session", usage="/bashRepl <script>", description="Run script in the persistent bash REPL.")
+    register_plugins(CommandPluginContext(command_registry=registry), [SessionPlugin()])
 
     _register_legacy_command(registry, "toggleSandboxing", category="sandbox", usage="/toggleSandboxing", description="Toggle sandboxing for the thread subtree.")
     _register_legacy_command(registry, "setSandboxConfiguration", category="sandbox", usage="/setSandboxConfiguration <file.json>", description="Apply sandbox configuration.")
