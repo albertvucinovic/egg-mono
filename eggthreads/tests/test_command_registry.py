@@ -422,6 +422,46 @@ def test_subagent_commands_are_registered_handlers(tmp_path, monkeypatch) -> Non
     assert root in snapshots
 
 
+def test_sandbox_admin_commands_are_registered_handlers(monkeypatch) -> None:
+    from eggthreads.builtin_plugins import sandbox_admin
+
+    registry = create_default_command_registry()
+
+    assert registry.get("toggleSandboxing").handler is sandbox_admin.toggle_sandboxing_command
+    assert registry.get("setSandboxConfiguration").handler is sandbox_admin.set_sandbox_configuration_command
+    assert registry.get("getSandboxingConfig").handler is sandbox_admin.get_sandboxing_config_command
+
+    logs: list[str] = []
+    printed: list[tuple[str, str]] = []
+    set_calls: list[dict] = []
+
+    class Config:
+        settings = {"provider": "memory"}
+
+    monkeypatch.setattr("eggthreads.is_user_sandbox_control_enabled", lambda db, tid: True)
+    monkeypatch.setattr("eggthreads.get_thread_sandbox_status", lambda db, tid: {"enabled": False, "effective": True, "provider": "docker"})
+    monkeypatch.setattr("eggthreads.get_thread_sandbox_config", lambda db, tid: Config())
+    monkeypatch.setattr("eggthreads.set_thread_sandbox_config", lambda db, tid, **kwargs: set_calls.append(kwargs))
+
+    ctx = CommandContext(
+        db=object(),
+        current_thread="thread-1",
+        log_system=logs.append,
+        console_print_block=lambda title, text, **kwargs: printed.append((title, text)),
+    )
+
+    registry.execute("toggleSandboxing", ctx)
+    registry.execute("setSandboxConfiguration", ctx, "")
+    registry.execute("setSandboxConfiguration", ctx, "locked.json")
+    registry.execute("getSandboxingConfig", ctx)
+
+    assert set_calls[0]["enabled"] is True
+    assert set_calls[0]["settings"] == {"provider": "memory"}
+    assert set_calls[1]["config_name"] == "locked.json"
+    assert any(title == "Sandbox Configuration" and "Sandbox Configuration and Control" in text for title, text in printed)
+    assert any("Sandbox configuration applied" in message for message in logs)
+
+
 def test_render_command_registry_help_uses_metadata() -> None:
     registry = CommandRegistry()
     registry.register(

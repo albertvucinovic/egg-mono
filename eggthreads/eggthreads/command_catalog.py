@@ -304,15 +304,12 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
     _register_legacy_command(registry, "schedulers", category="tools", usage="/schedulers", description="List active schedulers.")
 
-    from .builtin_plugins import SessionPlugin, SubagentsPlugin, ThreadUiPlugin
+    from .builtin_plugins import SandboxAdminPlugin, SessionPlugin, SubagentsPlugin, ThreadUiPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ThreadUiPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SessionPlugin()])
-
-    _register_legacy_command(registry, "toggleSandboxing", category="sandbox", usage="/toggleSandboxing", description="Toggle sandboxing for the thread subtree.")
-    _register_legacy_command(registry, "setSandboxConfiguration", category="sandbox", usage="/setSandboxConfiguration <file.json>", description="Apply sandbox configuration.")
-    _register_legacy_command(registry, "getSandboxingConfig", category="sandbox", usage="/getSandboxingConfig", description="Show current sandbox configuration.")
+    register_plugins(CommandPluginContext(command_registry=registry), [SandboxAdminPlugin()])
 
     _register_legacy_command(registry, "skills", category="skills", usage="/skills [query]", description="List or search packaged skills.")
     _register_legacy_command(registry, "skill", category="skills", usage="/skill <name>", description="Show and load a packaged skill.")
