@@ -330,7 +330,7 @@ Commands should be registered by the same feature plugins that register related 
 - [x] Add input-prefix handler registry for `$` and `$$`.
   - This decouples shell commands from hardcoded app input handling.
 - [ ] Migrate commands in small groups:
-  - [ ] core/lifecycle: `/help`, `/quit`, `/reload`.
+  - [x] core/lifecycle: `/help`, `/quit`, `/reload`.
   - [ ] tools admin: `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, `/toggleAutoApproval`.
   - [ ] thread UI: `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, `/continue`.
   - [ ] subagents: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, `/waitForThreads`.
@@ -358,6 +358,8 @@ Status notes:
 - 2026-05-07: Focused tests passed: `pytest -q egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py`.
 - 2026-05-07: Added `InputPrefixRegistry` and `InputPrefixSpec` with longest-prefix matching.
 - 2026-05-07: Egg TUI `$` and `$$` handling now dispatches through the input-prefix registry, with thin adapters to the existing `enqueue_bash_tool()` path.
+- 2026-05-07: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py egg/tests/test_completion.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-07: Migrated core/lifecycle commands `/help`, `/quit`, and `/reload` into registered command handlers; legacy mixin methods now delegate to those handlers for compatibility.
 - 2026-05-07: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py egg/tests/test_completion.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins

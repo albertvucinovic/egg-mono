@@ -12,6 +12,7 @@ from eggthreads.command_catalog import (
     command_completion_names,
     create_default_command_registry,
     create_default_input_prefix_registry,
+    render_command_registry_help,
 )
 
 
@@ -119,3 +120,53 @@ def test_default_input_prefix_registry_dispatches_to_bash_enqueue() -> None:
 
     assert result == CommandResult(clear_input=True)
     assert calls == [("echo secret", True)]
+
+
+def test_core_lifecycle_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:
+    registry = create_default_command_registry()
+    help_prints = []
+
+    class App:
+        running = True
+        _reload_requested = False
+        _reload_via_shell = False
+        current_thread = "thread-123"
+        command_registry = registry
+
+    app = App()
+    result = registry.execute(
+        "help",
+        CommandContext(app=app, log_system=lambda message: None, console_print_block=lambda *args, **kwargs: help_prints.append(args)),
+    )
+    assert result.clear_input is True
+    assert any("/help" in str(call) for call in help_prints)
+
+    result = registry.execute("quit", CommandContext(app=app))
+    assert result.exit_app is True
+    assert app.running is False
+
+    state_file = tmp_path / "reload-state"
+    monkeypatch.setenv("EGG_RELOAD_STATE_FILE", str(state_file))
+    result = registry.execute("reload", CommandContext(app=app, current_thread=app.current_thread, log_system=lambda message: None))
+    assert result.exit_app is True
+    assert app._reload_requested is True
+    assert state_file.read_text(encoding="utf-8").strip() == app.current_thread
+
+
+def test_render_command_registry_help_uses_metadata() -> None:
+    registry = CommandRegistry()
+    registry.register(
+        CommandSpec(
+            name="example",
+            aliases=("ex",),
+            category="plugins",
+            usage="/example <arg>",
+            description="Example command.",
+            handler=lambda ctx, arg: None,
+        )
+    )
+
+    text = render_command_registry_help(registry)
+
+    assert "Plugins:" in text
+    assert "/example <arg> (aliases: /ex) — Example command." in text

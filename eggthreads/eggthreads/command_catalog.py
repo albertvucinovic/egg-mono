@@ -2,7 +2,9 @@ from __future__ import annotations
 
 """Shared UI command/autocomplete catalog for Egg frontends."""
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping
 
 
@@ -164,6 +166,77 @@ class InputPrefixRegistry:
         return CommandResult(clear_input=spec.clear_input)
 
 
+def render_command_registry_help(registry: CommandRegistry) -> str:
+    """Render slash-command help from CommandRegistry metadata."""
+    lines: List[str] = ["Commands:"]
+    categories: dict[str, list[CommandSpec]] = {}
+    for spec in registry.specs():
+        categories.setdefault(spec.category or "general", []).append(spec)
+
+    for category, specs in categories.items():
+        lines.append(f"  {category.replace('_', ' ').title()}:")
+        for spec in specs:
+            usage = spec.usage or f"/{spec.name}"
+            if spec.aliases:
+                aliases = ", ".join(f"/{alias}" for alias in spec.aliases)
+                usage = f"{usage} (aliases: {aliases})"
+            if spec.description:
+                lines.append(f"    {usage} — {spec.description}")
+            else:
+                lines.append(f"    {usage}")
+    return "\n".join(lines)
+
+
+def _core_help_handler(context: CommandContext, arg: str) -> CommandResult:
+    registry = getattr(context.app, "command_registry", None) or create_default_command_registry()
+    help_text = render_command_registry_help(registry)
+    try:
+        if context.log_system is not None:
+            context.log_system("Help (see console for full).")
+        if context.console_print_block is not None:
+            context.console_print_block("Help", help_text, border_style="blue")
+        elif context.log_system is not None:
+            context.log_system(help_text)
+    except Exception:
+        if context.log_system is not None:
+            context.log_system(help_text)
+    return CommandResult(clear_input=True)
+
+
+def _core_quit_handler(context: CommandContext, arg: str) -> CommandResult:
+    if context.app is not None:
+        context.app.running = False
+    return CommandResult(clear_input=True, exit_app=True)
+
+
+def _core_reload_handler(context: CommandContext, arg: str) -> CommandResult:
+    thread_id = context.current_thread or getattr(context.app, "current_thread", "")
+    if not thread_id:
+        if context.log_system is not None:
+            context.log_system("/reload failed: no current thread.")
+        return CommandResult(clear_input=False)
+
+    os.environ["EGG_RELOAD_THREAD_ID"] = thread_id
+    if context.app is not None:
+        context.app._reload_via_shell = False
+    state_file = os.environ.get("EGG_RELOAD_STATE_FILE")
+    if state_file:
+        try:
+            Path(state_file).write_text(f"{thread_id}\n", encoding="utf-8")
+            if context.app is not None:
+                context.app._reload_via_shell = True
+        except Exception as e:
+            if context.log_system is not None:
+                context.log_system(f"/reload failed to save thread id for egg.sh: {e}; using direct restart.")
+    elif context.log_system is not None:
+        context.log_system("/reload: no egg.sh state file; using direct restart.")
+
+    if context.app is not None:
+        context.app._reload_requested = True
+        context.app.running = False
+    return CommandResult(clear_input=False, exit_app=True)
+
+
 def _legacy_app_handler(method_name: str) -> CommandHandler:
     def handler(context: CommandContext, arg: str) -> CommandResult:
         app = context.app
@@ -210,9 +283,9 @@ def create_default_command_registry() -> CommandRegistry:
 
     registry = CommandRegistry()
 
-    _register_legacy_command(registry, "help", category="core", usage="/help", description="Show available commands.")
-    _register_legacy_command(registry, "quit", category="core", usage="/quit", description="Exit the application.")
-    _register_legacy_command(registry, "reload", category="core", usage="/reload", description="Restart Egg and reopen the current thread.")
+    registry.register(CommandSpec("help", _core_help_handler, category="core", usage="/help", description="Show available commands."))
+    registry.register(CommandSpec("quit", _core_quit_handler, category="core", usage="/quit", description="Exit the application."))
+    registry.register(CommandSpec("reload", _core_reload_handler, category="core", usage="/reload", description="Restart Egg and reopen the current thread."))
 
     _register_legacy_command(registry, "model", category="model", usage="/model <key>", description="Set or display the active model.")
     _register_legacy_command(registry, "updateAllModels", category="model", usage="/updateAllModels <provider>", description="Refresh a provider model catalog.")
@@ -360,6 +433,7 @@ __all__ = [
     'command_completion_names',
     'create_default_command_registry',
     'create_default_input_prefix_registry',
+    'render_command_registry_help',
     'SESSION_COMMAND_COMPLETIONS',
     'SESSION_ON_COMPLETIONS',
     'SESSION_TARGET_COMPLETIONS',

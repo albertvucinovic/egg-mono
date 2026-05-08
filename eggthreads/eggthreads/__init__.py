@@ -202,6 +202,7 @@ from .command_catalog import (
     command_completion_names,
     create_default_command_registry,
     create_default_input_prefix_registry,
+    render_command_registry_help,
 )
 
 from .tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegistry, ToolStreamContext, create_default_tools, create_tool_registry
@@ -274,5 +275,6 @@ __all__ = [
     'SESSION_COMMAND_COMPLETIONS', 'SESSION_ON_COMPLETIONS', 'SESSION_TARGET_COMPLETIONS',
     'EGG_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',
     'command_completion_names', 'create_default_command_registry', 'create_default_input_prefix_registry',
+    'render_command_registry_help',
 ]
 from .event_watcher import EventWatcher
