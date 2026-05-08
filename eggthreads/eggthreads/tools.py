@@ -49,6 +49,40 @@ class ToolContext:
     cancel_check: Callable[[], bool] | None = None
     working_dir: Any = None
     raw: Mapping[str, Any] = field(default_factory=dict)
+    stream: "ToolStreamContext | None" = None
+
+
+@dataclass(frozen=True)
+class ToolStreamContext:
+    """Live stream/audit hooks exposed to streaming tool implementations."""
+
+    db: Any
+    thread_id: str
+    invoke_id: str
+    tool_call_id: str
+    tool_name: str
+    current_model: str | None = None
+    heartbeat: Callable[[], bool] | None = None
+    emit_delta: Callable[[str], bool] | None = None
+    emit_summary: Callable[[str], None] | None = None
+
+    def stream_delta(self, text: str) -> bool:
+        if self.emit_delta is None:
+            return True
+        return self.emit_delta(text)
+
+    def summary(self, text: str) -> None:
+        if self.emit_summary is not None:
+            self.emit_summary(text)
+
+
+@dataclass(frozen=True)
+class ToolExecutionResult:
+    """Structured result for tools that can report execution metadata."""
+
+    output: str
+    reason: str = "success"
+    streamed: bool = False
 
 
 @dataclass(frozen=True)
@@ -142,6 +176,12 @@ class ToolRegistry:
         """
         return [d["spec"] for d in self._tools.values() if not d.get("local_only")]
 
+    def capabilities(self, name: str) -> ToolCapabilities:
+        entry = self._tools.get(name)
+        if not entry:
+            raise KeyError(f"Unknown tool: {name}")
+        return entry["capabilities"]
+
     def _prepare_call(
         self,
         name: str,
@@ -207,6 +247,7 @@ class ToolRegistry:
             cancel_check=cancel_check,
             working_dir=context.get("working_dir"),
             raw=dict(context),
+            stream=context.get("stream"),
         )
 
         return impl, args, tool_ctx if accepts_context else None
@@ -235,7 +276,9 @@ class ToolRegistry:
     def execute(self, name: str, arguments: Any, **context: Any) -> Any:
         result = self._call(name, arguments, context)
         if inspect.isawaitable(result):
-            return self._run_awaitable_sync(result)
+            result = self._run_awaitable_sync(result)
+        if isinstance(result, ToolExecutionResult) and not context.get("preserve_tool_result"):
+            return result.output
         return result
 
     async def execute_async(self, name: str, arguments: Any, **context: Any) -> Any:
@@ -249,7 +292,9 @@ class ToolRegistry:
                 tool_ctx,
             ) if tool_ctx is not None else await asyncio.to_thread(impl, args)
         if inspect.isawaitable(result):
-            return await result
+            result = await result
+        if isinstance(result, ToolExecutionResult) and not context.get("preserve_tool_result"):
+            return result.output
         return result
 
 

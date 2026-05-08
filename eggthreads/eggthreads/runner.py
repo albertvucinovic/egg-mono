@@ -14,7 +14,7 @@ try:
 except Exception:
     LLMClient = None  # type: ignore
 from .db import ThreadsDB
-from .tools import ToolRegistry, create_default_tools
+from .tools import ToolExecutionResult, ToolRegistry, ToolStreamContext, create_default_tools
 from .tool_state import (
     ToolCallState,
     RunnerActionable,
@@ -1910,91 +1910,10 @@ class ThreadRunner:
         return out
 
 
-    async def _run_bash_tool_async(self, tc: ToolCallState, invoke_id: str, current_model: Optional[str], ra: RunnerActionable) -> None:
-        """Execute a bash tool call with OS-level cancellation.
-
-        This bypasses the generic ToolRegistry implementation so that we
-        can terminate the underlying subprocess when the thread's lease
-        is interrupted (e.g. via Ctrl+C in the UI).
-        """
-        import asyncio as _asyncio
-        import os as _os
-        import signal as _signal
-        from .api import _ensure_thread_working_directory
-
-        from .sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
-
-        # Decode arguments into a script string.
-        args_obj = parse_tool_arguments(tc.arguments)
-        script = (args_obj.get("script") or "").strip()
-
-        # Mark execution started
-        self.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=self.thread_id,
-            type_='tool_call.execution_started',
-            msg_id=None,
-            invoke_id=invoke_id,
-            payload={'tool_call_id': tc.tool_call_id},
-        )
-
-        # Build base argv for bash and wrap it in the sandbox when
-        # enabled.  We intentionally avoid using ``shell=True`` so that
-        # the sandbox wrapper controls the executed binary directly.
-        base_argv = ['/bin/bash', '-lc', script]
-        cwd = _ensure_thread_working_directory(self.db, self.thread_id)
-
-        # Honour per-thread sandbox settings. This makes tool execution
-        # reproducible across processes because the config is stored as
-        # events in the thread.
-        # Generate a unique container name for Docker sandboxing so we can
-        # explicitly stop the container on interrupt (SIGTERM to docker run
-        # may not stop the container quickly enough).
-        container_name: Optional[str] = None
-        sandbox_provider: Optional[str] = None
-        try:
-            sb = get_thread_sandbox_config(self.db, self.thread_id)
-            sandbox_provider = sb.provider
-            if sb.enabled and sb.provider == "docker":
-                container_name = f"egg_{invoke_id}"
-            argv = wrap_argv_for_sandbox_with_settings(
-                base_argv,
-                enabled=sb.enabled,
-                settings={**dict(sb.settings or {}), "_egg_thread_context": {"thread_id": self.thread_id, "db_path": str(self.db.path)}},
-                working_dir=cwd,
-                provider=sb.provider,
-                container_name=container_name,
-            )
-        except Exception:
-            from .sandbox import wrap_argv_for_sandbox
-            argv = wrap_argv_for_sandbox(base_argv)
-
-        # Resolve per-thread tools configuration so we can honour the
-        # "raw tool output" toggle for streaming as well.  When
-        # allow_raw_tool_output is True we still sanitize control
-        # characters but we skip any secret-masking heuristics, so the
-        # user sees exact tool output in the UI.
-        try:
-            tools_cfg = get_thread_tools_config(self.db, self.thread_id)
-            allow_raw_stream = bool(getattr(tools_cfg, 'allow_raw_tool_output', False))
-        except Exception:
-            allow_raw_stream = False
-
-        # Spawn bash (optionally under ``srt``) in its own process group
-        # so we can kill the entire command (sleep, child processes,
-        # etc.) on interrupt.
-        proc = await _asyncio.create_subprocess_exec(
-            *argv,
-            stdout=_asyncio.subprocess.PIPE,
-            stderr=_asyncio.subprocess.PIPE,
-            preexec_fn=_os.setsid,
-            cwd=cwd,
-        )
-        # True iff we lost the lease and explicitly interrupted via
-        # heartbeat failure; used to tag tool_call.finished.reason.
-        interrupted_by_lease = False
-        # True iff we timed out waiting for the command to complete.
-        timed_out = False
+    def _tool_stream_context(self, *, tc: ToolCallState, invoke_id: str, current_model: Optional[str]) -> ToolStreamContext:
+        """Build live streaming hooks for a ToolRegistry execution."""
+        stream_limiter = ToolStreamPreviewLimiter()
+        suppressed_counter = {'count': 0}
         chunk_seq = self.db.max_chunk_seq(invoke_id)
 
         def _next_chunk_seq() -> int:
@@ -2002,217 +1921,53 @@ class ThreadRunner:
             chunk_seq += 1
             return chunk_seq
 
-        # Shared timeout resolution: LLM-specified > config > global default.
-        tool_timeout_sec = resolve_tool_timeout_sec(
-            args_obj,
-            self.cfg.tool_timeout_sec if self.cfg is not None else None,
-            _default_tool_timeout_sec,
-        )
+        def _heartbeat() -> bool:
+            return self.db.heartbeat(
+                self.thread_id,
+                invoke_id,
+                _now_plus(self.cfg.lease_ttl_sec),
+            )
 
-        import time as _time
-        start_time = _time.time()
-        summary_period_sec = 1.0
-        last_summary_time = 0.0
-
-        def _emit_timeout_summary(*, force: bool = False) -> None:
-            nonlocal last_summary_time
-            summary = tool_timeout_summary(tc.name or 'bash', tool_timeout_sec, start_time, now=_time.time())
-            if not summary:
-                return
-            now = _time.time()
-            if not force and last_summary_time and (now - last_summary_time) < summary_period_sec:
-                return
-            last_summary_time = now
+        def _emit_delta(text: str) -> bool:
             try:
-                emit_tool_summary_event(
-                    self.db,
-                    thread_id=self.thread_id,
-                    invoke_id=invoke_id,
-                    tool_call_id=tc.tool_call_id,
-                    tool_name=tc.name or 'bash',
-                    summary=summary,
-                )
+                text = self._filter_tool_output(text, mask_secrets=False)
             except Exception:
                 pass
+            return emit_limited_tool_stream_delta(
+                self.db,
+                stream_limiter,
+                text,
+                thread_id=self.thread_id,
+                invoke_id=invoke_id,
+                tool_call_id=tc.tool_call_id,
+                tool_name=tc.name or '',
+                current_model=current_model,
+                heartbeat=_heartbeat,
+                suppressed_counter=suppressed_counter,
+                next_chunk_seq=_next_chunk_seq,
+            )
 
-        _emit_timeout_summary(force=True)
+        def _emit_summary(summary: str) -> None:
+            emit_tool_summary_event(
+                self.db,
+                thread_id=self.thread_id,
+                invoke_id=invoke_id,
+                tool_call_id=tc.tool_call_id,
+                tool_name=tc.name or '',
+                summary=summary,
+            )
 
-        def _kill_process_and_container():
-            """Helper to stop Docker container and kill process group."""
-            # First, explicitly stop Docker container if running in sandbox
-            if container_name and sandbox_provider == "docker":
-                try:
-                    from .sandbox import stop_docker_container
-                    stop_docker_container(container_name, timeout=2)
-                except Exception:
-                    pass
-            # Then kill the process group
-            try:
-                pgid = _os.getpgid(proc.pid)
-                _os.killpg(pgid, _signal.SIGTERM)
-            except Exception:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-
-        async def _hb_watcher():
-            nonlocal interrupted_by_lease, timed_out
-            while True:
-                await _asyncio.sleep(self.cfg.heartbeat_sec)
-                # If bash has already completed naturally, stop watching.
-                if proc.returncode is not None:
-                    return
-                _emit_timeout_summary()
-                # Check for timeout
-                if tool_timeout_sec and (_time.time() - start_time) >= tool_timeout_sec:
-                    timed_out = True
-                    _kill_process_and_container()
-                    return
-                # If we lose the lease (e.g. via interrupt_thread),
-                # terminate the subprocess group.
-                if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
-                    interrupted_by_lease = True
-                    _kill_process_and_container()
-                    return
-
-        # Concurrently read stdout/stderr so we can stream output as it
-        # arrives. We accumulate into buffers while also emitting
-        # stream.delta events for live display.
-        stdout_buf: list[str] = []
-        stderr_buf: list[str] = []
-        stream_limiter = ToolStreamPreviewLimiter()
-
-        cancelled = False
-
-        async def _stream_reader(stream, is_stdout: bool):
-            nonlocal cancelled
-            header_emitted = False
-            suppressed_counter = {'count': 0}
-            prefix = '--- STDOUT ---\n' if is_stdout else '--- STDERR ---\n'
-            while True:
-                try:
-                    chunk = await stream.readline()
-                except Exception:
-                    break
-                if not chunk:
-                    break
-                # Decode and sanitize control characters.  Secret
-                # masking is controlled by the per-thread
-                # allow_raw_tool_output flag: when raw output is
-                # allowed we *only* strip problematic control
-                # characters; otherwise we also apply heuristic
-                # secret-masking so things like API keys in .env-style
-                # lines are not splashed into the UI.
-                text_raw = chunk.decode(errors='replace')
-                try:
-                    text = self._filter_tool_output(
-                        text_raw,
-                        mask_secrets=not allow_raw_stream,
-                    )
-                except Exception:
-                    text = text_raw
-                if not header_emitted:
-                    if is_stdout:
-                        stdout_buf.append(prefix)
-                    else:
-                        stderr_buf.append(prefix)
-                    header_emitted = True
-                if is_stdout:
-                    stdout_buf.append(text)
-                else:
-                    stderr_buf.append(text)
-
-                # Stream only a bounded live preview. The full output remains
-                # in stdout_buf/stderr_buf and will be saved to disk by the
-                # normal long-output approval path after the tool finishes.
-                def _heartbeat() -> bool:
-                    return self.db.heartbeat(
-                        self.thread_id,
-                        invoke_id,
-                        _now_plus(self.cfg.lease_ttl_sec),
-                    )
-
-                ok = emit_limited_tool_stream_delta(
-                    self.db,
-                    stream_limiter,
-                    text,
-                    thread_id=self.thread_id,
-                    invoke_id=invoke_id,
-                    tool_call_id=tc.tool_call_id,
-                    tool_name=tc.name or '',
-                    current_model=current_model,
-                    heartbeat=_heartbeat,
-                    suppressed_counter=suppressed_counter,
-                    next_chunk_seq=_next_chunk_seq,
-                )
-                if not ok:
-                    cancelled = True
-                    break
-                await _asyncio.sleep(0)
-
-        watcher = _asyncio.create_task(_hb_watcher())
-        stdout_task = _asyncio.create_task(_stream_reader(proc.stdout, True))
-        stderr_task = _asyncio.create_task(_stream_reader(proc.stderr, False))
-
-        try:
-            await proc.wait()
-            await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        finally:
-            cancelled = True
-            try:
-                watcher.cancel()
-                await _asyncio.sleep(0)
-            except Exception:
-                pass
-
-        # Build combined output from accumulated buffers
-        out = ''.join(stdout_buf) + ''.join(stderr_buf)
-        full_result = out.strip() or "--- The command executed successfully and produced no output ---"
-
-        # Prepend timeout message if timed out
-        if timed_out:
-            timeout_msg = f"--- TIMEOUT ---\nCommand timed out after {tool_timeout_sec} seconds.\n\n"
-            full_result = timeout_msg + full_result
-
-        # NOTE: We intentionally do not mask secrets here. Tool output may
-        # contain secrets and we allow them to be stored and shown in the
-        # local UI; secrets are only masked when building the provider API
-        # request in _sanitize_messages_for_api(). We do keep the control-
-        # character sanitization above for terminal safety.
-
-        # Determine reason for tool_call.finished
-        if timed_out:
-            finish_reason = 'timeout'
-        elif interrupted_by_lease:
-            finish_reason = 'interrupted'
-        else:
-            finish_reason = 'success'
-
-        # Mark tool_call.finished with reason
-        self.db.append_event(
-            event_id=_os.urandom(10).hex(),
+        return ToolStreamContext(
+            db=self.db,
             thread_id=self.thread_id,
-            type_='tool_call.finished',
-            msg_id=None,
             invoke_id=invoke_id,
-            payload={
-                'tool_call_id': tc.tool_call_id,
-                'reason': finish_reason,
-                'output': full_result,
-            },
+            tool_call_id=tc.tool_call_id,
+            tool_name=tc.name or '',
+            current_model=current_model,
+            heartbeat=_heartbeat,
+            emit_delta=_emit_delta,
+            emit_summary=_emit_summary,
         )
-
-        # Auto output-approval: small outputs get decision='whole' and
-        # go through verbatim; long outputs are stashed to disk and get
-        # decision='partial' with a preview that references the saved
-        # file so the LLM can fetch the full content on demand. A UI
-        # cancellation (Ctrl+C) that already recorded an explicit
-        # decision is respected.
-        try:
-            _emit_auto_output_approval(self.db, self.thread_id, tc.tool_call_id, full_result)
-        except Exception:
-            pass
 
     async def _run_ra_tools(self, invoke_id: str, current_model: Optional[str], ra: RunnerActionable) -> None:
         """Handle RA2/RA3: process tool calls that are already approved or denied
@@ -2297,12 +2052,6 @@ class ThreadRunner:
                     )
                     continue
 
-                # Special-case bash so we can terminate the underlying
-                # subprocess on Ctrl+C / lease loss.
-                if tc.name == 'bash':
-                    await self._run_bash_tool_async(tc, invoke_id, current_model, ra)
-                    continue
-
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.thread_id,
@@ -2373,10 +2122,11 @@ class ThreadRunner:
                     return check
 
                 cancel_check = make_cancel_check(self.db.path, self.thread_id, invoke_id)
+                stream_ctx = self._tool_stream_context(tc=tc, invoke_id=invoke_id, current_model=current_model)
                 summary_task = asyncio.create_task(_summary_watcher())
 
                 try:
-                    full_result = await self.tools.execute_async(
+                    tool_result = await self.tools.execute_async(
                         tc.name,
                         tc.arguments,
                         thread_id=self.thread_id,
@@ -2386,9 +2136,21 @@ class ThreadRunner:
                         tool_timeout_sec=tool_timeout_sec,
                         cancel_check=cancel_check,
                         db=self.db,
+                        stream=stream_ctx,
+                        preserve_tool_result=True,
                     )
+                    if isinstance(tool_result, ToolExecutionResult):
+                        full_result = tool_result.output
+                        finish_reason = tool_result.reason or 'success'
+                        already_streamed = tool_result.streamed
+                    else:
+                        full_result = tool_result
+                        finish_reason = 'success'
+                        already_streamed = False
                 except Exception as e:
                     full_result = f"ERROR: {e}"
+                    finish_reason = 'error'
+                    already_streamed = False
                 finally:
                     summary_stop.set()
                     try:
@@ -2410,45 +2172,48 @@ class ThreadRunner:
                 out = full_result or ''
                 CH = 400
                 cancelled = False
-                stream_limiter = ToolStreamPreviewLimiter()
-                suppressed_counter = {'count': 0}
-                chunk_seq = self.db.max_chunk_seq(invoke_id)
+                if not already_streamed:
+                    stream_limiter = ToolStreamPreviewLimiter()
+                    suppressed_counter = {'count': 0}
+                    chunk_seq = self.db.max_chunk_seq(invoke_id)
 
-                def _next_chunk_seq() -> int:
-                    nonlocal chunk_seq
-                    chunk_seq += 1
-                    return chunk_seq
+                    def _next_chunk_seq() -> int:
+                        nonlocal chunk_seq
+                        chunk_seq += 1
+                        return chunk_seq
 
-                for i in range(0, len(out), CH):
-                    part = out[i : i + CH]
-                    # Respect the per-thread lease while emitting only a
-                    # bounded live preview. The full output remains in
-                    # full_result and is handled by the normal long-output
-                    # approval/stash path below.
-                    def _heartbeat() -> bool:
-                        return self.db.heartbeat(
-                            self.thread_id,
-                            invoke_id,
-                            _now_plus(self.cfg.lease_ttl_sec),
+                    for i in range(0, len(out), CH):
+                        part = out[i : i + CH]
+                        # Respect the per-thread lease while emitting only a
+                        # bounded live preview. The full output remains in
+                        # full_result and is handled by the normal long-output
+                        # approval/stash path below.
+                        def _heartbeat() -> bool:
+                            return self.db.heartbeat(
+                                self.thread_id,
+                                invoke_id,
+                                _now_plus(self.cfg.lease_ttl_sec),
+                            )
+
+                        ok = emit_limited_tool_stream_delta(
+                            self.db,
+                            stream_limiter,
+                            part,
+                            thread_id=self.thread_id,
+                            invoke_id=invoke_id,
+                            tool_call_id=tc.tool_call_id,
+                            tool_name=tc.name or '',
+                            current_model=current_model,
+                            heartbeat=_heartbeat,
+                            suppressed_counter=suppressed_counter,
+                            next_chunk_seq=_next_chunk_seq,
                         )
-
-                    ok = emit_limited_tool_stream_delta(
-                        self.db,
-                        stream_limiter,
-                        part,
-                        thread_id=self.thread_id,
-                        invoke_id=invoke_id,
-                        tool_call_id=tc.tool_call_id,
-                        tool_name=tc.name or '',
-                        current_model=current_model,
-                        heartbeat=_heartbeat,
-                        suppressed_counter=suppressed_counter,
-                        next_chunk_seq=_next_chunk_seq,
-                    )
-                    if not ok:
-                        cancelled = True
-                        break
-                    await asyncio.sleep(0)
+                        if not ok:
+                            cancelled = True
+                            break
+                        await asyncio.sleep(0)
+                if cancelled and finish_reason == 'success':
+                    finish_reason = 'interrupted'
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.thread_id,
@@ -2457,7 +2222,7 @@ class ThreadRunner:
                     invoke_id=invoke_id,
                     payload={
                         'tool_call_id': tc.tool_call_id,
-                        'reason': 'interrupted' if cancelled else 'success',
+                        'reason': finish_reason,
                         'output': full_result,
                     },
                 )

@@ -5,7 +5,7 @@ import threading
 
 import eggthreads as ts
 from eggthreads.plugins import FunctionPlugin, ToolPluginContext, register_plugins
-from eggthreads.tools import ToolCapabilities, ToolContext, ToolRegistry, create_default_tools, create_tool_registry
+from eggthreads.tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegistry, create_default_tools, create_tool_registry
 
 
 def _tool_names(registry: ToolRegistry) -> list[str]:
@@ -245,3 +245,22 @@ def test_execute_async_runs_sync_tool_in_worker_thread() -> None:
 
     assert asyncio.run(registry.execute_async("sync_tool", {"value": "ok"})) == "sync-ok"
     assert seen["thread_id"] != main_thread_id
+
+
+def test_tool_execution_result_unwraps_by_default_and_can_be_preserved() -> None:
+    registry = ToolRegistry()
+
+    def impl(args: dict[str, object]) -> ToolExecutionResult:
+        return ToolExecutionResult("structured-output", reason="timeout", streamed=True)
+
+    registry.register(
+        "structured_tool",
+        "Structured tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    assert registry.execute("structured_tool", {}) == "structured-output"
+
+    preserved = registry.execute("structured_tool", {}, preserve_tool_result=True)
+    assert preserved == ToolExecutionResult("structured-output", reason="timeout", streamed=True)
