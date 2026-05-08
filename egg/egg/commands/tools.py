@@ -9,7 +9,6 @@ from eggthreads import (
     approve_tool_calls_for_thread,
     append_message,
     create_snapshot,
-    create_default_tools,
 )
 
 
@@ -18,14 +17,9 @@ def get_available_tools() -> Dict[str, Dict[str, Any]]:
 
     Returns a dict mapping tool name to {"spec": ..., "local_only": bool}
     """
-    registry = create_default_tools()
-    tools = {}
-    for name, entry in registry._tools.items():
-        tools[name] = {
-            "spec": entry["spec"],
-            "local_only": entry.get("local_only", False),
-        }
-    return tools
+    from eggthreads.command_catalog import _get_available_tools
+
+    return _get_available_tools()
 
 
 class ToolCommandsMixin:
@@ -33,225 +27,112 @@ class ToolCommandsMixin:
 
     def cmd_toggleAutoApproval(self, arg: str) -> None:
         """Handle /toggleAutoApproval command - toggle global tool auto-approval."""
-        # Toggle per-thread global tool auto-approval by emitting a
-        # tool_call.approval event with decision global_approval /
-        # revoke_global_approval. This affects future tool calls in
-        # this thread (both assistant- and user-originated).
-        try:
-            from eggthreads import build_tool_call_states  # type: ignore
-            from eggthreads import thread_state as _thread_state  # type: ignore
-        except Exception:
-            self.log_system('Auto-approval toggle not available (eggthreads import failed).')
-            return
-        # Heuristic: check whether there exists any approval event with
-        # decision == 'global_approval' more recent than any
-        # revoke_global_approval; since we don't persist this flag
-        # separately, we simply toggle based on the last such event.
-        try:
-            cur = self.db.conn.execute(
-                "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.approval' ORDER BY event_seq ASC",
-                (self.current_thread,),
-            )
-            last_decision = None
-            for (pj,) in cur.fetchall():
-                try:
-                    payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
-                except Exception:
-                    payload = {}
-                d = payload.get('decision')
-                if d in ('global_approval', 'revoke_global_approval'):
-                    last_decision = d
-            enable = (last_decision != 'global_approval')
-        except Exception:
-            enable = True
+        from eggthreads.command_catalog import _toggle_auto_approval_for_thread
 
-        decision = 'global_approval' if enable else 'revoke_global_approval'
-        try:
-            approve_tool_calls_for_thread(
-                self.db,
-                self.current_thread,
-                decision=decision,
-                reason='Toggled by user via /toggleAutoApproval',
-            )
-            self.log_system(
-                'Global tool auto-approval ENABLED for this thread.' if enable
-                else 'Global tool auto-approval DISABLED for this thread.'
-            )
-        except Exception as e:
-            self.log_system(f'Error toggling auto-approval: {e}')
+        _toggle_auto_approval_for_thread(
+            self.db,
+            self.current_thread,
+            self.log_system,
+            approve_tool_calls_for_thread,
+        )
 
     def cmd_toolsOn(self, arg: str) -> None:
         """Handle /toolsOn command - enable tools for thread."""
-        # Thread-wide toggle: allow RA1 to expose tools again.
-        try:
-            from eggthreads import set_thread_tools_enabled  # type: ignore
-            set_thread_tools_enabled(self.db, self.current_thread, True)
-            self.log_system('Tools enabled for this thread (LLM may call tools).')
-        except Exception as e:
-            self.log_system(f'/toolson error: {e}')
+        from eggthreads.command_catalog import CommandContext, _tools_on_handler
+
+        _tools_on_handler(
+            CommandContext(
+                db=self.db,
+                current_thread=self.current_thread,
+                log_system=self.log_system,
+                app=self,
+            ),
+            arg,
+        )
 
     def cmd_toolsOff(self, arg: str) -> None:
         """Handle /toolsOff command - disable tools for thread."""
-        # Thread-wide toggle: RA1 will not expose tools to the LLM
-        # for this thread. User-initiated commands ($, $$, /wait)
-        # still work as they are modelled as explicit tool calls.
-        try:
-            from eggthreads import set_thread_tools_enabled  # type: ignore
-            set_thread_tools_enabled(self.db, self.current_thread, False)
-            self.log_system('Tools disabled for this thread (LLM tool calls suppressed).')
-        except Exception as e:
-            self.log_system(f'/toolsoff error: {e}')
+        from eggthreads.command_catalog import CommandContext, _tools_off_handler
+
+        _tools_off_handler(
+            CommandContext(
+                db=self.db,
+                current_thread=self.current_thread,
+                log_system=self.log_system,
+                app=self,
+            ),
+            arg,
+        )
 
     def cmd_toolsSecrets(self, arg: str) -> None:
         """Handle /toolsSecrets command - toggle secrets masking."""
-        # Toggle per-thread masking of potential secrets in tool
-        # outputs. When masking is enabled (default), outputs from
-        # tools such as bash/python are filtered to remove
-        # problematic control characters and, when the optional
-        # detect-secrets library is available, to mask values that
-        # look like API keys or credentials. "on" = allow raw
-        # output (no masking); "off" = mask secrets.
-        mode = (arg or '').strip().lower()
-        if mode not in ('on', 'off'):
-            self.log_system('Usage: /toolsSecrets <on|off>  (on = allow raw tool output, off = mask secrets)')
-            return
-        allow_raw = (mode == 'on')
-        try:
-            from eggthreads import set_thread_allow_raw_tool_output  # type: ignore
-            set_thread_allow_raw_tool_output(self.db, self.current_thread, allow_raw)
-            if allow_raw:
-                self.log_system('Tool output secrets: raw mode ENABLED (secrets will not be masked).')
-            else:
-                self.log_system('Tool output secrets: masking ENABLED (attempting to mask detected secrets).')
-        except Exception as e:
-            self.log_system(f'/toolsecrets error: {e}')
+        from eggthreads.command_catalog import CommandContext, _tools_secrets_handler
+
+        _tools_secrets_handler(
+            CommandContext(
+                db=self.db,
+                current_thread=self.current_thread,
+                log_system=self.log_system,
+                app=self,
+            ),
+            arg,
+        )
 
     def cmd_disableTool(self, arg: str) -> None:
         """Handle /disableTool command - disable a specific tool."""
-        # Per-thread blacklist of individual tool names.
-        name = (arg or '').strip()
-        if not name:
-            self.log_system('Usage: /disabletool <tool_name>')
-            return
-        try:
-            from eggthreads import disable_tool_for_thread  # type: ignore
-            disable_tool_for_thread(self.db, self.current_thread, name)
-            self.log_system(f"Tool '{name}' disabled for this thread.")
-        except Exception as e:
-            self.log_system(f'/disabletool error: {e}')
+        from eggthreads.command_catalog import CommandContext, _disable_tool_handler
+
+        _disable_tool_handler(
+            CommandContext(
+                db=self.db,
+                current_thread=self.current_thread,
+                log_system=self.log_system,
+                app=self,
+            ),
+            arg,
+        )
 
     def cmd_enableTool(self, arg: str) -> None:
         """Handle /enableTool command - enable a specific tool."""
-        name = (arg or '').strip()
-        if not name:
-            self.log_system('Usage: /enabletool <tool_name>')
-            return
-        try:
-            from eggthreads import enable_tool_for_thread  # type: ignore
-            enable_tool_for_thread(self.db, self.current_thread, name)
-            self.log_system(f"Tool '{name}' enabled for this thread.")
-        except Exception as e:
-            self.log_system(f'/enabletool error: {e}')
+        from eggthreads.command_catalog import CommandContext, _enable_tool_handler
+
+        _enable_tool_handler(
+            CommandContext(
+                db=self.db,
+                current_thread=self.current_thread,
+                log_system=self.log_system,
+                app=self,
+            ),
+            arg,
+        )
 
     def cmd_toolsStatus(self, arg: str) -> None:
         """Handle /toolsStatus command - report tools configuration and available tools."""
-        try:
-            from eggthreads import get_thread_tools_config, get_tool_statuses_for_config  # type: ignore
-            cfg = get_thread_tools_config(self.db, self.current_thread)
-        except Exception as e:
-            self.log_system(f'/toolStatus error: {e}')
-            return
+        from eggthreads.command_catalog import CommandContext, _tools_status_handler
 
-        available_tools = get_available_tools()
-        tool_statuses = get_tool_statuses_for_config(cfg, available_tools)
-
-        # Build status message
-        lines = []
-
-        # Overall tools status
-        tools_status = "ENABLED" if cfg.llm_tools_enabled else "DISABLED"
-        lines.append(f"Tools for LLM: {tools_status}")
-
-        # Secrets mode
-        secrets_mode = 'raw (secrets visible)' if getattr(cfg, 'allow_raw_tool_output', False) else 'masked'
-        lines.append(f"Tool output secrets: {secrets_mode}")
-
-        allowed_tools = getattr(cfg, 'allowed_tools', None)
-        if allowed_tools is None:
-            lines.append("Tool allowlist: all registered tools")
-        else:
-            allowed_names = ", ".join(sorted(allowed_tools)) or "(none)"
-            lines.append(f"Tool allowlist: {allowed_names}")
-
-        lines.append("")
-        lines.append("Available tools:")
-
-        # List all tools with their status
-        for tool_status in tool_statuses:
-            status_parts = [tool_status["status_label"]]
-            if tool_status.get("local_only", False):
-                status_parts.append("local-only")
-
-            status_str = ", ".join(status_parts)
-            lines.append(f"  {tool_status['name']}: {status_str}")
-
-        lines.append("")
-        lines.append("Use /disableTool <name> or /enableTool <name> to control individual tools")
-        lines.append("Use /toolInfo <name> to see tool description")
-
-        text = "\n".join(lines)
-        # Display in static view like /help and /threads
-        try:
-            self.log_system('Tools status (see console for full).')
-            self.console_print_block('Tools Status', text, border_style='blue')
-        except Exception:
-            self.log_system(text)
+        _tools_status_handler(
+            CommandContext(
+                db=self.db,
+                current_thread=self.current_thread,
+                log_system=self.log_system,
+                console_print_block=self.console_print_block,
+                app=self,
+            ),
+            arg,
+        )
 
     def cmd_toolInfo(self, arg: str) -> None:
         """Handle /toolInfo command - show tool description in JSON format."""
-        tool_name = (arg or '').strip()
-        if not tool_name:
-            self.log_system('Usage: /toolInfo <tool_name>')
-            return
+        from eggthreads.command_catalog import CommandContext, _tool_info_handler
 
-        available_tools = get_available_tools()
-
-        # Try exact match first, then case-insensitive
-        tool_info = available_tools.get(tool_name)
-        if not tool_info:
-            # Try case-insensitive match
-            for name, info in available_tools.items():
-                if name.lower() == tool_name.lower():
-                    tool_info = info
-                    tool_name = name  # Use the canonical name
-                    break
-
-        if not tool_info:
-            available_names = sorted(available_tools.keys())
-            self.log_system(f"Tool '{tool_name}' not found.\nAvailable tools: {', '.join(available_names)}")
-            return
-
-        spec = tool_info["spec"]
-        local_only = tool_info.get("local_only", False)
-
-        # Format as JSON for display
-        formatted_spec = json.dumps(spec, indent=2)
-
-        lines = [
-            f"Tool: {tool_name}",
-            f"Local-only: {local_only}",
-            "",
-            "Spec (sent to LLM):",
-            formatted_spec,
-        ]
-
-        text = "\n".join(lines)
-        # Display in static view like /help and /threads
-        try:
-            self.log_system(f'Tool info: {tool_name} (see console for full).')
-            self.console_print_block(f'Tool: {tool_name}', text, border_style='blue')
-        except Exception:
-            self.log_system(text)
+        _tool_info_handler(
+            CommandContext(
+                log_system=self.log_system,
+                console_print_block=self.console_print_block,
+                app=self,
+            ),
+            arg,
+        )
 
     def cmd_schedulers(self, arg: str) -> None:
         """Handle /schedulers command - list active schedulers."""

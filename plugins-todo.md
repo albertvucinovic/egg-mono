@@ -270,7 +270,7 @@ Goal: remove hidden magic args and support future async/streaming/cancellable pl
   - lease-loss cancellation;
   - sandbox provider execution;
   - Docker/container cleanup.
-- [ ] Commit after each compatibility-preserving substep.
+- [x] Commit after each compatibility-preserving substep.
 
 Status notes:
 - 2026-05-07: Added `ToolContext` with db/thread/invoke/origin/model/timeout/cancel/working-dir/raw context fields.
@@ -293,6 +293,7 @@ Status notes:
 - 2026-05-07: Moved bash execution into the execution plugin as a context-aware async tool; runner no longer has a bash-specific execution branch.
 - 2026-05-07: Bash tool path preserves live stdout/stderr streaming, timeout summaries, lease-loss cancellation, sandbox wrapping, and Docker container cleanup through tool context.
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_bash_registry_path.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_tool_timeout.py eggthreads/tests/test_terminal_safety.py eggthreads/tests/test_output_isolation.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_spawn_capabilities_session.py eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py eggthreads/tests/test_tools_config_allowlist.py`.
+- 2026-05-08: Verified Phase 3 compatibility-preserving substeps were committed before Phase 4 command migration continued.
 
 ## Phase 4 — Command registry and internal command plugins
 
@@ -331,7 +332,7 @@ Commands should be registered by the same feature plugins that register related 
   - This decouples shell commands from hardcoded app input handling.
 - [ ] Migrate commands in small groups:
   - [x] core/lifecycle: `/help`, `/quit`, `/reload`.
-  - [ ] tools admin: `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, `/toggleAutoApproval`.
+  - [x] tools admin: `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, `/toggleAutoApproval`.
   - [ ] thread UI: `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, `/continue`.
   - [ ] subagents: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, `/waitForThreads`.
   - [ ] session: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, `/bashRepl`.
@@ -361,6 +362,8 @@ Status notes:
 - 2026-05-07: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py egg/tests/test_completion.py eggthreads/tests/test_command_registry.py`.
 - 2026-05-07: Migrated core/lifecycle commands `/help`, `/quit`, and `/reload` into registered command handlers; legacy mixin methods now delegate to those handlers for compatibility.
 - 2026-05-07: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py egg/tests/test_completion.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-08: Migrated tools admin commands `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, and `/toggleAutoApproval` into registered command handlers; legacy mixin methods now delegate for compatibility.
+- 2026-05-08: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins
 
@@ -614,4 +617,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Start with **Phase 0**, then **Phase 1**. Do not begin external plugin discovery until internal built-in plugin registration is stable.
+Continue **Phase 4** with thread UI command migration: `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, and `/continue`.

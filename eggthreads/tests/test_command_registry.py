@@ -153,6 +153,126 @@ def test_core_lifecycle_commands_are_registered_handlers(tmp_path, monkeypatch) 
     assert state_file.read_text(encoding="utf-8").strip() == app.current_thread
 
 
+def test_tools_on_off_commands_are_registered_handlers(monkeypatch) -> None:
+    registry = create_default_command_registry()
+    calls: list[tuple[str, bool]] = []
+    logs: list[str] = []
+
+    monkeypatch.setattr(
+        "eggthreads.set_thread_tools_enabled",
+        lambda db, tid, enabled: calls.append((tid, enabled)),
+    )
+
+    ctx = CommandContext(db=object(), current_thread="thread-1", log_system=logs.append)
+
+    assert registry.execute("toolsOn", ctx).clear_input is True
+    assert registry.execute("toolsOff", ctx).clear_input is True
+
+    assert calls == [("thread-1", True), ("thread-1", False)]
+    assert any("Tools enabled" in message for message in logs)
+    assert any("Tools disabled" in message for message in logs)
+
+
+def test_enable_disable_tool_commands_are_registered_handlers(monkeypatch) -> None:
+    registry = create_default_command_registry()
+    disabled: list[tuple[str, str]] = []
+    enabled: list[tuple[str, str]] = []
+    logs: list[str] = []
+
+    monkeypatch.setattr(
+        "eggthreads.disable_tool_for_thread",
+        lambda db, tid, name: disabled.append((tid, name)),
+    )
+    monkeypatch.setattr(
+        "eggthreads.enable_tool_for_thread",
+        lambda db, tid, name: enabled.append((tid, name)),
+    )
+
+    ctx = CommandContext(db=object(), current_thread="thread-1", log_system=logs.append)
+
+    registry.execute("disableTool", ctx, "bash")
+    registry.execute("enableTool", ctx, "python")
+    result = registry.execute("disableTool", ctx, "")
+
+    assert disabled == [("thread-1", "bash")]
+    assert enabled == [("thread-1", "python")]
+    assert result.clear_input is False
+    assert any("Usage: /disabletool" in message for message in logs)
+
+
+def test_tools_secrets_status_and_info_commands_are_registered_handlers(monkeypatch) -> None:
+    registry = create_default_command_registry()
+    raw_values: list[tuple[str, bool]] = []
+    logs: list[str] = []
+    printed: list[tuple[str, str]] = []
+
+    class Config:
+        llm_tools_enabled = True
+        allow_raw_tool_output = False
+        allowed_tools = {"bash"}
+        disabled_tools = set()
+
+    monkeypatch.setattr(
+        "eggthreads.set_thread_allow_raw_tool_output",
+        lambda db, tid, value: raw_values.append((tid, value)),
+    )
+    monkeypatch.setattr("eggthreads.get_thread_tools_config", lambda db, tid: Config())
+    monkeypatch.setattr(
+        "eggthreads.command_catalog._get_available_tools",
+        lambda: {
+            "bash": {"spec": {"name": "bash"}, "local_only": False},
+            "python": {"spec": {"name": "python"}, "local_only": False},
+        },
+    )
+
+    ctx = CommandContext(
+        db=object(),
+        current_thread="thread-1",
+        log_system=logs.append,
+        console_print_block=lambda title, text, **kwargs: printed.append((title, text)),
+    )
+
+    registry.execute("toolsSecrets", ctx, "on")
+    invalid = registry.execute("toolsSecrets", ctx, "bad")
+    registry.execute("toolsStatus", ctx)
+    registry.execute("toolInfo", ctx, "BASH")
+
+    assert raw_values == [("thread-1", True)]
+    assert invalid.clear_input is False
+    assert any("Usage: /toolsSecrets" in message for message in logs)
+    assert any(title == "Tools Status" and "python: not allowed" in text for title, text in printed)
+    assert any(title == "Tool: bash" and '"name": "bash"' in text for title, text in printed)
+
+
+def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:
+    registry = create_default_command_registry()
+    logs: list[str] = []
+
+    from eggthreads import ThreadsDB, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, "auto-approval-test")
+    ctx = CommandContext(db=db, current_thread=thread_id, log_system=logs.append)
+
+    registry.execute("toggleAutoApproval", ctx)
+    registry.execute("toggleAutoApproval", ctx)
+
+    decisions = []
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.approval' ORDER BY event_seq ASC",
+        (thread_id,),
+    ).fetchall()
+    for (payload_json,) in rows:
+        import json
+
+        decisions.append(json.loads(payload_json)["decision"])
+
+    assert decisions[-2:] == ["global_approval", "revoke_global_approval"]
+    assert any("ENABLED" in message for message in logs)
+    assert any("DISABLED" in message for message in logs)
+
+
 def test_render_command_registry_help_uses_metadata() -> None:
     registry = CommandRegistry()
     registry.register(
