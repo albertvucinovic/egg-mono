@@ -7,8 +7,11 @@ from eggthreads.command_catalog import (
     CommandRegistry,
     CommandResult,
     CommandSpec,
+    InputPrefixRegistry,
+    InputPrefixSpec,
     command_completion_names,
     create_default_command_registry,
+    create_default_input_prefix_registry,
 )
 
 
@@ -90,3 +93,29 @@ def test_command_registry_uses_completion_callback() -> None:
         "alpha",
         {"display": "Beta", "insert": "beta"},
     ]
+
+
+def test_input_prefix_registry_uses_longest_prefix_match() -> None:
+    registry = InputPrefixRegistry()
+    seen: list[tuple[str, str]] = []
+    registry.register(InputPrefixSpec("$", lambda ctx, arg: seen.append(("visible", arg))))
+    registry.register(InputPrefixSpec("$$", lambda ctx, arg: seen.append(("hidden", arg))))
+
+    result = registry.execute("$$ echo secret", CommandContext())
+
+    assert result == CommandResult(clear_input=True)
+    assert seen == [("hidden", " echo secret")]
+
+
+def test_default_input_prefix_registry_dispatches_to_bash_enqueue() -> None:
+    calls: list[tuple[str, bool]] = []
+
+    class App:
+        def enqueue_bash_tool(self, script: str, hidden: bool) -> None:
+            calls.append((script, hidden))
+
+    registry = create_default_input_prefix_registry()
+    result = registry.execute("$$ echo secret", CommandContext(app=App()))
+
+    assert result == CommandResult(clear_input=True)
+    assert calls == [("echo secret", True)]

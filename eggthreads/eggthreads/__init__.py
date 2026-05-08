@@ -192,6 +192,8 @@ from .command_catalog import (
     CommandRegistry,
     CommandResult,
     CommandSpec,
+    InputPrefixRegistry,
+    InputPrefixSpec,
     SESSION_COMMAND_COMPLETIONS,
     SESSION_ON_COMPLETIONS,
     SESSION_TARGET_COMPLETIONS,
@@ -199,6 +201,7 @@ from .command_catalog import (
     EGGW_COMMAND_COMPLETIONS,
     command_completion_names,
     create_default_command_registry,
+    create_default_input_prefix_registry,
 )
 
 from .tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegistry, ToolStreamContext, create_default_tools, create_tool_registry
@@ -267,8 +270,9 @@ __all__ = [
     'create_eval_context', 'resolve_eval_context', 'dispose_eval_context',
     'repl_bridge_call_tool',
     'CommandContext', 'CommandRegistry', 'CommandResult', 'CommandSpec',
+    'InputPrefixRegistry', 'InputPrefixSpec',
     'SESSION_COMMAND_COMPLETIONS', 'SESSION_ON_COMPLETIONS', 'SESSION_TARGET_COMPLETIONS',
     'EGG_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',
-    'command_completion_names', 'create_default_command_registry',
+    'command_completion_names', 'create_default_command_registry', 'create_default_input_prefix_registry',
 ]
 from .event_watcher import EventWatcher

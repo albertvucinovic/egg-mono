@@ -327,7 +327,7 @@ Commands should be registered by the same feature plugins that register related 
   - Built-in UI-only commands may receive an app escape hatch if necessary.
 - [x] Make `/help` generated from command metadata.
 - [x] Make autocomplete use command registry metadata and completion callbacks.
-- [ ] Add input-prefix handler registry for `$` and `$$`.
+- [x] Add input-prefix handler registry for `$` and `$$`.
   - This decouples shell commands from hardcoded app input handling.
 - [ ] Migrate commands in small groups:
   - [ ] core/lifecycle: `/help`, `/quit`, `/reload`.
@@ -356,6 +356,9 @@ Status notes:
 - 2026-05-07: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_completion.py egg/tests/test_commands_utility.py`, `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_thread.py egg/tests/test_commands_tools.py egg/tests/test_commands_session.py egg/tests/test_commands_display.py egg/tests/test_commands_model.py egg/tests/test_commands_sandbox.py egg/tests/test_approval.py`, and `pytest -q eggthreads/tests/test_plugin_tool_registry.py`.
 - 2026-05-07: `/help` now renders command usage/descriptions from `CommandRegistry` metadata instead of the static `COMMANDS_TEXT` block, with the old static text kept only as a fallback.
 - 2026-05-07: Focused tests passed: `pytest -q egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py`.
+- 2026-05-07: Added `InputPrefixRegistry` and `InputPrefixSpec` with longest-prefix matching.
+- 2026-05-07: Egg TUI `$` and `$$` handling now dispatches through the input-prefix registry, with thin adapters to the existing `enqueue_bash_tool()` path.
+- 2026-05-07: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py egg/tests/test_completion.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins
 

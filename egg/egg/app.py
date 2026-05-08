@@ -47,7 +47,7 @@ from eggthreads import (  # type: ignore
     get_sandbox_status,
 )
 from eggthreads.event_watcher import EventWatcher  # type: ignore
-from eggthreads.command_catalog import CommandContext, create_default_command_registry  # type: ignore
+from eggthreads.command_catalog import CommandContext, create_default_command_registry, create_default_input_prefix_registry  # type: ignore
 
 # eggdisplay UI components
 from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer  # type: ignore
@@ -163,6 +163,7 @@ class EggDisplayApp(
         self._sandbox_status: Dict[str, Any] = {}
         self._reload_requested: bool = False
         self.command_registry = create_default_command_registry()
+        self.input_prefix_registry = create_default_input_prefix_registry()
         reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
         reloaded_existing_thread = False
         if reload_thread and self.db.get_thread(reload_thread):
@@ -432,17 +433,9 @@ class EggDisplayApp(
         Process user-submitted text.
         Returns True if the input panel should be cleared, False otherwise.
         """
-        # User command execution ($ / $$) is modeled as a user-originated
-        # tool call (RA3). We enqueue a user message with tool_calls and
-        # an automatic tool_call.approval so that the ThreadRunner executes
-        # the command via the bash tool under the normal tool-call state
-        # machine, rather than running it locally in the UI.
-        if text.startswith('$$') and len(text) > 2:
-            self.enqueue_bash_tool(text[2:].strip(), hidden=True)
-            return True
-        if text.startswith('$') and len(text) > 1:
-            self.enqueue_bash_tool(text[1:].strip(), hidden=False)
-            return True
+        prefix_result = self.handle_input_prefix(text)
+        if prefix_result is not None:
+            return prefix_result.clear_input
         if text.startswith('/paste'):
             self.handle_command(text)
             return False
@@ -457,6 +450,26 @@ class EggDisplayApp(
         self.ensure_scheduler_for(self.current_thread)
         self.log_system("User message queued; scheduler will stream the response.")
         return True
+
+    def _command_context(self) -> CommandContext:
+        return CommandContext(
+            db=self.db,
+            current_thread=self.current_thread,
+            set_current_thread=lambda tid: setattr(self, 'current_thread', tid),
+            log_system=self.log_system,
+            console_print_block=self.console_print_block,
+            start_scheduler=self.start_scheduler,
+            llm_client=self.llm_client,
+            system_prompt=self.system_prompt,
+            app=self,
+        )
+
+    def handle_input_prefix(self, text: str):
+        """Dispatch non-slash input prefixes through the prefix registry."""
+        registry = getattr(self, 'input_prefix_registry', None)
+        if registry is None:
+            return None
+        return registry.execute(text, self._command_context())
 
     def handle_command(self, text: str) -> None:
         """Dispatch /command through the command registry."""
@@ -475,18 +488,7 @@ class EggDisplayApp(
             self.log_system(f'Unknown command: /{cmd}')
             return
 
-        ctx = CommandContext(
-            db=self.db,
-            current_thread=self.current_thread,
-            set_current_thread=lambda tid: setattr(self, 'current_thread', tid),
-            log_system=self.log_system,
-            console_print_block=self.console_print_block,
-            start_scheduler=self.start_scheduler,
-            llm_client=self.llm_client,
-            system_prompt=self.system_prompt,
-            app=self,
-        )
-        registry.execute(cmd, ctx, arg)
+        registry.execute(cmd, self._command_context(), arg)
 
     # ---------------- Main loop ----------------
     async def run(self):

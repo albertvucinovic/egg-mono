@@ -42,6 +42,35 @@ class TestCommandRegistryDispatch:
 
         assert any("Unknown command: /missing" in msg for msg in egg_app._system_log)
 
+    def test_on_submit_uses_input_prefix_registry(self, egg_app):
+        called = []
+
+        class PrefixRegistry:
+            def execute(self, text, ctx):
+                called.append((text, ctx.current_thread, ctx.app is egg_app))
+                from eggthreads.command_catalog import CommandResult
+
+                return CommandResult(clear_input=False)
+
+        egg_app.input_prefix_registry = PrefixRegistry()
+
+        assert egg_app.on_submit("$ echo hi") is False
+        assert called == [("$ echo hi", egg_app.current_thread, True)]
+
+    def test_on_submit_falls_through_when_no_input_prefix_matches(self, egg_app, monkeypatch):
+        class PrefixRegistry:
+            def execute(self, text, ctx):
+                return None
+
+        egg_app.input_prefix_registry = PrefixRegistry()
+        appended = []
+        monkeypatch.setattr("egg.app.append_message", lambda db, tid, role, content: appended.append((role, content)))
+        monkeypatch.setattr("egg.app.create_snapshot", lambda db, tid: None)
+        monkeypatch.setattr(egg_app, "ensure_scheduler_for", lambda tid: None)
+
+        assert egg_app.on_submit("hello") is True
+        assert appended == [("user", "hello")]
+
 
 class TestMessageSubmissionWorkflow:
     """Tests for message submission workflow."""

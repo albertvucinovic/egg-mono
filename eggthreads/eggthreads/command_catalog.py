@@ -49,6 +49,7 @@ class CommandContext:
 
 CommandHandler = Callable[[CommandContext, str], CommandResult | None]
 CommandCompleter = Callable[[CommandContext, str], Iterable[str | Mapping[str, Any]]]
+InputPrefixHandler = Callable[[CommandContext, str], CommandResult | None]
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,51 @@ class CommandRegistry:
         if completer is None:
             return []
         return list(completer(context, arg))
+
+
+@dataclass(frozen=True)
+class InputPrefixSpec:
+    """Handler metadata for non-slash input prefixes such as `$` and `$$`."""
+
+    prefix: str
+    handler: InputPrefixHandler
+    description: str = ""
+    clear_input: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.prefix:
+            raise ValueError("Input prefix must not be empty")
+
+
+class InputPrefixRegistry:
+    """Longest-prefix-match registry for user input handlers."""
+
+    def __init__(self) -> None:
+        self._handlers: dict[str, InputPrefixSpec] = {}
+
+    def register(self, spec: InputPrefixSpec) -> None:
+        if spec.prefix in self._handlers:
+            raise ValueError(f"Input prefix already registered: {spec.prefix!r}")
+        self._handlers[spec.prefix] = spec
+
+    def specs(self) -> list[InputPrefixSpec]:
+        return [self._handlers[prefix] for prefix in sorted(self._handlers, key=lambda p: (-len(p), p))]
+
+    def match(self, text: str) -> tuple[InputPrefixSpec, str] | None:
+        for spec in self.specs():
+            if text.startswith(spec.prefix):
+                return spec, text[len(spec.prefix):]
+        return None
+
+    def execute(self, text: str, context: CommandContext) -> CommandResult | None:
+        matched = self.match(text)
+        if matched is None:
+            return None
+        spec, rest = matched
+        result = spec.handler(context, rest)
+        if isinstance(result, CommandResult):
+            return result
+        return CommandResult(clear_input=spec.clear_input)
 
 
 def _legacy_app_handler(method_name: str) -> CommandHandler:
@@ -235,6 +281,39 @@ def command_completion_names(registry: CommandRegistry | None = None) -> list[st
     return [f"/{name}" for name in registry.names(include_aliases=True)]
 
 
+def create_default_input_prefix_registry() -> InputPrefixRegistry:
+    """Create built-in non-slash input-prefix handlers.
+
+    Handlers are initially thin adapters to the existing UI methods. The
+    execution plugin can migrate `$`/`$$` onto shared services in a later step.
+    """
+
+    registry = InputPrefixRegistry()
+
+    def enqueue_bash(context: CommandContext, arg: str, *, hidden: bool) -> CommandResult:
+        app = context.app
+        if app is None:
+            raise RuntimeError("Bash input prefixes require an app context")
+        app.enqueue_bash_tool(arg.strip(), hidden=hidden)
+        return CommandResult(clear_input=True)
+
+    registry.register(
+        InputPrefixSpec(
+            prefix="$$",
+            handler=lambda context, arg: enqueue_bash(context, arg, hidden=True),
+            description="Run a hidden bash command; output is stored locally and hidden from the model.",
+        )
+    )
+    registry.register(
+        InputPrefixSpec(
+            prefix="$",
+            handler=lambda context, arg: enqueue_bash(context, arg, hidden=False),
+            description="Run a bash command as a user-originated tool call.",
+        )
+    )
+    return registry
+
+
 SESSION_COMMAND_COMPLETIONS: List[str] = [
     '/sessionStatus',
     '/sessionOn',
@@ -275,8 +354,12 @@ __all__ = [
     'CommandRegistry',
     'CommandResult',
     'CommandSpec',
+    'InputPrefixHandler',
+    'InputPrefixRegistry',
+    'InputPrefixSpec',
     'command_completion_names',
     'create_default_command_registry',
+    'create_default_input_prefix_registry',
     'SESSION_COMMAND_COMPLETIONS',
     'SESSION_ON_COMPLETIONS',
     'SESSION_TARGET_COMPLETIONS',
