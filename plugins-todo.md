@@ -571,79 +571,152 @@ Future plugin examples:
 - enterprise audit policy;
 - citation/artifact policy.
 
-## Phase 9 — Context compaction and memory plugins
+## Phase 9 — Hook runtime and Pi-style internal extension API
 
-Goal: make context construction, compaction, and memory extensible without corrupting the raw event log.
+Goal: add a small, source-aware hook/extension runtime before building context,
+compaction, or memory plugins. Pi's extension system shows that the highest
+leverage is not another narrow registry first, but one coherent runtime API that
+lets trusted extensions register tools/commands/resources and subscribe to
+well-defined lifecycle events.
 
 Core invariant:
 - The raw event transcript remains the source of truth.
-- Compaction/memory plugins may add derived events, summaries, artifacts, or injected context, but must not erase authoritative history.
+- Hooks may observe, veto, suggest, inject transient provider-visible context, or
+  request core actions through explicit APIs, but core remains the final writer
+  of authoritative events and the final arbiter for security-sensitive state
+  transitions.
+- External/user extension code is trusted code. Do not imply sandboxing unless a
+  later phase actually isolates it in a separate process/container.
 
-### 9.1 Context hook points
+Design notes from Pi to adapt, not blindly copy:
+- Use a single extension-facing API object (`egg`) rather than asking extension
+  authors to import broad internal modules such as `eggthreads.api`.
+- Separate load-time registration (`ExtensionAPI`) from runtime handler context
+  (`ExtensionContext`, `ExtensionCommandContext`, `ToolContext`).
+- Track source/provenance for every contribution.
+- Keep default core tools/commands/core state machines in core or built-in
+  plugins; make user-specific behavior possible as extensions.
+- Start with a small hook surface and grow only when a real feature needs it.
 
-- [ ] Add `ContextPolicy` or hook registry for context construction.
-- [ ] Add `pre_llm_call(messages, ctx) -> messages` hook.
-  - First implementation can be read-only/injection-only.
-- [ ] Add `on_context_pressure(ctx)` hook.
-  - Trigger when token estimate approaches thread/model context limit.
-- [ ] Add `post_assistant_message(message, ctx)` hook.
-  - Enables memory extraction after assistant/user turns.
-- [ ] Add `on_thread_idle(ctx)` hook if useful for background compaction/memory extraction.
+### 9.1 Source metadata for plugin contributions
 
-### 9.2 Compaction plugins
+- [ ] Add a small source/provenance model for registered contributions.
+  - Suggested fields:
+    - plugin/extension name;
+    - version if known;
+    - source kind: builtin, project, user, package, temporary/test;
+    - path/package identifier where applicable.
+- [ ] Attach source metadata to tool registrations.
+- [ ] Attach source metadata to command/input-prefix registrations.
+- [ ] Attach source metadata to provider and policy registrations where practical.
+- [ ] Surface source metadata in focused diagnostics/tests first; UI polish can
+  come later.
 
-- [ ] Define compaction decision model.
-  - Example decisions:
-    - no-op;
-    - summarize range;
-    - replace provider-visible context with summary plus recent tail;
-    - stash omitted details as artifact;
-    - require user confirmation.
-- [ ] Core should own token-budget accounting and final provider-visible message assembly.
-- [ ] Plugin should own summarization strategy.
-  - Examples:
-    - deterministic extractive summary;
-    - small-LLM abstractive summary;
-    - code-aware compaction;
-    - tool-output-specific compaction.
-- [ ] Add provenance metadata for every summary:
-  - source event range;
-  - model/policy used;
-  - timestamp;
-  - whether secrets/no_api content was included.
-- [ ] Ensure `no_api` and secret-masking rules are preserved in compacted context.
+### 9.2 Hook registry and runner
 
-### 9.3 Memory plugins
+- [ ] Add a hook registry/runner with deterministic ordering and explicit result
+  composition rules.
+- [ ] Add failure isolation:
+  - handler exceptions are reported as plugin/hook errors;
+  - one failing hook does not corrupt core startup or event processing;
+  - security-sensitive hooks fail closed where appropriate.
+- [ ] Add hook audit/debug metadata sufficient for tests and later
+  `/pluginsStatus`/diagnostics.
+- [ ] Keep the initial implementation internal-only: built-in plugins and tests
+  may register hooks; external discovery remains Phase 10.
 
-- [ ] Define `MemoryProvider` interface.
-  - Suggested methods:
-    - `store(memory_item, ctx)`
-    - `retrieve(query, ctx)`
-    - `delete(scope, selector)`
-    - `status()`
-- [ ] Define memory item metadata.
-  - scope: global/user/project/thread/subtree;
-  - provenance;
-  - sensitivity/privacy flags;
-  - expiry/ttl;
-  - embedding/model info if applicable.
-- [ ] Add built-in simple memory provider first.
-  - Could be SQLite or files under `.egg/memory/`.
-  - Keep it disabled unless explicitly enabled.
-- [ ] Add retrieval injection through `pre_llm_call`.
-- [ ] Add extraction through `post_assistant_message` or explicit command/tool.
-- [ ] Add commands/tools later:
-  - `/memoryStatus`
-  - `/memorySearch`
-  - `/memoryForget`
-  - possibly `remember` / `recall` tools.
-- [ ] Commit in small substeps.
+Initial hook events to support:
+- [ ] `before_agent_start` / `before_llm_call`: inspect prompt assembly inputs and
+  optionally add transient context or append system-prompt text for the current
+  turn.
+- [ ] `context`: receive a copy of provider-visible messages and return modified
+  provider-visible messages. Core still enforces no-api/private/secret rules and
+  final token-budget limits.
+- [ ] `tool_call`: inspect tool name/arguments before execution; may block with a
+  reason or request safe argument normalization through a typed result.
+- [ ] `tool_result`: inspect/transform publishable tool result content before it
+  is exposed to the model, while core preserves raw authoritative tool output.
+- [ ] `message_end` / `after_assistant_message`: observe finalized messages and
+  optionally request derived events/artifacts.
+- [ ] `thread_idle` / `agent_end`: observe that a thread/runner turn settled;
+  useful for background summaries, memory extraction, and audits.
+- [ ] `resources_discover`: allow plugins to contribute skill/prompt/context
+  resource paths without hardcoding each resource type into core.
 
-Memory safety notes:
-- Memory plugins must respect `no_api` and secret policy.
-- Retrieval should include provenance so the model knows where context came from.
-- Users need a way to inspect and delete memory.
-- Default should be conservative: no persistent cross-thread memory unless enabled.
+### 9.3 Internal `ExtensionAPI` facade
+
+- [ ] Add an internal Pi-style registration facade, separate from the existing
+  low-level registry context.
+  - Possible shape:
+    - `egg.register_tool(...)`
+    - `egg.register_command(...)`
+    - `egg.register_input_prefix(...)`
+    - `egg.register_provider(...)`
+    - `egg.register_policy(...)`
+    - `egg.on(event_name, handler)`
+- [ ] Keep this facade small and typed enough that it can become the external
+  plugin API in Phase 10.
+- [ ] Do not expose `app` objects or broad private helpers through the facade.
+- [ ] Built-in plugins may keep using internal APIs for now, but new hook-based
+  examples/tests should use the facade where practical.
+
+### 9.4 Runtime contexts and safe core actions
+
+- [ ] Define a minimal runtime `ExtensionContext` for hook handlers.
+  - Suggested fields/actions:
+    - thread id, db handle or narrow service facade;
+    - current working directory;
+    - current model/context usage where available;
+    - cancellation/timeout signal where available;
+    - source/plugin metadata;
+    - `append_plugin_event(...)` for derived plugin state;
+    - bounded logging/diagnostic reporting.
+- [ ] Define a narrower UI abstraction for future external commands instead of
+  passing frontend `app` internals.
+- [ ] Define which actions are only safe from command handlers, such as waiting
+  for idle, switching threads, or triggering reloads.
+- [ ] Add stale-context safeguards if reload/session replacement is introduced;
+  otherwise document that Phase 9 has no hot reload yet.
+
+### 9.5 Migrate one or two built-in behaviors onto hooks as proof
+
+Pick small proof points that validate hook ordering and result composition
+without broad refactors:
+
+- [ ] Move or mirror output-policy publication shaping through `tool_result` if
+  it can be done without weakening raw-output preservation.
+- [ ] Add a built-in or test-only protected-path/permission-gate hook for
+  `tool_call` to prove blocking semantics.
+- [ ] Add a test-only context injection hook to prove transient context does not
+  mutate the raw event log.
+- [ ] Add a test-only resource discovery hook to prove contributed skills/prompts
+  can be loaded with source metadata.
+
+### 9.6 Tests and stopping point
+
+- [ ] Unit-test hook ordering, result composition, and exception isolation.
+- [ ] Unit-test source metadata for at least tools and commands.
+- [ ] Integration-test one hook in the runner path, preferably `context` or
+  `tool_call`.
+- [ ] Update this TODO with decisions and commit in small substeps.
+
+Out of scope for Phase 9:
+- External plugin discovery from files, packages, or entry points.
+- Persistent memory providers.
+- Full custom compaction strategy plugins.
+- Hot reload.
+- Untrusted plugin sandboxing.
+- Large UI extension APIs.
+
+Future extension examples after Phase 9:
+- permission gate for dangerous shell commands;
+- protected paths policy;
+- git checkpoint observer;
+- custom context injection/RAG;
+- custom compaction summary;
+- memory extraction/retrieval;
+- project resource discovery;
+- subagent orchestration presets.
 
 ## Phase 10 — External plugin discovery and configuration
 
@@ -702,4 +775,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Next step: Phase 9 context/memory plugin work. Optional cleanup before that: remove remaining session/sandbox/utility `cmd_*` compatibility delegates if direct-call tests no longer require them.
+Next step: Phase 9 hook runtime and Pi-style internal extension API. Optional cleanup before that: remove remaining session/sandbox/utility `cmd_*` compatibility delegates if direct-call tests no longer require them.
