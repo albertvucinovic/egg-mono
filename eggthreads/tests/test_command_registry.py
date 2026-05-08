@@ -495,6 +495,23 @@ def test_sandbox_admin_commands_are_registered_handlers(monkeypatch) -> None:
     assert any("Sandbox configuration applied" in message for message in logs)
 
 
+def test_web_commands_are_registered_handlers(monkeypatch) -> None:
+    from eggthreads.builtin_plugins import web
+
+    registry = create_default_command_registry()
+
+    assert registry.get("startSearxng").handler is web.start_searxng_command
+    assert registry.get("stopSearxng").handler is web.stop_searxng_command
+
+    calls: list[tuple[list[str], str]] = []
+    monkeypatch.setattr(web, "run_searxng_compose", lambda ctx, args, **kwargs: calls.append((args, kwargs["action"])))
+
+    registry.execute("startSearxng", CommandContext())
+    registry.execute("stopSearxng", CommandContext())
+
+    assert calls == [(["up", "-d"], "start"), (["down"], "stop")]
+
+
 def test_render_command_registry_help_uses_metadata() -> None:
     registry = CommandRegistry()
     registry.register(

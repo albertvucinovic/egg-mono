@@ -361,7 +361,7 @@ Commands should be registered by the same feature plugins that register related 
   - [x] session: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, `/bashRepl`.
   - [x] sandbox admin: `/toggleSandboxing`, `/setSandboxConfiguration`, `/getSandboxingConfig`.
   - [x] skills: `/skills`, `/skill`.
-  - [ ] web: `/startSearxng`, `/stopSearxng`.
+  - [x] web: `/startSearxng`, `/stopSearxng`.
   - [ ] display/input TUI: `/togglePanel`, `/toggleBorders`, `/redraw`, `/displayMode`, `/paste`, `/enterMode`.
   - [ ] model/auth: `/model`, `/updateAllModels`, `/login`, `/logout`, `/authStatus`.
 - [ ] During each command migration, reuse the plugin's shared service layer instead of copying logic from the old mixin.
@@ -409,6 +409,8 @@ Status notes:
 - 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_sandbox.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_sandbox.py eggthreads/tests/test_command_registry.py`.
 - 2026-05-08: Migrated skills commands `/skills` and `/skill` into `builtin_plugins.skills`; `SkillsPlugin` now registers the skill tool, slash commands, and `/skill` completion from the shared skill renderer. Legacy utility mixin methods delegate to registry handlers for compatibility until obsolete mixins are removed.
 - 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_utility.py eggthreads/tests/test_skills_tool.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-08: Migrated web commands `/startSearxng` and `/stopSearxng` into `builtin_plugins.web`; `WebPlugin` now registers web tools and SearXNG lifecycle commands. Legacy utility mixin methods delegate to registry handlers for compatibility until obsolete mixins are removed.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_utility.py eggthreads/tests/test_web_searxng.py eggthreads/tests/test_tavily_tools.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins
 
@@ -662,4 +664,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Continue **Phase 4** with web command migration into `builtin_plugins.web`: `/startSearxng` and `/stopSearxng`.
+Continue **Phase 4** with display/input TUI command migration into an owning plugin/module: `/togglePanel`, `/toggleBorders`, `/redraw`, `/displayMode`, `/paste`, and `/enterMode`.

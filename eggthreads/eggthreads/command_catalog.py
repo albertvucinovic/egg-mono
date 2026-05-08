@@ -304,7 +304,7 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
     _register_legacy_command(registry, "schedulers", category="tools", usage="/schedulers", description="List active schedulers.")
 
-    from .builtin_plugins import SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin
+    from .builtin_plugins import SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ThreadUiPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])
@@ -313,8 +313,7 @@ def create_default_command_registry() -> CommandRegistry:
 
     register_plugins(CommandPluginContext(command_registry=registry), [SkillsPlugin()])
 
-    _register_legacy_command(registry, "startSearxng", category="web", usage="/startSearxng", description="Start the local SearXNG backend.")
-    _register_legacy_command(registry, "stopSearxng", category="web", usage="/stopSearxng", description="Stop the local SearXNG backend.")
+    register_plugins(CommandPluginContext(command_registry=registry), [WebPlugin()])
 
     _register_legacy_command(registry, "togglePanel", category="display", usage="/togglePanel <chat|children|system>", description="Show or hide a panel.")
     _register_legacy_command(registry, "toggleBorders", category="display", usage="/toggleBorders", description="Toggle panel borders.")

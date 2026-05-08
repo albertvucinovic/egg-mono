@@ -20,63 +20,15 @@ from eggthreads import (
 
 
 def _find_searxng_dir() -> Optional[Path]:
-    """Locate the SearXNG docker-compose directory.
+    from eggthreads.builtin_plugins.web import find_searxng_dir
 
-    The canonical location is the eggthreads.web.searxng package
-    (``eggthreads/eggthreads/web/searxng/``), shipped alongside the
-    ``SearxngBackend`` implementation. We resolve it via the package's
-    ``__file__`` so it works whether eggthreads is installed editable
-    or from a wheel with package-data.
-    """
-    try:
-        import eggthreads.web.searxng as _pkg
-        pkg_dir = Path(_pkg.__file__).resolve().parent
-    except Exception:
-        pkg_dir = None
-
-    if pkg_dir is not None and (pkg_dir / "docker-compose.yml").is_file():
-        return pkg_dir
-
-    # Fallback for older checkouts: walk upward from the egg package dir
-    # looking for any searxng/ dir containing docker-compose.yml.
-    candidates: List[Path] = []
-    here = ROOT
-    for _ in range(5):
-        candidates.append(here / "searxng")
-        candidates.append(here / "eggthreads" / "eggthreads" / "web" / "searxng")
-        if here.parent == here:
-            break
-        here = here.parent
-    seen: set[Path] = set()
-    for c in candidates:
-        c = c.resolve()
-        if c in seen:
-            continue
-        seen.add(c)
-        if (c / "docker-compose.yml").is_file():
-            return c
-    return None
+    return find_searxng_dir()
 
 
 def _resolve_compose_cmd() -> Optional[List[str]]:
-    """Return the argv prefix for docker compose, preferring v2 plugin.
+    from eggthreads.builtin_plugins.web import resolve_compose_cmd
 
-    Returns None if neither form is installed.
-    """
-    if shutil.which("docker"):
-        try:
-            probe = subprocess.run(
-                ["docker", "compose", "version"],
-                capture_output=True,
-                timeout=5,
-            )
-            if probe.returncode == 0:
-                return ["docker", "compose"]
-        except Exception:
-            pass
-    if shutil.which("docker-compose"):
-        return ["docker-compose"]
-    return None
+    return resolve_compose_cmd()
 
 
 class UtilityCommandsMixin:
@@ -561,36 +513,35 @@ class UtilityCommandsMixin:
         threading.Thread(target=_runner, name=f"searxng-{action}", daemon=True).start()
 
     def cmd_startSearxng(self, arg: str) -> None:
-        """Handle /startSearxng - start the SearXNG docker service in the background.
+        """Handle /startSearxng - start the SearXNG docker service in the background."""
+        from eggthreads.builtin_plugins import web as web_plugin
 
-        Runs ``docker compose up -d`` inside the repo's ``searxng/`` dir
-        so the ``web_search`` / ``fetch_url`` tools have a local backend
-        to talk to. The first run may pull the image (~200 MB).
-        """
-        self._run_searxng_compose(
-            ["up", "-d"],
-            action="start",
-            starting_msg="starting container (first run may pull the image)",
-            success_summary=(
-                "Container up at http://localhost:8888. "
-                "web_search / fetch_url will now use SearXNG."
-            ),
-            timeout_sec=600,
-        )
+        original_find = web_plugin.find_searxng_dir
+        original_resolve = web_plugin.resolve_compose_cmd
+        original_run = web_plugin.subprocess.run
+        try:
+            web_plugin.find_searxng_dir = _find_searxng_dir
+            web_plugin.resolve_compose_cmd = _resolve_compose_cmd
+            web_plugin.subprocess.run = subprocess.run
+            self._dispatch_utility_command("startSearxng", arg)
+        finally:
+            web_plugin.find_searxng_dir = original_find
+            web_plugin.resolve_compose_cmd = original_resolve
+            web_plugin.subprocess.run = original_run
 
     def cmd_stopSearxng(self, arg: str) -> None:
-        """Handle /stopSearxng - stop the SearXNG docker service.
+        """Handle /stopSearxng - stop the SearXNG docker service."""
+        from eggthreads.builtin_plugins import web as web_plugin
 
-        Runs ``docker compose down`` inside the repo's ``searxng/`` dir.
-        """
-        self._run_searxng_compose(
-            ["down"],
-            action="stop",
-            starting_msg="stopping container",
-            success_summary=(
-                "Container stopped. web_search / fetch_url will now fail "
-                "until you /startSearxng again or switch backends "
-                "(EGG_WEB_BACKEND=tavily)."
-            ),
-            timeout_sec=120,
-        )
+        original_find = web_plugin.find_searxng_dir
+        original_resolve = web_plugin.resolve_compose_cmd
+        original_run = web_plugin.subprocess.run
+        try:
+            web_plugin.find_searxng_dir = _find_searxng_dir
+            web_plugin.resolve_compose_cmd = _resolve_compose_cmd
+            web_plugin.subprocess.run = subprocess.run
+            self._dispatch_utility_command("stopSearxng", arg)
+        finally:
+            web_plugin.find_searxng_dir = original_find
+            web_plugin.resolve_compose_cmd = original_resolve
+            web_plugin.subprocess.run = original_run
