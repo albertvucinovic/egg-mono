@@ -304,15 +304,14 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
     _register_legacy_command(registry, "schedulers", category="tools", usage="/schedulers", description="List active schedulers.")
 
-    from .builtin_plugins import SandboxAdminPlugin, SessionPlugin, SubagentsPlugin, ThreadUiPlugin
+    from .builtin_plugins import SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ThreadUiPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SessionPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SandboxAdminPlugin()])
 
-    _register_legacy_command(registry, "skills", category="skills", usage="/skills [query]", description="List or search packaged skills.")
-    _register_legacy_command(registry, "skill", category="skills", usage="/skill <name>", description="Show and load a packaged skill.")
+    register_plugins(CommandPluginContext(command_registry=registry), [SkillsPlugin()])
 
     _register_legacy_command(registry, "startSearxng", category="web", usage="/startSearxng", description="Start the local SearXNG backend.")
     _register_legacy_command(registry, "stopSearxng", category="web", usage="/stopSearxng", description="Stop the local SearXNG backend.")

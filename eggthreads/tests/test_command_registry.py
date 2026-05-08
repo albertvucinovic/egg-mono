@@ -422,6 +422,39 @@ def test_subagent_commands_are_registered_handlers(tmp_path, monkeypatch) -> Non
     assert root in snapshots
 
 
+def test_skills_commands_are_registered_handlers(tmp_path) -> None:
+    from eggthreads.builtin_plugins import skills
+    from eggthreads import ThreadsDB, create_root_thread, create_snapshot
+
+    registry = create_default_command_registry()
+
+    assert registry.get("skills").handler is skills.skills_command
+    assert registry.get("skill").handler is skills.skill_command
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, "skills-test")
+    create_snapshot(db, thread_id)
+    logs: list[str] = []
+    printed: list[tuple[str, str]] = []
+    ctx = CommandContext(
+        db=db,
+        current_thread=thread_id,
+        log_system=logs.append,
+        console_print_block=lambda title, text, **kwargs: printed.append((title, text)),
+    )
+
+    registry.execute("skills", ctx, "persistent REPL")
+    registry.execute("skill", ctx, "rlm")
+    registry.execute("skill", ctx, "")
+
+    assert any(title == "Skills" and "SKILL SEARCH RESULTS" in text for title, text in printed)
+    assert any(title.startswith("Skill: RLM Skill") and "chunk_text" in text for title, text in printed)
+    assert any("Skill /rlm loaded" in message for message in logs)
+    assert any("Usage: /skill <name>" in message for message in logs)
+    assert "rlm" in registry.complete("skill", ctx, "r")
+
+
 def test_sandbox_admin_commands_are_registered_handlers(monkeypatch) -> None:
     from eggthreads.builtin_plugins import sandbox_admin
 

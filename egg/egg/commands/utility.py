@@ -102,60 +102,28 @@ class UtilityCommandsMixin:
             # Fallback: at least log it.
             self.log_system(COMMANDS_TEXT)
 
+    def _dispatch_utility_command(self, name: str, arg: str) -> None:
+        from eggthreads.command_catalog import CommandContext, create_default_command_registry
+
+        if hasattr(self, "_command_context"):
+            context = self._command_context()
+        else:
+            context = CommandContext(
+                db=getattr(self, "db", None),
+                current_thread=getattr(self, "current_thread", None),
+                log_system=getattr(self, "log_system", None),
+                console_print_block=getattr(self, "console_print_block", None),
+                app=self,
+            )
+        create_default_command_registry().execute(name, context, arg)
+
     def cmd_skills(self, arg: str) -> None:
         """List or search packaged skill documents."""
-        try:
-            from eggthreads.tools import create_default_tools
-
-            query = (arg or "").strip()
-            args = {"query": query} if query else {}
-            text = create_default_tools().execute("skill", args)
-            self.log_system("Skills list (see console for full).")
-            self.console_print_block("Skills", text, border_style="cyan")
-        except Exception as e:
-            self.log_system(f"/skills error: {e}")
+        self._dispatch_utility_command("skills", arg)
 
     def cmd_skill(self, arg: str) -> None:
         """Show a packaged skill document by name."""
-        name = (arg or "").strip()
-        if not name:
-            self.log_system("Usage: /skill <name>")
-            return
-        try:
-            from eggthreads.tools import create_default_tools
-            from eggthreads.skills import get_skill
-
-            skill = get_skill(name)
-            text = create_default_tools().execute("skill", {"name": skill.name})
-            marker = f"<!-- egg-skill:{skill.name} -->"
-            context_text = f"{marker}\n{text}"
-            loaded = False
-            already_loaded = False
-            db = getattr(self, "db", None)
-            thread_id = getattr(self, "current_thread", None)
-            if db is not None and thread_id:
-                already_loaded = any(
-                    marker in str(message.get("content") or "")
-                    for message in snapshot_messages(db, thread_id)
-                    if message.get("role") == "system"
-                )
-                if not already_loaded:
-                    from eggthreads import append_message, create_snapshot
-
-                    append_message(db, thread_id, "system", context_text)
-                    create_snapshot(db, thread_id)
-                    loaded = True
-            if loaded:
-                self.log_system(f"Skill /{skill.name} loaded into thread context (see console for full).")
-            elif already_loaded:
-                self.log_system(f"Skill /{skill.name} already loaded; showing document.")
-            else:
-                self.log_system(f"Skill /{skill.name} (see console for full).")
-            self.console_print_block(f"Skill: {skill.title}", text, border_style="cyan")
-        except KeyError:
-            self.log_system(f"Unknown skill: {name}")
-        except Exception as e:
-            self.log_system(f"/skill error: {e}")
+        self._dispatch_utility_command("skill", arg)
 
     def cmd_paste(self, arg: str) -> None:
         """Handle /paste command - paste clipboard content to input."""

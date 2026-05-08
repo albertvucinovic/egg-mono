@@ -360,7 +360,7 @@ Commands should be registered by the same feature plugins that register related 
   - [x] subagents: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, `/waitForThreads`.
   - [x] session: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, `/bashRepl`.
   - [x] sandbox admin: `/toggleSandboxing`, `/setSandboxConfiguration`, `/getSandboxingConfig`.
-  - [ ] skills: `/skills`, `/skill`.
+  - [x] skills: `/skills`, `/skill`.
   - [ ] web: `/startSearxng`, `/stopSearxng`.
   - [ ] display/input TUI: `/togglePanel`, `/toggleBorders`, `/redraw`, `/displayMode`, `/paste`, `/enterMode`.
   - [ ] model/auth: `/model`, `/updateAllModels`, `/login`, `/logout`, `/authStatus`.
@@ -407,6 +407,8 @@ Status notes:
 - 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_session.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_session.py eggthreads/tests/test_command_registry.py`.
 - 2026-05-08: Added `builtin_plugins.sandbox_admin` with `SandboxAdminPlugin`; sandbox admin command handlers now live in that owning plugin and are registered through `PluginContext.command_registry` instead of `command_catalog.py`. Legacy sandbox mixin methods delegate to registry handlers for compatibility until obsolete mixins are removed.
 - 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_sandbox.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_sandbox.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-08: Migrated skills commands `/skills` and `/skill` into `builtin_plugins.skills`; `SkillsPlugin` now registers the skill tool, slash commands, and `/skill` completion from the shared skill renderer. Legacy utility mixin methods delegate to registry handlers for compatibility until obsolete mixins are removed.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_utility.py eggthreads/tests/test_skills_tool.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins
 
@@ -660,4 +662,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Continue **Phase 4** with skills command migration into `builtin_plugins.skills`: `/skills` and `/skill`.
+Continue **Phase 4** with web command migration into `builtin_plugins.web`: `/startSearxng` and `/stopSearxng`.
