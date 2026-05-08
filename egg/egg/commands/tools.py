@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List
+from typing import List
 
 from eggthreads import (
     approve_tool_calls_for_thread,
@@ -12,127 +12,8 @@ from eggthreads import (
 )
 
 
-def get_available_tools() -> Dict[str, Dict[str, Any]]:
-    """Get all available tools with their specs.
-
-    Returns a dict mapping tool name to {"spec": ..., "local_only": bool}
-    """
-    from eggthreads.command_catalog import _get_available_tools
-
-    return _get_available_tools()
-
-
 class ToolCommandsMixin:
     """Mixin providing tool management commands."""
-
-    def cmd_toggleAutoApproval(self, arg: str) -> None:
-        """Handle /toggleAutoApproval command - toggle global tool auto-approval."""
-        from eggthreads.command_catalog import _toggle_auto_approval_for_thread
-
-        _toggle_auto_approval_for_thread(
-            self.db,
-            self.current_thread,
-            self.log_system,
-            approve_tool_calls_for_thread,
-        )
-
-    def cmd_toolsOn(self, arg: str) -> None:
-        """Handle /toolsOn command - enable tools for thread."""
-        from eggthreads.command_catalog import CommandContext, _tools_on_handler
-
-        _tools_on_handler(
-            CommandContext(
-                db=self.db,
-                current_thread=self.current_thread,
-                log_system=self.log_system,
-                app=self,
-            ),
-            arg,
-        )
-
-    def cmd_toolsOff(self, arg: str) -> None:
-        """Handle /toolsOff command - disable tools for thread."""
-        from eggthreads.command_catalog import CommandContext, _tools_off_handler
-
-        _tools_off_handler(
-            CommandContext(
-                db=self.db,
-                current_thread=self.current_thread,
-                log_system=self.log_system,
-                app=self,
-            ),
-            arg,
-        )
-
-    def cmd_toolsSecrets(self, arg: str) -> None:
-        """Handle /toolsSecrets command - toggle secrets masking."""
-        from eggthreads.command_catalog import CommandContext, _tools_secrets_handler
-
-        _tools_secrets_handler(
-            CommandContext(
-                db=self.db,
-                current_thread=self.current_thread,
-                log_system=self.log_system,
-                app=self,
-            ),
-            arg,
-        )
-
-    def cmd_disableTool(self, arg: str) -> None:
-        """Handle /disableTool command - disable a specific tool."""
-        from eggthreads.command_catalog import CommandContext, _disable_tool_handler
-
-        _disable_tool_handler(
-            CommandContext(
-                db=self.db,
-                current_thread=self.current_thread,
-                log_system=self.log_system,
-                app=self,
-            ),
-            arg,
-        )
-
-    def cmd_enableTool(self, arg: str) -> None:
-        """Handle /enableTool command - enable a specific tool."""
-        from eggthreads.command_catalog import CommandContext, _enable_tool_handler
-
-        _enable_tool_handler(
-            CommandContext(
-                db=self.db,
-                current_thread=self.current_thread,
-                log_system=self.log_system,
-                app=self,
-            ),
-            arg,
-        )
-
-    def cmd_toolsStatus(self, arg: str) -> None:
-        """Handle /toolsStatus command - report tools configuration and available tools."""
-        from eggthreads.command_catalog import CommandContext, _tools_status_handler
-
-        _tools_status_handler(
-            CommandContext(
-                db=self.db,
-                current_thread=self.current_thread,
-                log_system=self.log_system,
-                console_print_block=self.console_print_block,
-                app=self,
-            ),
-            arg,
-        )
-
-    def cmd_toolInfo(self, arg: str) -> None:
-        """Handle /toolInfo command - show tool description in JSON format."""
-        from eggthreads.command_catalog import CommandContext, _tool_info_handler
-
-        _tool_info_handler(
-            CommandContext(
-                log_system=self.log_system,
-                console_print_block=self.console_print_block,
-                app=self,
-            ),
-            arg,
-        )
 
     def cmd_schedulers(self, arg: str) -> None:
         """Handle /schedulers command - list active schedulers."""

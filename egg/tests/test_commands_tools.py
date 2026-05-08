@@ -6,138 +6,126 @@ import json
 import pytest
 
 
-class TestCmdToggleAutoApproval:
-    """Tests for cmd_toggleAutoApproval()."""
+class TestToolsAdminCommands:
+    """Tests for tools-admin commands through CommandRegistry dispatch."""
 
-    def test_enables_when_disabled(self, egg_app, monkeypatch):
+    def test_toggle_auto_approval_enables_when_disabled(self, egg_app, monkeypatch):
         """Should enable auto-approval when currently disabled."""
         approved = []
+
         def mock_approve(db, tid, decision, reason=None, tool_call_id=None):
             approved.append(decision)
-        # Mock at commands.tools level since it's imported there
-        import egg.commands.tools as tools_mod
-        monkeypatch.setattr(tools_mod, "approve_tool_calls_for_thread", mock_approve)
 
-        egg_app.cmd_toggleAutoApproval("")
+        monkeypatch.setattr("eggthreads.approve_tool_calls_for_thread", mock_approve)
+
+        egg_app.handle_command("/toggleAutoApproval")
 
         assert "global_approval" in approved or "revoke_global_approval" in approved
 
-    def test_logs_status_change(self, egg_app, monkeypatch):
+    def test_toggle_auto_approval_logs_status_change(self, egg_app, monkeypatch):
         """Should log the status change."""
-        import egg.commands.tools as tools_mod
-        monkeypatch.setattr(tools_mod, "approve_tool_calls_for_thread", lambda *a, **k: None)
+        monkeypatch.setattr("eggthreads.approve_tool_calls_for_thread", lambda *a, **k: None)
 
-        egg_app.cmd_toggleAutoApproval("")
+        egg_app.handle_command("/toggleAutoApproval")
 
         assert any("auto-approval" in msg.lower() or "enabled" in msg.lower() or "disabled" in msg.lower()
                    for msg in egg_app._system_log)
 
-
-class TestCmdToolsOn:
-    """Tests for cmd_toolsOn()."""
-
-    def test_enables_tools_for_thread(self, egg_app, monkeypatch):
+    def test_tools_on_enables_tools_for_thread(self, egg_app, monkeypatch):
         """Should call set_thread_tools_enabled(True)."""
         enabled = []
+
         def mock_set(db, tid, value):
             enabled.append((tid, value))
+
         monkeypatch.setattr("eggthreads.set_thread_tools_enabled", mock_set)
 
-        egg_app.cmd_toolsOn("")
+        egg_app.handle_command("/toolsOn")
 
         assert len(enabled) == 1
         assert enabled[0][1] is True
 
-    def test_logs_success(self, egg_app, monkeypatch):
+    def test_tools_on_logs_success(self, egg_app, monkeypatch):
         """Should log success message."""
         monkeypatch.setattr("eggthreads.set_thread_tools_enabled", lambda *a: None)
 
-        egg_app.cmd_toolsOn("")
+        egg_app.handle_command("/toolsOn")
 
         assert any("enabled" in msg.lower() for msg in egg_app._system_log)
 
-
-class TestCmdToolsOff:
-    """Tests for cmd_toolsOff()."""
-
-    def test_disables_tools_for_thread(self, egg_app, monkeypatch):
+    def test_tools_off_disables_tools_for_thread(self, egg_app, monkeypatch):
         """Should call set_thread_tools_enabled(False)."""
         disabled = []
+
         def mock_set(db, tid, value):
             disabled.append((tid, value))
+
         monkeypatch.setattr("eggthreads.set_thread_tools_enabled", mock_set)
 
-        egg_app.cmd_toolsOff("")
+        egg_app.handle_command("/toolsOff")
 
         assert len(disabled) == 1
         assert disabled[0][1] is False
 
-    def test_logs_success(self, egg_app, monkeypatch):
+    def test_tools_off_logs_success(self, egg_app, monkeypatch):
         """Should log success message."""
         monkeypatch.setattr("eggthreads.set_thread_tools_enabled", lambda *a: None)
 
-        egg_app.cmd_toolsOff("")
+        egg_app.handle_command("/toolsOff")
 
         assert any("disabled" in msg.lower() for msg in egg_app._system_log)
 
-
-class TestCmdDisableTool:
-    """Tests for cmd_disableTool()."""
-
-    def test_disables_specific_tool(self, egg_app, monkeypatch):
+    def test_disable_tool_disables_specific_tool(self, egg_app, monkeypatch):
         """Should disable named tool."""
         disabled = []
+
         def mock_disable(db, tid, name):
             disabled.append((tid, name))
+
         monkeypatch.setattr("eggthreads.disable_tool_for_thread", mock_disable)
 
-        egg_app.cmd_disableTool("bash")
+        egg_app.handle_command("/disableTool bash")
 
         assert len(disabled) == 1
         assert disabled[0][1] == "bash"
 
-    def test_requires_tool_name(self, egg_app):
+    def test_disable_tool_requires_tool_name(self, egg_app):
         """Should show usage when no name given."""
-        egg_app.cmd_disableTool("")
+        egg_app.handle_command("/disableTool")
 
         assert any("Usage" in msg or "usage" in msg.lower() for msg in egg_app._system_log)
 
-    def test_logs_success(self, egg_app, monkeypatch):
+    def test_disable_tool_logs_success(self, egg_app, monkeypatch):
         """Should log success message."""
         monkeypatch.setattr("eggthreads.disable_tool_for_thread", lambda *a: None)
 
-        egg_app.cmd_disableTool("bash")
+        egg_app.handle_command("/disableTool bash")
 
         assert any("disabled" in msg.lower() or "bash" in msg.lower() for msg in egg_app._system_log)
 
-
-class TestCmdEnableTool:
-    """Tests for cmd_enableTool()."""
-
-    def test_enables_specific_tool(self, egg_app, monkeypatch):
+    def test_enable_tool_enables_specific_tool(self, egg_app, monkeypatch):
         """Should enable named tool."""
         enabled = []
+
         def mock_enable(db, tid, name):
             enabled.append((tid, name))
+
         monkeypatch.setattr("eggthreads.enable_tool_for_thread", mock_enable)
 
-        egg_app.cmd_enableTool("bash")
+        egg_app.handle_command("/enableTool bash")
 
         assert len(enabled) == 1
         assert enabled[0][1] == "bash"
 
-    def test_requires_tool_name(self, egg_app):
+    def test_enable_tool_requires_tool_name(self, egg_app):
         """Should show usage when no name given."""
-        egg_app.cmd_enableTool("")
+        egg_app.handle_command("/enableTool")
 
         assert any("Usage" in msg or "usage" in msg.lower() for msg in egg_app._system_log)
 
-
-class TestCmdToolsStatus:
-    """Tests for cmd_toolsStatus()."""
-
-    def test_displays_tools_config(self, egg_app, monkeypatch, capsys):
+    def test_tools_status_displays_tools_config(self, egg_app, monkeypatch, capsys):
         """Should display current tools configuration."""
+
         class MockConfig:
             llm_tools_enabled = True
             disabled_tools = ["python"]
@@ -146,16 +134,15 @@ class TestCmdToolsStatus:
 
         monkeypatch.setattr("eggthreads.get_thread_tools_config", lambda db, tid: MockConfig())
 
-        egg_app.cmd_toolsStatus("")
+        egg_app.handle_command("/toolsStatus")
 
-        # The main output goes to console, system log gets a brief message
         captured = capsys.readouterr()
         assert "python" in captured.out.lower() or "DISABLED" in captured.out
-        # System log gets a brief confirmation
         assert any("tools status" in msg.lower() for msg in egg_app._system_log)
 
-    def test_displays_allowlist_restricted_tools(self, egg_app, monkeypatch):
+    def test_tools_status_displays_allowlist_restricted_tools(self, egg_app, monkeypatch):
         """Should show allowlist-excluded tools as unavailable."""
+
         class MockConfig:
             llm_tools_enabled = True
             disabled_tools = []
@@ -165,7 +152,7 @@ class TestCmdToolsStatus:
         printed = []
         monkeypatch.setattr("eggthreads.get_thread_tools_config", lambda db, tid: MockConfig())
         monkeypatch.setattr(
-            "egg.commands.tools.get_available_tools",
+            "eggthreads.command_catalog._get_available_tools",
             lambda: {
                 "bash": {"spec": {}, "local_only": False},
                 "python": {"spec": {}, "local_only": False},
@@ -177,7 +164,7 @@ class TestCmdToolsStatus:
             lambda title, text, **kwargs: printed.append((title, text)),
         )
 
-        egg_app.cmd_toolsStatus("")
+        egg_app.handle_command("/toolsStatus")
 
         assert printed
         text = printed[0][1]
@@ -185,35 +172,35 @@ class TestCmdToolsStatus:
         assert "bash: enabled" in text
         assert "python: not allowed" in text
 
-
-class TestCmdToolsSecrets:
-    """Tests for cmd_toolsSecrets()."""
-
-    def test_enables_raw_mode(self, egg_app, monkeypatch):
+    def test_tools_secrets_enables_raw_mode(self, egg_app, monkeypatch):
         """Should enable raw mode on 'on'."""
         set_values = []
+
         def mock_set(db, tid, value):
             set_values.append(value)
+
         monkeypatch.setattr("eggthreads.set_thread_allow_raw_tool_output", mock_set)
 
-        egg_app.cmd_toolsSecrets("on")
+        egg_app.handle_command("/toolsSecrets on")
 
         assert True in set_values
 
-    def test_disables_raw_mode(self, egg_app, monkeypatch):
+    def test_tools_secrets_disables_raw_mode(self, egg_app, monkeypatch):
         """Should disable raw mode on 'off'."""
         set_values = []
+
         def mock_set(db, tid, value):
             set_values.append(value)
+
         monkeypatch.setattr("eggthreads.set_thread_allow_raw_tool_output", mock_set)
 
-        egg_app.cmd_toolsSecrets("off")
+        egg_app.handle_command("/toolsSecrets off")
 
         assert False in set_values
 
-    def test_shows_usage_for_invalid(self, egg_app):
+    def test_tools_secrets_shows_usage_for_invalid(self, egg_app):
         """Should show usage for invalid argument."""
-        egg_app.cmd_toolsSecrets("invalid")
+        egg_app.handle_command("/toolsSecrets invalid")
 
         assert any("Usage" in msg or "usage" in msg.lower() for msg in egg_app._system_log)
 

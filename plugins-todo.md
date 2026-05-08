@@ -364,6 +364,8 @@ Status notes:
 - 2026-05-07: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py egg/tests/test_completion.py eggthreads/tests/test_command_registry.py`.
 - 2026-05-08: Migrated tools admin commands `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, and `/toggleAutoApproval` into registered command handlers; legacy mixin methods now delegate for compatibility.
 - 2026-05-08: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-08: Removed tools-admin `cmd_*` compatibility delegates from the TUI mixin and rewrote related tests to exercise `CommandRegistry`/`handle_command()` dispatch instead of direct mixin calls.
+- 2026-05-08: Future command-group migrations should update tests to target the registry/plugin seam first; only keep direct `cmd_*` compatibility tests while a group still has unmigrated mixin behavior.
 
 ## Phase 5 — Sandbox provider plugins
 

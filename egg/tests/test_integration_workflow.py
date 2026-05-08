@@ -242,7 +242,7 @@ class TestToolEnablingWorkflow:
             disabled.append((tid, name))
         monkeypatch.setattr("eggthreads.disable_tool_for_thread", mock_disable)
 
-        egg_app.cmd_disableTool("bash")
+        egg_app.handle_command("/disableTool bash")
 
         assert len(disabled) == 1
         assert disabled[0][1] == "bash"
@@ -258,8 +258,8 @@ class TestToolEnablingWorkflow:
         monkeypatch.setattr("eggthreads.disable_tool_for_thread", mock_disable)
         monkeypatch.setattr("eggthreads.enable_tool_for_thread", mock_enable)
 
-        egg_app.cmd_disableTool("bash")
-        egg_app.cmd_enableTool("bash")
+        egg_app.handle_command("/disableTool bash")
+        egg_app.handle_command("/enableTool bash")
 
         assert "bash" in disabled
         assert "bash" in enabled
