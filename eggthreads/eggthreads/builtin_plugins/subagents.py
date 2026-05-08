@@ -421,9 +421,9 @@ def _command_approve_tool_calls(context: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def _command_resolve_thread_selector(context: Any, selector: str) -> str | None:
-    from ..command_catalog import _resolve_thread_selector
+    from .thread_ui import resolve_thread_selector
 
-    return _resolve_thread_selector(context, selector)
+    return resolve_thread_selector(context, selector)
 
 
 def spawn_child_thread_command(context: Any, arg: str):

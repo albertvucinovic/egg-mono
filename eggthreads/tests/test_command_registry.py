@@ -291,6 +291,7 @@ def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:
 
 
 def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:
+    from eggthreads.builtin_plugins import thread_ui
     from eggthreads import ThreadsDB, append_message, create_child_thread, create_root_thread, create_snapshot
 
     db = ThreadsDB(tmp_path / "threads.sqlite")
@@ -325,6 +326,15 @@ def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> No
         )
 
     registry = create_default_command_registry()
+
+    assert registry.get("thread").handler is thread_ui.thread_command
+    assert registry.get("threads").handler is thread_ui.threads_command
+    assert registry.get("newThread").handler is thread_ui.new_thread_command
+    assert registry.get("deleteThread").handler is thread_ui.delete_thread_command
+    assert registry.get("duplicateThread").handler is thread_ui.duplicate_thread_command
+    assert registry.get("parentThread").handler is thread_ui.parent_thread_command
+    assert registry.get("listChildren").handler is thread_ui.list_children_command
+    assert registry.get("continue").handler is thread_ui.continue_thread_command
 
     registry.execute("thread", make_context(), child[-8:])
     assert current["thread_id"] == child
