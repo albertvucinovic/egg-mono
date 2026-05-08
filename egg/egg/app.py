@@ -461,6 +461,11 @@ class EggDisplayApp(
             start_scheduler=self.start_scheduler,
             llm_client=self.llm_client,
             system_prompt=self.system_prompt,
+            get_current_model=self.current_model_for_thread,
+            watch_current_thread=self.start_watching_current,
+            print_current_thread=self.print_static_view_current,
+            format_threads=self.format_tree,
+            select_threads=self.select_threads_by_selector,
             app=self,
         )
 

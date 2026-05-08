@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from eggthreads.command_catalog import (
@@ -271,6 +273,69 @@ def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:
     assert decisions[-2:] == ["global_approval", "revoke_global_approval"]
     assert any("ENABLED" in message for message in logs)
     assert any("DISABLED" in message for message in logs)
+
+
+def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:
+    from eggthreads import ThreadsDB, append_message, create_child_thread, create_root_thread, create_snapshot
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    root = create_root_thread(db, "root")
+    append_message(db, root, "system", "sys")
+    create_snapshot(db, root)
+    child = create_child_thread(db, root, "child")
+    create_snapshot(db, child)
+
+    current = {"thread_id": root}
+    logs: list[str] = []
+    printed: list[tuple[str, str]] = []
+    started: list[str] = []
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: type("Loop", (), {"create_task": lambda self, coro: None})())
+
+    def make_context() -> CommandContext:
+        return CommandContext(
+            db=db,
+            current_thread=current["thread_id"],
+            set_current_thread=lambda tid: current.__setitem__("thread_id", tid),
+            log_system=logs.append,
+            console_print_block=lambda title, text, **kwargs: printed.append((title, text)),
+            start_scheduler=started.append,
+            system_prompt="sys",
+            get_current_model=lambda tid: None,
+            watch_current_thread=lambda: None,
+            print_current_thread=lambda **kwargs: None,
+            format_threads=lambda root_tid=None: f"tree:{root_tid or 'all'}",
+            select_threads=lambda selector: [row[0] for row in db.conn.execute("SELECT thread_id FROM threads") if row[0].endswith(selector) or selector in row[0]],
+        )
+
+    registry = create_default_command_registry()
+
+    registry.execute("thread", make_context(), child[-8:])
+    assert current["thread_id"] == child
+
+    registry.execute("parentThread", make_context())
+    assert current["thread_id"] == root
+
+    registry.execute("listChildren", make_context())
+    registry.execute("threads", make_context())
+    assert ("Subtree", f"tree:{root}") in printed
+    assert ("Threads", "tree:all") in printed
+
+    registry.execute("newThread", make_context(), "created")
+    assert current["thread_id"] != root
+    assert db.get_thread(current["thread_id"]) is not None
+
+    current["thread_id"] = root
+    registry.execute("duplicateThread", make_context(), "copy")
+    duplicate_id = current["thread_id"]
+    assert duplicate_id not in {root, child}
+    assert db.get_thread(duplicate_id) is not None
+
+    current["thread_id"] = root
+    registry.execute("deleteThread", make_context(), duplicate_id[-8:])
+    assert db.get_thread(duplicate_id) is None
+    assert any("Switched to thread" in message for message in logs)
 
 
 def test_render_command_registry_help_uses_metadata() -> None:

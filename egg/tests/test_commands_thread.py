@@ -7,8 +7,8 @@ import json
 import pytest
 
 
-class TestCmdNewThread:
-    """Tests for cmd_newThread()."""
+class TestNewThreadCommand:
+    """Tests for /newThread through CommandRegistry dispatch."""
 
     def test_creates_root_thread(self, egg_app, monkeypatch):
         """Should create new root thread."""
@@ -17,7 +17,7 @@ class TestCmdNewThread:
         # Mock asyncio to avoid event loop issues
         monkeypatch.setattr(asyncio, "get_running_loop", lambda: type('Loop', (), {'create_task': lambda self, x: None})())
 
-        egg_app.cmd_newThread("TestNewThread")
+        egg_app.handle_command("/newThread TestNewThread")
 
         assert egg_app.current_thread != original_thread
 
@@ -26,7 +26,7 @@ class TestCmdNewThread:
         # Mock asyncio to avoid event loop issues
         monkeypatch.setattr(asyncio, "get_running_loop", lambda: type('Loop', (), {'create_task': lambda self, x: None})())
 
-        egg_app.cmd_newThread("")
+        egg_app.handle_command("/newThread")
 
         # Thread should have been created
         assert egg_app.current_thread is not None
@@ -80,12 +80,12 @@ class TestCmdSpawnChildThread:
         assert "child_thread_id_12345" in ensured
 
 
-class TestCmdThread:
-    """Tests for cmd_thread()."""
+class TestThreadCommand:
+    """Tests for /thread through CommandRegistry dispatch."""
 
     def test_shows_current_thread_without_arg(self, egg_app):
         """Should display current thread when no arg."""
-        egg_app.cmd_thread("")
+        egg_app.handle_command("/thread")
 
         # Should log current thread info
         assert any(egg_app.current_thread[-8:] in msg for msg in egg_app._system_log)
@@ -101,7 +101,7 @@ class TestCmdThread:
         # Mock asyncio to avoid event loop issues
         monkeypatch.setattr(asyncio, "get_running_loop", lambda: type('Loop', (), {'create_task': lambda self, x: None})())
 
-        egg_app.cmd_thread(other_thread[-8:])  # Use suffix
+        egg_app.handle_command(f"/thread {other_thread[-8:]}")  # Use suffix
 
         assert egg_app.current_thread == other_thread
 
@@ -115,19 +115,19 @@ class TestCmdThread:
         # Mock asyncio to avoid event loop issues
         monkeypatch.setattr(asyncio, "get_running_loop", lambda: type('Loop', (), {'create_task': lambda self, x: None})())
 
-        egg_app.cmd_thread("UniqueTestName")
+        egg_app.handle_command("/thread UniqueTestName")
 
         assert egg_app.current_thread == named_thread
 
     def test_logs_error_for_no_match(self, egg_app):
         """Should log error when no thread matches."""
-        egg_app.cmd_thread("nonexistent_thread_xyz")
+        egg_app.handle_command("/thread nonexistent_thread_xyz")
 
         assert any("No thread" in msg or "no thread" in msg.lower() for msg in egg_app._system_log)
 
 
-class TestCmdDeleteThread:
-    """Tests for cmd_deleteThread()."""
+class TestDeleteThreadCommand:
+    """Tests for /deleteThread through CommandRegistry dispatch."""
 
     def test_deletes_matching_thread(self, egg_app, monkeypatch):
         """Should delete thread matching selector."""
@@ -137,7 +137,7 @@ class TestCmdDeleteThread:
         to_delete = create_root_thread(egg_app.db, name="ToDelete")
         create_snapshot(egg_app.db, to_delete)
 
-        egg_app.cmd_deleteThread(to_delete[-8:])
+        egg_app.handle_command(f"/deleteThread {to_delete[-8:]}")
 
         # Thread should be deleted
         threads = list_threads(egg_app.db)
@@ -148,35 +148,35 @@ class TestCmdDeleteThread:
         """Should not delete current thread."""
         current = egg_app.current_thread
 
-        egg_app.cmd_deleteThread(current[-8:])
+        egg_app.handle_command(f"/deleteThread {current[-8:]}")
 
         # Current thread should still exist
         assert egg_app.current_thread == current
 
     def test_requires_selector(self, egg_app):
         """Should show usage when no selector given."""
-        egg_app.cmd_deleteThread("")
+        egg_app.handle_command("/deleteThread")
 
         assert any("Usage" in msg or "usage" in msg.lower() for msg in egg_app._system_log)
 
 
-class TestCmdThreads:
-    """Tests for cmd_threads()."""
+class TestThreadsCommand:
+    """Tests for /threads through CommandRegistry dispatch."""
 
     def test_lists_all_threads(self, egg_app):
         """Should list all threads."""
-        egg_app.cmd_threads("")
+        egg_app.handle_command("/threads")
 
         # Should log thread list
         assert any("Thread" in msg or "thread" in msg.lower() for msg in egg_app._system_log)
 
 
-class TestCmdListChildren:
-    """Tests for cmd_listChildren()."""
+class TestListChildrenCommand:
+    """Tests for /listChildren through CommandRegistry dispatch."""
 
     def test_shows_no_subthreads_message(self, egg_app):
         """Should show message when no children."""
-        egg_app.cmd_listChildren("")
+        egg_app.handle_command("/listChildren")
 
         assert any("No subthread" in msg or "no subthread" in msg.lower() for msg in egg_app._system_log)
 
@@ -187,14 +187,14 @@ class TestCmdListChildren:
         child = create_child_thread(egg_app.db, egg_app.current_thread, name="ChildThread")
         create_snapshot(egg_app.db, child)
 
-        egg_app.cmd_listChildren("")
+        egg_app.handle_command("/listChildren")
 
         # Should log subtree info
         assert any("Subtree" in msg or "subtree" in msg.lower() or child[-8:] in msg for msg in egg_app._system_log)
 
 
-class TestCmdParentThread:
-    """Tests for cmd_parentThread()."""
+class TestParentThreadCommand:
+    """Tests for /parentThread through CommandRegistry dispatch."""
 
     def test_moves_to_parent(self, egg_app, monkeypatch):
         """Should move to parent thread."""
@@ -209,13 +209,13 @@ class TestCmdParentThread:
         # Mock asyncio to avoid event loop issues
         monkeypatch.setattr(asyncio, "get_running_loop", lambda: type('Loop', (), {'create_task': lambda self, x: None})())
 
-        egg_app.cmd_parentThread("")
+        egg_app.handle_command("/parentThread")
 
         assert egg_app.current_thread == parent
 
     def test_shows_error_at_root(self, egg_app):
         """Should show error when already at root."""
-        egg_app.cmd_parentThread("")
+        egg_app.handle_command("/parentThread")
 
         assert any("root" in msg.lower() or "no parent" in msg.lower() for msg in egg_app._system_log)
 

@@ -382,7 +382,7 @@ class TestThreadListingWorkflow:
         create_snapshot(egg_app.db, t1)
         create_snapshot(egg_app.db, t2)
 
-        egg_app.cmd_threads("")
+        egg_app.handle_command("/threads")
 
         # Should log thread info
         assert any("thread" in msg.lower() for msg in egg_app._system_log)
@@ -394,7 +394,7 @@ class TestThreadListingWorkflow:
         child = create_child_thread(egg_app.db, egg_app.current_thread, name="ChildThread")
         create_snapshot(egg_app.db, child)
 
-        egg_app.cmd_listChildren("")
+        egg_app.handle_command("/listChildren")
 
         # Should log subtree info
         assert any("subtree" in msg.lower() or child[-8:] in msg for msg in egg_app._system_log)
