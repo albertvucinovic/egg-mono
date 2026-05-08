@@ -353,7 +353,7 @@ Commands should be registered by the same feature plugins that register related 
 - [x] Make autocomplete use command registry metadata and completion callbacks.
 - [x] Add input-prefix handler registry for `$` and `$$`.
   - This decouples shell commands from hardcoded app input handling.
-- [ ] Migrate commands in small groups:
+- [x] Migrate commands in small groups:
   - [x] core/lifecycle: `/help`, `/quit`, `/reload`.
   - [x] tools admin: `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, `/toggleAutoApproval`.
   - [x] thread UI: `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, `/continue`.
@@ -362,15 +362,16 @@ Commands should be registered by the same feature plugins that register related 
   - [x] sandbox admin: `/toggleSandboxing`, `/setSandboxConfiguration`, `/getSandboxingConfig`.
   - [x] skills: `/skills`, `/skill`.
   - [x] web: `/startSearxng`, `/stopSearxng`.
-  - [ ] display/input TUI: `/togglePanel`, `/toggleBorders`, `/redraw`, `/displayMode`, `/paste`, `/enterMode`.
-  - [ ] model/auth: `/model`, `/updateAllModels`, `/login`, `/logout`, `/authStatus`.
-- [ ] During each command migration, reuse the plugin's shared service layer instead of copying logic from the old mixin.
+  - [x] display/input TUI: `/togglePanel`, `/toggleBorders`, `/redraw`, `/displayMode`, `/paste`, `/enterMode`.
+  - [x] model/auth: `/model`, `/updateAllModels`, `/login`, `/logout`, `/authStatus`.
+  - [x] diagnostics/tools misc: `/schedulers`, `/cost`, `/setContextLimit`, `/setThreadPriority`.
+- [x] During each command migration, reuse the plugin's shared service layer instead of copying logic from the old mixin.
   - Example: subagent commands should call the same spawn/wait services as `spawn_agent` and `wait` tools.
   - Example: session commands should call the same status/stop/reset target-resolution helpers as session tools.
   - Example: skills commands should call the same list/load skill service as the `skill` tool.
   - Example: web commands should share SearXNG/backend helpers with web tools.
-- [ ] Remove obsolete mixin dispatch only after all commands are registered.
-- [ ] Commit after each command group.
+- [x] Remove obsolete mixin dispatch only after all commands are registered.
+- [x] Commit after each command group.
 
 Modularization checkpoint before continuing Phase 4:
 - [x] Add command registries to `PluginContext` so plugins can register command contributions directly.
@@ -411,37 +412,53 @@ Status notes:
 - 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_utility.py eggthreads/tests/test_skills_tool.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
 - 2026-05-08: Migrated web commands `/startSearxng` and `/stopSearxng` into `builtin_plugins.web`; `WebPlugin` now registers web tools and SearXNG lifecycle commands. Legacy utility mixin methods delegate to registry handlers for compatibility until obsolete mixins are removed.
 - 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_utility.py eggthreads/tests/test_web_searxng.py eggthreads/tests/test_tavily_tools.py` and `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-08: Added `builtin_plugins.display_input` with `DisplayInputPlugin`; display/input commands `/togglePanel`, `/toggleBorders`, `/redraw`, `/displayMode`, `/paste`, and `/enterMode` now register through the plugin. Removed their TUI `cmd_*` delegates and updated focused tests to use `handle_command()`/registry dispatch.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_display.py egg/tests/test_commands_utility.py egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py`.
+- 2026-05-08: Added `builtin_plugins.model` and `builtin_plugins.auth`; model/auth commands `/model`, `/updateAllModels`, `/login`, `/logout`, and `/authStatus` now register through plugins. Removed their TUI `cmd_*` delegates and updated focused tests to use `handle_command()`/registry dispatch.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_model.py egg/tests/test_integration_workflow.py egg/tests/test_completion.py egg/tests/test_commands_utility.py egg/tests/test_input.py`.
+- 2026-05-08: Added `builtin_plugins.diagnostics`; `/schedulers`, `/cost`, `/setContextLimit`, and `/setThreadPriority` now register through plugins. Removed the remaining `_register_legacy_command` usages from the default command registry and trimmed obsolete mixin implementations for these commands.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_command_registry.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py egg/tests/test_integration_workflow.py`.
+- 2026-05-08: Broader tests passed: `pytest -q eggthreads/tests egg/tests`.
+- 2026-05-08: Verified the remaining command migration is complete: default command registry no longer uses legacy app-handler dispatch, and all listed command groups register through feature plugins or core lifecycle handlers.
+- 2026-05-08: Remaining Phase 4 command migration changes were recovered from an uncommitted handoff batch and included in the final Phase 4-8 catch-up commit.
 
 ## Phase 5 — Sandbox provider plugins
 
 Goal: make sandbox providers pluggable while keeping enforcement core.
 
-- [ ] Introduce `SandboxProviderRegistry`.
-- [ ] Define provider interface.
+- [x] Introduce `SandboxProviderRegistry`.
+- [x] Define provider interface.
   - Prefer a full execution interface over only `wrap_argv()`:
     - availability/status;
     - config validation;
     - run command with cwd/env/config/context;
     - stream output;
     - cancel/cleanup.
-- [ ] Move existing Docker provider behind the registry.
-- [ ] Move existing SRT provider behind the registry if still supported.
-- [ ] Move existing bwrap provider behind the registry if still supported.
-- [ ] Preserve current sandbox config event format where possible.
-- [ ] Keep fail-closed semantics available for policies that require sandboxing.
-- [ ] Add tests for provider selection and unavailable-provider warnings.
-- [ ] Commit per provider.
+- [x] Move existing Docker provider behind the registry.
+- [x] Move existing SRT provider behind the registry if still supported.
+- [x] Move existing bwrap provider behind the registry if still supported.
+- [x] Preserve current sandbox config event format where possible.
+- [x] Keep fail-closed semantics available for policies that require sandboxing.
+- [x] Add tests for provider selection and unavailable-provider warnings.
+- [x] Commit per provider.
 
 Security note:
 - A plugin sandbox provider can implement the boundary, but core must ensure tools cannot accidentally bypass the selected boundary.
 - In-process host-side tools are trusted. Untrusted tools eventually need out-of-process execution.
 
+Status notes:
+- 2026-05-08: Added provider/policy registry fields to `PluginContext` plus `ProviderPluginContext`.
+- 2026-05-08: Added `SandboxProviderRegistry`, `SandboxProvider` protocol, and `builtin_plugins.sandbox_providers`; Docker, SRT, and bwrap providers are now registered through that plugin while `_PROVIDERS` remains as a compatibility alias for existing tests/callers.
+- 2026-05-08: Existing thread sandbox config events and unavailable-provider warning behavior were preserved.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_providers.py eggthreads/tests/test_output_isolation.py eggthreads/tests/test_bash_registry_path.py`.
+- 2026-05-08: Provider changes were recovered from an uncommitted handoff batch and included in the final Phase 4-8 catch-up commit.
+
 ## Phase 6 — Session provider plugins
 
 Goal: make persistent execution sessions provider-based.
 
-- [ ] Introduce `SessionProviderRegistry`.
-- [ ] Define `SessionProvider` interface.
+- [x] Introduce `SessionProviderRegistry`.
+- [x] Define `SessionProvider` interface.
   - Suggested methods:
     - `available()`
     - `status()`
@@ -451,43 +468,49 @@ Goal: make persistent execution sessions provider-based.
     - `stop()`
     - `reset()`
     - `cleanup()`
-- [ ] Move memory session provider behind the registry.
-- [ ] Move Docker session provider behind the registry.
-- [ ] Keep eval-token authorization and `eggtools` bridge protocol core.
-- [ ] Ensure session runtime wrapper generation uses active tool registry.
-- [ ] Add room for future providers:
+- [x] Move memory session provider behind the registry.
+- [x] Move Docker session provider behind the registry.
+- [x] Keep eval-token authorization and `eggtools` bridge protocol core.
+- [x] Ensure session runtime wrapper generation uses active tool registry.
+- [x] Add room for future providers:
   - containerd;
   - Podman;
   - VM/microVM;
   - SSH/remote worker;
   - Kubernetes pod.
-- [ ] Commit per provider.
+- [x] Commit per provider.
+
+Status notes:
+- 2026-05-08: Added `SessionProviderRegistry`, `SessionProvider` protocol, and `builtin_plugins.session_providers`; memory and Docker session status/eval/stop/reset/cleanup behavior is now reached through provider objects, while eval-token auth and bridge protocol remain in core session/repl_bridge code.
+- 2026-05-08: Session runtime `_eggtools_generated.py` still uses `create_default_tools()` from the active plugin-populated tool registry.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_session_config.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py eggthreads/tests/test_repl_bridge.py eggthreads/tests/test_command_registry.py egg/tests/test_commands_session.py`.
+- 2026-05-08: Session provider changes were recovered from an uncommitted handoff batch and included in the final Phase 4-8 catch-up commit.
 
 ## Phase 7 — Approval policy plugins
 
 Goal: allow pluggable approval strategies without giving plugins authority to mutate TC state directly.
 
-- [ ] Define `ApprovalPolicy` interface.
+- [x] Define `ApprovalPolicy` interface.
   - Input: tool call, parsed args, tool metadata, caller origin, thread policy, sandbox/session status.
   - Output: verdict only.
-- [ ] Define verdict model.
+- [x] Define verdict model.
   - Suggested decisions:
     - `allow`
     - `deny`
     - `require_human`
     - `abstain`
-- [ ] Implement core aggregation.
+- [x] Implement core aggregation.
   - Conservative rule suggestion:
     - deny wins;
     - require-human beats allow;
     - allow only if no policy denies/requires-human;
     - abstain means no opinion;
     - no decisive policy falls back to existing behavior.
-- [ ] Move current auto-approval/manual approval defaults into built-in policies where appropriate.
-- [ ] Add audit events for policy evaluations.
-- [ ] Add a placeholder interface suitable for future small-LLM approver plugin.
-- [ ] Do not implement LLM approval until the deterministic policy chain is tested.
-- [ ] Commit.
+- [x] Move current auto-approval/manual approval defaults into built-in policies where appropriate.
+- [x] Add audit events for policy evaluations.
+- [x] Add a placeholder interface suitable for future small-LLM approver plugin.
+- [x] Do not implement LLM approval until the deterministic policy chain is tested.
+- [x] Commit.
 
 LLM approver design notes:
 - It should be an advisor, not the final authority.
@@ -495,36 +518,51 @@ LLM approver design notes:
 - It must not override hard sandbox/tool capability constraints.
 - It should be able to return `require_human` for uncertainty.
 
+Status notes:
+- 2026-05-08: Added `eggthreads.approval` with `ApprovalPolicy`, `ApprovalRequest`, `ApprovalVerdict`, `ApprovalPolicyRegistry`, conservative aggregation, and audit event emission (`tool_call.approval_policy`).
+- 2026-05-08: Added `builtin_plugins.approval_policies` with a deterministic user-origin policy. Core still records authoritative `tool_call.approval` events; policies return verdicts only. Assistant-originated tool calls continue to fall back to existing human approval unless a future policy decides otherwise.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_approval_policies.py eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_bash_registry_path.py eggthreads/tests/test_tools_config_allowlist.py`.
+- 2026-05-08: Approval policy changes were recovered from an uncommitted handoff batch and included in the final Phase 4-8 catch-up commit.
+
 ## Phase 8 — Output publication/truncation/secrets plugins
 
 Goal: separate raw captured output, UI output, LLM-visible output, artifacts, redaction, and summaries.
 
-- [ ] Define output channel model.
+- [x] Define output channel model.
   - Suggested channels:
     - raw captured output;
     - stored artifact;
     - UI-visible preview;
     - LLM-visible message;
     - audit metadata.
-- [ ] Define `OutputPolicy` interface.
+- [x] Define `OutputPolicy` interface.
   - Input: tool output, tool metadata, thread config, caller origin, current limits.
   - Output: proposed publication decision.
-- [ ] Implement built-in default policy chain matching current behavior.
+- [x] Implement built-in default policy chain matching current behavior.
   - terminal safety;
   - secret masking config;
   - truncation/stashing;
   - output approval defaults;
   - `no_api` handling.
-- [ ] Keep core-owned hard limits to avoid DB/UI blowups.
-- [ ] Add policy composition rules.
-- [ ] Add tests for:
+- [x] Keep core-owned hard limits to avoid DB/UI blowups.
+- [x] Add policy composition rules.
+- [x] Add tests for:
   - long output;
   - hidden `$$` output;
   - raw vs masked mode;
   - omitted output;
   - artifact/stash preview;
   - terminal control sanitization.
-- [ ] Commit after each policy-stage migration.
+- [x] Commit after each policy-stage migration.
+
+Status notes:
+- 2026-05-08: Added `eggthreads.output_policy` with output channel constants, `OutputPolicy`, `OutputPolicyRequest`, `OutputPublicationDecision`, `OutputPolicyRegistry`, and simple ordered policy composition.
+- 2026-05-08: Added `builtin_plugins.output_policies.DefaultOutputPolicy`; the runner's auto output approval now uses the policy seam for terminal safety, long-output truncation/stashing, previews, and audit/channel metadata while keeping raw output in `tool_call.finished`.
+- 2026-05-08: `no_api` publication handling for hidden `$$` output remains core-owned in the TC5 publish step.
+- 2026-05-08: `OutputPolicyRequest` carries tool metadata, thread config, caller origin, and limit metadata for future policy stages; policy composition now explicitly skips `abstain` decisions while preserving later-policy override behavior.
+- 2026-05-08: Focused tests passed: `pytest -q eggthreads/tests/test_output_policies.py eggthreads/tests/test_tool_message_format.py eggthreads/tests/test_terminal_safety.py eggthreads/tests/test_output_isolation.py eggthreads/tests/test_bash_registry_path.py`.
+- 2026-05-08: Broader tests passed: `pytest -q eggthreads/tests egg/tests`.
+- 2026-05-08: Output policy changes were recovered from an uncommitted handoff batch and included in the final Phase 4-8 catch-up commit.
 
 Future plugin examples:
 - DLP scanner;
@@ -664,4 +702,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Continue **Phase 4** with display/input TUI command migration into an owning plugin/module: `/togglePanel`, `/toggleBorders`, `/redraw`, `/displayMode`, `/paste`, and `/enterMode`.
+Next step: Phase 9 context/memory plugin work. Optional cleanup before that: remove remaining session/sandbox/utility `cmd_*` compatibility delegates if direct-call tests no longer require them.

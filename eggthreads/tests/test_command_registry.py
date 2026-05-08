@@ -81,6 +81,23 @@ def test_default_command_registry_contains_existing_ui_commands() -> None:
     assert "/sessionStatus" in command_completion_names(registry)
 
 
+def test_plugins_expose_common_provider_policy_context_fields() -> None:
+    from eggthreads.plugins import CommandPluginContext, ProviderPluginContext, ToolPluginContext
+
+    assert hasattr(ToolPluginContext(tool_registry=object()), "sandbox_provider_registry")
+    assert hasattr(CommandPluginContext(command_registry=object()), "output_policy_registry")
+    ctx = ProviderPluginContext(
+        sandbox_provider_registry="sandbox",
+        session_provider_registry="session",
+        approval_policy_registry="approval",
+        output_policy_registry="output",
+    )
+    assert ctx.sandbox_provider_registry == "sandbox"
+    assert ctx.session_provider_registry == "session"
+    assert ctx.approval_policy_registry == "approval"
+    assert ctx.output_policy_registry == "output"
+
+
 def test_command_registry_uses_completion_callback() -> None:
     registry = CommandRegistry()
 
@@ -153,6 +170,18 @@ def test_core_lifecycle_commands_are_registered_handlers(tmp_path, monkeypatch) 
     assert result.exit_app is True
     assert app._reload_requested is True
     assert state_file.read_text(encoding="utf-8").strip() == app.current_thread
+
+
+def test_model_auth_commands_are_registered_handlers() -> None:
+    from eggthreads.builtin_plugins import auth, model
+
+    registry = create_default_command_registry()
+
+    assert registry.get("model").handler is model.model_command
+    assert registry.get("updateAllModels").handler is model.update_all_models_command
+    assert registry.get("login").handler is auth.login_command
+    assert registry.get("logout").handler is auth.logout_command
+    assert registry.get("authStatus").handler is auth.auth_status_command
 
 
 def test_default_registry_uses_tools_admin_plugin_handlers() -> None:
@@ -259,6 +288,34 @@ def test_tools_secrets_status_and_info_commands_are_registered_handlers(monkeypa
     assert any("Usage: /toolsSecrets" in message for message in logs)
     assert any(title == "Tools Status" and "python: not allowed" in text for title, text in printed)
     assert any(title == "Tool: bash" and '"name": "bash"' in text for title, text in printed)
+
+
+def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
+    from eggthreads.builtin_plugins import diagnostics
+
+    registry = create_default_command_registry()
+
+    assert registry.get("schedulers").handler is diagnostics.schedulers_command
+    assert registry.get("cost").handler is diagnostics.cost_command
+    assert registry.get("setContextLimit").handler is diagnostics.set_context_limit_command
+    assert registry.get("setThreadPriority").handler is diagnostics.set_thread_priority_command
+
+    logs: list[str] = []
+    printed: list[tuple[str, str]] = []
+
+    ctx = CommandContext(
+        db=object(),
+        current_thread="thread-1",
+        log_system=logs.append,
+        console_print_block=lambda title, text, **kwargs: printed.append((title, text)),
+        app=type("App", (), {"active_schedulers": {}, "current_token_stats": lambda self: (10, {"total_input_tokens": 5, "total_output_tokens": 2})})(),
+    )
+
+    registry.execute("schedulers", ctx)
+    registry.execute("cost", ctx)
+
+    assert any("No active" in message for message in logs)
+    assert any(title == "Cost" for title, _text in printed)
 
 
 def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:
@@ -493,6 +550,57 @@ def test_sandbox_admin_commands_are_registered_handlers(monkeypatch) -> None:
     assert set_calls[1]["config_name"] == "locked.json"
     assert any(title == "Sandbox Configuration" and "Sandbox Configuration and Control" in text for title, text in printed)
     assert any("Sandbox configuration applied" in message for message in logs)
+
+
+def test_display_input_commands_are_registered_handlers() -> None:
+    from eggthreads.builtin_plugins import display_input
+
+    registry = create_default_command_registry()
+
+    assert registry.get("togglePanel").handler is display_input.toggle_panel_command
+    assert registry.get("toggleBorders").handler is display_input.toggle_borders_command
+    assert registry.get("redraw").handler is display_input.redraw_command
+    assert registry.get("displayMode").handler is display_input.display_mode_command
+    assert registry.get("paste").handler is display_input.paste_command
+    assert registry.get("enterMode").handler is display_input.enter_mode_command
+
+    logs: list[str] = []
+    redrawn: list[str] = []
+
+    class Style:
+        box = object()
+
+    class Panel:
+        style = Style()
+
+    class App:
+        _panel_visible = {"chat": True, "children": True, "system": True}
+        _display_is_inline = False
+        _pending_mode_change = False
+        _borders_visible = False
+        _original_box_styles = {"chat": "chat-box", "system": "system-box", "children": "children-box", "approval": "approval-box"}
+        chat_output = Panel()
+        system_output = Panel()
+        children_output = Panel()
+        approval_panel = Panel()
+        enter_sends = True
+
+        def redraw_static_view(self, reason=None):
+            redrawn.append(reason)
+
+    app = App()
+    ctx = CommandContext(app=app, log_system=logs.append)
+
+    registry.execute("togglePanel", ctx, "chat")
+    registry.execute("displayMode", ctx, "inline")
+    registry.execute("redraw", ctx)
+    registry.execute("enterMode", ctx, "newline")
+
+    assert app._panel_visible["chat"] is False
+    assert app._display_is_inline is True
+    assert app._pending_mode_change is True
+    assert app.enter_sends is False
+    assert "manual" in redrawn
 
 
 def test_web_commands_are_registered_handlers(monkeypatch) -> None:

@@ -153,14 +153,14 @@ class TestCmdSkills:
 
 
 class TestCmdPaste:
-    """Tests for cmd_paste()."""
+    """Tests for /paste."""
 
     def test_pastes_clipboard_to_input(self, egg_app, monkeypatch):
         """Should paste clipboard content to input."""
         import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: "pasted content")
 
-        egg_app.cmd_paste("")
+        egg_app.handle_command("/paste")
 
         assert egg_app.input_panel.get_text() == "pasted content"
 
@@ -169,7 +169,7 @@ class TestCmdPaste:
         import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: "a\x1b[2Jb\r\x08c")
 
-        egg_app.cmd_paste("")
+        egg_app.handle_command("/paste")
 
         text = egg_app.input_panel.editor.editor.get_text()
         assert "\x1b" not in text
@@ -181,7 +181,7 @@ class TestCmdPaste:
         import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: "")
 
-        egg_app.cmd_paste("")
+        egg_app.handle_command("/paste")
 
         # Actual message is "Clipboard is empty."
         assert any("Clipboard is empty" in msg for msg in egg_app._system_log)
@@ -191,7 +191,7 @@ class TestCmdPaste:
         import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: None)
 
-        egg_app.cmd_paste("")
+        egg_app.handle_command("/paste")
 
         # Actual message is "Failed to read clipboard."
         assert any("Failed to read clipboard" in msg for msg in egg_app._system_log)
@@ -201,7 +201,7 @@ class TestCmdPaste:
         import egg.commands.utility as util_mod
         monkeypatch.setattr(util_mod, "read_clipboard", lambda: "test content")
 
-        egg_app.cmd_paste("")
+        egg_app.handle_command("/paste")
 
         assert any("Pasted" in msg or "characters" in msg for msg in egg_app._system_log)
 
@@ -241,13 +241,13 @@ class TestCmdReload:
 
 
 class TestCmdEnterMode:
-    """Tests for cmd_enterMode()."""
+    """Tests for /enterMode."""
 
     def test_sets_send_mode(self, egg_app):
         """Should set enter_sends = True for 'send'."""
         egg_app.enter_sends = False
 
-        egg_app.cmd_enterMode("send")
+        egg_app.handle_command("/enterMode send")
 
         assert egg_app.enter_sends is True
 
@@ -255,44 +255,44 @@ class TestCmdEnterMode:
         """Should set enter_sends = False for 'newline'."""
         egg_app.enter_sends = True
 
-        egg_app.cmd_enterMode("newline")
+        egg_app.handle_command("/enterMode newline")
 
         assert egg_app.enter_sends is False
 
     def test_accepts_short_forms(self, egg_app):
         """Should accept 's' for send and 'n' for newline."""
         egg_app.enter_sends = False
-        egg_app.cmd_enterMode("s")
+        egg_app.handle_command("/enterMode s")
         assert egg_app.enter_sends is True
 
-        egg_app.cmd_enterMode("n")
+        egg_app.handle_command("/enterMode n")
         assert egg_app.enter_sends is False
 
     def test_accepts_on_off(self, egg_app):
         """Should accept 'on' for send and 'off' for newline."""
         egg_app.enter_sends = False
-        egg_app.cmd_enterMode("on")
+        egg_app.handle_command("/enterMode on")
         assert egg_app.enter_sends is True
 
-        egg_app.cmd_enterMode("off")
+        egg_app.handle_command("/enterMode off")
         assert egg_app.enter_sends is False
 
     def test_shows_usage_for_invalid(self, egg_app):
         """Should show usage for invalid argument."""
-        egg_app.cmd_enterMode("invalid")
+        egg_app.handle_command("/enterMode invalid")
 
         assert any("Usage" in msg or "usage" in msg.lower() for msg in egg_app._system_log)
 
     def test_logs_mode_change(self, egg_app):
         """Should log the mode change."""
-        egg_app.cmd_enterMode("send")
+        egg_app.handle_command("/enterMode send")
 
         assert any("Enter mode" in msg or "enter mode" in msg.lower() or "send" in msg.lower()
                    for msg in egg_app._system_log)
 
 
 class TestCmdCost:
-    """Tests for cmd_cost()."""
+    """Tests for /cost."""
 
     def test_displays_token_statistics(self, egg_app, monkeypatch):
         """Should display token usage from current_token_stats."""
@@ -302,7 +302,7 @@ class TestCmdCost:
             lambda: (1000, {"total_input_tokens": 500, "total_output_tokens": 200})
         )
 
-        egg_app.cmd_cost("")
+        egg_app.handle_command("/cost")
 
         assert any("token" in msg.lower() or "cost" in msg.lower() for msg in egg_app._system_log)
 
@@ -310,7 +310,7 @@ class TestCmdCost:
         """Should handle case when no stats available."""
         monkeypatch.setattr(egg_app, "current_token_stats", lambda: (None, None))
 
-        egg_app.cmd_cost("")
+        egg_app.handle_command("/cost")
 
         assert any("No snapshot" in msg or "no snapshot" in msg.lower() or "not available" in msg.lower()
                    for msg in egg_app._system_log)
@@ -329,7 +329,7 @@ class TestCmdCost:
             })
         )
 
-        egg_app.cmd_cost("")
+        egg_app.handle_command("/cost")
 
         # Should log cost information
         assert any("cost" in msg.lower() or "$" in msg or "token" in msg.lower()

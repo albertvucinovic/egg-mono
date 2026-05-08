@@ -5,15 +5,15 @@ import pytest
 
 
 class TestCmdModel:
-    """Tests for cmd_model()."""
+    """Tests for /model."""
 
     def test_sets_model_with_argument(self, egg_app, monkeypatch):
         """Should set model via set_thread_model."""
-        # set_thread_model is imported inside cmd_model, so we mock at eggthreads level
+        # set_thread_model is imported inside the /model handler, so we mock at eggthreads level
         monkeypatch.setattr("eggthreads.set_thread_model", lambda *a, **k: None)
         monkeypatch.setattr("eggthreads.create_snapshot", lambda *a: None)
 
-        egg_app.cmd_model("gpt-4")
+        egg_app.handle_command("/model gpt-4")
 
         # Should log about the model change
         assert any("model" in msg.lower() for msg in egg_app._system_log)
@@ -23,7 +23,7 @@ class TestCmdModel:
         # Without llm_client, it shows the current thread model
         egg_app.llm_client = None
 
-        egg_app.cmd_model("")
+        egg_app.handle_command("/model")
 
         # Should log something about model
         assert any("model" in msg.lower() or "Model" in msg for msg in egg_app._system_log)
@@ -32,7 +32,7 @@ class TestCmdModel:
         """Should list available models from llm_client."""
         egg_app.llm_client = mock_llm_client
 
-        egg_app.cmd_model("")
+        egg_app.handle_command("/model")
 
         # Should log available models or current model
         assert any("model" in msg.lower() for msg in egg_app._system_log)
@@ -41,7 +41,7 @@ class TestCmdModel:
         """Should handle gracefully when llm_client is None."""
         egg_app.llm_client = None
 
-        egg_app.cmd_model("")
+        egg_app.handle_command("/model")
 
         # Should still work, just not list models
         assert any("model" in msg.lower() or "Model" in msg for msg in egg_app._system_log)
@@ -52,17 +52,17 @@ class TestCmdModel:
         monkeypatch.setattr("eggthreads.set_thread_model", lambda *a, **k: None)
         monkeypatch.setattr("eggthreads.create_snapshot", lambda *a: None)
 
-        egg_app.cmd_model("new-model")
+        egg_app.handle_command("/model new-model")
 
         assert any("model" in msg.lower() for msg in egg_app._system_log)
 
 
 class TestCmdUpdateAllModels:
-    """Tests for cmd_updateAllModels()."""
+    """Tests for /updateAllModels."""
 
     def test_requires_provider_argument(self, egg_app):
         """Should show usage when no provider given."""
-        egg_app.cmd_updateAllModels("")
+        egg_app.handle_command("/updateAllModels")
 
         assert any("Usage" in msg or "usage" in msg.lower() or "provider" in msg.lower()
                    for msg in egg_app._system_log)
@@ -77,7 +77,7 @@ class TestCmdUpdateAllModels:
 
         egg_app.llm_client = MockLLMClient()
 
-        egg_app.cmd_updateAllModels("openai")
+        egg_app.handle_command("/updateAllModels openai")
 
         assert "openai" in updated
 
@@ -85,7 +85,7 @@ class TestCmdUpdateAllModels:
         """Should handle gracefully when llm_client is None."""
         egg_app.llm_client = None
 
-        egg_app.cmd_updateAllModels("openai")
+        egg_app.handle_command("/updateAllModels openai")
 
         assert any("not available" in msg.lower() or "error" in msg.lower()
                    for msg in egg_app._system_log)
@@ -98,7 +98,7 @@ class TestCmdUpdateAllModels:
 
         egg_app.llm_client = MockLLMClient()
 
-        egg_app.cmd_updateAllModels("openai")
+        egg_app.handle_command("/updateAllModels openai")
 
         assert any("update" in msg.lower() or "model" in msg.lower()
                    for msg in egg_app._system_log)

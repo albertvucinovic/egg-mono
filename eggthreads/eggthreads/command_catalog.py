@@ -245,45 +245,11 @@ def _core_reload_handler(context: CommandContext, arg: str) -> CommandResult:
     return CommandResult(clear_input=False, exit_app=True)
 
 
-def _legacy_app_handler(method_name: str) -> CommandHandler:
-    def handler(context: CommandContext, arg: str) -> CommandResult:
-        app = context.app
-        if app is None:
-            raise RuntimeError(f"/{method_name[4:]} requires an app context")
-        getattr(app, method_name)(arg)
-        return CommandResult()
-
-    return handler
-
-
-def _register_legacy_command(
-    registry: CommandRegistry,
-    name: str,
-    *,
-    category: str,
-    usage: str = "",
-    description: str = "",
-    aliases: tuple[str, ...] = (),
-    method_name: str | None = None,
-) -> None:
-    registry.register(
-        CommandSpec(
-            name=name,
-            aliases=aliases,
-            category=category,
-            usage=usage,
-            description=description,
-            handler=_legacy_app_handler(method_name or f"cmd_{name}"),
-        )
-    )
-
-
 def create_default_command_registry() -> CommandRegistry:
     """Create the built-in slash-command registry.
 
-    Handlers are initially thin adapters to the existing UI mixin methods so
-    metadata, dispatch, and autocomplete can move to a registry before each
-    command group's service layer is migrated.
+    Built-in feature plugins own command handlers; this registry wires their
+    metadata and dispatch in deterministic order.
     """
 
     registry = CommandRegistry()
@@ -292,19 +258,18 @@ def create_default_command_registry() -> CommandRegistry:
     registry.register(CommandSpec("quit", _core_quit_handler, category="core", usage="/quit", description="Exit the application."))
     registry.register(CommandSpec("reload", _core_reload_handler, category="core", usage="/reload", description="Restart Egg and reopen the current thread."))
 
-    _register_legacy_command(registry, "model", category="model", usage="/model <key>", description="Set or display the active model.")
-    _register_legacy_command(registry, "updateAllModels", category="model", usage="/updateAllModels <provider>", description="Refresh a provider model catalog.")
-    _register_legacy_command(registry, "login", category="auth", usage="/login", description="Start ChatGPT OAuth login.")
-    _register_legacy_command(registry, "logout", category="auth", usage="/logout", description="Clear ChatGPT OAuth tokens.")
-    _register_legacy_command(registry, "authStatus", category="auth", usage="/authStatus", description="Show ChatGPT OAuth status.")
-
-    from .builtin_plugins import ToolsAdminPlugin
+    from .builtin_plugins import AuthPlugin, ModelPlugin
     from .plugins import CommandPluginContext, register_plugins
 
-    register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
-    _register_legacy_command(registry, "schedulers", category="tools", usage="/schedulers", description="List active schedulers.")
+    register_plugins(CommandPluginContext(command_registry=registry), [ModelPlugin()])
+    register_plugins(CommandPluginContext(command_registry=registry), [AuthPlugin()])
 
-    from .builtin_plugins import SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
+    from .builtin_plugins import DiagnosticsPlugin, ToolsAdminPlugin
+
+    register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
+    register_plugins(CommandPluginContext(command_registry=registry), [DiagnosticsPlugin()])
+
+    from .builtin_plugins import DisplayInputPlugin, SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ThreadUiPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])
@@ -315,16 +280,7 @@ def create_default_command_registry() -> CommandRegistry:
 
     register_plugins(CommandPluginContext(command_registry=registry), [WebPlugin()])
 
-    _register_legacy_command(registry, "togglePanel", category="display", usage="/togglePanel <chat|children|system>", description="Show or hide a panel.")
-    _register_legacy_command(registry, "toggleBorders", category="display", usage="/toggleBorders", description="Toggle panel borders.")
-    _register_legacy_command(registry, "redraw", category="display", usage="/redraw", description="Redraw the static transcript.")
-    _register_legacy_command(registry, "displayMode", category="display", usage="/displayMode <full-screen|inline>", description="Switch display mode.")
-    _register_legacy_command(registry, "paste", category="input", usage="/paste", description="Paste clipboard content into the input panel.")
-    _register_legacy_command(registry, "enterMode", category="input", usage="/enterMode <send|newline>", description="Set Enter key behavior.")
-
-    _register_legacy_command(registry, "cost", category="diagnostics", usage="/cost", description="Show token usage and approximate cost.")
-    _register_legacy_command(registry, "setContextLimit", category="diagnostics", usage="/setContextLimit [limit]", description="Set or show the thread context limit.")
-    _register_legacy_command(registry, "setThreadPriority", category="diagnostics", usage="/setThreadPriority ...", description="Set thread scheduler settings.")
+    register_plugins(CommandPluginContext(command_registry=registry), [DisplayInputPlugin()])
 
     return registry
 

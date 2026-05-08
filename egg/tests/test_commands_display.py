@@ -5,13 +5,13 @@ import pytest
 
 
 class TestCmdTogglePanel:
-    """Tests for cmd_togglePanel()."""
+    """Tests for /togglePanel."""
 
     def test_toggles_chat_panel(self, egg_app):
         """Should toggle chat panel visibility."""
         initial = egg_app._panel_visible.get('chat', True)
 
-        egg_app.cmd_togglePanel("chat")
+        egg_app.handle_command("/togglePanel " + "chat")
 
         assert egg_app._panel_visible['chat'] != initial
 
@@ -19,7 +19,7 @@ class TestCmdTogglePanel:
         """Should toggle children panel visibility."""
         initial = egg_app._panel_visible.get('children', True)
 
-        egg_app.cmd_togglePanel("children")
+        egg_app.handle_command("/togglePanel " + "children")
 
         assert egg_app._panel_visible['children'] != initial
 
@@ -27,27 +27,27 @@ class TestCmdTogglePanel:
         """Should toggle system panel visibility."""
         initial = egg_app._panel_visible.get('system', True)
 
-        egg_app.cmd_togglePanel("system")
+        egg_app.handle_command("/togglePanel " + "system")
 
         assert egg_app._panel_visible['system'] != initial
 
     def test_shows_usage_for_invalid_panel(self, egg_app):
         """Should show usage for unknown panel name."""
-        egg_app.cmd_togglePanel("invalid_panel")
+        egg_app.handle_command("/togglePanel " + "invalid_panel")
 
         assert any("Usage" in msg or "usage" in msg.lower() or "chat|children|system" in msg
                    for msg in egg_app._system_log)
 
     def test_logs_visibility_change(self, egg_app):
         """Should log the visibility change."""
-        egg_app.cmd_togglePanel("chat")
+        egg_app.handle_command("/togglePanel " + "chat")
 
         assert any("panel" in msg.lower() or "visible" in msg.lower() or "hidden" in msg.lower()
                    for msg in egg_app._system_log)
 
 
 class TestCmdRedraw:
-    """Tests for cmd_redraw()."""
+    """Tests for /redraw."""
 
     def test_calls_redraw_static_view(self, egg_app, monkeypatch):
         """Should call redraw_static_view(reason='manual')."""
@@ -56,7 +56,7 @@ class TestCmdRedraw:
             redrawn.append(reason)
         monkeypatch.setattr(egg_app, "redraw_static_view", mock_redraw)
 
-        egg_app.cmd_redraw("")
+        egg_app.handle_command("/redraw")
 
         assert len(redrawn) == 1
         assert redrawn[0] == "manual"
@@ -65,13 +65,13 @@ class TestCmdRedraw:
         """Should log the redraw action."""
         monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
 
-        egg_app.cmd_redraw("")
+        egg_app.handle_command("/redraw")
 
         assert any("redraw" in msg.lower() for msg in egg_app._system_log)
 
 
 class TestCmdToggleBorders:
-    """Tests for cmd_toggleBorders()."""
+    """Tests for /toggleBorders."""
 
     def test_toggles_borders_visibility(self, egg_app, monkeypatch):
         """Should toggle _borders_visible flag."""
@@ -80,7 +80,7 @@ class TestCmdToggleBorders:
 
         initial = egg_app._borders_visible
 
-        egg_app.cmd_toggleBorders("")
+        egg_app.handle_command("/toggleBorders")
 
         assert egg_app._borders_visible != initial
 
@@ -90,8 +90,8 @@ class TestCmdToggleBorders:
 
         initial = egg_app._borders_visible
 
-        egg_app.cmd_toggleBorders("")
-        egg_app.cmd_toggleBorders("")
+        egg_app.handle_command("/toggleBorders")
+        egg_app.handle_command("/toggleBorders")
 
         assert egg_app._borders_visible == initial
 
@@ -105,7 +105,7 @@ class TestCmdToggleBorders:
         assert egg_app._borders_visible is False
         assert egg_app.chat_output.style.box == rich_box.MINIMAL
 
-        egg_app.cmd_toggleBorders("")
+        egg_app.handle_command("/toggleBorders")
 
         # After toggle, borders should be visible
         assert egg_app._borders_visible is True
@@ -129,7 +129,7 @@ class TestCmdToggleBorders:
         assert egg_app.chat_output.style.box == rich_box.MINIMAL
 
         # Toggle to on - should restore original SQUARE styles
-        egg_app.cmd_toggleBorders("")
+        egg_app.handle_command("/toggleBorders")
 
         assert egg_app.chat_output.style.box == original_chat
         assert egg_app.system_output.style.box == original_system
@@ -140,7 +140,7 @@ class TestCmdToggleBorders:
 
         original_input_box = egg_app.input_panel.style.box
 
-        egg_app.cmd_toggleBorders("")
+        egg_app.handle_command("/toggleBorders")
 
         # Input panel should be unchanged
         assert egg_app.input_panel.style.box == original_input_box
@@ -149,7 +149,7 @@ class TestCmdToggleBorders:
         """Should log the borders state change."""
         monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
 
-        egg_app.cmd_toggleBorders("")
+        egg_app.handle_command("/toggleBorders")
 
         # Since borders are off by default, first toggle turns them on
         assert any("borders" in msg.lower() and "on" in msg.lower()
@@ -162,7 +162,7 @@ class TestCmdToggleBorders:
             redrawn.append(reason)
         monkeypatch.setattr(egg_app, "redraw_static_view", mock_redraw)
 
-        egg_app.cmd_toggleBorders("")
+        egg_app.handle_command("/toggleBorders")
 
         assert len(redrawn) == 1
         assert "borders" in redrawn[0].lower()

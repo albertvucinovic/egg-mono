@@ -267,29 +267,55 @@ def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_outpu
 
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
+    try:
+        from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
 
-    line_count = len(full_output.splitlines())
-    char_count = len(full_output)
-    is_long = (
-        line_count > LONG_OUTPUT_LINE_THRESHOLD
-        or char_count > LONG_OUTPUT_CHAR_THRESHOLD
-    )
+        publication = decide_output_publication(
+            create_output_policy_registry(),
+            OutputPolicyRequest(
+                db=db,
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                output=full_output,
+                limits={
+                    "long_output_line_threshold": LONG_OUTPUT_LINE_THRESHOLD,
+                    "long_output_char_threshold": LONG_OUTPUT_CHAR_THRESHOLD,
+                    "preview_max_lines": PREVIEW_MAX_LINES,
+                    "preview_max_chars": PREVIEW_MAX_CHARS,
+                },
+            ),
+        )
+        preview = publication.preview
+        decision = publication.decision
+        reason = publication.reason
+        channels = dict(publication.channels or {})
+        artifact_path = publication.artifact_path
+    except Exception:
+        line_count = len(full_output.splitlines())
+        char_count = len(full_output)
+        is_long = (
+            line_count > LONG_OUTPUT_LINE_THRESHOLD
+            or char_count > LONG_OUTPUT_CHAR_THRESHOLD
+        )
 
-    if is_long:
-        preview, saved = stash_tool_output_and_build_preview(
-            db, thread_id, tool_call_id, full_output,
-        )
-        decision = "partial"
-        reason = (
-            f"Auto: output too long ({line_count} lines, {char_count} chars) — "
-            f"stashed to {saved}" if saved else
-            f"Auto: output too long ({line_count} lines, {char_count} chars); "
-            "stash failed, sending preview only"
-        )
-    else:
-        preview = full_output
-        decision = "whole"
-        reason = "Auto: output below size thresholds"
+        if is_long:
+            preview, saved = stash_tool_output_and_build_preview(
+                db, thread_id, tool_call_id, full_output,
+            )
+            decision = "partial"
+            reason = (
+                f"Auto: output too long ({line_count} lines, {char_count} chars) — "
+                f"stashed to {saved}" if saved else
+                f"Auto: output too long ({line_count} lines, {char_count} chars); "
+                "stash failed, sending preview only"
+            )
+            artifact_path = saved
+        else:
+            preview = full_output
+            decision = "whole"
+            reason = "Auto: output below size thresholds"
+            artifact_path = ""
+        channels = {}
 
     try:
         db.append_event(
@@ -303,6 +329,8 @@ def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_outpu
                 "decision": decision,
                 "reason": reason,
                 "preview": preview,
+                "channels": channels,
+                "artifact_path": artifact_path,
             },
         )
     except Exception:
@@ -611,6 +639,60 @@ class ThreadRunner:
         self.cfg = config or RunnerConfig()
         self.tools = tools or create_default_tools()
 
+    def _evaluate_pending_approval_policies(self) -> None:
+        """Let deterministic approval policies advise on TC1 tool calls."""
+
+        try:
+            from .approval import (
+                APPROVAL_ALLOW,
+                APPROVAL_DENY,
+                create_approval_policy_registry,
+                evaluate_approval_policies,
+                request_from_tool_call_state,
+            )
+            from .api import approve_tool_calls_for_thread
+            from .tool_state import build_tool_call_states
+        except Exception:
+            return
+
+        registry = create_approval_policy_registry()
+        changed = False
+        for tc in build_tool_call_states(self.db, self.thread_id).values():
+            if tc.state != "TC1":
+                continue
+            origin = "user_command" if tc.parent_role == "user" else "assistant"
+            request = request_from_tool_call_state(self.db, self.thread_id, tc, origin=origin)
+            # Assistant-originated calls still fall back to the existing human
+            # approval flow; audit auto-allow decisions that change state.
+            verdict = evaluate_approval_policies(registry, request, audit=(origin == "user_command"))
+            if verdict.decision == APPROVAL_ALLOW:
+                approve_tool_calls_for_thread(
+                    self.db,
+                    self.thread_id,
+                    decision="granted",
+                    reason=verdict.reason or f"Approved by policy {verdict.policy}",
+                    tool_call_id=tc.tool_call_id,
+                )
+                changed = True
+            elif verdict.decision == APPROVAL_DENY:
+                approve_tool_calls_for_thread(
+                    self.db,
+                    self.thread_id,
+                    decision="denied",
+                    reason=verdict.reason or f"Denied by policy {verdict.policy}",
+                    tool_call_id=tc.tool_call_id,
+                )
+                changed = True
+        if changed:
+            try:
+                from .tool_state import _REDUCER_CACHE  # type: ignore
+
+                for key in list(_REDUCER_CACHE.keys()):
+                    if key[0] == str(self.db.path) and key[1] == self.thread_id:
+                        del _REDUCER_CACHE[key]
+            except Exception:
+                pass
+
     async def run_once(self) -> bool:
         """Attempt one assistant step (RA1/RA2/RA3) if runnable.
 
@@ -623,6 +705,13 @@ class ThreadRunner:
         th = self.db.get_thread(self.thread_id)
         if th and th.status == 'paused':
             return False
+
+        # Let approval policies auto-resolve safe TC1 calls before asking
+        # discover_runner_actionable() what work is runnable.
+        try:
+            self._evaluate_pending_approval_policies()
+        except Exception:
+            pass
 
         # Determine what kind of work (if any) is pending.  The cached
         # variant avoids repeatedly rebuilding tool-call state when the

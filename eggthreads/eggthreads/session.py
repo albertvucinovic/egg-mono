@@ -15,7 +15,7 @@ import time
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from .db import ThreadsDB
 
@@ -71,6 +71,45 @@ class DockerSessionHandle:
     runtime_dir: str
     mount_dir: str
     workspace: str
+
+
+@runtime_checkable
+class SessionProvider(Protocol):
+    """Persistent execution-session provider interface."""
+
+    name: str
+
+    def available(self) -> bool:
+        ...
+
+    def status(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
+        ...
+
+    def start(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
+        ...
+
+    def eval(
+        self,
+        db: ThreadsDB,
+        runtime_thread_id: str,
+        cfg: SessionConfig,
+        *,
+        language: str,
+        code: str,
+        repl_channel: str,
+        eval_token: Optional[str],
+        timeout_sec: Optional[float],
+    ) -> str:
+        ...
+
+    def stop(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> SessionStatus:
+        ...
+
+    def reset(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> str:
+        ...
+
+    def cleanup(self, db: ThreadsDB, **kwargs: Any) -> List[Dict[str, Any]]:
+        ...
 
 
 _DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-sandbox-v2"
@@ -561,6 +600,15 @@ def cleanup_docker_sessions(
     return removed
 
 
+def cleanup_thread_sessions(db: ThreadsDB, provider_name: str = "docker", **kwargs: Any) -> List[Dict[str, Any]]:
+    """Run cleanup for the named session provider."""
+
+    provider = get_session_provider(provider_name)
+    if provider is None:
+        return []
+    return provider.cleanup(db, **kwargs)
+
+
 def repl_channel_name(runtime_thread_id: str, repl_name: str = "default", *, share_repl: bool = False) -> str:
     """Return the provider-level REPL channel name for an eval.
 
@@ -931,19 +979,9 @@ def get_thread_session_status(db: ThreadsDB, thread_id: str) -> SessionStatus:
     cfg = get_thread_session_config(db, thread_id)
     if not cfg.enabled:
         return SessionStatus(False, cfg.provider, cfg.session_id, "disabled", "Session is disabled", share_repl=cfg.share_repl)
-    if cfg.provider == "memory":
-        action = _latest_session_lifecycle_action(db, thread_id, cfg.session_id)
-        if action == "stopped":
-            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", "In-memory test session provider is stopped", share_repl=cfg.share_repl)
-        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "In-memory test session provider", share_repl=cfg.share_repl)
-    if cfg.provider == "docker":
-        name = docker_session_container_name(db, cfg.session_id or _session_id_for_thread(thread_id))
-        if not docker_session_available():
-            return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", "Docker is not available", name, cfg.share_repl)
-        action = _latest_session_lifecycle_action(db, thread_id, cfg.session_id)
-        if action == "stopped":
-            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", "Docker session is stopped", name, cfg.share_repl)
-        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "Docker session provider skeleton is available", name, cfg.share_repl)
+    provider = get_session_provider(cfg.provider)
+    if provider is not None:
+        return provider.status(db, thread_id, cfg)
     return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", f"Unknown session provider: {cfg.provider}", share_repl=cfg.share_repl)
 
 
@@ -1449,52 +1487,9 @@ def stop_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") 
         )
         return get_thread_session_status(db, thread_id)
 
-    if cfg.provider == "memory":
-        for key in list(_MEMORY_PYTHON_REPLS.keys()):
-            if key[0] == cfg.session_id:
-                _MEMORY_PYTHON_REPLS.pop(key, None)
-        for key in list(_MEMORY_BASH_ENVS.keys()):
-            if key[0] == cfg.session_id:
-                _MEMORY_BASH_ENVS.pop(key, None)
-        append_session_lifecycle_event(
-            db,
-            thread_id,
-            action="stopped",
-            session_id=cfg.session_id,
-            payload={"provider": cfg.provider, "reason": reason},
-        )
-        return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", _session_provider_stop_message(cfg), share_repl=cfg.share_repl)
-
-    if cfg.provider == "docker":
-        container_name = docker_session_container_name(db, cfg.session_id)
-        if not docker_session_available():
-            append_session_lifecycle_event(
-                db,
-                thread_id,
-                action="stop_unavailable",
-                session_id=cfg.session_id,
-                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason},
-            )
-            return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", "Docker is not available", container_name, cfg.share_repl)
-        try:
-            subprocess.run(["docker", "stop", container_name], capture_output=True, check=False, timeout=20)
-            append_session_lifecycle_event(
-                db,
-                thread_id,
-                action="stopped",
-                session_id=cfg.session_id,
-                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason},
-            )
-            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", _session_provider_stop_message(cfg), container_name, cfg.share_repl)
-        except Exception as e:
-            append_session_lifecycle_event(
-                db,
-                thread_id,
-                action="stop_error",
-                session_id=cfg.session_id,
-                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason, "error": str(e)},
-            )
-            return SessionStatus(True, cfg.provider, cfg.session_id, "error", str(e), container_name, cfg.share_repl)
+    provider = get_session_provider(cfg.provider)
+    if provider is not None:
+        return provider.stop(db, thread_id, cfg, reason=reason)
 
     append_session_lifecycle_event(
         db,
@@ -1506,7 +1501,7 @@ def stop_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") 
     return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", f"Unknown session provider: {cfg.provider}", share_repl=cfg.share_repl)
 
 
-def reset_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") -> str:
+def _reset_thread_session_core(db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> str:
     """Reset a session's mutable state and assign a fresh session id.
 
     Reset is event-sourced as a stop/lifecycle event followed by a new
@@ -1515,16 +1510,6 @@ def reset_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user")
     the authority path.
     """
 
-    cfg = get_thread_session_config(db, thread_id)
-    if not cfg.enabled:
-        append_session_lifecycle_event(
-            db,
-            thread_id,
-            action="reset_ignored",
-            session_id=cfg.session_id,
-            payload={"provider": cfg.provider, "reason": reason, "message": "Session is not enabled"},
-        )
-        return ""
     if cfg.enabled and cfg.session_id:
         stop_thread_session(db, thread_id, reason=f"reset:{reason}")
 
@@ -1553,6 +1538,31 @@ def reset_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user")
         payload={"provider": cfg.provider, "old_session_id": old_session_id, "reason": reason},
     )
     return sid
+
+
+def reset_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") -> str:
+    """Reset a session's mutable state and assign a fresh session id.
+
+    Reset is event-sourced as a stop/lifecycle event followed by a new
+    ``session.config`` event with the same provider/image/share policy but a
+    new session id.  This preserves auditability and keeps providers out of
+    the authority path.
+    """
+
+    cfg = get_thread_session_config(db, thread_id)
+    if not cfg.enabled:
+        append_session_lifecycle_event(
+            db,
+            thread_id,
+            action="reset_ignored",
+            session_id=cfg.session_id,
+            payload={"provider": cfg.provider, "reason": reason, "message": "Session is not enabled"},
+        )
+        return ""
+    provider = get_session_provider(cfg.provider)
+    if provider is not None:
+        return provider.reset(db, thread_id, cfg, reason=reason)
+    return _reset_thread_session_core(db, thread_id, cfg, reason=reason)
 
 
 def _execute_bash_memory(session_id: str, repl_name: str, script: str, *, eval_token: Optional[str] = None, timeout_sec: Optional[float] = None) -> str:
@@ -1590,6 +1600,181 @@ def _execute_bash_memory(session_id: str, repl_name: str, script: str, *, eval_t
     if proc.stderr and proc.stderr.strip():
         out += f"--- STDERR ---\n{proc.stderr.strip()}\n"
     return out.strip() or "--- The Bash REPL executed successfully and produced no output ---"
+
+
+class MemorySessionProvider:
+    """In-process test/development session provider."""
+
+    name = "memory"
+
+    def available(self) -> bool:
+        return True
+
+    def status(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
+        action = _latest_session_lifecycle_action(db, thread_id, cfg.session_id)
+        if action == "stopped":
+            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", "In-memory test session provider is stopped", share_repl=cfg.share_repl)
+        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "In-memory test session provider", share_repl=cfg.share_repl)
+
+    def start(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
+        return self.status(db, thread_id, cfg)
+
+    def eval(
+        self,
+        db: ThreadsDB,
+        runtime_thread_id: str,
+        cfg: SessionConfig,
+        *,
+        language: str,
+        code: str,
+        repl_channel: str,
+        eval_token: Optional[str],
+        timeout_sec: Optional[float],
+    ) -> str:
+        if language == "python":
+            return _execute_python_memory(cfg.session_id or "", repl_channel, code, eval_token=eval_token)
+        if language == "bash":
+            return _execute_bash_memory(cfg.session_id or "", repl_channel, code, eval_token=eval_token, timeout_sec=timeout_sec)
+        return f"Error: unknown session language: {language}"
+
+    def stop(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> SessionStatus:
+        for key in list(_MEMORY_PYTHON_REPLS.keys()):
+            if key[0] == cfg.session_id:
+                _MEMORY_PYTHON_REPLS.pop(key, None)
+        for key in list(_MEMORY_BASH_ENVS.keys()):
+            if key[0] == cfg.session_id:
+                _MEMORY_BASH_ENVS.pop(key, None)
+        append_session_lifecycle_event(
+            db,
+            thread_id,
+            action="stopped",
+            session_id=cfg.session_id,
+            payload={"provider": cfg.provider, "reason": reason},
+        )
+        return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", _session_provider_stop_message(cfg), share_repl=cfg.share_repl)
+
+    def reset(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> str:
+        return _reset_thread_session_core(db, thread_id, cfg, reason=reason)
+
+    def cleanup(self, db: ThreadsDB, **kwargs: Any) -> List[Dict[str, Any]]:
+        return []
+
+
+class DockerSessionProvider:
+    """Docker-backed persistent session provider."""
+
+    name = "docker"
+
+    def available(self) -> bool:
+        return docker_session_available()
+
+    def status(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
+        name = docker_session_container_name(db, cfg.session_id or _session_id_for_thread(thread_id))
+        if not self.available():
+            return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", "Docker is not available", name, cfg.share_repl)
+        action = _latest_session_lifecycle_action(db, thread_id, cfg.session_id)
+        if action == "stopped":
+            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", "Docker session is stopped", name, cfg.share_repl)
+        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "Docker session provider skeleton is available", name, cfg.share_repl)
+
+    def start(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
+        return get_or_start_docker_session(db, thread_id)
+
+    def eval(
+        self,
+        db: ThreadsDB,
+        runtime_thread_id: str,
+        cfg: SessionConfig,
+        *,
+        language: str,
+        code: str,
+        repl_channel: str,
+        eval_token: Optional[str],
+        timeout_sec: Optional[float],
+    ) -> str:
+        if language == "python":
+            return _execute_python_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec)
+        if language == "bash":
+            return _execute_bash_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec)
+        return f"Error: unknown session language: {language}"
+
+    def stop(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> SessionStatus:
+        container_name = docker_session_container_name(db, cfg.session_id or _session_id_for_thread(thread_id))
+        if not self.available():
+            append_session_lifecycle_event(
+                db,
+                thread_id,
+                action="stop_unavailable",
+                session_id=cfg.session_id,
+                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason},
+            )
+            return SessionStatus(True, cfg.provider, cfg.session_id, "unavailable", "Docker is not available", container_name, cfg.share_repl)
+        try:
+            subprocess.run(["docker", "stop", container_name], capture_output=True, check=False, timeout=20)
+            append_session_lifecycle_event(
+                db,
+                thread_id,
+                action="stopped",
+                session_id=cfg.session_id,
+                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason},
+            )
+            return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", _session_provider_stop_message(cfg), container_name, cfg.share_repl)
+        except Exception as e:
+            append_session_lifecycle_event(
+                db,
+                thread_id,
+                action="stop_error",
+                session_id=cfg.session_id,
+                payload={"provider": cfg.provider, "container_name": container_name, "reason": reason, "error": str(e)},
+            )
+            return SessionStatus(True, cfg.provider, cfg.session_id, "error", str(e), container_name, cfg.share_repl)
+
+    def reset(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> str:
+        return _reset_thread_session_core(db, thread_id, cfg, reason=reason)
+
+    def cleanup(self, db: ThreadsDB, **kwargs: Any) -> List[Dict[str, Any]]:
+        return cleanup_docker_sessions(db, **kwargs)
+
+
+class SessionProviderRegistry:
+    """Deterministic registry for persistent session providers."""
+
+    def __init__(self) -> None:
+        self._providers: Dict[str, SessionProvider] = {}
+
+    def register(self, provider: SessionProvider) -> None:
+        name = str(getattr(provider, "name", "") or "").strip()
+        if not name:
+            raise ValueError("Session provider name must not be empty")
+        if name in self._providers:
+            raise ValueError(f"Session provider already registered: {name}")
+        self._providers[name] = provider
+
+    def get(self, name: str) -> Optional[SessionProvider]:
+        return self._providers.get(name)
+
+    def names(self) -> List[str]:
+        return list(self._providers.keys())
+
+
+def create_session_provider_registry() -> SessionProviderRegistry:
+    from .builtin_plugins.session_providers import SessionProvidersPlugin
+    from .plugins import ProviderPluginContext, register_plugins
+
+    registry = SessionProviderRegistry()
+    register_plugins(ProviderPluginContext(session_provider_registry=registry), [SessionProvidersPlugin()])
+    return registry
+
+
+_SESSION_PROVIDER_REGISTRY = create_session_provider_registry()
+
+
+def get_session_provider(name: str) -> Optional[SessionProvider]:
+    return _SESSION_PROVIDER_REGISTRY.get(name)
+
+
+def get_session_provider_names() -> List[str]:
+    return _SESSION_PROVIDER_REGISTRY.names()
 
 
 def execute_python_repl(
@@ -1681,68 +1866,45 @@ def execute_python_repl(
         caller_thread_id=caller_thread_id,
     )
 
-    if cfg.provider == "memory":
-        from .repl_bridge import create_eval_context, dispose_eval_context
+    provider = get_session_provider(cfg.provider)
+    if provider is None:
+        return f"Error: unknown session provider: {cfg.provider}"
 
-        ctx = create_eval_context(
-            db,
-            caller_thread_id=caller_thread_id,
-            runtime_thread_id=runtime_thread_id,
-            session_id=cfg.session_id,
-            timeout_sec=effective_timeout_sec,
-            drive_runtime_tools=drive_runtime_tools,
-        )
-        try:
-            out = _execute_python_memory(cfg.session_id, channel, code, eval_token=ctx.token)
-        finally:
-            dispose_eval_context(ctx.token)
-        _append_runtime_repl_message(
+    from .repl_bridge import create_eval_context, dispose_eval_context
+
+    ctx = create_eval_context(
+        db,
+        caller_thread_id=caller_thread_id,
+        runtime_thread_id=runtime_thread_id,
+        session_id=cfg.session_id,
+        timeout_sec=effective_timeout_sec,
+        drive_runtime_tools=drive_runtime_tools,
+    )
+    try:
+        out = provider.eval(
             db,
             runtime_thread_id,
-            "tool",
-            out,
+            cfg,
             language="python",
-            repl_name=repl_name,
+            code=code,
             repl_channel=channel,
-            session_id=cfg.session_id,
-            caller_thread_id=caller_thread_id,
-        )
-        return out
-    if cfg.provider == "docker":
-        from .repl_bridge import create_eval_context, dispose_eval_context
-
-        ctx = create_eval_context(
-            db,
-            caller_thread_id=caller_thread_id,
-            runtime_thread_id=runtime_thread_id,
-            session_id=cfg.session_id,
+            eval_token=ctx.token,
             timeout_sec=effective_timeout_sec,
-            drive_runtime_tools=drive_runtime_tools,
         )
-        try:
-            out = _execute_python_docker(
-                db,
-                runtime_thread_id,
-                code,
-                repl_name=channel,
-                eval_token=ctx.token,
-                timeout_sec=effective_timeout_sec,
-            )
-        finally:
-            dispose_eval_context(ctx.token)
-        _append_runtime_repl_message(
-            db,
-            runtime_thread_id,
-            "tool",
-            out,
-            language="python",
-            repl_name=repl_name,
-            repl_channel=channel,
-            session_id=cfg.session_id,
-            caller_thread_id=caller_thread_id,
-        )
-        return out
-    return f"Error: unknown session provider: {cfg.provider}"
+    finally:
+        dispose_eval_context(ctx.token)
+    _append_runtime_repl_message(
+        db,
+        runtime_thread_id,
+        "tool",
+        out,
+        language="python",
+        repl_name=repl_name,
+        repl_channel=channel,
+        session_id=cfg.session_id,
+        caller_thread_id=caller_thread_id,
+    )
+    return out
 
 
 def execute_bash_repl(
@@ -1833,42 +1995,31 @@ def execute_bash_repl(
         drive_runtime_tools=drive_runtime_tools,
     )
     try:
-        if cfg.provider == "memory":
-            out = _execute_bash_memory(cfg.session_id, channel, script, eval_token=ctx.token, timeout_sec=effective_timeout_sec)
-            _append_runtime_repl_message(
-                db,
-                runtime_thread_id,
-                "tool",
-                out,
-                language="bash",
-                repl_name=repl_name,
-                repl_channel=channel,
-                session_id=cfg.session_id,
-                caller_thread_id=caller_thread_id,
-            )
-            return out
-        if cfg.provider == "docker":
-            out = _execute_bash_docker(
-                db,
-                runtime_thread_id,
-                script,
-                repl_name=channel,
-                eval_token=ctx.token,
-                timeout_sec=effective_timeout_sec,
-            )
-            _append_runtime_repl_message(
-                db,
-                runtime_thread_id,
-                "tool",
-                out,
-                language="bash",
-                repl_name=repl_name,
-                repl_channel=channel,
-                session_id=cfg.session_id,
-                caller_thread_id=caller_thread_id,
-            )
-            return out
-        return f"Error: unknown session provider: {cfg.provider}"
+        provider = get_session_provider(cfg.provider)
+        if provider is None:
+            return f"Error: unknown session provider: {cfg.provider}"
+        out = provider.eval(
+            db,
+            runtime_thread_id,
+            cfg,
+            language="bash",
+            code=script,
+            repl_channel=channel,
+            eval_token=ctx.token,
+            timeout_sec=effective_timeout_sec,
+        )
+        _append_runtime_repl_message(
+            db,
+            runtime_thread_id,
+            "tool",
+            out,
+            language="bash",
+            repl_name=repl_name,
+            repl_channel=channel,
+            session_id=cfg.session_id,
+            caller_thread_id=caller_thread_id,
+        )
+        return out
     finally:
         dispose_eval_context(ctx.token)
 
@@ -2030,7 +2181,14 @@ def get_or_create_runtime_thread(
 __all__ = [
     "RuntimeThreadConfig",
     "SessionConfig",
+    "SessionProvider",
+    "SessionProviderRegistry",
     "SessionStatus",
+    "MemorySessionProvider",
+    "DockerSessionProvider",
+    "create_session_provider_registry",
+    "get_session_provider",
+    "get_session_provider_names",
     "get_thread_session_config",
     "get_thread_session_status",
     "docker_session_container_name",
@@ -2039,6 +2197,7 @@ __all__ = [
     "docker_session_mount_dir",
     "list_docker_session_containers",
     "cleanup_docker_sessions",
+    "cleanup_thread_sessions",
     "get_or_start_docker_session",
     "get_or_start_docker_session_handle",
     "set_thread_session_config",

@@ -295,8 +295,9 @@ def session_cleanup_command(context: Any, arg: str):
     stopped_only = mode not in ("all", "force")
     older_than = parsed.get("older_than") or parsed.get("olderThan")
     try:
-        removed = _eggthreads.cleanup_docker_sessions(
+        removed = _eggthreads.cleanup_thread_sessions(
             db,
+            provider_name="docker",
             stopped_only=stopped_only,
             older_than_sec=_parse_duration_seconds(older_than),
         )

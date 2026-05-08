@@ -16,6 +16,10 @@ class PluginContext(Protocol):
 
     tool_registry: Any | None
     command_registry: Any | None
+    sandbox_provider_registry: Any | None
+    session_provider_registry: Any | None
+    approval_policy_registry: Any | None
+    output_policy_registry: Any | None
 
 
 class EggPlugin(Protocol):
@@ -34,6 +38,10 @@ class ToolPluginContext:
 
     tool_registry: Any
     command_registry: Any | None = None
+    sandbox_provider_registry: Any | None = None
+    session_provider_registry: Any | None = None
+    approval_policy_registry: Any | None = None
+    output_policy_registry: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,22 @@ class CommandPluginContext:
 
     command_registry: Any
     tool_registry: Any | None = None
+    sandbox_provider_registry: Any | None = None
+    session_provider_registry: Any | None = None
+    approval_policy_registry: Any | None = None
+    output_policy_registry: Any | None = None
+
+
+@dataclass(frozen=True)
+class ProviderPluginContext:
+    """Plugin context used while constructing provider/policy registries."""
+
+    tool_registry: Any | None = None
+    command_registry: Any | None = None
+    sandbox_provider_registry: Any | None = None
+    session_provider_registry: Any | None = None
+    approval_policy_registry: Any | None = None
+    output_policy_registry: Any | None = None
 
 
 def register_plugins(context: PluginContext, plugins: Iterable[EggPlugin]) -> None:
@@ -73,6 +97,7 @@ __all__ = [
     "CommandPluginContext",
     "FunctionPlugin",
     "PluginContext",
+    "ProviderPluginContext",
     "ToolPluginContext",
     "register_plugins",
 ]

@@ -12,6 +12,14 @@ def _make_db(tmp_path: Path) -> ts.ThreadsDB:
     return db
 
 
+def test_session_provider_registry_populated_by_plugin(tmp_path):
+    registry = ts.create_session_provider_registry()
+
+    assert registry.names() == ["memory", "docker"]
+    assert registry.get("memory") is not None
+    assert registry.get("missing") is None
+
+
 def test_session_config_defaults_disabled(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
@@ -136,6 +144,7 @@ def test_session_lifecycle_event(tmp_path):
 
 
 def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
     sid = ts.enable_thread_session(db, tid, provider="docker", image="egg-rlm-session")
@@ -159,7 +168,7 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
         (tid,),
     ).fetchone()
     payload = json.loads(row[0])
-    assert payload["action"] in ("docker_started", "docker_skeleton_ready")
+    assert payload["action"] == "docker_started"
     assert payload["container_name"] == status.container_name
 
 

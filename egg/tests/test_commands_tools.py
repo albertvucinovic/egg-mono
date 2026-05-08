@@ -206,13 +206,13 @@ class TestToolsAdminCommands:
 
 
 class TestCmdSchedulers:
-    """Tests for cmd_schedulers()."""
+    """Tests for /schedulers."""
 
     def test_shows_no_schedulers_message(self, egg_app):
         """Should show message when no schedulers."""
         egg_app.active_schedulers = {}
 
-        egg_app.cmd_schedulers("")
+        egg_app.handle_command("/schedulers")
 
         assert any("No active" in msg or "no active" in msg.lower() for msg in egg_app._system_log)
 
@@ -222,7 +222,7 @@ class TestCmdSchedulers:
             egg_app.current_thread: {"scheduler": None, "task": None}
         }
 
-        egg_app.cmd_schedulers("")
+        egg_app.handle_command("/schedulers")
 
         assert any("scheduler" in msg.lower() or egg_app.current_thread[-8:] in msg
                    for msg in egg_app._system_log)

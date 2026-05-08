@@ -30,6 +30,16 @@ def test_get_provider_names(eggthreads):
     assert len(names) == 3
 
 
+def test_sandbox_provider_registry_populated_by_plugin(eggthreads):
+    """Built-in sandbox providers are registered through the plugin seam."""
+    sandbox = eggthreads.sandbox
+    registry = sandbox.create_sandbox_provider_registry()
+
+    assert registry.names() == ["srt", "docker", "bwrap"]
+    assert registry.get("docker") is not None
+    assert registry.get("missing") is None
+
+
 def test_provider_available(eggthreads):
     """Test provider availability checking."""
     sandbox = eggthreads.sandbox

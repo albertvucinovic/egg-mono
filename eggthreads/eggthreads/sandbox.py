@@ -72,7 +72,7 @@ import json
 import os
 import hashlib
 from pathlib import Path
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Protocol, TYPE_CHECKING, runtime_checkable
 
 import shutil
 
@@ -351,52 +351,29 @@ class ThreadSandboxConfig:
 # Sandbox providers registry
 # ---------------------------------------------------------------------------
 
-from typing import Protocol, runtime_checkable, Dict, List, Optional, Any
-import subprocess
-import shutil
-
-
 @runtime_checkable
 class SandboxProvider(Protocol):
-    """Protocol for sandbox providers."""
+    """Sandbox provider interface exposed through SandboxProviderRegistry."""
+
     name: str
 
     def is_available(self) -> bool:
         """Return True if this provider can be used on the current system."""
         ...
 
-    def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
-        if not self.is_available():
-            return argv
-        # Basic bwrap sandbox: read-only root, bind working directory, unshare network
-        # This is a minimal example; real implementation should respect settings.
-        from pathlib import Path
-        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
-        # Build bwrap command
-        cmd = ["bwrap", "--ro-bind", "/", "/",
-               "--bind", str(wd), str(wd),
-               "--dev", "/dev",
-               "--proc", "/proc",
-               "--unshare-net",
-               "--chdir", str(wd)]
-        # Protect .egg directory if it's within the bound directory
-        egg_dir = Path.cwd() / ".egg"
-        try:
-            egg_rel = egg_dir.relative_to(wd)
-            # egg_dir is inside wd, need to add read-only bind
-            cmd.extend(["--ro-bind", str(egg_dir), str(egg_dir)])
-        except ValueError:
-            # egg_dir is not inside wd, already protected by root ro-bind
-            pass
-        # Add the original command
-        cmd.extend(argv)
-        return cmd
-        srt_bin = os.environ.get("EGG_SRT_BIN", "srt").strip() or "srt"
-        available = shutil.which(srt_bin) is not None
-        return {
-            "available": available,
-            "binary": srt_bin,
-        }
+    def wrap_argv(
+        self,
+        argv: List[str],
+        settings: Dict[str, Any],
+        working_dir: Optional[Path] = None,
+    ) -> List[str]:
+        """Return argv wrapped for this provider, or argv unchanged if unavailable."""
+        ...
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return lightweight provider status metadata."""
+        ...
+
 
 class DockerProvider:
     """Sandbox provider using Docker containers."""
@@ -556,7 +533,6 @@ class BwrapProvider:
             "available": available,
             "provider": "bwrap",
         }
-# Registry of known providers
 class SrtProvider:
     """Sandbox provider using Anthropic's sandbox-runtime (srt)."""
     name = "srt"
@@ -611,14 +587,56 @@ class SrtProvider:
             "binary": srt_bin,
         }
 
-_PROVIDERS: Dict[str, SandboxProvider] = {
-    "srt": SrtProvider(),
-    "docker": DockerProvider(),
-    "bwrap": BwrapProvider(),}
+class SandboxProviderRegistry:
+    """Deterministic registry for sandbox providers."""
+
+    def __init__(self) -> None:
+        self._providers: Dict[str, SandboxProvider] = {}
+
+    def register(self, provider: SandboxProvider) -> None:
+        name = str(getattr(provider, "name", "") or "").strip()
+        if not name:
+            raise ValueError("Sandbox provider name must not be empty")
+        if name in self._providers:
+            raise ValueError(f"Sandbox provider already registered: {name}")
+        self._providers[name] = provider
+
+    def get(self, name: str) -> Optional[SandboxProvider]:
+        return self._providers.get(name)
+
+    def names(self) -> List[str]:
+        return list(self._providers.keys())
+
+    def statuses(self) -> Dict[str, Dict[str, Any]]:
+        statuses: Dict[str, Dict[str, Any]] = {}
+        for name, provider in self._providers.items():
+            try:
+                status = provider.get_status()
+            except Exception as e:
+                status = {"available": False, "error": str(e)}
+            statuses[name] = dict(status or {})
+            statuses[name].setdefault("provider", name)
+            statuses[name]["available"] = provider.is_available()
+        return statuses
+
+
+def create_sandbox_provider_registry() -> SandboxProviderRegistry:
+    """Create the built-in sandbox provider registry."""
+
+    from .builtin_plugins.sandbox_providers import SandboxProvidersPlugin
+    from .plugins import ProviderPluginContext, register_plugins
+
+    registry = SandboxProviderRegistry()
+    register_plugins(ProviderPluginContext(sandbox_provider_registry=registry), [SandboxProvidersPlugin()])
+    return registry
+
+
+_PROVIDER_REGISTRY = create_sandbox_provider_registry()
+_PROVIDERS: Dict[str, SandboxProvider] = _PROVIDER_REGISTRY._providers
 
 
 def _get_provider(name: str) -> Optional[SandboxProvider]:
-    return _PROVIDERS.get(name)
+    return _PROVIDER_REGISTRY.get(name)
 
 
 def provider_available(name: str) -> bool:
@@ -627,7 +645,7 @@ def provider_available(name: str) -> bool:
 
 
 def get_provider_names() -> List[str]:
-    return list(_PROVIDERS.keys())
+    return _PROVIDER_REGISTRY.names()
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +870,8 @@ def sandbox_enabled() -> bool:
 def sandbox_available() -> bool:
     """Return whether the default sandbox provider (docker) is available."""
     try:
-        return _PROVIDERS["docker"].is_available()
+        provider = _get_provider("docker")
+        return bool(provider and provider.is_available())
     except Exception:
         return False
 
@@ -951,7 +970,7 @@ def wrap_argv_for_sandbox_with_settings(
     else:
         provider_name = provider
 
-    provider_obj = _PROVIDERS.get(provider_name)
+    provider_obj = _get_provider(provider_name)
     # Normalize settings for this provider
     settings = normalize_provider_settings(provider_name, settings)
         # Apply mandatory protections
@@ -982,7 +1001,7 @@ def stop_docker_container(container_name: str, timeout: int = 2) -> bool:
     Returns:
         True if container was stopped successfully, False otherwise
     """
-    docker_provider = _PROVIDERS.get("docker")
+    docker_provider = _get_provider("docker")
     if docker_provider is None:
         return False
     return docker_provider.stop_container(container_name, timeout)
@@ -1228,7 +1247,8 @@ def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, obje
     """
 
     cfg = get_thread_sandbox_config(db, thread_id)
-    provider_available = _PROVIDERS.get(cfg.provider, SrtProvider()).is_available()
+    provider_obj = _get_provider(cfg.provider)
+    provider_available = provider_obj.is_available() if provider_obj else False
     effective = bool(cfg.enabled) and provider_available
     warning: Optional[str] = None
     if bool(cfg.enabled) and not provider_available:
@@ -1370,8 +1390,8 @@ def get_sandbox_status() -> Dict[str, object]:
     cfg = get_srt_sandbox_configuration()
     # Provider availability
     providers = {}
-    for name, prov in _PROVIDERS.items():
-        providers[name] = prov.is_available()
+    for name, status in _PROVIDER_REGISTRY.statuses().items():
+        providers[name] = bool(status.get("available"))
     return {
         "available": sandbox_available(),
         "srt_bin": _SRT_BIN,

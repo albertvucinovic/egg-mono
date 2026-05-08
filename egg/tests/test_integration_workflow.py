@@ -226,7 +226,7 @@ class TestModelSwitchingWorkflow:
         """Model command without arg should show current model."""
         egg_app.llm_client = None  # No llm client
 
-        egg_app.cmd_model("")
+        egg_app.handle_command("/model")
 
         # Should log something about model
         assert any("model" in msg.lower() for msg in egg_app._system_log)
@@ -273,11 +273,11 @@ class TestPanelVisibilityWorkflow:
         initial = egg_app._panel_visible.get('chat', True)
 
         # Toggle off
-        egg_app.cmd_togglePanel("chat")
+        egg_app.handle_command("/togglePanel chat")
         assert egg_app._panel_visible['chat'] != initial
 
         # Toggle back on
-        egg_app.cmd_togglePanel("chat")
+        egg_app.handle_command("/togglePanel chat")
         assert egg_app._panel_visible['chat'] == initial
 
     def test_hidden_panel_excluded_from_render(self, egg_app):
@@ -331,20 +331,20 @@ class TestEnterModeWorkflow:
 
     def test_toggle_enter_mode_to_newline(self, egg_app):
         """Should set newline mode."""
-        egg_app.cmd_enterMode("newline")
+        egg_app.handle_command("/enterMode newline")
         assert egg_app.enter_sends is False
 
     def test_toggle_enter_mode_to_send(self, egg_app):
         """Should set send mode."""
-        egg_app.cmd_enterMode("send")
+        egg_app.handle_command("/enterMode send")
         assert egg_app.enter_sends is True
 
     def test_toggle_enter_mode_cycle(self, egg_app):
         """Should cycle between modes."""
-        egg_app.cmd_enterMode("send")
+        egg_app.handle_command("/enterMode send")
         assert egg_app.enter_sends is True
 
-        egg_app.cmd_enterMode("newline")
+        egg_app.handle_command("/enterMode newline")
         assert egg_app.enter_sends is False
 
     def test_reload_stops_app_when_submitted_with_enter(self, egg_app, tmp_path, monkeypatch):
