@@ -334,7 +334,7 @@ Commands should be registered by the same feature plugins that register related 
   - [x] core/lifecycle: `/help`, `/quit`, `/reload`.
   - [x] tools admin: `/toolsOn`, `/toolsOff`, `/disableTool`, `/enableTool`, `/toolsStatus`, `/toolInfo`, `/toolsSecrets`, `/toggleAutoApproval`.
   - [x] thread UI: `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, `/continue`.
-  - [ ] subagents: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, `/waitForThreads`.
+  - [x] subagents: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, `/waitForThreads`.
   - [ ] session: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, `/bashRepl`.
   - [ ] sandbox admin: `/toggleSandboxing`, `/setSandboxConfiguration`, `/getSandboxingConfig`.
   - [ ] skills: `/skills`, `/skill`.
@@ -367,6 +367,8 @@ Status notes:
 - 2026-05-08: Removed tools-admin `cmd_*` compatibility delegates from the TUI mixin and rewrote related tests to exercise `CommandRegistry`/`handle_command()` dispatch instead of direct mixin calls.
 - 2026-05-08: Future command-group migrations should update tests to target the registry/plugin seam first; only keep direct `cmd_*` compatibility tests while a group still has unmigrated mixin behavior.
 - 2026-05-08: Migrated thread UI commands `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, and `/continue` into registered command handlers and removed their TUI `cmd_*` compatibility delegates. Selector/tree helper methods remain on the TUI for formatting and dispatch context callbacks.
+- 2026-05-08: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_thread.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-08: Migrated subagent commands `/spawnChildThread`, `/spawnAutoApprovedChildThread`, and `/waitForThreads` into registered command handlers and removed their TUI `cmd_*` compatibility delegates. The spawn commands reuse the `spawn_agent` / `spawn_agent_auto` tool services; `/waitForThreads` still enqueues the shared `wait` tool path.
 - 2026-05-08: Focused tests passed: `PYTHONPATH=. pytest -q egg/tests/test_integration_workflow.py egg/tests/test_input.py egg/tests/test_completion.py egg/tests/test_commands_thread.py egg/tests/test_commands_tools.py egg/tests/test_commands_utility.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — Sandbox provider plugins
@@ -621,4 +623,4 @@ Goal: allow third-party plugins after internal plugin interfaces stabilize.
 
 ## Last-known suggested next step
 
-Continue **Phase 4** with subagent command migration: `/spawnChildThread`, `/spawnAutoApprovedChildThread`, and `/waitForThreads`.
+Continue **Phase 4** with session command migration: `/sessionStatus`, `/sessionOn`, `/sessionOff`, `/sessionStop`, `/sessionReset`, `/sessionCleanup`, `/pythonRepl`, and `/bashRepl`.

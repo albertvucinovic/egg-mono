@@ -32,8 +32,8 @@ class TestNewThreadCommand:
         assert egg_app.current_thread is not None
 
 
-class TestCmdSpawnChildThread:
-    """Tests for cmd_spawnChildThread()."""
+class TestSpawnChildThreadCommand:
+    """Tests for /spawnChildThread through CommandRegistry dispatch."""
 
     def test_spawns_child_with_context(self, egg_app, monkeypatch):
         """Should spawn child thread with context text."""
@@ -51,7 +51,7 @@ class TestCmdSpawnChildThread:
             lambda: MockTools()
         )
 
-        egg_app.cmd_spawnChildThread("Do this task", text="/spawnChildThread Do this task")
+        egg_app.handle_command("/spawnChildThread Do this task")
 
         assert len(spawned) == 1
         assert spawned[0][0] == "spawn_agent"
@@ -61,9 +61,10 @@ class TestCmdSpawnChildThread:
     def test_ensures_scheduler_for_child(self, egg_app, monkeypatch):
         """Should ensure scheduler for child thread."""
         ensured = []
-        original_ensure = egg_app.ensure_scheduler_for
+
         def mock_ensure(tid):
             ensured.append(tid)
+
         monkeypatch.setattr(egg_app, "ensure_scheduler_for", mock_ensure)
 
         class MockTools:
@@ -75,9 +76,69 @@ class TestCmdSpawnChildThread:
             lambda: MockTools()
         )
 
-        egg_app.cmd_spawnChildThread("Task")
+        egg_app.handle_command("/spawnChildThread Task")
 
         assert "child_thread_id_12345" in ensured
+
+
+class TestSpawnAutoApprovedChildThreadCommand:
+    """Tests for /spawnAutoApprovedChildThread through CommandRegistry dispatch."""
+
+    def test_spawns_auto_approved_child(self, egg_app, monkeypatch):
+        spawned = []
+
+        class MockTools:
+            def execute(self, name, args):
+                spawned.append((name, args))
+                return "auto_child_thread_id_12345"
+
+        monkeypatch.setattr("eggthreads.tools.create_default_tools", lambda: MockTools())
+
+        egg_app.handle_command("/spawnAutoApprovedChildThread Do this task")
+
+        assert spawned == [
+            (
+                "spawn_agent_auto",
+                {
+                    "parent_thread_id": egg_app.current_thread,
+                    "context_text": "Do this task",
+                    "label": "spawn_auto",
+                    "system_prompt": egg_app.system_prompt,
+                },
+            )
+        ]
+        assert any("Spawned auto-approval thread" in message for message in egg_app._system_log)
+
+
+class TestWaitForThreadsCommand:
+    """Tests for /waitForThreads through CommandRegistry dispatch."""
+
+    def test_queues_wait_tool_call(self, egg_app, monkeypatch):
+        from eggthreads import create_child_thread, create_snapshot
+
+        child = create_child_thread(egg_app.db, egg_app.current_thread, name="WaitChild")
+        create_snapshot(egg_app.db, child)
+        approved = []
+        monkeypatch.setattr(
+            "egg.app.approve_tool_calls_for_thread",
+            lambda db, tid, decision, reason=None, tool_call_id=None: approved.append((tid, decision, tool_call_id)),
+        )
+
+        egg_app.handle_command(f"/waitForThreads {child[-8:]}")
+
+        assert approved
+        assert approved[0][1] == "granted"
+        assert any("Queued /wait" in message for message in egg_app._system_log)
+
+    def test_wait_requires_selector(self, egg_app):
+        egg_app.handle_command("/waitForThreads")
+
+        assert any("Usage: /wait" in message for message in egg_app._system_log)
+
+    def test_wait_logs_no_match(self, egg_app):
+        egg_app.handle_command("/waitForThreads missing-thread")
+
+        assert any("no thread matches" in message.lower() for message in egg_app._system_log)
 
 
 class TestThreadCommand:

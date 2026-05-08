@@ -458,7 +458,7 @@ class EggDisplayApp(
             set_current_thread=lambda tid: setattr(self, 'current_thread', tid),
             log_system=self.log_system,
             console_print_block=self.console_print_block,
-            start_scheduler=self.start_scheduler,
+            start_scheduler=self.ensure_scheduler_for,
             llm_client=self.llm_client,
             system_prompt=self.system_prompt,
             get_current_model=self.current_model_for_thread,
@@ -466,6 +466,9 @@ class EggDisplayApp(
             print_current_thread=self.print_static_view_current,
             format_threads=self.format_tree,
             select_threads=self.select_threads_by_selector,
+            append_message=append_message,
+            create_snapshot=create_snapshot,
+            approve_tool_calls=approve_tool_calls_for_thread,
             app=self,
         )
 

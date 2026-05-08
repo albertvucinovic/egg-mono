@@ -338,6 +338,65 @@ def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> No
     assert any("Switched to thread" in message for message in logs)
 
 
+def test_subagent_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:
+    from eggthreads import ThreadsDB, create_child_thread, create_root_thread, create_snapshot
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    root = create_root_thread(db, "root")
+    child = create_child_thread(db, root, "child")
+    create_snapshot(db, child)
+
+    tool_calls: list[tuple[str, dict]] = []
+
+    class Tools:
+        def execute(self, name, args):
+            tool_calls.append((name, args))
+            return "spawned-child-id"
+
+    monkeypatch.setattr("eggthreads.tools.create_default_tools", lambda: Tools())
+
+    messages: list[tuple[str, str, dict | None]] = []
+    approvals: list[tuple[str, str, str | None]] = []
+    snapshots: list[str] = []
+    started: list[str] = []
+    logs: list[str] = []
+
+    ctx = CommandContext(
+        db=db,
+        current_thread=root,
+        log_system=logs.append,
+        start_scheduler=started.append,
+        system_prompt="sys",
+        append_message=lambda db, tid, role, content, extra=None: messages.append((role, content, extra)) or "msg-1",
+        create_snapshot=lambda db, tid: snapshots.append(tid),
+        approve_tool_calls=lambda db, tid, decision, reason=None, tool_call_id=None: approvals.append((tid, decision, tool_call_id)),
+        select_threads=lambda selector: [tid for tid in (root, child) if tid.endswith(selector) or selector in tid],
+    )
+
+    registry = create_default_command_registry()
+
+    registry.execute("spawnChildThread", ctx, "do task")
+    registry.execute("spawnAutoApprovedChildThread", ctx, "auto task")
+    registry.execute("waitForThreads", ctx, child[-8:])
+
+    assert tool_calls[0] == (
+        "spawn_agent",
+        {
+            "parent_thread_id": root,
+            "context_text": "do task",
+            "label": "spawn",
+            "system_prompt": "sys",
+        },
+    )
+    assert tool_calls[1][0] == "spawn_agent_auto"
+    assert "spawned-child-id" in started
+    assert messages[-1][0] == "user"
+    assert messages[-1][2]["tool_calls"][0]["function"]["name"] == "wait"
+    assert approvals == [(root, "granted", messages[-1][2]["tool_calls"][0]["id"])]
+    assert root in snapshots
+
+
 def test_render_command_registry_help_uses_metadata() -> None:
     registry = CommandRegistry()
     registry.register(
