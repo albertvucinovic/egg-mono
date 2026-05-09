@@ -65,7 +65,7 @@ def compact_thread_command(context: Any, arg: str):
     log = getattr(context, "log_system", None)
     if callable(log):
         log(result.message if result.success else f"/compact: {result.message}")
-    return CommandResult(clear_input=bool(result.success), message=result.message)
+    return CommandResult(clear_input=bool(result.success))
 
 
 def register_compaction_tool(registry: ToolRegistry) -> None:

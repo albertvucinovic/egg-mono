@@ -496,7 +496,13 @@ class EggDisplayApp(
             self.log_system(f'Unknown command: /{cmd}')
             return
 
-        registry.execute(cmd, self._command_context(), arg)
+        result = registry.execute(cmd, self._command_context(), arg)
+        try:
+            message = getattr(result, 'message', None)
+        except Exception:
+            message = None
+        if isinstance(message, str) and message.strip():
+            self.log_system(message.strip())
 
     # ---------------- Main loop ----------------
     async def run(self):

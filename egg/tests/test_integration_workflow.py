@@ -31,6 +31,22 @@ class TestCommandRegistryDispatch:
             ("execute", "example", "value", egg_app.current_thread, True),
         ]
 
+    def test_handle_command_logs_command_result_message(self, egg_app):
+        from eggthreads.command_catalog import CommandResult
+
+        class Registry:
+            def get(self, name):
+                return object()
+
+            def execute(self, name, ctx, arg):
+                return CommandResult(message="Command says hello")
+
+        egg_app.command_registry = Registry()
+
+        egg_app.handle_command("/example")
+
+        assert any("Command says hello" in msg for msg in egg_app._system_log)
+
     def test_handle_command_reports_unknown_registry_command(self, egg_app):
         class Registry:
             def get(self, name):

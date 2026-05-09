@@ -120,7 +120,6 @@ def test_compact_command_uses_core_helper(tmp_path):
     )
 
     assert result.clear_input is True
-    assert "Compaction committed" in (result.message or "")
     assert seen and "Compaction committed" in seen[-1]
     assert _events(db, tid)[0][1]["start_msg_id"] == user
 
