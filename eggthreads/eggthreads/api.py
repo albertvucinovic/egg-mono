@@ -587,6 +587,281 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
     return row[0] if row else None
 
 
+# --------- Compaction API -----------------------------------------------------
+
+COMPACTION_EVENT_TYPE = 'thread.compaction'
+
+
+@dataclass
+class CompactionStartResolution:
+    """Resolved provider-context start message for a compaction request."""
+
+    success: bool
+    selector: str
+    msg_id: Optional[str]
+    event_seq: Optional[int]
+    role: Optional[str]
+    message: str
+
+
+@dataclass
+class CompactionCommitResult:
+    """Result of committing a ``thread.compaction`` boundary event."""
+
+    success: bool
+    selector: str
+    start_msg_id: Optional[str]
+    start_event_seq: Optional[int]
+    compaction_event_seq: Optional[int]
+    message: str
+
+
+def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tuple[set[str], set[str]]:
+    skipped: set[str] = set()
+    deleted: set[str] = set()
+    cur = db.conn.execute(
+        "SELECT type, msg_id, payload_json FROM events WHERE thread_id=? AND type IN ('msg.edit', 'msg.delete')",
+        (thread_id,),
+    )
+    for type_, msg_id, payload_json in cur.fetchall():
+        if not msg_id:
+            continue
+        if type_ == 'msg.delete':
+            deleted.add(str(msg_id))
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and payload.get('skipped_on_continue'):
+            skipped.add(str(msg_id))
+    return skipped, deleted
+
+
+def list_thread_compactions(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
+    """Return raw ``thread.compaction`` events for a thread in event order."""
+
+    cur = db.conn.execute(
+        "SELECT event_seq, event_id, ts, payload_json FROM events WHERE thread_id=? AND type=? ORDER BY event_seq ASC",
+        (thread_id, COMPACTION_EVENT_TYPE),
+    )
+    out: List[Dict[str, Any]] = []
+    for row in cur.fetchall():
+        try:
+            payload = json.loads(row['payload_json']) if isinstance(row['payload_json'], str) else (row['payload_json'] or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        item = dict(payload)
+        item['event_seq'] = int(row['event_seq'])
+        item['event_id'] = row['event_id']
+        item['ts'] = row['ts']
+        out.append(item)
+    return out
+
+
+def latest_thread_compaction(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the latest raw ``thread.compaction`` event for a thread."""
+
+    compactions = list_thread_compactions(db, thread_id)
+    return compactions[-1] if compactions else None
+
+
+def current_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optional[int]:
+    """Return the latest raw compaction start event_seq, if any."""
+
+    latest = latest_thread_compaction(db, thread_id)
+    if not latest:
+        return None
+    try:
+        return int(latest.get('start_event_seq'))
+    except Exception:
+        return None
+
+
+def filter_messages_for_compaction_provider_context(
+    db: ThreadsDB,
+    thread_id: str,
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return provider-view messages after the latest compaction start.
+
+    UI/raw history intentionally remains full.  This helper is only for
+    provider/API context construction.  System messages are preserved so the
+    thread's standing instructions survive compaction even when they were
+    created before the selected start message.
+    """
+
+    start_seq = current_compaction_start_event_seq(db, thread_id)
+    if start_seq is None:
+        return list(messages)
+
+    # Snapshots created before event_seq was persisted on messages can still
+    # be filtered by msg_id.  Query lazily once for all messages in the view.
+    seq_by_msg_id: Dict[str, int] = {}
+    missing_seq = [m.get('msg_id') for m in messages if isinstance(m, dict) and m.get('event_seq') is None and isinstance(m.get('msg_id'), str)]
+    if missing_seq:
+        try:
+            cur = db.conn.execute(
+                "SELECT msg_id, event_seq FROM events WHERE thread_id=? AND type='msg.create'",
+                (thread_id,),
+            )
+            for msg_id, event_seq in cur.fetchall():
+                if msg_id:
+                    seq_by_msg_id[str(msg_id)] = int(event_seq)
+        except Exception:
+            seq_by_msg_id = {}
+
+    filtered: List[Dict[str, Any]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        if m.get('role') == 'system':
+            filtered.append(m)
+            continue
+        seq_val = m.get('event_seq')
+        if seq_val is None and isinstance(m.get('msg_id'), str):
+            seq_val = seq_by_msg_id.get(str(m.get('msg_id')))
+        try:
+            seq_int = int(seq_val)
+        except Exception:
+            continue
+        if seq_int >= int(start_seq):
+            filtered.append(m)
+    return filtered
+
+
+def _normalize_compaction_selector(selector: Optional[str]) -> str:
+    value = (selector or '').strip()
+    return value or 'last_message'
+
+
+def _compaction_candidate_messages(db: ThreadsDB, thread_id: str) -> List[tuple[int, str, Dict[str, Any]]]:
+    skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    cur = db.conn.execute(
+        "SELECT event_seq, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    rows: List[tuple[int, str, Dict[str, Any]]] = []
+    for event_seq, msg_id, payload_json in cur.fetchall():
+        if not msg_id or str(msg_id) in skipped or str(msg_id) in deleted:
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        rows.append((int(event_seq), str(msg_id), payload))
+    return rows
+
+
+def resolve_compaction_start_message(db: ThreadsDB, thread_id: str, selector: Optional[str] = None) -> CompactionStartResolution:
+    """Resolve a compaction start selector to a valid user/assistant message.
+
+    Supported selectors are an explicit ``msg_id``, ``last_user``,
+    ``last_llm``, and omitted/``last_message``.  Tool/system/no_api/skipped
+    messages are not valid compaction starts for the MVP.
+    """
+
+    if db.get_thread(thread_id) is None:
+        return CompactionStartResolution(False, _normalize_compaction_selector(selector), None, None, None, f"Thread not found: {thread_id}")
+
+    normalized = _normalize_compaction_selector(selector)
+    current_start = current_compaction_start_event_seq(db, thread_id)
+    min_event_seq = int(current_start) if current_start is not None else -1
+    candidates = _compaction_candidate_messages(db, thread_id)
+
+    def _valid(row: tuple[int, str, Dict[str, Any]]) -> bool:
+        event_seq, _msg_id, payload = row
+        role = payload.get('role')
+        if event_seq <= min_event_seq:
+            return False
+        if payload.get('no_api'):
+            return False
+        return role in ('user', 'assistant')
+
+    selected: Optional[tuple[int, str, Dict[str, Any]]] = None
+    if normalized in ('last_message', 'last_user', 'last_llm'):
+        role_filter = None
+        if normalized == 'last_user':
+            role_filter = 'user'
+        elif normalized == 'last_llm':
+            role_filter = 'assistant'
+        for row in reversed(candidates):
+            if not _valid(row):
+                continue
+            if role_filter is not None and row[2].get('role') != role_filter:
+                continue
+            selected = row
+            break
+        if selected is None:
+            return CompactionStartResolution(False, normalized, None, None, None, f"No valid compaction start message found for selector: {normalized}")
+    else:
+        for row in candidates:
+            if row[1] == normalized:
+                selected = row
+                break
+        if selected is None:
+            return CompactionStartResolution(False, normalized, None, None, None, f"Message not found or not active: {normalized}")
+        if not _valid(selected):
+            role = selected[2].get('role')
+            if selected[0] <= min_event_seq:
+                reason = "would not reduce the current provider context"
+            elif selected[2].get('no_api'):
+                reason = "message is hidden from provider APIs"
+            else:
+                reason = f"message role is not a valid start role: {role!r}"
+            return CompactionStartResolution(False, normalized, selected[1], selected[0], role if isinstance(role, str) else None, f"Invalid compaction start: {reason}")
+
+    event_seq, msg_id, payload = selected
+    role = payload.get('role')
+    return CompactionStartResolution(True, normalized, msg_id, event_seq, role if isinstance(role, str) else None, "ok")
+
+
+def commit_thread_compaction(
+    db: ThreadsDB,
+    thread_id: str,
+    selector: Optional[str] = None,
+    *,
+    created_by: str,
+    tool_call_id: Optional[str] = None,
+    committed_from_msg_id: Optional[str] = None,
+) -> CompactionCommitResult:
+    """Append a ``thread.compaction`` event that sets provider-context start."""
+
+    resolution = resolve_compaction_start_message(db, thread_id, selector)
+    if not resolution.success:
+        return CompactionCommitResult(False, resolution.selector, resolution.msg_id, resolution.event_seq, None, resolution.message)
+
+    payload = {
+        'start_msg_id': resolution.msg_id,
+        'start_event_seq': resolution.event_seq,
+        'selector': resolution.selector,
+        'created_by': created_by,
+    }
+    if tool_call_id:
+        payload['tool_call_id'] = tool_call_id
+    if committed_from_msg_id:
+        payload['committed_from_msg_id'] = committed_from_msg_id
+
+    event_seq = db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_=COMPACTION_EVENT_TYPE,
+        payload=payload,
+    )
+    return CompactionCommitResult(
+        True,
+        resolution.selector,
+        resolution.msg_id,
+        resolution.event_seq,
+        int(event_seq),
+        f"Compaction committed; provider context now starts at {resolution.msg_id[-8:] if resolution.msg_id else 'unknown'}.",
+    )
+
+
 @dataclass
 class ThreadDiagnosis:
     """Diagnosis of thread state for auto-fix."""
@@ -1240,6 +1515,12 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
                     ts_val = ev["ts"]
                     if ts_val is not None:
                         msg["ts"] = ts_val
+                    event_seq_val = ev["event_seq"]
+                    if event_seq_val is not None:
+                        try:
+                            msg["event_seq"] = int(event_seq_val)
+                        except Exception:
+                            msg["event_seq"] = event_seq_val
                     messages.append(msg)
                     tail_messages.append(msg)
                 snap["messages"] = messages

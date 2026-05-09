@@ -27,7 +27,46 @@ Every session working on this plan should:
     - `git add` the changed files, including this file;
     - `git commit` the unit of work.
 12. Do not batch unrelated phases into one commit.
-13. If a task appears to require a broad refactor beyond the current phase, stop and ask the user before proceeding.
+13. Commit meaningful chunks: each commit should have one coherent purpose, a focused test result, and no unrelated cleanup. Prefer several small commits over one broad mixed commit.
+14. If a task appears to require a broad refactor beyond the current phase, stop and ask the user before proceeding.
+
+## Manual context handoff until compaction exists
+
+Until this compaction system is implemented, use this file as the durable
+handoff document between sessions. At the end of any session that worked on
+compaction, add a short handoff note under the relevant phase before stopping.
+
+Each handoff note should include:
+
+- date/time;
+- current phase and exact next unchecked task;
+- files changed in the session;
+- whether changes are committed or still uncommitted;
+- focused tests run and their results;
+- any known failures, incomplete edits, or design decisions;
+- the recommended first command for the next session, usually `git status --short` plus a focused test or file to inspect.
+
+Suggested handoff note template:
+
+```text
+Status notes:
+- YYYY-MM-DD: Handoff — <short summary>.
+  - Changed files: <paths>.
+  - Commit: <hash> or uncommitted.
+  - Tests: <commands and pass/fail>.
+  - Next: <one concrete next action>.
+  - Caveats: <anything the next session must know>.
+```
+
+If a session stops with uncommitted work, the next session should first run:
+
+```bash
+git status --short
+git diff --stat
+git diff -- <relevant paths>
+```
+
+Then either finish that in-progress unit or ask the user before changing direction.
 
 ## Core model
 
@@ -304,22 +343,22 @@ Status notes:
 
 Goal: add the durable boundary event and selector resolution without changing provider context yet.
 
-- [ ] Add helper to resolve compaction start selectors.
+- [x] Add helper to resolve compaction start selectors.
   - Inputs: `thread_id`, optional selector string.
   - Supported selectors: omitted/`last_message`, `last_user`, `last_llm`, explicit `msg_id`.
   - Return resolved `msg_id` and `event_seq` or a clear error/no-op reason.
-- [ ] Add helper to append `thread.compaction`.
+- [x] Add helper to append `thread.compaction`.
   - Suggested internal name: `commit_thread_compaction(db, thread_id, selector=None, *, created_by, tool_call_id=None, committed_from_msg_id=None)`.
   - The helper should resolve the selector, validate it, and append the event only if useful.
   - Do not store summary text in the event.
-- [ ] Add helper to list/latest compaction events.
+- [x] Add helper to list/latest compaction events.
   - Raw latest helper is useful for diagnostics.
   - Effective latest helper may wait until `/continue` handling is clear.
-- [ ] Add no-op validation.
+- [x] Add no-op validation.
   - Reject invalid/hidden/tool-role starts.
   - Reject starts at or before current effective start.
   - Reject provider-protocol-unsafe starts if existing sanitization cannot repair them.
-- [ ] Add focused tests.
+- [x] Add focused tests.
   - Resolves omitted selector to latest user/assistant message.
   - Resolves `last_user` and `last_llm` correctly.
   - Resolves explicit `msg_id`.
@@ -329,23 +368,23 @@ Goal: add the durable boundary event and selector resolution without changing pr
 - [ ] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09: In progress, uncommitted. Added initial `thread.compaction` core helpers in `eggthreads/eggthreads/api.py`, exports, focused tests, and a `CompactionPlugin` skeleton with `compact_thread` tool plus `/compact` command registration. Basic no-op validation exists for missing/skipped/deleted/no_api/non-user-or-assistant/non-forward selectors; deeper provider-protocol-unsafe starts remain for Phase 10 hardening. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 2 — Provider-context start boundary
 
 Goal: make API/provider context respect the latest effective compaction start pointer while UI/raw history remains full.
 
-- [ ] Add a provider-context event/message builder or filter.
+- [x] Add a provider-context event/message builder or filter.
   - Prefer a small shared builder over scattering compaction checks through runner code.
   - It should derive provider messages from the effective thread view and latest effective compaction event.
-- [ ] Apply compaction as a start pointer.
+- [x] Apply compaction as a start pointer.
   - Include messages from `start_event_seq` onward.
   - Exclude earlier messages from normal provider context.
   - Continue applying `no_api` filtering and existing provider sanitization.
-- [ ] Preserve UI/raw snapshot behavior.
+- [x] Preserve UI/raw snapshot behavior.
   - Do not truncate full UI history at the compaction start.
   - If existing `threads.snapshot_json` is both UI cache and provider source, split or filter provider view without destroying UI/audit history.
-- [ ] Add tests.
+- [x] Add tests.
   - UI/raw snapshot or event listing still contains pre-compaction messages.
   - Provider input excludes messages before `start_event_seq`.
   - Provider input includes the selected start message and later messages.
@@ -353,22 +392,22 @@ Goal: make API/provider context respect the latest effective compaction start po
 - [ ] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09: In progress, uncommitted. Added `filter_messages_for_compaction_provider_context(...)`, persisted `event_seq` in snapshot messages, and wired RA1 prompt building to filter snapshot messages before provider conversion. UI snapshot remains full. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 3 — Model-visible `compact_thread` tool
 
 Goal: expose compaction as a normal default tool using the core helper.
 
-- [ ] Add `compact_thread` to the default tool registry.
+- [x] Add `compact_thread` to the default tool registry.
   - One optional argument: `start_message`.
   - Tool description should explain accepted values: explicit msg id, `last_user`, `last_llm`, omitted = latest user/assistant message.
   - Tool description should say it sets future provider context start and does not delete history.
-- [ ] Implement model-tool behavior.
+- [x] Implement model-tool behavior.
   - Normal RA2 tool call path.
   - Normal tool result visible to the LLM.
   - Assistant can continue after result.
-- [ ] Handle no-op/rejection cases with clear tool output and no event emission.
-- [ ] Add tests.
+- [x] Handle no-op/rejection cases with clear tool output and no event emission.
+- [x] Add tests.
   - Tool emits `thread.compaction` for valid selector.
   - Tool returns no-op result for invalid selector.
   - Tool result participates in normal tool protocol.
@@ -376,30 +415,30 @@ Goal: expose compaction as a normal default tool using the core helper.
 - [ ] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09: In progress, uncommitted. Added built-in `CompactionPlugin` and registered the `compact_thread` tool. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 4 — `/compact` user command
 
 Goal: expose manual user compaction using the same core code.
 
-- [ ] Add `/compact` command forms.
+- [x] Add `/compact` command forms.
   - `/compact` -> omitted selector / `last_message`.
   - `/compact <msg_id>`.
   - `/compact last_user`.
   - `/compact last_llm`.
-- [ ] Reuse the same core compaction helper as the tool.
+- [x] Reuse the same core compaction helper as the tool.
   - Do not implement parallel command-only compaction behavior.
-- [ ] Preserve user-command turn semantics.
+- [x] Preserve user-command turn semantics.
   - Command output should be local/user-command style.
   - It should not unexpectedly trigger an assistant response by itself.
-- [ ] Add tests.
+- [x] Add tests.
   - Command emits `thread.compaction` for all valid selector forms.
   - Command no-ops/rejects invalid selectors.
   - Command does not alter child relationships.
 - [ ] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09: In progress, uncommitted. Added `/compact [msg_id|last_user|last_llm]` through `CompactionPlugin`, using the same core helper as the tool. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
 
 ## Phase 5 — `/continue` and effective control events
 

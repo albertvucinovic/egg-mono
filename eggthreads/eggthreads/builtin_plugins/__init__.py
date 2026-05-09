@@ -6,6 +6,7 @@ from .display_input import DisplayInputPlugin
 from .diagnostics import DiagnosticsPlugin
 from .execution import ExecutionPlugin
 from .auth import AuthPlugin
+from .compaction import CompactionPlugin
 from .model import ModelPlugin
 from .sandbox_admin import SandboxAdminPlugin
 from .session import SessionPlugin
@@ -15,7 +16,7 @@ from .thread_ui import ThreadUiPlugin
 from .tools_admin import ToolsAdminPlugin
 from .web import WebPlugin
 
-__all__ = ["ApprovalPoliciesPlugin", "AuthPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ModelPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolsAdminPlugin", "WebPlugin"]
+__all__ = ["ApprovalPoliciesPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ModelPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolsAdminPlugin", "WebPlugin"]
 
 
 def __getattr__(name: str):

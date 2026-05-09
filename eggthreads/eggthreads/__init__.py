@@ -86,10 +86,18 @@ from .api import (
     get_context_limit,
     # Continue thread API
     ContinueResult,
+    COMPACTION_EVENT_TYPE,
+    CompactionCommitResult,
+    CompactionStartResolution,
+    commit_thread_compaction,
     continue_thread,
+    filter_messages_for_compaction_provider_context,
     continue_child_thread,
     continue_thread_async,
     find_continue_point,
+    latest_thread_compaction,
+    list_thread_compactions,
+    resolve_compaction_start_message,
     is_thread_continuable,
     # Thread diagnosis
     ThreadDiagnosis,
@@ -256,6 +264,9 @@ __all__ = [
     'set_context_limit', 'get_context_limit',
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_child_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
+    'COMPACTION_EVENT_TYPE', 'CompactionCommitResult', 'CompactionStartResolution',
+    'commit_thread_compaction', 'latest_thread_compaction', 'list_thread_compactions', 'resolve_compaction_start_message',
+    'filter_messages_for_compaction_provider_context',
     # Thread diagnosis
     'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text',
     # Thread scheduling API

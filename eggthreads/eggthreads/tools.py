@@ -301,7 +301,7 @@ class ToolRegistry:
 def create_tool_registry() -> ToolRegistry:
     """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
 
-    from .builtin_plugins import ExecutionPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, WebPlugin
+    from .builtin_plugins import CompactionPlugin, ExecutionPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, WebPlugin
     from .plugins import ToolPluginContext, register_plugins
 
     reg = ToolRegistry()
@@ -309,6 +309,7 @@ def create_tool_registry() -> ToolRegistry:
         ToolPluginContext(tool_registry=reg),
         [
             SkillsPlugin(),
+            CompactionPlugin(),
             ExecutionPlugin(),
             SessionPlugin(),
             SubagentsPlugin(),

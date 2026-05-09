@@ -1038,6 +1038,16 @@ class ThreadRunner:
             try:
                 snap = json.loads(th.snapshot_json)
                 msgs = snap.get('messages', []) or []
+                try:
+                    from .api import filter_messages_for_compaction_provider_context
+
+                    msgs = filter_messages_for_compaction_provider_context(
+                        self.db,
+                        self.thread_id,
+                        msgs,
+                    )
+                except Exception:
+                    pass
 
                 # Recognize encrypted-Gemini thinking policies.
                 if thinking_policy in ('send all encrypted gemini', 'send_all_encrypted_gemini'):

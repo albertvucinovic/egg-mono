@@ -124,6 +124,12 @@ class SnapshotBuilder:
             ts_val = _get(e, "ts")
             if ts_val is not None:
                 msg["ts"] = ts_val
+            event_seq_val = _get(e, "event_seq")
+            if event_seq_val is not None:
+                try:
+                    msg["event_seq"] = int(event_seq_val)
+                except Exception:
+                    msg["event_seq"] = event_seq_val
             # The selective field copying above was replaced by payload
             # passthrough. We intentionally keep all payload keys.
 
