@@ -9,17 +9,30 @@ from ..plugins import PluginContext
 from ..tools import ToolContext, ToolRegistry
 
 
+def _context_db(ctx: ToolContext):
+    """Return a DB connection safe for the current tool execution thread."""
+
+    try:
+        from .execution import _thread_db
+
+        return _thread_db(ctx.db)
+    except Exception:
+        from ..db import ThreadsDB
+
+        db_path = getattr(ctx.db, "path", None)
+        return ThreadsDB(db_path) if db_path is not None else ThreadsDB()
+
+
 def compact_thread_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     """Commit a compaction boundary for the calling thread."""
 
     from ..api import commit_thread_compaction
-    from ..db import ThreadsDB
 
     thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
     if not thread_id:
         return "Error: compact_thread requires a calling thread."
 
-    db = ctx.db if ctx.db is not None else ThreadsDB()
+    db = _context_db(ctx)
     selector = args.get("start_message")
     selector_text = str(selector).strip() if selector is not None else None
     result = commit_thread_compaction(
@@ -38,13 +51,12 @@ def show_compaction_start_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     import json
 
     from ..api import show_compaction_start
-    from ..db import ThreadsDB
 
     thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
     if not thread_id:
         return "Error: show_compaction_start requires a calling thread."
 
-    db = ctx.db if ctx.db is not None else ThreadsDB()
+    db = _context_db(ctx)
     return json.dumps(show_compaction_start(db, thread_id), ensure_ascii=False, indent=2)
 
 
@@ -54,13 +66,12 @@ def search_compaction_sources_tool(args: Dict[str, Any], ctx: ToolContext) -> st
     import json
 
     from ..api import search_compaction_sources
-    from ..db import ThreadsDB
 
     thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
     if not thread_id:
         return "Error: search_compaction_sources requires a calling thread."
 
-    db = ctx.db if ctx.db is not None else ThreadsDB()
+    db = _context_db(ctx)
     return json.dumps(
         search_compaction_sources(
             db,
@@ -80,13 +91,12 @@ def fetch_compaction_source_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     import json
 
     from ..api import fetch_compaction_source
-    from ..db import ThreadsDB
 
     thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
     if not thread_id:
         return "Error: fetch_compaction_source requires a calling thread."
 
-    db = ctx.db if ctx.db is not None else ThreadsDB()
+    db = _context_db(ctx)
     return json.dumps(
         fetch_compaction_source(
             db,
