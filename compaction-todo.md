@@ -466,18 +466,18 @@ Status notes:
 
 Goal: teach the model how and when to use the default compaction tool.
 
-- [ ] Add concise tool-use guidance to the relevant system/runtime prompt contribution.
+- [x] Add concise tool-use guidance to the relevant system/runtime prompt contribution.
   - Compaction does not delete history.
   - Use `compact_thread` when explicitly asked, during automatic compaction requests, or when context pressure makes a faithful start message appropriate.
   - If writing a summary, write it as normal assistant content and then call `compact_thread()` with omitted selector.
   - Use `last_user` when the goal is to keep the latest user turn and following continuation as the new start.
-- [ ] Avoid over-encouraging spontaneous compaction.
+- [x] Avoid over-encouraging spontaneous compaction.
   - The model should not compact in the middle of substantive work unless requested or needed.
-- [ ] Add or update tests for tool schema/prompt contribution if applicable.
-- [ ] Commit.
+- [x] Add or update tests for tool schema/prompt contribution if applicable.
+- [x] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09 21:38 UTC: Added concise `compact_thread` tool-description guidance rather than a broader prompt refactor. The schema now states that compaction does not delete UI/raw history, should be used only on explicit request, automatic compaction request, or real context pressure, that summaries should be normal assistant content before an omitted-selector call, and that `last_user` keeps the latest user turn as the new start. Added focused schema guidance assertions. Tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 6 change.
 
 ## Phase 7 — Automatic compaction
 

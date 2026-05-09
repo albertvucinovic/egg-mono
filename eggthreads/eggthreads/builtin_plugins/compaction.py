@@ -59,10 +59,15 @@ def register_compaction_tool(registry: ToolRegistry) -> None:
     registry.register(
         "compact_thread",
         (
-            "Set where future provider/API context for this thread starts. "
-            "This does not delete or hide earlier history from the UI. "
-            "start_message may be an explicit message id, 'last_user', or 'last_llm'. "
-            "If omitted, the latest provider-visible user or assistant message is used."
+            "Set where future provider/API context for this thread starts; this does not delete "
+            "or hide earlier UI/raw history. Use only when the user asks, an automatic compaction "
+            "request asks, or context pressure makes a faithful new start appropriate; do not compact "
+            "in the middle of substantive work merely because this tool is available. If writing a "
+            "summary, write it first as normal assistant content, then call compact_thread with "
+            "start_message omitted. Use 'last_user' when the goal is to keep the latest user turn "
+            "and following continuation as the new start. start_message may be an explicit message "
+            "id, 'last_user', or 'last_llm'; if omitted, the latest provider-visible user or "
+            "assistant message is used."
         ),
         {
             "type": "object",

@@ -80,6 +80,21 @@ def test_compact_thread_tool_is_registered_and_emits_event(tmp_path):
     assert events[0][1]["start_msg_id"] == user
 
 
+def test_compact_thread_tool_schema_guides_non_spontaneous_use() -> None:
+    registry = create_tool_registry()
+    spec = registry._tools["compact_thread"]["spec"]["function"]
+    description = spec["description"]
+
+    assert "does not delete" in description
+    assert "user asks" in description
+    assert "automatic compaction" in description
+    assert "context pressure" in description
+    assert "do not compact" in description
+    assert "write it first as normal assistant content" in description
+    assert "start_message omitted" in description
+    assert "last_user" in description
+
+
 def test_compact_command_uses_core_helper(tmp_path):
     db, tid = _new_thread(tmp_path)
     user = ts.append_message(db, tid, "user", "hello")
