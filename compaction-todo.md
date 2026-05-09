@@ -510,7 +510,7 @@ Goal: let the LLM recover older details without sending the full old transcript 
 
 - [x] Add `show_compaction_start` or equivalent helper if useful.
   - It can report the latest compaction start message and marker.
-- [ ] Add source search/fetch helpers over pre-start history.
+- [x] Add source search/fetch helpers over pre-start history.
   - Must skip `no_api`/hidden content by default.
   - Must bound output sizes.
   - Must apply existing secret masking/tool-output policy.
@@ -518,13 +518,15 @@ Goal: let the LLM recover older details without sending the full old transcript 
   - Expose compaction markers and old-source search/fetch functions.
   - Keep durable source in the event log; REPL is only a cache/workspace.
 - [ ] Add audit/logging for source access if needed.
-- [ ] Add tests.
+- [x] Add tests.
   - Hidden `$$` output is not returned by model-visible search.
   - Visible old content before compaction can be found/fetched within bounds.
 - [ ] Commit.
 
 Status notes:
 - 2026-05-09 21:52 UTC: First slice only. Added read-only `show_compaction_start(...)` helper plus model-visible `show_compaction_start` tool. It reports raw compaction count/latest raw marker, latest effective compaction marker, start message id/event seq, selector/created_by, and a bounded start-message preview. It does not fetch/search old pre-compaction history and does not mutate the thread. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 8 first-slice change.
+- 2026-05-09 22:00 UTC: Added model-visible pre-start source exploration helpers `search_compaction_sources(...)` and `fetch_compaction_source(...)`, plus default tools of the same names. They search/fetch only the latest effective compaction's pre-start history, rebuild from the effective snapshot so `/continue` skips still apply, skip `no_api`/hidden content by default (including hidden `$$` command/tool messages), bound result counts and returned characters, and apply terminal-safety plus provider-style secret masking before returning content. No REPL hydration workspace or audit event was added in this slice. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py`; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 8 source-search/fetch slice.
+  - Next: Phase 8 REPL exposure/hydration should be a separate small slice, likely first adding focused tests that generated `eggtools` wrappers expose `show_compaction_start`, `search_compaction_sources`, and `fetch_compaction_source` without hydrating raw hidden content; defer any durable REPL cache/workspace or audit logging to later commits.
 
 ## Phase 9 — UI/status and diagnostics
 

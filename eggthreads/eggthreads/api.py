@@ -590,6 +590,12 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
 # --------- Compaction API -----------------------------------------------------
 
 COMPACTION_EVENT_TYPE = 'thread.compaction'
+COMPACTION_SOURCE_DEFAULT_MAX_RESULTS = 10
+COMPACTION_SOURCE_MAX_RESULTS = 20
+COMPACTION_SOURCE_DEFAULT_MAX_CHARS = 4000
+COMPACTION_SOURCE_MAX_CHARS = 12000
+COMPACTION_SOURCE_MAX_SNIPPET_CHARS = 800
+_COMPACTION_SOURCE_MODEL_VISIBLE_ROLES = {'system', 'user', 'assistant', 'tool'}
 
 
 @dataclass
@@ -785,6 +791,288 @@ def show_compaction_start(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
         'start_message': start_message,
     }
     return status
+
+
+def _coerce_compaction_source_limit(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    if out < minimum:
+        return int(minimum)
+    if out > maximum:
+        return int(maximum)
+    return out
+
+
+def _compaction_effective_start_summary(effective: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'compaction_event_seq': effective.get('event_seq'),
+        'compaction_event_id': effective.get('event_id'),
+        'start_msg_id': effective.get('start_msg_id'),
+        'start_event_seq': effective.get('start_event_seq'),
+        'selector': effective.get('selector'),
+        'created_by': effective.get('created_by'),
+    }
+
+
+def _compaction_source_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ''
+    try:
+        return json.dumps(content, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(content)
+
+
+def _mask_compaction_source_text(text: str) -> str:
+    """Apply the same terminal/secret filtering used for provider tool output."""
+
+    if not isinstance(text, str) or not text:
+        return text
+    try:
+        runner = ThreadRunner.__new__(ThreadRunner)
+        return runner._filter_tool_output(text, mask_secrets=True)
+    except Exception:
+        try:
+            from .terminal_safety import sanitize_terminal_text
+
+            return sanitize_terminal_text(text)
+        except Exception:
+            return text
+
+
+def _compaction_source_snippet(text: str, query: str, *, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ''
+    if len(text) <= max_chars:
+        return text
+
+    query_lower = query.lower()
+    text_lower = text.lower()
+    idx = text_lower.find(query_lower) if query_lower else -1
+    if idx < 0:
+        start = 0
+    else:
+        start = max(0, idx - max_chars // 2)
+        if start + max_chars > len(text):
+            start = max(0, len(text) - max_chars)
+
+    prefix = '…' if start > 0 else ''
+    suffix = '…' if start + max_chars < len(text) else ''
+    body_limit = max(0, max_chars - len(prefix) - len(suffix))
+    body = text[start:start + body_limit]
+    return f"{prefix}{body}{suffix}"[:max_chars]
+
+
+def _effective_pre_start_compaction_source_messages(
+    db: ThreadsDB,
+    thread_id: str,
+) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Return effective, model-visible messages before the compaction start."""
+
+    effective = latest_effective_thread_compaction(db, thread_id)
+    if not effective:
+        return None, []
+    try:
+        start_seq = int(effective.get('start_event_seq'))
+    except Exception:
+        return effective, []
+
+    try:
+        cur = db.conn.execute("SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC", (thread_id,))
+        snapshot = SnapshotBuilder().build(cur.fetchall())
+    except Exception:
+        snapshot = {'messages': []}
+    raw_messages = snapshot.get('messages') if isinstance(snapshot, dict) else []
+    if not isinstance(raw_messages, list):
+        raw_messages = []
+
+    out: List[Dict[str, Any]] = []
+    for message in raw_messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get('no_api'):
+            continue
+        role = message.get('role')
+        if role not in _COMPACTION_SOURCE_MODEL_VISIBLE_ROLES:
+            continue
+        msg_id = message.get('msg_id')
+        if not isinstance(msg_id, str) or not msg_id:
+            continue
+        try:
+            event_seq = int(message.get('event_seq'))
+        except Exception:
+            continue
+        if event_seq < start_seq:
+            out.append(message)
+    return effective, out
+
+
+def search_compaction_sources(
+    db: ThreadsDB,
+    thread_id: str,
+    query: str,
+    *,
+    max_results: int = COMPACTION_SOURCE_DEFAULT_MAX_RESULTS,
+    max_chars: int = COMPACTION_SOURCE_DEFAULT_MAX_CHARS,
+) -> Dict[str, Any]:
+    """Search model-visible pre-compaction history with bounded output.
+
+    Hidden/``no_api`` messages are intentionally skipped.  Returned snippets
+    are terminal-safe and secret-masked using the same filtering path used for
+    provider-visible tool output.
+    """
+
+    query_text = str(query or '').strip()
+    result_limit = _coerce_compaction_source_limit(
+        max_results,
+        default=COMPACTION_SOURCE_DEFAULT_MAX_RESULTS,
+        minimum=1,
+        maximum=COMPACTION_SOURCE_MAX_RESULTS,
+    )
+    char_limit = _coerce_compaction_source_limit(
+        max_chars,
+        default=COMPACTION_SOURCE_DEFAULT_MAX_CHARS,
+        minimum=1,
+        maximum=COMPACTION_SOURCE_MAX_CHARS,
+    )
+    response: Dict[str, Any] = {
+        'ok': False,
+        'thread_id': thread_id,
+        'query': query_text,
+        'max_results': result_limit,
+        'max_chars': char_limit,
+        'results': [],
+        'matching_message_count': 0,
+        'omitted_result_count': 0,
+        'returned_chars': 0,
+    }
+    if db.get_thread(thread_id) is None:
+        response['error'] = f"Thread not found: {thread_id}"
+        return response
+    if not query_text:
+        response['error'] = 'search query is required'
+        return response
+
+    effective, messages = _effective_pre_start_compaction_source_messages(db, thread_id)
+    if not effective:
+        response['error'] = 'No effective compaction start; no pre-start source history is currently compacted away.'
+        return response
+    response['ok'] = True
+    response['effective_start'] = _compaction_effective_start_summary(effective)
+
+    query_lower = query_text.lower()
+    returned_chars = 0
+    omitted = 0
+    matching = 0
+    results: List[Dict[str, Any]] = []
+    for message in messages:
+        raw_text = _compaction_source_content_to_text(message.get('content'))
+        if not raw_text:
+            continue
+        safe_text = _mask_compaction_source_text(raw_text)
+        match_count = safe_text.lower().count(query_lower)
+        if match_count <= 0:
+            continue
+        matching += 1
+        remaining = char_limit - returned_chars
+        if len(results) >= result_limit or remaining <= 0:
+            omitted += 1
+            continue
+
+        snippet_limit = min(remaining, COMPACTION_SOURCE_MAX_SNIPPET_CHARS)
+        snippet = _compaction_source_snippet(safe_text, query_text, max_chars=snippet_limit)
+        returned_chars += len(snippet)
+        item: Dict[str, Any] = {
+            'source_id': message.get('msg_id'),
+            'msg_id': message.get('msg_id'),
+            'event_seq': message.get('event_seq'),
+            'role': message.get('role'),
+            'match_count': match_count,
+            'content_preview': snippet,
+            'preview_truncated': len(safe_text) > len(snippet),
+        }
+        if message.get('tool_call_id'):
+            item['tool_call_id'] = message.get('tool_call_id')
+        results.append(item)
+
+    response['results'] = results
+    response['matching_message_count'] = matching
+    response['omitted_result_count'] = omitted
+    response['returned_chars'] = returned_chars
+    return response
+
+
+def fetch_compaction_source(
+    db: ThreadsDB,
+    thread_id: str,
+    source_id: str,
+    *,
+    max_chars: int = COMPACTION_SOURCE_DEFAULT_MAX_CHARS,
+) -> Dict[str, Any]:
+    """Fetch one model-visible pre-compaction source message by id.
+
+    The source id is currently the message id returned by
+    :func:`search_compaction_sources`.  Hidden/``no_api`` messages are not
+    fetchable by this model-visible helper, and returned content is bounded,
+    terminal-safe, and secret-masked.
+    """
+
+    raw_source_id = str(source_id or '').strip()
+    normalized_source_id = raw_source_id[4:] if raw_source_id.startswith('msg:') else raw_source_id
+    char_limit = _coerce_compaction_source_limit(
+        max_chars,
+        default=COMPACTION_SOURCE_DEFAULT_MAX_CHARS,
+        minimum=1,
+        maximum=COMPACTION_SOURCE_MAX_CHARS,
+    )
+    response: Dict[str, Any] = {
+        'ok': False,
+        'found': False,
+        'thread_id': thread_id,
+        'source_id': normalized_source_id,
+        'max_chars': char_limit,
+    }
+    if db.get_thread(thread_id) is None:
+        response['error'] = f"Thread not found: {thread_id}"
+        return response
+    if not normalized_source_id:
+        response['error'] = 'source_id is required'
+        return response
+
+    effective, messages = _effective_pre_start_compaction_source_messages(db, thread_id)
+    if not effective:
+        response['error'] = 'No effective compaction start; no pre-start source history is currently compacted away.'
+        return response
+    response['ok'] = True
+    response['effective_start'] = _compaction_effective_start_summary(effective)
+
+    for message in messages:
+        if message.get('msg_id') != normalized_source_id:
+            continue
+        raw_text = _compaction_source_content_to_text(message.get('content'))
+        safe_text = _mask_compaction_source_text(raw_text)
+        truncated = len(safe_text) > char_limit
+        content = safe_text[:char_limit]
+        response.update({
+            'found': True,
+            'message': {
+                'msg_id': message.get('msg_id'),
+                'event_seq': message.get('event_seq'),
+                'role': message.get('role'),
+                **({'tool_call_id': message.get('tool_call_id')} if message.get('tool_call_id') else {}),
+            },
+            'content': content,
+            'content_chars': len(content),
+            'truncated': truncated,
+        })
+        return response
+
+    response['error'] = 'Source not found in model-visible pre-start history.'
+    return response
 
 
 def current_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optional[int]:

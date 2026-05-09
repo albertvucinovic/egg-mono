@@ -131,6 +131,68 @@ def test_show_compaction_start_ignores_continued_away_marker(tmp_path):
     assert status["effective"] is None
 
 
+def test_search_compaction_sources_skips_hidden_and_bounds_output(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    visible = ts.append_message(db, tid, "user", "needle visible detail " * 20)
+    hidden_tcid = ts.execute_bash_command_hidden(db, tid, "echo needle hidden dollar-dollar")
+    hidden = ts.append_message(db, tid, "tool", "needle hidden detail", extra={"no_api": True, "tool_call_id": hidden_tcid})
+    start = ts.append_message(db, tid, "assistant", "summary start")
+    after = ts.append_message(db, tid, "user", "needle after start should not appear")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+
+    result = ts.search_compaction_sources(db, tid, "needle", max_results=5, max_chars=40)
+
+    assert result["ok"] is True
+    assert result["effective_start"]["start_msg_id"] == start
+    assert result["matching_message_count"] == 1
+    assert result["returned_chars"] <= 40
+    assert [item["msg_id"] for item in result["results"]] == [visible]
+    preview = result["results"][0]["content_preview"]
+    assert "needle" in preview
+    assert "hidden" not in json.dumps(result)
+    assert hidden not in json.dumps(result)
+    assert after not in json.dumps(result)
+
+
+def test_fetch_compaction_source_returns_visible_pre_start_message_only(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    secret_text = "API_KEY=sk-" + ("a" * 24)
+    visible = ts.append_message(db, tid, "tool", f"old output\n{secret_text}")
+    hidden = ts.append_message(db, tid, "user", "hidden old", extra={"no_api": True})
+    start = ts.append_message(db, tid, "assistant", "summary start")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+
+    fetched = ts.fetch_compaction_source(db, tid, visible, max_chars=200)
+    hidden_fetch = ts.fetch_compaction_source(db, tid, hidden, max_chars=200)
+
+    assert fetched["ok"] is True
+    assert fetched["found"] is True
+    assert fetched["message"]["msg_id"] == visible
+    assert "old output" in fetched["content"]
+    assert "sk-" + ("a" * 24) not in fetched["content"]
+    assert "***" in fetched["content"] or "MASKED SECRET" in fetched["content"]
+    assert hidden_fetch["ok"] is True
+    assert hidden_fetch["found"] is False
+    assert "not found" in hidden_fetch["error"].lower()
+
+
+def test_compaction_source_tools_are_registered_and_bound_to_context(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    visible = ts.append_message(db, tid, "user", "needle visible detail")
+    start = ts.append_message(db, tid, "assistant", "summary start")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+
+    registry = create_tool_registry()
+    search_payload = json.loads(registry.execute("search_compaction_sources", {"query": "needle"}, thread_id=tid, db=db))
+    fetch_payload = json.loads(registry.execute("fetch_compaction_source", {"source_id": visible}, thread_id=tid, db=db))
+
+    assert "search_compaction_sources" in registry._tools
+    assert "fetch_compaction_source" in registry._tools
+    assert search_payload["results"][0]["msg_id"] == visible
+    assert fetch_payload["message"]["msg_id"] == visible
+    assert fetch_payload["content"] == "needle visible detail"
+
+
 def test_compact_command_uses_core_helper(tmp_path):
     db, tid = _new_thread(tmp_path)
     user = ts.append_message(db, tid, "user", "hello")
