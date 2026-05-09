@@ -91,6 +91,7 @@ from .api import (
     CompactionCommitResult,
     CompactionStartResolution,
     commit_thread_compaction,
+    build_repl_thread_context,
     current_effective_compaction_start_event_seq,
     continue_thread,
     filter_messages_for_compaction_provider_context,
@@ -270,7 +271,7 @@ __all__ = [
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_child_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
     'COMPACTION_EVENT_TYPE', 'AutoCompactionResult', 'CompactionCommitResult', 'CompactionStartResolution',
-    'commit_thread_compaction', 'current_effective_compaction_start_event_seq',
+    'build_repl_thread_context', 'commit_thread_compaction', 'current_effective_compaction_start_event_seq',
     'latest_effective_thread_compaction', 'latest_thread_compaction', 'list_thread_compactions', 'resolve_compaction_start_message',
     'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread',
     # Thread diagnosis

@@ -938,6 +938,239 @@ def commit_thread_compaction(
     )
 
 
+
+def _repl_message_view(message: Dict[str, Any], db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
+    """Return the consumer-facing REPL representation of one usable message."""
+
+    out: Dict[str, Any] = {
+        'msg_id': message.get('msg_id'),
+        'role': message.get('role'),
+        'content': message.get('content', ''),
+    }
+    seq = message.get('event_seq')
+    if seq is None:
+        seq = _get_event_seq_for_msg_id(db, thread_id, message.get('msg_id'))
+    if seq is not None:
+        try:
+            out['event_seq'] = int(seq)
+        except Exception:
+            out['event_seq'] = seq
+    if message.get('ts') is not None:
+        out['ts'] = message.get('ts')
+
+    # Preserve common protocol fields so tool turns can be inspected exactly
+    # enough from the REPL without exposing unrelated internal bookkeeping.
+    for key in ('name', 'tool_call_id', 'tool_calls'):
+        if key in message:
+            out[key] = message.get(key)
+    return out
+
+
+def _messages_by_role(messages: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {
+        'system': [],
+        'user': [],
+        'assistant': [],
+        'tool': [],
+    }
+    for message in messages:
+        role = message.get('role')
+        if isinstance(role, str):
+            grouped.setdefault(role, []).append(message)
+    return grouped
+
+
+def _effective_thread_compactions_for_repl(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
+    """Return compaction markers still present in the effective thread view."""
+
+    erased_ranges = _continue_erased_event_ranges(db, thread_id)
+    skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    out: List[Dict[str, Any]] = []
+    for marker in list_thread_compactions(db, thread_id):
+        try:
+            marker_seq = int(marker.get('event_seq'))
+        except Exception:
+            continue
+        if _event_erased_by_continue(marker_seq, erased_ranges):
+            continue
+        start_msg_id = marker.get('start_msg_id')
+        if isinstance(start_msg_id, str) and (start_msg_id in skipped or start_msg_id in deleted):
+            continue
+        out.append(marker)
+    return out
+
+
+def _repl_context_compactions(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
+    """Return consumer-facing compaction marker summaries."""
+
+    current = latest_effective_thread_compaction(db, thread_id)
+    current_seq: Optional[int] = None
+    if current is not None:
+        try:
+            current_seq = int(current.get('event_seq'))
+        except Exception:
+            current_seq = None
+
+    out: List[Dict[str, Any]] = []
+    for marker in _effective_thread_compactions_for_repl(db, thread_id):
+        try:
+            marker_seq: Optional[int] = int(marker.get('event_seq'))
+        except Exception:
+            marker_seq = None
+        start_seq = marker.get('start_event_seq')
+        try:
+            start_seq_out: Any = int(start_seq) if start_seq is not None else None
+        except Exception:
+            start_seq_out = start_seq
+        out.append({
+            'marker_event_seq': marker_seq,
+            'current_prompt_starts_at_msg_id': marker.get('start_msg_id'),
+            'current_prompt_starts_at_event_seq': start_seq_out,
+            'selector_used': marker.get('selector'),
+            'created_by': marker.get('created_by'),
+            'is_current': bool(current_seq is not None and marker_seq == current_seq),
+        })
+    return out
+
+
+def build_repl_thread_context(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
+    """Build a consumer-friendly context object for thread REPL use.
+
+    The returned structure contains the usable effective thread transcript and
+    the same compacted prompt slice that provider/API context uses.  Hidden
+    local-only messages (``no_api``), deleted messages, and messages skipped by
+    ``/continue`` are excluded.  Tool output is passed through the normal
+    provider-context compaction filtering and API sanitization path rather than
+    the removed model-visible source/status helpers.
+    """
+
+    if db.get_thread(thread_id) is None:
+        raise ValueError(f"Thread not found: {thread_id}")
+
+    snapshot = create_snapshot(db, thread_id)
+    raw_messages = snapshot.get('messages', []) if isinstance(snapshot, dict) else []
+    usable_messages = [m for m in raw_messages if isinstance(m, dict) and not m.get('no_api')]
+    current_prompt_raw = filter_messages_for_compaction_provider_context(db, thread_id, usable_messages)
+
+    class _ContextSanitizer:
+        def __init__(self, db: ThreadsDB, thread_id: str) -> None:
+            self.db = db
+            self.thread_id = thread_id
+            self.llm = None
+
+        def _get_tool_call_id_normalization_strategy(self, model_key=None):
+            return None
+
+        def _mask_secrets_heuristic(self, text: str) -> str:
+            from .runner import ThreadRunner
+
+            return ThreadRunner._mask_secrets_heuristic(self, text)
+
+        def _filter_tool_output(self, text: str, *, mask_secrets: bool = True) -> str:
+            from .runner import ThreadRunner
+
+            return ThreadRunner._filter_tool_output(self, text, mask_secrets=mask_secrets)
+
+        def _enforce_assistant_toolcall_protocol(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            from .runner import ThreadRunner
+
+            return ThreadRunner._enforce_assistant_toolcall_protocol(self, messages)
+
+    sanitizer = _ContextSanitizer(db, thread_id)
+
+    def _sanitize_tool_output_for_repl_message(message: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(message)
+        if out.get('role') != 'tool':
+            return out
+        content = out.get('content')
+        if not isinstance(content, str):
+            return out
+        try:
+            from .tools_config import get_thread_tools_config
+
+            tools_cfg = get_thread_tools_config(db, thread_id)
+            mask_secrets = not bool(getattr(tools_cfg, 'allow_raw_tool_output', False))
+        except Exception:
+            mask_secrets = True
+        try:
+            out['content'] = sanitizer._filter_tool_output(content, mask_secrets=mask_secrets)
+        except Exception:
+            pass
+        return out
+
+    def _sanitize_for_repl_context(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        try:
+            from .runner import ThreadRunner
+
+            sanitized = ThreadRunner._sanitize_messages_for_api(sanitizer, messages)
+        except Exception:
+            return list(messages)
+        if len(sanitized) != len(messages):
+            return sanitized
+        out: List[Dict[str, Any]] = []
+        for original, clean in zip(messages, sanitized):
+            if not isinstance(original, dict) or not isinstance(clean, dict):
+                out.append(clean)
+                continue
+            clean_copy = dict(clean)
+            for key in ('msg_id', 'event_seq', 'ts'):
+                if key not in clean_copy and key in original:
+                    clean_copy[key] = original.get(key)
+            out.append(clean_copy)
+        return out
+
+    all_messages_raw = [_sanitize_tool_output_for_repl_message(m) for m in usable_messages]
+    current_prompt_sanitized = _sanitize_for_repl_context(current_prompt_raw)
+
+    prompt_ids = {
+        m.get('msg_id')
+        for m in current_prompt_raw
+        if isinstance(m, dict) and isinstance(m.get('msg_id'), str)
+    }
+    all_messages = [_repl_message_view(m, db, thread_id) for m in all_messages_raw]
+    current_prompt_messages = [
+        _repl_message_view(m, db, thread_id)
+        for m in current_prompt_sanitized
+        if isinstance(m, dict)
+    ]
+    older_messages_not_in_prompt = [
+        _repl_message_view(m, db, thread_id)
+        for m in all_messages_raw
+        if m.get('msg_id') not in prompt_ids
+    ]
+
+    messages_by_id = {
+        message.get('msg_id'): message
+        for message in all_messages
+        if isinstance(message.get('msg_id'), str)
+    }
+    messages_by_role = _messages_by_role(all_messages)
+    max_seq = db.max_event_seq(thread_id)
+
+    return {
+        'thread': {
+            'thread_id': thread_id,
+            'loaded_at': _utcnow_iso(),
+            'loaded_through_event_seq': max_seq,
+            'message_count': len(all_messages),
+            'visibility_note': 'Contains the thread messages available for model use; hidden/local-only content is excluded.',
+        },
+        'how_to_use': (
+            "Use all_messages for the full usable transcript, "
+            "current_prompt_messages for the messages currently in the model prompt, "
+            "older_messages_not_in_prompt for earlier usable context omitted after compaction, "
+            "messages_by_id[get_id] for exact messages, and messages_by_role for role-based browsing."
+        ),
+        'all_messages': all_messages,
+        'current_prompt_messages': current_prompt_messages,
+        'older_messages_not_in_prompt': older_messages_not_in_prompt,
+        'messages_by_id': messages_by_id,
+        'messages_by_role': messages_by_role,
+        'compactions': _repl_context_compactions(db, thread_id),
+        'context_files': {},
+    }
+
+
 def maybe_auto_compact_thread(
     db: ThreadsDB,
     thread_id: str,

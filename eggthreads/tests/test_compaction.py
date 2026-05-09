@@ -360,3 +360,119 @@ def test_provider_context_token_stats_uses_effective_compaction_not_raw_history(
     assert old in full["per_message"]
     assert old not in provider["per_message"]
     assert start in provider["per_message"]
+
+
+def _ids(messages):
+    return [m.get("msg_id") for m in messages]
+
+
+def test_build_repl_thread_context_splits_visible_old_and_current_messages(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    system = ts.append_message(db, tid, "system", "rules")
+    old = ts.append_message(db, tid, "user", "old visible context")
+    start = ts.append_message(db, tid, "assistant", "compact summary")
+    current = ts.append_message(db, tid, "user", "current question")
+    hidden = ts.append_message(db, tid, "user", "hidden secret", extra={"no_api": True})
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+
+    ctx = ts.build_repl_thread_context(db, tid)
+
+    assert _ids(ctx["all_messages"]) == [system, old, start, current]
+    assert hidden not in ctx["messages_by_id"]
+    assert _ids(ctx["current_prompt_messages"]) == [system, start, current]
+    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, ts.create_snapshot(db, tid)["messages"])
+    provider_view = [m for m in provider_view if not m.get("no_api")]
+    assert _ids(ctx["current_prompt_messages"]) == _ids(provider_view)
+    assert _ids(ctx["older_messages_not_in_prompt"]) == [old]
+    assert ctx["context_files"] == {}
+    assert "older_messages_not_in_prompt" in ctx["how_to_use"]
+    assert "effective_compaction" not in ctx
+    assert "effective_compaction" not in ctx["how_to_use"]
+
+
+def test_build_repl_thread_context_groups_messages_by_role(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    system = ts.append_message(db, tid, "system", "rules")
+    user = ts.append_message(db, tid, "user", "question")
+    assistant = ts.append_message(db, tid, "assistant", "I will call a tool", extra={
+        "tool_calls": [{"id": "tc-repl-role", "function": {"name": "bash", "arguments": "{}"}}]
+    })
+    tool = ts.append_message(db, tid, "tool", "tool output", extra={"tool_call_id": "tc-repl-role"})
+
+    ctx = ts.build_repl_thread_context(db, tid)
+
+    grouped = ctx["messages_by_role"]
+    assert _ids(grouped["system"]) == [system]
+    assert _ids(grouped["user"]) == [user]
+    assert _ids(grouped["assistant"]) == [assistant]
+    assert _ids(grouped["tool"]) == [tool]
+    assert ctx["messages_by_id"][assistant]["tool_calls"][0]["id"] == "tc-repl-role"
+    assert ctx["messages_by_id"][tool]["tool_call_id"] == "tc-repl-role"
+
+
+def test_build_repl_thread_context_compactions_array_marks_current(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    first_start = ts.append_message(db, tid, "assistant", "first summary")
+    first = ts.commit_thread_compaction(db, tid, first_start, created_by="test")
+    second_start = ts.append_message(db, tid, "user", "new start")
+    second = ts.commit_thread_compaction(db, tid, "last_user", created_by="user_command")
+
+    ctx = ts.build_repl_thread_context(db, tid)
+
+    assert len(ctx["compactions"]) == 2
+    assert [c["is_current"] for c in ctx["compactions"]] == [False, True]
+    assert ctx["compactions"][0]["marker_event_seq"] == first.compaction_event_seq
+    assert ctx["compactions"][0]["current_prompt_starts_at_msg_id"] == first_start
+    assert ctx["compactions"][1]["marker_event_seq"] == second.compaction_event_seq
+    assert ctx["compactions"][1]["current_prompt_starts_at_msg_id"] == second_start
+    assert ctx["compactions"][1]["selector_used"] == "last_user"
+    assert ctx["compactions"][1]["created_by"] == "user_command"
+    assert old in ctx["messages_by_id"]
+
+
+def test_build_repl_thread_context_excludes_no_api_and_sanitizes_tool_output(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    visible_tool_parent = ts.append_message(db, tid, "assistant", "call", extra={
+        "tool_calls": [{"id": "tc-visible", "function": {"name": "bash", "arguments": "{}"}}]
+    })
+    visible_tool = ts.append_message(
+        db,
+        tid,
+        "tool",
+        "API_KEY=supersecretvalue\n\x1b[31mred\x1b[0m",
+        extra={"tool_call_id": "tc-visible"},
+    )
+    hidden_user = ts.append_message(db, tid, "user", "hidden", extra={"no_api": True})
+    hidden_tool = ts.append_message(db, tid, "tool", "hidden tool", extra={"no_api": True, "tool_call_id": "tc-hidden"})
+
+    ctx = ts.build_repl_thread_context(db, tid)
+
+    assert visible_tool_parent in ctx["messages_by_id"]
+    assert visible_tool in ctx["messages_by_id"]
+    assert hidden_user not in ctx["messages_by_id"]
+    assert hidden_tool not in ctx["messages_by_id"]
+    content = ctx["messages_by_id"][visible_tool]["content"]
+    assert "\x1b" not in content
+    assert "API_KEY=supersecretvalue" in content
+
+
+def test_build_repl_thread_context_uses_effective_view_after_continue(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    summary = ts.append_message(db, tid, "assistant", "summary")
+    after = ts.append_message(db, tid, "user", "after")
+    first = ts.commit_thread_compaction(db, tid, summary, created_by="test")
+    assert first.success is True
+
+    result = ts.continue_thread(db, tid, old)
+    assert result.success is True
+
+    ctx = ts.build_repl_thread_context(db, tid)
+
+    assert _ids(ctx["all_messages"]) == [old]
+    assert _ids(ctx["current_prompt_messages"]) == [old]
+    assert ctx["older_messages_not_in_prompt"] == []
+    assert ctx["compactions"] == []
+    assert summary not in ctx["messages_by_id"]
+    assert after not in ctx["messages_by_id"]
