@@ -365,10 +365,11 @@ Goal: add the durable boundary event and selector resolution without changing pr
   - Rejects hidden/no_api/tool messages.
   - Emits `thread.compaction` with start pointer metadata.
   - Does not change parent/child rows.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
 - 2026-05-09: In progress, uncommitted. Added initial `thread.compaction` core helpers in `eggthreads/eggthreads/api.py`, exports, focused tests, and a `CompactionPlugin` skeleton with `compact_thread` tool plus `/compact` command registration. Basic no-op validation exists for missing/skipped/deleted/no_api/non-user-or-assistant/non-forward selectors; deeper provider-protocol-unsafe starts remain for Phase 10 hardening. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-09: Committed in `de7281a` (`Add thread compaction start pointer`).
 
 ## Phase 2 — Provider-context start boundary
 
@@ -389,10 +390,11 @@ Goal: make API/provider context respect the latest effective compaction start po
   - Provider input excludes messages before `start_event_seq`.
   - Provider input includes the selected start message and later messages.
   - Hidden/no_api messages after start remain excluded.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
 - 2026-05-09: In progress, uncommitted. Added `filter_messages_for_compaction_provider_context(...)`, persisted `event_seq` in snapshot messages, and wired RA1 prompt building to filter snapshot messages before provider conversion. UI snapshot remains full. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-09: Committed in `de7281a` (`Add thread compaction start pointer`).
 
 ## Phase 3 — Model-visible `compact_thread` tool
 
@@ -412,10 +414,11 @@ Goal: expose compaction as a normal default tool using the core helper.
   - Tool returns no-op result for invalid selector.
   - Tool result participates in normal tool protocol.
   - Future provider context starts at resolved message.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
 - 2026-05-09: In progress, uncommitted. Added built-in `CompactionPlugin` and registered the `compact_thread` tool. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-09: Committed in `de7281a` (`Add thread compaction start pointer`).
 
 ## Phase 4 — `/compact` user command
 
@@ -435,28 +438,29 @@ Goal: expose manual user compaction using the same core code.
   - Command emits `thread.compaction` for all valid selector forms.
   - Command no-ops/rejects invalid selectors.
   - Command does not alter child relationships.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
 - 2026-05-09: In progress, uncommitted. Added `/compact [msg_id|last_user|last_llm]` through `CompactionPlugin`, using the same core helper as the tool. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`.
+- 2026-05-09: Committed in `de7281a` (`Add thread compaction start pointer`).
 
 ## Phase 5 — `/continue` and effective control events
 
 Goal: make `/continue` able to erase/retry compaction in practice.
 
-- [ ] Define effective view for compaction events after continue.
+- [x] Define effective view for compaction events after continue.
   - A compaction event after the continue point should not affect provider context.
   - Raw UI/audit history can still show it.
-- [ ] Update provider-context builder to use effective latest compaction, not raw latest compaction.
-- [ ] Add tests.
+- [x] Update provider-context builder to use effective latest compaction, not raw latest compaction.
+- [x] Add tests.
   - Compact, then `/continue` from before compaction.
   - Provider context ignores the old compaction event.
   - UI/raw history still contains the old compaction event for audit.
   - Re-compaction after continue works.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09 21:32 UTC: Implemented effective compaction lookup for provider context. Later `control.interrupt` events with `purpose=continue` now erase non-message control events in the continued-away range for compaction purposes; raw `latest_thread_compaction(...)` remains available for diagnostics/audit, while provider filtering and selector forward checks use `latest_effective_thread_compaction(...)` / `current_effective_compaction_start_event_seq(...)`. Added focused tests for compact-then-continue, raw audit retention, and re-compaction after continue. Tests passed: `pytest -q eggthreads/tests/test_compaction.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 5 change.
 
 ## Phase 6 — LLM/system instructions
 

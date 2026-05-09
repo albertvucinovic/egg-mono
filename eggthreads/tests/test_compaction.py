@@ -153,3 +153,55 @@ def test_runner_sanitize_keeps_compacted_provider_view(tmp_path):
 
     assert [m.get("content") for m in out] == ["rules", "summary", "after"]
     assert old not in [m.get("msg_id") for m in compacted]
+
+
+def test_continue_before_compaction_makes_control_event_ineffective(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    summary = ts.append_message(db, tid, "assistant", "summary")
+    after = ts.append_message(db, tid, "user", "after")
+    first = ts.commit_thread_compaction(db, tid, summary, created_by="test")
+    assert first.success is True
+
+    result = ts.continue_thread(db, tid, old)
+
+    assert result.success is True
+    assert summary in result.skipped_msg_ids
+    assert after in result.skipped_msg_ids
+    assert ts.latest_thread_compaction(db, tid) is not None
+    assert ts.latest_effective_thread_compaction(db, tid) is None
+
+    snapshot = ts.create_snapshot(db, tid)
+    assert [m["msg_id"] for m in snapshot["messages"]] == [old]
+    filtered = ts.filter_messages_for_compaction_provider_context(db, tid, snapshot["messages"])
+    assert [m["msg_id"] for m in filtered] == [old]
+
+    # Raw/audit history still contains the skipped messages and old marker.
+    cur = db.conn.execute(
+        "SELECT msg_id FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+        (tid,),
+    )
+    assert [row[0] for row in cur.fetchall()] == [old, summary, after]
+    assert len(_events(db, tid)) == 1
+
+
+def test_recompaction_after_continue_uses_effective_start(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    summary = ts.append_message(db, tid, "assistant", "summary")
+    ts.commit_thread_compaction(db, tid, summary, created_by="test")
+
+    result = ts.continue_thread(db, tid, old)
+    assert result.success is True
+    retry_summary = ts.append_message(db, tid, "assistant", "retry summary")
+
+    second = ts.commit_thread_compaction(db, tid, retry_summary, created_by="test")
+
+    assert second.success is True
+    assert second.start_msg_id == retry_summary
+    assert ts.latest_effective_thread_compaction(db, tid)["start_msg_id"] == retry_summary
+
+    snapshot = ts.create_snapshot(db, tid)
+    filtered = ts.filter_messages_for_compaction_provider_context(db, tid, snapshot["messages"])
+    assert [m["msg_id"] for m in filtered] == [retry_summary]
+    assert old not in [m["msg_id"] for m in filtered]

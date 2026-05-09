@@ -668,10 +668,77 @@ def latest_thread_compaction(db: ThreadsDB, thread_id: str) -> Optional[Dict[str
     return compactions[-1] if compactions else None
 
 
+def _continue_erased_event_ranges(db: ThreadsDB, thread_id: str) -> List[tuple[int, int]]:
+    """Return raw event ranges made ineffective by later ``/continue`` calls.
+
+    ``continue_thread`` preserves the raw event log but marks message creates
+    after the continue point as skipped.  Non-message control events (including
+    ``thread.compaction``) need the same effective-view treatment for provider
+    context: a later continue from message P erases control events in
+    ``(P.event_seq, continue_event_seq)``.
+    """
+
+    cur = db.conn.execute(
+        "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND type='control.interrupt' ORDER BY event_seq ASC",
+        (thread_id,),
+    )
+    ranges: List[tuple[int, int]] = []
+    for event_seq, payload_json in cur.fetchall():
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get('purpose') != 'continue':
+            continue
+        msg_id = payload.get('continue_from_msg_id')
+        if not isinstance(msg_id, str) or not msg_id:
+            continue
+        continue_from_seq = _get_event_seq_for_msg_id(db, thread_id, msg_id)
+        if continue_from_seq is None:
+            continue
+        ranges.append((int(continue_from_seq), int(event_seq)))
+    return ranges
+
+
+def _event_erased_by_continue(event_seq: int, erased_ranges: List[tuple[int, int]]) -> bool:
+    return any(start_seq < event_seq < continue_seq for start_seq, continue_seq in erased_ranges)
+
+
+def latest_effective_thread_compaction(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the latest ``thread.compaction`` still active in the effective view."""
+
+    erased_ranges = _continue_erased_event_ranges(db, thread_id)
+    skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    for compaction in reversed(list_thread_compactions(db, thread_id)):
+        try:
+            compaction_seq = int(compaction.get('event_seq'))
+        except Exception:
+            continue
+        if _event_erased_by_continue(compaction_seq, erased_ranges):
+            continue
+        start_msg_id = compaction.get('start_msg_id')
+        if isinstance(start_msg_id, str) and (start_msg_id in skipped or start_msg_id in deleted):
+            continue
+        return compaction
+    return None
+
+
 def current_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optional[int]:
     """Return the latest raw compaction start event_seq, if any."""
 
     latest = latest_thread_compaction(db, thread_id)
+    if not latest:
+        return None
+    try:
+        return int(latest.get('start_event_seq'))
+    except Exception:
+        return None
+
+
+def current_effective_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optional[int]:
+    """Return the current effective provider-context start event_seq, if any."""
+
+    latest = latest_effective_thread_compaction(db, thread_id)
     if not latest:
         return None
     try:
@@ -693,7 +760,7 @@ def filter_messages_for_compaction_provider_context(
     created before the selected start message.
     """
 
-    start_seq = current_compaction_start_event_seq(db, thread_id)
+    start_seq = current_effective_compaction_start_event_seq(db, thread_id)
     if start_seq is None:
         return list(messages)
 
@@ -769,7 +836,7 @@ def resolve_compaction_start_message(db: ThreadsDB, thread_id: str, selector: Op
         return CompactionStartResolution(False, _normalize_compaction_selector(selector), None, None, None, f"Thread not found: {thread_id}")
 
     normalized = _normalize_compaction_selector(selector)
-    current_start = current_compaction_start_event_seq(db, thread_id)
+    current_start = current_effective_compaction_start_event_seq(db, thread_id)
     min_event_seq = int(current_start) if current_start is not None else -1
     candidates = _compaction_candidate_messages(db, thread_id)
 
