@@ -483,26 +483,26 @@ Status notes:
 
 Goal: implement threshold-triggered compaction using the same semantics as user/tool compaction.
 
-- [ ] Define threshold signal.
+- [x] Define threshold signal.
   - Trigger on provider-context token estimate, not raw UI/history size.
   - Use hysteresis to avoid immediate re-triggering.
-- [ ] Trigger only at user-turn/safe turn boundaries.
+- [x] Trigger only at user-turn/safe turn boundaries.
   - Do not interrupt active assistant/tool turns.
   - Reuse general scheduling semantics rather than a compaction-specific input gate.
-- [ ] Decide first auto behavior.
+- [x] Decide first auto behavior.
   - Option A: compact to `last_llm` or omitted `last_message` directly.
   - Option B: append an automatic compaction request asking the assistant to write a summary and call `compact_thread()`.
   - Prefer the simpler behavior first unless summary quality requires Option B.
-- [ ] Reuse `commit_thread_compaction` / `compact_thread` core path.
-- [ ] Add tests.
+- [x] Reuse `commit_thread_compaction` / `compact_thread` core path.
+- [x] Add tests.
   - Threshold triggers at safe boundary.
   - No trigger below threshold.
   - Active turn defers compaction.
   - Auto compaction emits the same `thread.compaction` event shape.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09 21:58 UTC: Implemented the smallest Phase 7 behavior as direct threshold compaction to `last_llm` at the RA1 boundary. Added `provider_context_token_stats(...)` so the threshold uses effective provider context instead of raw UI history, `maybe_auto_compact_thread(...)` so auto compaction reuses `commit_thread_compaction`, and `RunnerConfig.auto_compact_threshold_tokens` checked only after acquiring the per-thread lease and before opening an LLM stream/provider call. Re-trigger hysteresis is provided by core forward-only validation: after compacting to the latest assistant, a repeated check without a newer assistant no-ops and emits no second event. Tests cover threshold trigger/no-trigger, no duplicate without new LLM, RA1-boundary provider view, deferral during tool turns, and provider-token counting after compaction. Tests passed: `pytest -q eggthreads/tests/test_compaction.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 7 change.
 
 ## Phase 8 — Decompaction/source exploration tools
 

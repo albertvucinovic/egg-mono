@@ -1214,6 +1214,42 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
     return total
 
 
+def provider_context_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
+    """Return approximate token stats for the effective provider context.
+
+    Unlike :func:`total_token_stats`, this applies the current effective
+    compaction start pointer before counting snapshot messages.  It is intended
+    for budget/auto-compaction decisions that must track provider input size,
+    not full UI/raw-history size.
+    """
+
+    messages: List[Dict[str, Any]] = []
+    try:
+        th = db.get_thread(thread_id)
+    except Exception:
+        th = None
+    if th is not None:
+        snap_raw = getattr(th, "snapshot_json", None)
+        if isinstance(snap_raw, str) and snap_raw:
+            try:
+                snap = json.loads(snap_raw)
+            except Exception:
+                snap = None
+            if isinstance(snap, dict):
+                raw_messages = snap.get("messages") or []
+                if isinstance(raw_messages, list):
+                    messages = [m for m in raw_messages if isinstance(m, dict)]
+
+    try:
+        from .api import filter_messages_for_compaction_provider_context
+
+        messages = filter_messages_for_compaction_provider_context(db, thread_id, messages)
+    except Exception:
+        pass
+
+    return _token_stats_for_messages([m for m in messages if isinstance(m, dict)])
+
+
 def _example_cost_cfg_note() -> str:
     return (
         "Cost estimates require per-model cost config in models.json. "
@@ -1231,5 +1267,6 @@ __all__ = [
     "extend_snapshot_token_stats",
     "streaming_token_stats",
     "total_token_stats",
+    "provider_context_token_stats",
 ]
 

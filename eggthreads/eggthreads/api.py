@@ -616,6 +616,18 @@ class CompactionCommitResult:
     message: str
 
 
+@dataclass
+class AutoCompactionResult:
+    """Result of checking and possibly committing automatic compaction."""
+
+    triggered: bool
+    attempted: bool
+    context_tokens: int
+    threshold_tokens: Optional[int]
+    compaction: Optional[CompactionCommitResult]
+    message: str
+
+
 def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tuple[set[str], set[str]]:
     skipped: set[str] = set()
     deleted: set[str] = set()
@@ -926,6 +938,63 @@ def commit_thread_compaction(
         resolution.event_seq,
         int(event_seq),
         f"Compaction committed; provider context now starts at {resolution.msg_id[-8:] if resolution.msg_id else 'unknown'}.",
+    )
+
+
+def maybe_auto_compact_thread(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    threshold_tokens: Optional[int],
+    context_tokens: Optional[int] = None,
+    selector: str = 'last_llm',
+) -> AutoCompactionResult:
+    """Commit a small automatic compaction at a safe turn boundary if needed.
+
+    This first automatic policy is intentionally narrow: callers invoke it at
+    a user-turn/scheduler boundary, and it only compacts when the effective
+    provider-context token estimate is at or above ``threshold_tokens``.  The
+    boundary selector defaults to ``last_llm`` so an automatic check before the
+    next user-triggered RA1 turn preserves the last assistant result as the new
+    provider-context start.  The shared compaction helper still performs all
+    selector validation and no-op handling.
+    """
+
+    if threshold_tokens is None:
+        return AutoCompactionResult(False, False, int(context_tokens or 0), None, None, "Auto compaction disabled.")
+    try:
+        threshold_int = int(threshold_tokens)
+    except Exception:
+        return AutoCompactionResult(False, False, int(context_tokens or 0), None, None, "Auto compaction disabled.")
+    if threshold_int <= 0:
+        return AutoCompactionResult(False, False, int(context_tokens or 0), None, None, "Auto compaction disabled.")
+
+    if context_tokens is None:
+        try:
+            from .token_count import provider_context_token_stats
+
+            stats = provider_context_token_stats(db, thread_id)
+            context_tokens = int(stats.get('context_tokens') or 0)
+        except Exception as e:
+            return AutoCompactionResult(False, False, 0, threshold_int, None, f"Auto compaction token estimate failed: {e}")
+
+    context_int = int(context_tokens or 0)
+    if context_int < threshold_int:
+        return AutoCompactionResult(False, False, context_int, threshold_int, None, "Auto compaction threshold not reached.")
+
+    result = commit_thread_compaction(
+        db,
+        thread_id,
+        selector,
+        created_by='auto_compaction',
+    )
+    return AutoCompactionResult(
+        bool(result.success),
+        True,
+        context_int,
+        threshold_int,
+        result,
+        result.message,
     )
 
 

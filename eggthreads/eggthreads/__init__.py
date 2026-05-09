@@ -87,6 +87,7 @@ from .api import (
     # Continue thread API
     ContinueResult,
     COMPACTION_EVENT_TYPE,
+    AutoCompactionResult,
     CompactionCommitResult,
     CompactionStartResolution,
     commit_thread_compaction,
@@ -99,6 +100,7 @@ from .api import (
     latest_thread_compaction,
     latest_effective_thread_compaction,
     list_thread_compactions,
+    maybe_auto_compact_thread,
     resolve_compaction_start_message,
     is_thread_continuable,
     # Thread diagnosis
@@ -124,6 +126,7 @@ from .token_count import (
     llm_message_tps_for_invoke,
     live_llm_tps_for_invoke,
     snapshot_token_stats,
+    provider_context_token_stats,
     tool_message_tps_for_call,
     streaming_token_stats,
     total_token_stats,
@@ -266,10 +269,10 @@ __all__ = [
     'set_context_limit', 'get_context_limit',
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_child_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
-    'COMPACTION_EVENT_TYPE', 'CompactionCommitResult', 'CompactionStartResolution',
+    'COMPACTION_EVENT_TYPE', 'AutoCompactionResult', 'CompactionCommitResult', 'CompactionStartResolution',
     'commit_thread_compaction', 'current_effective_compaction_start_event_seq',
     'latest_effective_thread_compaction', 'latest_thread_compaction', 'list_thread_compactions', 'resolve_compaction_start_message',
-    'filter_messages_for_compaction_provider_context',
+    'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread',
     # Thread diagnosis
     'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text',
     # Thread scheduling API
@@ -291,7 +294,7 @@ __all__ = [
     'ToolCapabilities', 'ToolContext', 'ToolExecutionResult', 'ToolRegistry', 'ToolStreamContext', 'create_default_tools', 'create_tool_registry',
     'Skill', 'get_skill', 'list_skills', 'load_skill_text', 'render_skill_index', 'render_skill_tool_output', 'search_skills',
     'create_llm_client',
-    'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'streaming_token_stats', 'total_token_stats', 'EventWatcher',
+    'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'provider_context_token_stats', 'streaming_token_stats', 'total_token_stats', 'EventWatcher',
     'enable_user_sandbox_control',
     'disable_user_sandbox_control',
     'is_user_sandbox_control_enabled',

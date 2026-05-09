@@ -613,6 +613,11 @@ class RunnerConfig:
     # Global context limit: None = no limit, >0 = max tokens before LLM call is rejected
     # Per-thread settings (via thread.context_limit events) override this
     context_limit: Optional[int] = None
+    # First automatic compaction policy: when set, check effective provider
+    # context size at the RA1 turn boundary and compact to the latest assistant
+    # message before sending the next provider request.  Keep this below any
+    # hard context_limit so compaction can reduce context before hard rejection.
+    auto_compact_threshold_tokens: Optional[int] = None
 
     @property
     def effective_max_concurrent_llm_threads(self) -> int:
@@ -738,6 +743,32 @@ class ThreadRunner:
 
         if not self.db.try_open_stream(self.thread_id, invoke_id, lease_until, owner=self.owner, purpose=purpose):
             return False
+
+        # Optional first auto-compaction policy.  Run it after acquiring the
+        # per-thread lease (so concurrent runners cannot race to compact) but
+        # before opening an RA1 stream or calling the provider.  This keeps the
+        # mutation at a turn boundary rather than inside an assistant/tool
+        # cycle.
+        if ra.kind == 'RA1_llm' and self.cfg.auto_compact_threshold_tokens:
+            try:
+                from .api import create_snapshot, maybe_auto_compact_thread
+                from .token_count import provider_context_token_stats
+
+                create_snapshot(self.db, self.thread_id)
+                stats = provider_context_token_stats(self.db, self.thread_id)
+                current_tokens = int(stats.get('context_tokens') or 0)
+                auto_result = maybe_auto_compact_thread(
+                    self.db,
+                    self.thread_id,
+                    threshold_tokens=self.cfg.auto_compact_threshold_tokens,
+                    context_tokens=current_tokens,
+                )
+                if auto_result.triggered:
+                    create_snapshot(self.db, self.thread_id)
+            except Exception as e:
+                # Token accounting/auto-compaction is best-effort; do not block
+                # the existing RA1 path on advisory compaction.
+                print(f"Warning: auto compaction check failed: {e}")
 
         # Resolve current model for this turn from eggthreads API so that
         # the provider call and the event annotations stay in sync. Fall

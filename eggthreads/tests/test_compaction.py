@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import eggthreads as ts
 from eggthreads.command_catalog import CommandContext, create_default_command_registry
-from eggthreads.runner import ThreadRunner
+from eggthreads.runner import RunnerConfig, ThreadRunner
 from eggthreads.tools import create_tool_registry
 
 
@@ -220,3 +221,133 @@ def test_recompaction_after_continue_uses_effective_start(tmp_path):
     filtered = ts.filter_messages_for_compaction_provider_context(db, tid, snapshot["messages"])
     assert [m["msg_id"] for m in filtered] == [retry_summary]
     assert old not in [m["msg_id"] for m in filtered]
+
+
+def test_maybe_auto_compact_triggers_at_threshold_with_last_llm(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    assistant = ts.append_message(db, tid, "assistant", "assistant summary")
+
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10)
+
+    assert result.triggered is True
+    assert result.attempted is True
+    assert result.compaction is not None
+    assert result.compaction.start_msg_id == assistant
+    events = _events(db, tid)
+    assert len(events) == 1
+    payload = events[0][1]
+    assert payload["created_by"] == "auto_compaction"
+    assert payload["selector"] == "last_llm"
+    assert payload["start_msg_id"] == assistant
+    assert old
+
+
+def test_maybe_auto_compact_noops_below_threshold(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    ts.append_message(db, tid, "assistant", "assistant summary")
+
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=100, context_tokens=99)
+
+    assert result.triggered is False
+    assert result.attempted is False
+    assert _events(db, tid) == []
+
+
+def test_maybe_auto_compact_does_not_emit_again_without_new_llm(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    ts.append_message(db, tid, "assistant", "assistant summary")
+
+    first = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10)
+    second = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10)
+
+    assert first.triggered is True
+    assert second.triggered is False
+    assert second.attempted is True
+    assert len(_events(db, tid)) == 1
+
+
+def test_runner_auto_compacts_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old context")
+    assistant = ts.append_message(db, tid, "assistant", "previous answer")
+    next_user = ts.append_message(db, tid, "user", "next question")
+    ts.create_snapshot(db, tid)
+    seen_messages: list[list[dict]] = []
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            seen_messages.append(messages)
+            yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 100},
+    )
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    events = _events(db, tid)
+    assert len(events) == 1
+    payload = events[0][1]
+    assert payload["created_by"] == "auto_compaction"
+    assert payload["start_msg_id"] == assistant
+    assert seen_messages
+    assert [m["content"] for m in seen_messages[0]] == ["previous answer", "next question"]
+    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, ts.create_snapshot(db, tid)["messages"])
+    assert old not in [m.get("msg_id") for m in provider_view]
+
+
+def test_runner_does_not_auto_compact_during_tool_turn(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    tool_call_id = "tc-auto-defers"
+    db.append_event(
+        event_id="assistant-tool-parent",
+        thread_id=tid,
+        type_="msg.create",
+        msg_id="assistant-msg",
+        payload={
+            "role": "assistant",
+            "content": "running",
+            "tool_calls": [{"id": tool_call_id, "function": {"name": "compact_thread", "arguments": "{}"}}],
+        },
+    )
+    db.append_event(
+        event_id="tool-approved",
+        thread_id=tid,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tool_call_id, "decision": "denied", "reason": "test"},
+    )
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: calls.append("token") or {"context_tokens": 100},
+    )
+
+    runner = ThreadRunner(db, tid, llm=object(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    assert calls == []
+    assert _events(db, tid) == []
+
+
+def test_provider_context_token_stats_uses_effective_compaction_not_raw_history(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old " * 200)
+    start = ts.append_message(db, tid, "assistant", "summary")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.create_snapshot(db, tid)
+
+    full = ts.total_token_stats(db, tid)
+    provider = ts.provider_context_token_stats(db, tid)
+
+    assert full["context_tokens"] > provider["context_tokens"]
+    assert old in full["per_message"]
+    assert old not in provider["per_message"]
+    assert start in provider["per_message"]
