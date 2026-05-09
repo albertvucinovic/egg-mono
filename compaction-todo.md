@@ -115,7 +115,7 @@ hide old messages from humans
 
 - Provider context uses the latest effective `thread.compaction` event to find the start message.
 - Messages before the start message are not sent to the provider as normal context.
-- Normal provider filtering still applies after the start message: `no_api` messages remain excluded, tool protocol sanitization remains enforced, and provider-specific adapters may normalize message sequences as they do today.
+- Normal visibility rules still apply after the start message: hidden/local-only messages remain excluded from API context, tool protocol sanitization remains enforced, and provider-specific adapters may normalize message sequences as they do today.
 
 ### Failure/retry behavior
 
@@ -504,43 +504,152 @@ Goal: implement threshold-triggered compaction using the same semantics as user/
 Status notes:
 - 2026-05-09 21:58 UTC: Implemented the smallest Phase 7 behavior as direct threshold compaction to `last_llm` at the RA1 boundary. Added `provider_context_token_stats(...)` so the threshold uses effective provider context instead of raw UI history, `maybe_auto_compact_thread(...)` so auto compaction reuses `commit_thread_compaction`, and `RunnerConfig.auto_compact_threshold_tokens` checked only after acquiring the per-thread lease and before opening an LLM stream/provider call. Re-trigger hysteresis is provided by core forward-only validation: after compacting to the latest assistant, a repeated check without a newer assistant no-ops and emits no second event. Tests cover threshold trigger/no-trigger, no duplicate without new LLM, RA1-boundary provider view, deferral during tool turns, and provider-token counting after compaction. Tests passed: `pytest -q eggthreads/tests/test_compaction.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 7 change.
 
-## Phase 8 — Decompaction/source exploration tools
+## REPL thread context design
 
-Goal: let the LLM recover older details without sending the full old transcript by default.
+The REPL is the main decompaction surface. It should be hydrated automatically with a clear, consumer-friendly view of the whole effective thread context, not only the compacted-away part.
 
-- [x] Add `show_compaction_start` or equivalent helper if useful.
-  - It can report the latest compaction start message and marker.
-- [x] Add source search/fetch helpers over pre-start history.
-  - Must skip `no_api`/hidden content by default.
-  - Must bound output sizes.
-  - Must apply existing secret masking/tool-output policy.
-- [ ] Add REPL hydration helpers for compacted threads.
-  - Expose compaction markers and old-source search/fetch functions.
-  - Keep durable source in the event log; REPL is only a cache/workspace.
-- [ ] Add audit/logging for source access if needed.
-- [x] Add tests.
-  - Hidden `$$` output is not returned by model-visible search.
-  - Visible old content before compaction can be found/fetched within bounds.
+Design principles:
+
+- Prefer self-explanatory names over internal implementation terms.
+- Do not make the LLM learn Egg internals such as "effective compaction" before it can use old context.
+- Do not advertise "provider-safe" in the REPL object names. Internally, the builder must still obey normal visibility rules and exclude hidden/local-only content, but the consumer-facing structure should feel like "the usable thread context".
+- Include current prompt messages and older messages in the same context object so the LLM can retrieve exact current-context text too.
+- Precompute common groupings so the LLM does not need boilerplate filtering for user/assistant/tool messages.
+- Keep the event DB as source of truth. REPL hydration is a regenerated working copy/cache.
+
+Target REPL variables:
+
+```python
+thread_context = {
+    "thread": {
+        "thread_id": "...",
+        "loaded_at": "...",
+        "loaded_through_event_seq": 1234,
+        "message_count": 87,
+        "visibility_note": "Contains the thread messages available for model use; hidden/local-only content is excluded.",
+    },
+    "how_to_use": "... short instructions ...",
+    "all_messages": [...],                 # whole usable effective thread transcript
+    "current_prompt_messages": [...],      # messages currently in the API prompt after compaction
+    "older_messages_not_in_prompt": [...], # usable messages omitted from current prompt due to compaction
+    "messages_by_id": {...},
+    "messages_by_role": {
+        "system": [...],
+        "user": [...],
+        "assistant": [...],
+        "tool": [...],
+    },
+    "compactions": [
+        {
+            "marker_event_seq": 1004,
+            "current_prompt_starts_at_msg_id": "msg_...",
+            "current_prompt_starts_at_event_seq": 950,
+            "selector_used": "last_llm",
+            "created_by": "assistant_tool",
+            "is_current": True,
+        }
+    ],
+    "context_files": {
+        "jsonl_path": "...",
+        "markdown_path": "...",
+    },
+}
+```
+
+Convenience aliases should also be present:
+
+```python
+all_messages
+current_prompt_messages
+older_messages_not_in_prompt
+messages_by_id
+messages_by_role
+system_messages
+user_messages
+assistant_messages
+tool_messages
+compactions
+context_files
+```
+
+Helper functions should use simple names:
+
+```python
+search_thread(query, role=None, in_prompt=None)
+get_message(msg_id)
+print_message(msg_id)
+reload_thread_context()
+```
+
+`compactions` should be an array because a thread may be compacted multiple times. Mark the current/active marker with `is_current=True` instead of using an ambiguous singular `compaction` or internal name like `effective_compaction`.
+
+Freshness policy:
+
+- Hydrate on first REPL use for compacted threads, and ideally for all threads if cheap.
+- Store `loaded_through_event_seq`.
+- Before REPL eval, cheaply compare the current max event seq. If stale, rebuild for correctness in the MVP.
+- Later optimization may incrementally append simple `msg.create` tails, but correctness should come first.
+
+File-backed context:
+
+- Write JSONL and Markdown copies for grep/read workflows.
+- Do not print the full context automatically.
+- The files are a cache and can be regenerated.
+
+## Phase 8 — REPL thread context hydration
+
+Goal: make the hydrated REPL context the primary way for the LLM to inspect full thread context, including both current prompt messages and older messages omitted by compaction.
+
+- [ ] Remove redundant model-visible compaction source/status tools.
+  - Remove default registrations for `show_compaction_start`, `search_compaction_sources`, and `fetch_compaction_source`.
+  - Keep only `compact_thread` as the compaction-specific model-visible tool.
+  - Remove/update tests that expect those tools in generated `eggtools` wrappers.
+  - Keep internal helper code only if immediately reused by REPL hydration; otherwise remove it to avoid parallel retrieval systems.
+- [ ] Add a consumer-friendly REPL context builder.
+  - Suggested internal name: `build_repl_thread_context(db, thread_id)`.
+  - Return `thread_context` with `all_messages`, `current_prompt_messages`, `older_messages_not_in_prompt`, `messages_by_id`, `messages_by_role`, `compactions`, `context_files`, and `how_to_use`.
+  - Group by role and expose message ids/event seqs/timestamps/content.
+  - Internally obey normal visibility rules: hidden/local-only content is excluded, deleted/skipped messages are excluded, and tool output is sanitized consistently with API context.
+  - Do not use internal-facing names like `effective_compaction` in the consumer-visible structure.
+- [ ] Add REPL hydration for compacted threads, and for all threads if cheap enough.
+  - Inject `thread_context` plus convenience aliases into Python REPL state.
+  - Inject helper functions: `search_thread`, `get_message`, `print_message`, `reload_thread_context`.
+  - Rebuild if stale based on max event seq; optimize later only if needed.
+  - Write JSONL/Markdown cache files and expose their paths in `context_files`.
+- [ ] Add instructions for using hydrated REPL context.
+  - Tell the model to use `python_repl` for exact transcript details when needed.
+  - Mention the obvious variable/function names, not implementation internals.
+  - Do not overemphasize provider-safety language to the LLM; say hidden/local-only content is excluded.
+- [ ] Add tests.
+  - Hydrated context includes visible old and current messages.
+  - `older_messages_not_in_prompt` contains pre-start messages after compaction.
+  - `current_prompt_messages` matches current compacted API context.
+  - `messages_by_role` and aliases include user/assistant/tool groupings.
+  - Hidden/`no_api` content is excluded.
+  - `/continue` before compaction removes continued-away messages/markers from the hydrated current view.
 - [ ] Commit.
 
 Status notes:
+- 2026-05-09: Design revision after initial Phase 8 slices: model-visible `show_compaction_start`, `search_compaction_sources`, and `fetch_compaction_source` are now considered redundant with the desired hydrated REPL context and should be removed from default tools. Historical notes below describe already-committed work that should be superseded by the new plan.
 - 2026-05-09 21:52 UTC: First slice only. Added read-only `show_compaction_start(...)` helper plus model-visible `show_compaction_start` tool. It reports raw compaction count/latest raw marker, latest effective compaction marker, start message id/event seq, selector/created_by, and a bounded start-message preview. It does not fetch/search old pre-compaction history and does not mutate the thread. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 8 first-slice change.
 - 2026-05-09 22:00 UTC: Added model-visible pre-start source exploration helpers `search_compaction_sources(...)` and `fetch_compaction_source(...)`, plus default tools of the same names. They search/fetch only the latest effective compaction's pre-start history, rebuild from the effective snapshot so `/continue` skips still apply, skip `no_api`/hidden content by default (including hidden `$$` command/tool messages), bound result counts and returned characters, and apply terminal-safety plus provider-style secret masking before returning content. No REPL hydration workspace or audit event was added in this slice. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py`; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 8 source-search/fetch slice.
   - Next: Phase 8 REPL exposure/hydration should be a separate small slice, likely first adding focused tests that generated `eggtools` wrappers expose `show_compaction_start`, `search_compaction_sources`, and `fetch_compaction_source` without hydrating raw hidden content; defer any durable REPL cache/workspace or audit logging to later commits.
   - 2026-05-09 22:10 UTC: Added the small REPL exposure test slice. Focused tests now assert generated `eggtools` wrappers expose `show_compaction_start`, `search_compaction_sources`, and `fetch_compaction_source`, and an in-memory REPL can call those wrappers without returning hidden/no_api pre-start content. Fixed the compaction tool wrapper path to reopen the DB when context-aware compaction tools execute in a worker thread, matching the existing execution-tool DB pattern. No durable REPL cache/workspace hydration and no source-access audit logging were added in this slice. Focused tests passed: `pytest -q eggthreads/tests/test_repl_dynamic_tool_wrappers.py`; `pytest -q eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`; `python -m compileall -q eggthreads/eggthreads`. Commit: this Phase 8 REPL exposure test slice.
   - Next: Phase 8 still has durable REPL hydration helpers and optional audit/logging unchecked; treat those as separate manager-approved slices because they are broader than wrapper exposure tests.
 
-## Phase 9 — UI/status and diagnostics
+## Phase 9 — UI compaction markers and diagnostics
 
-Goal: make compaction visible and debuggable without hiding history.
+Goal: make compaction visible to humans without hiding history.
 
-- [ ] Show compaction markers in UI or diagnostics.
-  - Include start message id and event seq.
-  - Make clear that old messages are still present in raw history.
-- [ ] Add read-only compaction status command or extend thread diagnostics.
-  - Latest effective compaction start.
-  - Raw compaction history.
-  - Provider-context token estimate if available.
+- [ ] Draw visual compaction borders in the UI transcript.
+  - The UI should still show all messages before and after compaction.
+  - Render `thread.compaction` markers as a clear horizontal divider, for example a red horizontal line or similarly visible boundary.
+  - Include concise text near the divider such as `Compaction boundary: API context now starts at msg_...`.
+- [ ] Add read-only human diagnostics if useful.
+  - Prefer a user command such as `/compactionStatus` or extend existing thread diagnostics.
+  - Show raw compaction marker history and identify the current marker.
+  - Show current prompt start msg id/event seq and provider-context token estimate if available.
+  - This is for humans/debugging, not a default model-visible status tool.
 - [ ] Ensure message ids are visible/copyable enough for `/compact <msg_id>` and `/continue <msg_id>` workflows.
 - [ ] Commit.
 
@@ -580,7 +689,9 @@ Resolve these only when implementation pressure makes them concrete:
 - Should automatic compaction directly choose `last_llm`/`last_message`, or should it ask the assistant to write a summary and call the tool?
 - What is the cleanest way to make non-message control events ineffective after `/continue`?
 - How visible should compaction tool results be in the UI/provider context after the boundary?
-- Should source exploration tools search only before the latest start message, or the whole raw event log with markers?
+- Should any source exploration remain as a user command, or should hydrated REPL context be the only decompaction surface besides UI scrollback?
+- Should REPL hydration run for all threads or only compacted threads at first?
+- What exact UI rendering should mark compaction boundaries: red horizontal line, labeled divider, or frontend-specific styling?
 
 ## Suggested first implementation slice
 
@@ -592,4 +703,4 @@ The smallest useful slice is:
 4. Add `/compact [selector]` command using the same helper.
 5. Add tests for `/continue` before a compaction event invalidating it for provider context.
 
-Do not start with tree-like threads, source bundles, or automatic compaction. The start-pointer boundary must be correct first.
+Next implementation priority after the start-pointer boundary is to remove redundant source/status model tools, add consumer-friendly REPL context hydration, and draw UI compaction borders. Do not start with tree-like threads or source bundles.
