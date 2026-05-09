@@ -1111,13 +1111,33 @@ def _execute_python_docker(
     req_id = os.urandom(8).hex()
     req_path = bridge_dir / f"eval_{req_id}.req.json"
     res_path = bridge_dir / f"eval_{req_id}.res.json"
-    _atomic_write_json(req_path, {
+    payload = {
         "id": req_id,
         "language": "python",
         "code": code,
         "repl_name": repl_name,
         "token": eval_token,
-    })
+    }
+    try:
+        from .repl_bridge import resolve_eval_context
+
+        eval_ctx = resolve_eval_context(eval_token)
+        context = _load_repl_thread_context(str(db.path), eval_ctx.caller_thread_id)
+        files = context.get("context_files") if isinstance(context.get("context_files"), dict) else None
+        if isinstance(files, dict):
+            container_files: Dict[str, str] = {}
+            for key, value in files.items():
+                mapped = None
+                if isinstance(value, str):
+                    mapped = _container_workspace_path(Path(value), Path(handle.mount_dir), handle.workspace)
+                container_files[str(key)] = mapped or str(value)
+            context = dict(context)
+            context["context_files"] = container_files
+        context_json = json.dumps(context, ensure_ascii=False, sort_keys=True)
+        payload["thread_context_json"] = context_json
+    except Exception:
+        pass
+    _atomic_write_json(req_path, payload)
     start = time.time()
     while True:
         _service_tool_requests(bridge_dir)
@@ -1202,6 +1222,300 @@ def _coerce_positive_timeout(value: Any) -> Optional[float]:
     except Exception:
         return None
     return timeout if timeout > 0 else None
+
+
+
+def _safe_repl_context_part(value: Any, default: str = "thread") -> str:
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(value or ''))
+    safe = safe.strip('-_')
+    return safe or default
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{os.urandom(4).hex()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _repl_context_cache_dir(db: ThreadsDB, thread_id: str) -> Path:
+    # Keep regenerated transcript caches in the thread working directory so
+    # Python REPL code can open/grep/read them.  This remains only a cache; the
+    # event DB is the source of truth and hydration rewrites the files.
+    try:
+        from .api import _ensure_thread_working_directory
+
+        base = _ensure_thread_working_directory(db, thread_id)
+    except Exception:
+        base = Path(db.path).parent
+    return Path(base) / ".egg_thread_context" / _safe_repl_context_part(thread_id)
+
+
+def _message_text_for_context_file(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value)
+
+
+def _format_context_message_for_markdown(message: Dict[str, Any]) -> List[str]:
+    role = message.get("role") or "message"
+    msg_id = message.get("msg_id") or "(no msg_id)"
+    seq = message.get("event_seq")
+    title = f"### {role} {msg_id}"
+    if seq is not None:
+        title += f" (event_seq={seq})"
+    lines = [title, ""]
+    content = _message_text_for_context_file(message.get("content", ""))
+    lines.append(content)
+    lines.append("")
+    return lines
+
+
+def _write_repl_thread_context_files(db: ThreadsDB, thread_id: str, context: Dict[str, Any]) -> Dict[str, str]:
+    """Write regenerated JSONL/Markdown REPL context caches.
+
+    These files deliberately contain the already-built consumer-facing context,
+    not raw event-log data, so the same hidden/no_api and tool-output filtering
+    used by ``build_repl_thread_context`` applies to file-backed workflows.
+    """
+
+    cache_dir = _repl_context_cache_dir(db, thread_id)
+    jsonl_path = cache_dir / "thread_context.jsonl"
+    markdown_path = cache_dir / "thread_context.md"
+
+    records: List[Dict[str, Any]] = []
+    thread_meta = context.get("thread") if isinstance(context.get("thread"), dict) else {}
+    records.append({"type": "thread", **dict(thread_meta)})
+    for compaction in context.get("compactions", []) if isinstance(context.get("compactions"), list) else []:
+        if isinstance(compaction, dict):
+            records.append({"type": "compaction", **compaction})
+    for message in context.get("all_messages", []) if isinstance(context.get("all_messages"), list) else []:
+        if isinstance(message, dict):
+            records.append({"type": "message", **message})
+    jsonl_text = "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records)
+
+    lines: List[str] = ["# Thread context", ""]
+    lines.append(f"Thread: `{thread_id}`")
+    loaded_seq = thread_meta.get("loaded_through_event_seq") if isinstance(thread_meta, dict) else None
+    if loaded_seq is not None:
+        lines.append(f"Loaded through event seq: `{loaded_seq}`")
+    note = thread_meta.get("visibility_note") if isinstance(thread_meta, dict) else None
+    if note:
+        lines.extend(["", f"> {note}"])
+    how_to_use = context.get("how_to_use")
+    if how_to_use:
+        lines.extend(["", "## How to use", "", str(how_to_use)])
+    compactions = context.get("compactions") if isinstance(context.get("compactions"), list) else []
+    if compactions:
+        lines.extend(["", "## Compactions", ""])
+        for item in compactions:
+            if not isinstance(item, dict):
+                continue
+            current = " current" if item.get("is_current") else ""
+            lines.append(
+                f"- marker_event_seq={item.get('marker_event_seq')} starts_at={item.get('current_prompt_starts_at_msg_id')}"
+                f" selector={item.get('selector_used')} created_by={item.get('created_by')}{current}"
+            )
+    sections = [
+        ("Current prompt messages", context.get("current_prompt_messages")),
+        ("Older messages not in prompt", context.get("older_messages_not_in_prompt")),
+        ("All usable messages", context.get("all_messages")),
+    ]
+    for title, messages in sections:
+        if not isinstance(messages, list):
+            continue
+        lines.extend(["", f"## {title}", ""])
+        if not messages:
+            lines.append("(none)")
+            continue
+        for message in messages:
+            if isinstance(message, dict):
+                lines.extend(_format_context_message_for_markdown(message))
+    markdown_text = "\n".join(lines).rstrip() + "\n"
+
+    _atomic_write_text(jsonl_path, jsonl_text)
+    _atomic_write_text(markdown_path, markdown_text)
+    files = {
+        "jsonl_path": str(jsonl_path),
+        "markdown_path": str(markdown_path),
+    }
+    context["context_files"] = files
+    return files
+
+
+def _message_search_blob(message: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for key in ("msg_id", "role", "name", "tool_call_id"):
+        value = message.get(key)
+        if value is not None:
+            parts.append(str(value))
+    parts.append(_message_text_for_context_file(message.get("content", "")))
+    return "\n".join(parts).lower()
+
+
+def _coerce_context_seq(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _load_repl_thread_context(db_path: str, thread_id: str) -> Dict[str, Any]:
+    from .api import build_repl_thread_context
+
+    db = ThreadsDB(db_path)
+    context = build_repl_thread_context(db, thread_id)
+    try:
+        _write_repl_thread_context_files(db, thread_id, context)
+    except Exception as e:
+        # File-backed context is a convenience cache.  Keep REPL hydration
+        # usable even if the filesystem is read-only or otherwise unavailable.
+        context.setdefault("context_files", {})
+        if isinstance(context.get("context_files"), dict):
+            context["context_files"].setdefault("error", f"{type(e).__name__}: {e}")
+    return context
+
+
+def _install_repl_thread_context(globs: Dict[str, Any], context: Dict[str, Any], *, db_path: str, thread_id: str) -> None:
+    """Install thread-context variables and helpers into a Python REPL namespace."""
+
+    def reload_thread_context() -> Dict[str, Any]:
+        fresh = _load_repl_thread_context(db_path, thread_id)
+        _install_repl_thread_context(globs, fresh, db_path=db_path, thread_id=thread_id)
+        return fresh
+
+    def _current_context() -> Dict[str, Any]:
+        current = globs.get("thread_context")
+        if isinstance(current, dict):
+            return current
+        return reload_thread_context()
+
+    def search_thread(query: Any, role: Any = None, in_prompt: Any = None) -> List[Dict[str, Any]]:
+        """Search hydrated thread messages by text, optionally filtering role/prompt membership."""
+
+        ctx = _current_context()
+        if in_prompt is True:
+            messages = ctx.get("current_prompt_messages", [])
+        elif in_prompt is False:
+            messages = ctx.get("older_messages_not_in_prompt", [])
+        else:
+            messages = ctx.get("all_messages", [])
+        if not isinstance(messages, list):
+            messages = []
+        query_text = str(query or "").lower()
+        role_filter: Optional[set[str]] = None
+        if role is not None:
+            if isinstance(role, (list, tuple, set)):
+                role_filter = {str(item) for item in role}
+            else:
+                role_filter = {str(role)}
+        out: List[Dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if role_filter is not None and str(message.get("role")) not in role_filter:
+                continue
+            if query_text and query_text not in _message_search_blob(message):
+                continue
+            out.append(message)
+        return out
+
+    def get_message(msg_id: Any) -> Optional[Dict[str, Any]]:
+        """Return one hydrated message by exact msg_id, or None."""
+
+        ctx = _current_context()
+        by_id = ctx.get("messages_by_id") if isinstance(ctx, dict) else None
+        if not isinstance(by_id, dict):
+            return None
+        return by_id.get(str(msg_id))
+
+    def print_message(msg_id: Any) -> None:
+        """Print one hydrated message with a compact header and its exact content."""
+
+        message = get_message(msg_id)
+        if message is None:
+            print(f"Message not found: {msg_id}")
+            return None
+        header_parts = [str(message.get("role") or "message")]
+        if message.get("msg_id") is not None:
+            header_parts.append(str(message.get("msg_id")))
+        if message.get("event_seq") is not None:
+            header_parts.append(f"event_seq={message.get('event_seq')}")
+        print("[" + " ".join(header_parts) + "]")
+        print(_message_text_for_context_file(message.get("content", "")))
+        return None
+
+    globs["thread_context"] = context
+    globs["all_messages"] = context.get("all_messages", [])
+    globs["current_prompt_messages"] = context.get("current_prompt_messages", [])
+    globs["older_messages_not_in_prompt"] = context.get("older_messages_not_in_prompt", [])
+    globs["messages_by_id"] = context.get("messages_by_id", {})
+    messages_by_role = context.get("messages_by_role", {}) if isinstance(context.get("messages_by_role"), dict) else {}
+    globs["messages_by_role"] = messages_by_role
+    globs["system_messages"] = messages_by_role.get("system", [])
+    globs["user_messages"] = messages_by_role.get("user", [])
+    globs["assistant_messages"] = messages_by_role.get("assistant", [])
+    globs["tool_messages"] = messages_by_role.get("tool", [])
+    globs["compactions"] = context.get("compactions", [])
+    globs["context_files"] = context.get("context_files", {})
+    globs["search_thread"] = search_thread
+    globs["get_message"] = get_message
+    globs["print_message"] = print_message
+    globs["reload_thread_context"] = reload_thread_context
+    loaded_seq = None
+    thread_meta = context.get("thread") if isinstance(context.get("thread"), dict) else {}
+    if isinstance(thread_meta, dict):
+        loaded_seq = _coerce_context_seq(thread_meta.get("loaded_through_event_seq"))
+    globs["_egg_thread_context_meta"] = {
+        "db_path": str(db_path),
+        "thread_id": str(thread_id),
+        "loaded_through_event_seq": loaded_seq,
+    }
+
+
+def _hydrate_python_repl_thread_context(globs: Dict[str, Any], eval_token: Optional[str]) -> None:
+    """Refresh the Python REPL's thread_context variables when needed."""
+
+    if not eval_token:
+        return
+    try:
+        from .repl_bridge import resolve_eval_context
+
+        eval_ctx = resolve_eval_context(eval_token)
+        db_path = str(eval_ctx.db_path)
+        thread_id = str(eval_ctx.caller_thread_id)
+        db = ThreadsDB(db_path)
+        current_seq = db.max_event_seq(thread_id)
+        meta = globs.get("_egg_thread_context_meta") if isinstance(globs.get("_egg_thread_context_meta"), dict) else {}
+        existing = globs.get("thread_context")
+        loaded_seq = _coerce_context_seq(meta.get("loaded_through_event_seq")) if isinstance(meta, dict) else None
+        existing_thread_id = meta.get("thread_id") if isinstance(meta, dict) else None
+        existing_db_path = meta.get("db_path") if isinstance(meta, dict) else None
+        needs_rebuild = (
+            not isinstance(existing, dict)
+            or str(existing_thread_id or "") != thread_id
+            or str(existing_db_path or "") != db_path
+            or loaded_seq != int(current_seq)
+        )
+        if needs_rebuild:
+            context = _load_repl_thread_context(db_path, thread_id)
+        else:
+            context = existing
+            if not isinstance(context.get("context_files"), dict) or not context.get("context_files"):
+                try:
+                    _write_repl_thread_context_files(db, thread_id, context)
+                except Exception:
+                    pass
+        _install_repl_thread_context(globs, context, db_path=db_path, thread_id=thread_id)
+        globs.pop("_egg_thread_context_error", None)
+    except Exception as e:
+        # Hydration should not make the REPL itself unusable.  Keep a compact
+        # diagnostic in the namespace for explicit debugging without printing it
+        # into every eval result.
+        globs["_egg_thread_context_error"] = f"{type(e).__name__}: {e}"
 
 
 def _append_runtime_repl_message(
@@ -1420,6 +1734,7 @@ def _execute_python_memory(session_id: str, repl_name: str, code: str, *, eval_t
 
     key = (session_id, repl_name)
     globs = _MEMORY_PYTHON_REPLS.setdefault(key, {"__name__": "__egg_repl__"})
+    _hydrate_python_repl_thread_context(globs, eval_token)
     old_eggtools = sys.modules.get("eggtools")
     if eval_token:
         eggtools_mod = _make_eggtools_module(eval_token)

@@ -16,3 +16,5 @@ node_modules/
 *.swp
 *.swo
 *.swn
+
+.egg_thread_context/

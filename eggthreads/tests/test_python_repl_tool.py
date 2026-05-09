@@ -63,6 +63,104 @@ def test_python_repl_tool_registered():
     assert "session_stop" in names
 
 
+def test_python_repl_tool_schema_mentions_hydrated_thread_context():
+    tools = ts.create_default_tools()
+    spec = {spec["function"]["name"]: spec for spec in tools.tools_spec()}["python_repl"]["function"]
+    description = spec["description"]
+
+    assert "thread_context" in description
+    assert "older_messages_not_in_prompt" in description
+    assert "search_thread" in description
+    assert "get_message" in description
+    assert "reload_thread_context" in description
+    assert "hidden/local-only content is excluded" in description
+
+
+def test_python_repl_hydrates_thread_context_aliases_helpers_and_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    old = ts.append_message(db, parent, "user", "old visible context")
+    summary = ts.append_message(db, parent, "assistant", "compact summary")
+    current = ts.append_message(db, parent, "user", "current question")
+    hidden = ts.append_message(db, parent, "user", "hidden secret", extra={"no_api": True})
+    result = ts.commit_thread_compaction(db, parent, summary, created_by="test")
+    assert result.success is True
+    ts.enable_thread_session(db, parent, provider="memory")
+
+    code = (
+        f"print(thread_context['thread']['thread_id'] == {parent!r})\n"
+        "print([m['msg_id'] for m in all_messages])\n"
+        "print([m['msg_id'] for m in older_messages_not_in_prompt])\n"
+        "print([m['msg_id'] for m in current_prompt_messages])\n"
+        f"print(messages_by_id[{old!r}]['content'])\n"
+        "print([m['msg_id'] for m in user_messages])\n"
+        "print(search_thread('old', role='user', in_prompt=False)[0]['msg_id'])\n"
+        f"print(get_message({summary!r})['content'])\n"
+        "print(callable(print_message), callable(reload_thread_context))\n"
+        "print('jsonl_path' in context_files and 'markdown_path' in context_files)\n"
+        "print('old visible context' in open(context_files['markdown_path'], encoding='utf-8').read())\n"
+        "thread_context['all_messages'] = []\n"
+        "print(len(reload_thread_context()['all_messages']))\n"
+        f"print({hidden!r} in messages_by_id)\n"
+    )
+    out = ts.execute_python_repl(db, parent, code, timeout_sec=5)
+
+    assert "Traceback" not in out
+    assert "True" in out
+    assert repr([old, summary, current]) in out
+    assert repr([old]) in out
+    assert repr([summary, current]) in out
+    assert "old visible context" in out
+    assert repr([old, current]) in out
+    assert summary in out
+    assert "3" in out  # reload_thread_context rebuilt the three visible messages
+    assert "False" in out  # hidden message id is not in messages_by_id
+    assert "jsonl_path" not in out  # only printed as a boolean, not full context
+    jsonl = tmp_path / ".egg_thread_context" / parent / "thread_context.jsonl"
+    markdown = tmp_path / ".egg_thread_context" / parent / "thread_context.md"
+    assert jsonl.exists()
+    assert markdown.exists()
+    jsonl_text = jsonl.read_text(encoding="utf-8")
+    markdown_text = markdown.read_text(encoding="utf-8")
+    assert old in jsonl_text
+    assert "old visible context" in markdown_text
+    assert hidden not in jsonl_text
+    assert hidden not in ts.build_repl_thread_context(db, parent)["messages_by_id"]
+
+
+def test_python_repl_thread_context_rebuilds_when_event_seq_is_stale(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    first = ts.append_message(db, parent, "user", "first")
+    ts.enable_thread_session(db, parent, provider="memory")
+
+    out1 = ts.execute_python_repl(
+        db,
+        parent,
+        "print(thread_context['thread']['loaded_through_event_seq'])\nprint([m['msg_id'] for m in all_messages])",
+        timeout_sec=5,
+    )
+    seq1 = db.max_event_seq(parent)
+    assert "Traceback" not in out1
+    assert str(seq1) in out1
+    assert repr([first]) in out1
+
+    second = ts.append_message(db, parent, "assistant", "second")
+    out2 = ts.execute_python_repl(
+        db,
+        parent,
+        "print(thread_context['thread']['loaded_through_event_seq'])\nprint([m['msg_id'] for m in all_messages])",
+        timeout_sec=5,
+    )
+    seq2 = db.max_event_seq(parent)
+    assert "Traceback" not in out2
+    assert str(seq2) in out2
+    assert repr([first, second]) in out2
+    assert seq2 > seq1
+
+
 def test_shared_session_uses_separate_repl_channel_by_default(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")

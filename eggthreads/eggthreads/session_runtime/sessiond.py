@@ -15,7 +15,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 
 PY_REPLS: Dict[str, Dict[str, Any]] = {}
@@ -44,8 +44,114 @@ def format_bash_output(output_text: str) -> str:
     return f"--- STDOUT ---\n{output_text}" if output_text else "--- The Bash REPL executed successfully and produced no output ---"
 
 
-def execute_python(code: str, repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) -> str:
+def _message_text_for_context_file(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value)
+
+
+def _message_search_blob(message: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for key in ("msg_id", "role", "name", "tool_call_id"):
+        value = message.get(key)
+        if value is not None:
+            parts.append(str(value))
+    parts.append(_message_text_for_context_file(message.get("content", "")))
+    return "\n".join(parts).lower()
+
+
+def install_thread_context_helpers(globs: Dict[str, Any], context: Dict[str, Any]) -> None:
+    def reload_thread_context() -> Dict[str, Any]:
+        # Docker REPL hydration is host-provided per eval.  A fresh eval will
+        # rebuild from the event DB before running user code; within one eval,
+        # keep the current hydrated copy rather than reaching into Egg internals
+        # from inside the container.
+        return globs.get("thread_context", context)
+
+    def _current_context() -> Dict[str, Any]:
+        current = globs.get("thread_context")
+        return current if isinstance(current, dict) else context
+
+    def search_thread(query: Any, role: Any = None, in_prompt: Any = None) -> List[Dict[str, Any]]:
+        ctx = _current_context()
+        if in_prompt is True:
+            messages = ctx.get("current_prompt_messages", [])
+        elif in_prompt is False:
+            messages = ctx.get("older_messages_not_in_prompt", [])
+        else:
+            messages = ctx.get("all_messages", [])
+        if not isinstance(messages, list):
+            messages = []
+        query_text = str(query or "").lower()
+        role_filter: Optional[set[str]] = None
+        if role is not None:
+            if isinstance(role, (list, tuple, set)):
+                role_filter = {str(item) for item in role}
+            else:
+                role_filter = {str(role)}
+        out: List[Dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if role_filter is not None and str(message.get("role")) not in role_filter:
+                continue
+            if query_text and query_text not in _message_search_blob(message):
+                continue
+            out.append(message)
+        return out
+
+    def get_message(msg_id: Any) -> Optional[Dict[str, Any]]:
+        ctx = _current_context()
+        by_id = ctx.get("messages_by_id") if isinstance(ctx, dict) else None
+        if not isinstance(by_id, dict):
+            return None
+        return by_id.get(str(msg_id))
+
+    def print_message(msg_id: Any) -> None:
+        message = get_message(msg_id)
+        if message is None:
+            print(f"Message not found: {msg_id}")
+            return None
+        header_parts = [str(message.get("role") or "message")]
+        if message.get("msg_id") is not None:
+            header_parts.append(str(message.get("msg_id")))
+        if message.get("event_seq") is not None:
+            header_parts.append(f"event_seq={message.get('event_seq')}")
+        print("[" + " ".join(header_parts) + "]")
+        print(_message_text_for_context_file(message.get("content", "")))
+        return None
+
+    globs["thread_context"] = context
+    globs["all_messages"] = context.get("all_messages", [])
+    globs["current_prompt_messages"] = context.get("current_prompt_messages", [])
+    globs["older_messages_not_in_prompt"] = context.get("older_messages_not_in_prompt", [])
+    globs["messages_by_id"] = context.get("messages_by_id", {})
+    messages_by_role = context.get("messages_by_role", {}) if isinstance(context.get("messages_by_role"), dict) else {}
+    globs["messages_by_role"] = messages_by_role
+    globs["system_messages"] = messages_by_role.get("system", [])
+    globs["user_messages"] = messages_by_role.get("user", [])
+    globs["assistant_messages"] = messages_by_role.get("assistant", [])
+    globs["tool_messages"] = messages_by_role.get("tool", [])
+    globs["compactions"] = context.get("compactions", [])
+    globs["context_files"] = context.get("context_files", {})
+    globs["search_thread"] = search_thread
+    globs["get_message"] = get_message
+    globs["print_message"] = print_message
+    globs["reload_thread_context"] = reload_thread_context
+
+
+def execute_python(code: str, repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path, thread_context_json: str | None = None) -> str:
     globs = PY_REPLS.setdefault(repl_name or "default", {"__name__": "__egg_repl__"})
+    if thread_context_json:
+        try:
+            context = json.loads(thread_context_json)
+            if isinstance(context, dict):
+                install_thread_context_helpers(globs, context)
+        except Exception:
+            pass
     sys.path.insert(0, str(runtime_dir)) if str(runtime_dir) not in sys.path else None
     old_bridge = os.environ.get("EGG_BRIDGE_DIR")
     old_token = os.environ.get("EGG_EVAL_TOKEN")
@@ -164,6 +270,7 @@ def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) ->
                 bridge_dir,
                 str(payload.get("token") or ""),
                 runtime_dir,
+                str(payload.get("thread_context_json") or "") or None,
             )
         elif language == "bash":
             output = execute_bash(

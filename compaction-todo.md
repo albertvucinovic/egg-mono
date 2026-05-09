@@ -611,25 +611,26 @@ Goal: make the hydrated REPL context the primary way for the LLM to inspect full
   - Group by role and expose message ids/event seqs/timestamps/content.
   - Internally obey normal visibility rules: hidden/local-only content is excluded, deleted/skipped messages are excluded, and tool output is sanitized consistently with API context.
   - Do not use internal-facing names like `effective_compaction` in the consumer-visible structure.
-- [ ] Add REPL hydration for compacted threads, and for all threads if cheap enough.
+- [x] Add REPL hydration for compacted threads, and for all threads if cheap enough.
   - Inject `thread_context` plus convenience aliases into Python REPL state.
   - Inject helper functions: `search_thread`, `get_message`, `print_message`, `reload_thread_context`.
   - Rebuild if stale based on max event seq; optimize later only if needed.
   - Write JSONL/Markdown cache files and expose their paths in `context_files`.
-- [ ] Add instructions for using hydrated REPL context.
+- [x] Add instructions for using hydrated REPL context.
   - Tell the model to use `python_repl` for exact transcript details when needed.
   - Mention the obvious variable/function names, not implementation internals.
   - Do not overemphasize provider-safety language to the LLM; say hidden/local-only content is excluded.
-- [ ] Add tests.
+- [x] Add tests.
   - Hydrated context includes visible old and current messages.
   - `older_messages_not_in_prompt` contains pre-start messages after compaction.
   - `current_prompt_messages` matches current compacted API context.
   - `messages_by_role` and aliases include user/assistant/tool groupings.
   - Hidden/`no_api` content is excluded.
   - `/continue` before compaction removes continued-away messages/markers from the hydrated current view.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
+- 2026-05-09 23:30 UTC: Added automatic Python REPL hydration using `build_repl_thread_context`. In-memory Python REPL evals now refresh `thread_context` when the caller thread max event seq changes, install convenience aliases (`all_messages`, `current_prompt_messages`, `older_messages_not_in_prompt`, role group aliases, `compactions`, `context_files`), and inject `search_thread`, `get_message`, `print_message`, and `reload_thread_context`. Hydration writes regenerated JSONL/Markdown cache files under `.egg_thread_context/<thread_id>/` and exposes their paths; Docker REPL evals receive the same hydrated context in their request payload with cache paths mapped to the workspace when possible. The `python_repl` tool description now points models to the hydrated variables/functions for exact transcript details and says hidden/local-only content is excluded. Focused tests added for schema guidance, in-memory hydration aliases/helpers/files, and stale max-event-seq rebuilds. Tests passed: `pytest -q eggthreads/tests/test_python_repl_tool.py`; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 8 REPL hydration change. Next: Phase 9 UI compaction markers and human diagnostics.
 - 2026-05-09 23:25 UTC: Added the small consumer-friendly REPL context builder slice only. `build_repl_thread_context(db, thread_id)` now returns full usable effective transcript data, current compacted prompt messages, older usable messages omitted by compaction, `messages_by_id`, `messages_by_role`, effective compaction marker summaries with `is_current`, empty/deferred `context_files`, and `how_to_use`; it excludes hidden/no_api and continued-away messages and reuses provider compaction filtering/sanitization for current prompt content. No automatic REPL hydration, aliases, helper injection, or context files were wired in this slice. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py`; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py`. Commit: this Phase 8 builder change. Next: add REPL hydration/injected aliases/helpers as a separate slice.
 - 2026-05-09 23:07 UTC: Removed redundant model-visible compaction source/status tools per the revised Phase 8 plan. `CompactionPlugin` now registers only `compact_thread`; local API/source helper code for `show_compaction_start`, `search_compaction_sources`, and `fetch_compaction_source` was removed instead of kept as a parallel retrieval surface; public exports were cleaned up; focused tests were updated to assert generated `eggtools` wrappers include `compact_thread` and exclude the removed helpers. No REPL hydration was implemented. Tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_repl_dynamic_tool_wrappers.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 8 removal change.
 - 2026-05-09: Design revision after initial Phase 8 slices: model-visible `show_compaction_start`, `search_compaction_sources`, and `fetch_compaction_source` are now considered redundant with the desired hydrated REPL context and should be removed from default tools. Historical notes below describe already-committed work that should be superseded by the new plan.

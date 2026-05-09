@@ -393,7 +393,16 @@ def register_session_commands(registry: Any) -> None:
 def register_session_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="python_repl",
-        description="Execute Python code in this thread's persistent Python REPL session.",
+        description=(
+            "Execute Python code in this thread's persistent Python REPL session. "
+            "The REPL is automatically hydrated with thread_context plus aliases "
+            "all_messages, current_prompt_messages, older_messages_not_in_prompt, "
+            "messages_by_id, messages_by_role, user_messages, assistant_messages, "
+            "tool_messages, compactions, and context_files. Use search_thread(query, "
+            "role=None, in_prompt=None), get_message(msg_id), print_message(msg_id), "
+            "and reload_thread_context() when exact transcript details are needed; "
+            "hidden/local-only content is excluded."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
