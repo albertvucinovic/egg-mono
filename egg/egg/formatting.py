@@ -5,7 +5,14 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Set
 
-from eggthreads import list_children_with_meta, list_root_threads, list_threads, get_thread_status, get_thread_statuses_bulk
+from eggthreads import (
+    COMPACTION_EVENT_TYPE,
+    list_children_with_meta,
+    list_root_threads,
+    list_threads,
+    get_thread_status,
+    get_thread_statuses_bulk,
+)
 
 from .utils import snapshot_messages
 
@@ -153,13 +160,83 @@ class FormattingMixin:
             lines.extend(render_tree(rid))
         return "\n".join(lines)
 
+    def _compaction_marker_text(self, marker: Dict[str, Any]) -> str:
+        """Return the textual transcript divider for a compaction event."""
+        start_msg_id = str(marker.get('start_msg_id') or '')
+        start_event_seq = marker.get('start_event_seq')
+        selector = str(marker.get('selector') or '')
+        created_by = str(marker.get('created_by') or '')
+        event_seq = marker.get('event_seq')
+
+        start_short = start_msg_id[-8:] if start_msg_id else 'unknown'
+        details: List[str] = []
+        if event_seq is not None:
+            details.append(f"marker #{event_seq}")
+        if start_event_seq is not None:
+            details.append(f"start event #{start_event_seq}")
+        if selector:
+            details.append(f"selector {selector}")
+        if created_by:
+            details.append(f"by {created_by}")
+        detail_text = f" ({'; '.join(details)})" if details else ""
+        return (
+            "────────────────────────────────────────────────────────\n"
+            f"Compaction boundary: API context now starts at msg_{start_short}{detail_text}.\n"
+            "Earlier messages remain visible in the UI/raw history.\n"
+            "────────────────────────────────────────────────────────"
+        )
+
+    def _compaction_markers_by_start_seq(self, thread_id: str) -> Dict[int, List[Dict[str, Any]]]:
+        """Return raw compaction markers keyed by their start message event sequence."""
+        try:
+            cur = self.db.conn.execute(
+                "SELECT event_seq, ts, payload_json FROM events "
+                "WHERE thread_id=? AND type=? ORDER BY event_seq ASC",
+                (thread_id, COMPACTION_EVENT_TYPE),
+            )
+        except Exception:
+            return {}
+
+        markers: Dict[int, List[Dict[str, Any]]] = {}
+        for row in cur.fetchall():
+            try:
+                payload = json.loads(row['payload_json']) if isinstance(row['payload_json'], str) else (row['payload_json'] or {})
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            try:
+                start_seq = int(payload.get('start_event_seq'))
+            except Exception:
+                continue
+            marker = dict(payload)
+            try:
+                marker['event_seq'] = int(row['event_seq'])
+            except Exception:
+                marker['event_seq'] = row['event_seq']
+            marker['ts'] = row['ts']
+            markers.setdefault(start_seq, []).append(marker)
+        return markers
+
     def format_messages_text(self, thread_id: str) -> str:
         """Format all messages in a thread for display."""
         msgs = snapshot_messages(self.db, thread_id)
+        markers_by_start_seq = self._compaction_markers_by_start_seq(thread_id)
         lines: List[str] = []
-        if not msgs:
+        if not msgs and not markers_by_start_seq:
             return "No messages yet."
+        emitted_marker_keys: Set[tuple[int, int]] = set()
         for m in msgs:
+            try:
+                event_seq_int = int(m.get('event_seq'))
+            except Exception:
+                event_seq_int = -1
+            for marker in markers_by_start_seq.get(event_seq_int, []):
+                key = (event_seq_int, int(marker.get('event_seq') or -1))
+                if key not in emitted_marker_keys:
+                    lines.append(self._compaction_marker_text(marker))
+                    emitted_marker_keys.add(key)
+
             role = m.get('role')
             tps_text = ""
             try:

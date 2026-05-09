@@ -167,10 +167,13 @@ class StreamingMixin:
         ew = EventWatcher(watcher_db, thread_id, after_seq=after_for_watch, poll_sec=0.1)
         async for batch in ew.aiter():
             saw_non_stream_msg = False
+            saw_compaction_marker = False
             for idx, e in enumerate(batch):
                 try:
                     if e["type"] in ("msg.create", "msg.edit", "msg.delete"):
                         saw_non_stream_msg = True
+                    elif e["type"] == "thread.compaction":
+                        saw_compaction_marker = True
                 except Exception:
                     pass
                 await self.ingest_event_for_live(e, thread_id)
@@ -183,30 +186,48 @@ class StreamingMixin:
                 except Exception:
                     pass
 
-            # If we saw message-level events, refresh snapshot to include them
-            if saw_non_stream_msg:
+            # If we saw message-level events or compaction markers, refresh the
+            # snapshot/console transcript.  Compaction markers are non-message
+            # control events, so the UI must explicitly render them without
+            # hiding the surrounding messages.
+            if saw_non_stream_msg or saw_compaction_marker:
                 try:
                     create_snapshot(self.db, self.current_thread)
                 except Exception:
                     pass
-                # Print any new messages to console (above live panel)
+                # Print any new messages and compaction dividers to console
+                # (above live panel), preserving event order.
                 try:
                     last_printed = self._last_printed_seq_by_thread.get(self.current_thread, -1)
                     cur = self.db.conn.execute(
-                        "SELECT event_seq, msg_id, ts, payload_json FROM events WHERE thread_id=? AND event_seq>? AND type='msg.create' ORDER BY event_seq ASC",
+                        "SELECT event_seq, type, msg_id, ts, payload_json FROM events "
+                        "WHERE thread_id=? AND event_seq>? AND type IN ('msg.create', 'thread.compaction') "
+                        "ORDER BY event_seq ASC",
                         (self.current_thread, last_printed)
                     )
                     rows = cur.fetchall()
-                    for ev_seq, msg_id, ts, pj in rows:
+                    for row in rows:
                         try:
-                            m = json.loads(pj) if isinstance(pj, str) else (pj or {})
-                            if isinstance(m, dict):
-                                # Ensure msg_id and ts are propagated so
-                                # console titles can display them.
-                                m.setdefault('msg_id', msg_id)
+                            ev_seq = int(row['event_seq'])
+                            typ = row['type']
+                            msg_id = row['msg_id']
+                            ts = row['ts']
+                            pj = row['payload_json']
+                            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+                            if typ == 'thread.compaction':
+                                marker = dict(payload) if isinstance(payload, dict) else {}
+                                marker.setdefault('event_seq', ev_seq)
                                 if ts is not None:
-                                    m.setdefault('ts', ts)
-                                self.console_print_message(m)
+                                    marker.setdefault('ts', ts)
+                                self.console_print_compaction_marker(marker)
+                            elif isinstance(payload, dict):
+                                # Ensure msg_id, ts, and event_seq are propagated so
+                                # console titles can display them.
+                                payload.setdefault('msg_id', msg_id)
+                                payload.setdefault('event_seq', ev_seq)
+                                if ts is not None:
+                                    payload.setdefault('ts', ts)
+                                self.console_print_message(payload)
                             self._last_printed_seq_by_thread[self.current_thread] = ev_seq
                         except Exception:
                             pass

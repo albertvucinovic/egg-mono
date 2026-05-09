@@ -10,6 +10,7 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 
 from eggthreads import (
+    COMPACTION_EVENT_TYPE,
     SnapshotBuilder,
     ThreadsDB,
     append_message,
@@ -22,6 +23,36 @@ from .. import core
 from ..core import ensure_scheduler_for, get_thread_root_id
 
 router = APIRouter(prefix="/api/threads", tags=["messages"])
+
+
+def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> MessageContent:
+    marker_id = f"compaction-{marker.get('marker_event_seq') or fallback_start_seq}"
+    start_msg_id = str(marker.get("start_msg_id") or "")
+    start_short = start_msg_id[-8:] if start_msg_id else "unknown"
+    detail_parts = []
+    if marker.get("marker_event_seq") is not None:
+        detail_parts.append(f"marker #{marker.get('marker_event_seq')}")
+    if marker.get("start_event_seq") is not None:
+        detail_parts.append(f"start event #{marker.get('start_event_seq')}")
+    if marker.get("selector"):
+        detail_parts.append(f"selector {marker.get('selector')}")
+    if marker.get("created_by"):
+        detail_parts.append(f"by {marker.get('created_by')}")
+    details = f" ({'; '.join(detail_parts)})" if detail_parts else ""
+    return MessageContent(
+        id=marker_id,
+        role="compaction_marker",
+        kind="compaction_marker",
+        content=(
+            f"Compaction boundary: API context now starts at msg_{start_short}{details}. "
+            "Earlier messages remain visible in the UI/raw history."
+        ),
+        start_msg_id=start_msg_id or None,
+        start_event_seq=marker.get("start_event_seq"),
+        marker_event_seq=marker.get("marker_event_seq"),
+        selector=marker.get("selector"),
+        created_by=marker.get("created_by"),
+    )
 
 
 def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
@@ -53,9 +84,54 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
         except:
             pass
 
+    raw_compactions = []
+    for row in events:
+        try:
+            typ = row["type"]
+        except Exception:
+            typ = row[2] if len(row) > 2 else None
+        if typ != COMPACTION_EVENT_TYPE:
+            continue
+        try:
+            payload_json = row["payload_json"]
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        try:
+            marker_event_seq = int(row["event_seq"])
+        except Exception:
+            marker_event_seq = None
+        try:
+            start_event_seq = int(payload.get("start_event_seq"))
+        except Exception:
+            start_event_seq = None
+        raw_compactions.append({
+            "marker_event_seq": marker_event_seq,
+            "start_event_seq": start_event_seq,
+            "start_msg_id": payload.get("start_msg_id"),
+            "selector": payload.get("selector"),
+            "created_by": payload.get("created_by"),
+        })
+
+    markers_by_start_seq = {}
+    for marker in raw_compactions:
+        start_seq = marker.get("start_event_seq")
+        if isinstance(start_seq, int):
+            markers_by_start_seq.setdefault(start_seq, []).append(marker)
+
     messages = []
     for msg in snap.get("messages", []):
         msg_id = msg.get("msg_id", "")
+
+        try:
+            msg_event_seq = int(msg.get("event_seq"))
+        except Exception:
+            msg_event_seq = None
+        if msg_event_seq is not None:
+            for marker in markers_by_start_seq.get(msg_event_seq, []):
+                messages.append(_compaction_marker_message(marker, msg_event_seq))
 
         # Get per-message token count from cached stats
         pm_info = per_message_tokens.get(msg_id, {}) if msg_id else {}

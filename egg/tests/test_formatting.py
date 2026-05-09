@@ -125,6 +125,39 @@ class TestFormatMessagesText:
         assert "Hi there!" in text
 
 
+    def test_shows_compaction_marker_without_hiding_history(self, isolated_db):
+        """Chat transcript text should include a divider and keep old messages."""
+        from eggthreads import append_message, commit_thread_compaction, create_root_thread, create_snapshot
+
+        tid = create_root_thread(isolated_db, name="CompactionUI")
+        old = append_message(isolated_db, tid, "user", "old visible history")
+        start = append_message(isolated_db, tid, "assistant", "compact summary")
+        after = append_message(isolated_db, tid, "user", "new question")
+        commit_thread_compaction(isolated_db, tid, start, created_by="test")
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._live_state = {"active_invoke": None, "content": "", "tools": {}, "tc_text": {}, "tc_order": []}
+
+        from egg.formatting import FormattingMixin
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert "old visible history" in text
+        assert "compact summary" in text
+        assert "new question" in text
+        assert "Compaction boundary: API context now starts at msg_" in text
+        assert start[-8:] in text
+        assert text.index("old visible history") < text.index("Compaction boundary") < text.index("compact summary")
+        assert old and after
+
+
 class TestComposeChatPanelText:
     """Tests for compose_chat_panel_text()."""
 

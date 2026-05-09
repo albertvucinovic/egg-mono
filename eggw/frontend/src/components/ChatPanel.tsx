@@ -61,7 +61,42 @@ interface MessageBlockProps {
   showBorders?: boolean;
 }
 
+function CompactionMarker({ message }: { message: Message }) {
+  const startId = message.start_msg_id || "";
+  const startShort = startId.length >= 8 ? startId.slice(-8) : startId;
+  const markerColor = "#ef4444";
+  const details = [
+    message.marker_event_seq ? `marker #${message.marker_event_seq}` : null,
+    message.start_event_seq ? `start event #${message.start_event_seq}` : null,
+    message.selector ? `selector ${message.selector}` : null,
+    message.created_by ? `by ${message.created_by}` : null,
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div className="my-4 flex items-center gap-3" data-testid="compaction-marker">
+      <div className="h-px flex-1" style={{ background: markerColor }} />
+      <div
+        className="rounded-full px-3 py-1 text-xs font-medium text-center"
+        style={{
+          color: markerColor,
+          border: `1px solid ${markerColor}`,
+          background: "rgba(239, 68, 68, 0.10)",
+        }}
+        title={message.content || undefined}
+      >
+        Compaction boundary: API context now starts at {startShort ? `msg_${startShort}` : "the selected message"}
+        {details && <span className="ml-2 font-normal" style={{ color: "var(--muted)" }}>({details})</span>}
+      </div>
+      <div className="h-px flex-1" style={{ background: markerColor }} />
+    </div>
+  );
+}
+
 function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
+  if (message.kind === "compaction_marker" || message.role === "compaction_marker") {
+    return <CompactionMarker message={message} />;
+  }
+
   // Use CSS variables for theme-aware colors
   // Text colors use fallback to --foreground for themes that don't define *-text vars
   const roleStyles: Record<string, React.CSSProperties> = {

@@ -487,6 +487,32 @@ class TestPrintStaticViewCurrent:
         assert egg_app.current_thread in created
 
 
+    def test_prints_compaction_marker_before_start_message(self, egg_app, monkeypatch):
+        """Static transcript prints a red compaction divider and full history."""
+        from eggthreads import append_message, commit_thread_compaction, create_snapshot
+
+        old = append_message(egg_app.db, egg_app.current_thread, "user", "old visible history")
+        start = append_message(egg_app.db, egg_app.current_thread, "assistant", "compact summary")
+        after = append_message(egg_app.db, egg_app.current_thread, "user", "new question")
+        commit_thread_compaction(egg_app.db, egg_app.current_thread, start, created_by="test")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.print_static_view_current()
+
+        titles = [str(getattr(arg, "title", "")) for args, _kw in printed for arg in args]
+        renderables = [getattr(arg, "renderable", None) for args, _kw in printed for arg in args]
+        body = "\n".join(str(getattr(renderable, "plain", renderable or "")) for renderable in renderables)
+        assert any("Compaction Boundary" in title for title in titles)
+        assert "Compaction boundary: API context now starts at msg_" in body
+        assert start[-8:] in body
+        assert any("User" in title for title in titles)
+        assert any("Assistant" in title for title in titles)
+        assert old and after
+
+
 class TestRedrawStaticView:
     """Tests for redraw_static_view()."""
 

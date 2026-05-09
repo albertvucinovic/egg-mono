@@ -644,7 +644,7 @@ Status notes:
 
 Goal: make compaction visible to humans without hiding history.
 
-- [ ] Draw visual compaction borders in the UI transcript.
+- [x] Draw visual compaction borders in the UI transcript.
   - The UI should still show all messages before and after compaction.
   - Render `thread.compaction` markers as a clear horizontal divider, for example a red horizontal line or similarly visible boundary.
   - Include concise text near the divider such as `Compaction boundary: API context now starts at msg_...`.
@@ -654,10 +654,10 @@ Goal: make compaction visible to humans without hiding history.
   - Show current prompt start msg id/event seq and provider-context token estimate if available.
   - This is for humans/debugging, not a default model-visible status tool.
 - [ ] Ensure message ids are visible/copyable enough for `/compact <msg_id>` and `/continue <msg_id>` workflows.
-- [ ] Commit.
+- [x] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09 23:46 UTC: Added the smallest visual marker slice. The terminal transcript formatter now inserts a clear compaction divider before the selected start message while preserving all snapshot messages; static console rendering prints the divider as a red `Compaction Boundary` panel, and the live event watcher notices `thread.compaction` control events so markers appear during active UI watching. The web message API now injects read-only `compaction_marker` transcript items before the start message, and the React chat panel renders them as red horizontal labeled dividers. Existing message-id display/copy behavior was not changed in this slice. Focused tests passed: `pytest -q egg/tests/test_formatting.py egg/tests/test_panels.py eggthreads/tests/test_command_registry.py`; `PYTHONPATH=eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests/test_api.py::TestMessageOperations`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py`; `cd eggw/frontend && npx tsc --noEmit --pretty false`. Commit: this Phase 9 visual-marker slice. Next: verify/improve full message-id copyability, then add `/compactionStatus` human diagnostics if desired.
 
 ## Phase 10 — Hardening and cleanup
 

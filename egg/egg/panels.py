@@ -502,6 +502,19 @@ class PanelsMixin:
             self._system_log = []
         self._system_log.append(msg)
 
+    def console_print_compaction_marker(self, marker: Dict[str, Any]) -> None:
+        """Print a visible compaction boundary divider to the console."""
+        try:
+            text = self._compaction_marker_text(marker)
+        except Exception:
+            start_msg_id = str(marker.get('start_msg_id') or '')
+            start_short = start_msg_id[-8:] if start_msg_id else 'unknown'
+            text = f"Compaction boundary: API context now starts at msg_{start_short}."
+        try:
+            self._live_print(Panel(Text(text, no_wrap=False, overflow='fold', style='bold red'), title='[bold red]Compaction Boundary[/bold red]', border_style='red', box=self._get_static_box()))
+        except Exception:
+            self._live_print(text)
+
     def console_print_message(self, m: Dict[str, Any]) -> None:
         """Print a single message to the console with rich formatting."""
         def fmt_ts(val: Any) -> str:
@@ -723,16 +736,23 @@ class PanelsMixin:
             except Exception:
                 self._live_print(heading)
         msgs = snapshot_messages(self.db, tid)
-        if not msgs:
+        markers_by_start_seq = self._compaction_markers_by_start_seq(tid)
+        if not msgs and not markers_by_start_seq:
             self._live_print(Panel('[dim]No messages yet[/dim]', border_style='blue', box=self._get_static_box()))
         else:
             for m in msgs:
                 if isinstance(m, dict):
+                    try:
+                        event_seq_int = int(m.get('event_seq'))
+                    except Exception:
+                        event_seq_int = -1
+                    for marker in markers_by_start_seq.get(event_seq_int, []):
+                        self.console_print_compaction_marker(marker)
                     self.console_print_message(m)
-        # Update last-printed seq to the latest message event so we don't re-print
+        # Update last-printed seq to the latest rendered transcript event so we don't re-print.
         try:
             row = self.db.conn.execute(
-                "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type='msg.create'",
+                "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type IN ('msg.create', 'thread.compaction')",
                 (tid,)
             ).fetchone()
             last = int(row[0]) if row and row[0] is not None else -1

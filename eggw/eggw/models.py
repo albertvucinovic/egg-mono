@@ -17,10 +17,16 @@ class ThreadInfo(BaseModel):
 
 
 class MessageContent(BaseModel):
-    """A single message in a thread."""
+    """A single message or transcript marker in a thread."""
     id: str
-    role: str  # "user" | "assistant" | "system" | "tool"
+    role: str  # "user" | "assistant" | "system" | "tool" | "compaction_marker"
     content: Optional[str] = None
+    kind: str = "message"
+    start_msg_id: Optional[str] = None
+    start_event_seq: Optional[int] = None
+    marker_event_seq: Optional[int] = None
+    selector: Optional[str] = None
+    created_by: Optional[str] = None
     reasoning: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None

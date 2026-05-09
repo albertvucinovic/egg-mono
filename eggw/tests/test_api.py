@@ -184,6 +184,38 @@ class TestMessageOperations:
         assert len(data) >= 1
         assert any(m["content"] == "Test message" for m in data)
 
+    def test_get_messages_includes_compaction_marker_and_full_history(self, client):
+        """Web transcript API returns a divider marker without hiding old messages."""
+        from eggthreads import append_message, commit_thread_compaction, create_snapshot
+
+        create_resp = client.post("/api/threads", json={"name": "Compaction UI"})
+        thread_id = create_resp.json()["id"]
+
+        old = append_message(core_state.db, thread_id, "user", "old visible history")
+        start = append_message(core_state.db, thread_id, "assistant", "compact summary")
+        after = append_message(core_state.db, thread_id, "user", "new question")
+        commit_thread_compaction(core_state.db, thread_id, start, created_by="test")
+        create_snapshot(core_state.db, thread_id)
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        data = response.json()
+        contents = [m.get("content") for m in data]
+        assert "old visible history" in contents
+        assert "compact summary" in contents
+        assert "new question" in contents
+        markers = [m for m in data if m.get("kind") == "compaction_marker"]
+        assert len(markers) == 1
+        marker = markers[0]
+        assert marker["role"] == "compaction_marker"
+        assert marker["start_msg_id"] == start
+        assert marker["start_event_seq"] is not None
+        assert "Compaction boundary: API context now starts at msg_" in marker["content"]
+        assert start[-8:] in marker["content"]
+        assert [m.get("id") for m in data].index(old) < data.index(marker) < [m.get("id") for m in data].index(start)
+        assert after
+
 
 class TestEventStreaming:
     """Test SSE event shaping for streaming UI clients."""

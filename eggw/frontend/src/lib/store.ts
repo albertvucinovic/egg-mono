@@ -12,6 +12,12 @@ export interface Message {
   id: string;
   role: string;
   content?: string;
+  kind?: string;
+  start_msg_id?: string;
+  start_event_seq?: number;
+  marker_event_seq?: number;
+  selector?: string;
+  created_by?: string;
   reasoning?: string;
   tool_calls?: any[];
   tool_call_id?: string;
