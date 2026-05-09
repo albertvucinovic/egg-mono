@@ -96,6 +96,41 @@ def test_compact_thread_tool_schema_guides_non_spontaneous_use() -> None:
     assert "last_user" in description
 
 
+def test_show_compaction_start_tool_reports_effective_marker(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    start = ts.append_message(db, tid, "assistant", "summary start")
+    result = ts.commit_thread_compaction(db, tid, start, created_by="test")
+    assert result.success is True
+
+    registry = create_tool_registry()
+    out = registry.execute("show_compaction_start", {}, thread_id=tid, db=db)
+    payload = json.loads(out)
+
+    assert payload["thread_id"] == tid
+    assert payload["raw_compaction_count"] == 1
+    assert payload["effective"]["compaction_event_seq"] == result.compaction_event_seq
+    assert payload["effective"]["start_msg_id"] == start
+    assert payload["effective"]["start_event_seq"] == result.start_event_seq
+    assert payload["effective"]["start_message"]["role"] == "assistant"
+    assert payload["effective"]["start_message"]["content_preview"] == "summary start"
+    assert old
+
+
+def test_show_compaction_start_ignores_continued_away_marker(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    start = ts.append_message(db, tid, "assistant", "summary")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.continue_thread(db, tid, old)
+
+    status = ts.show_compaction_start(db, tid)
+
+    assert status["raw_compaction_count"] == 1
+    assert status["latest_raw_compaction_event_seq"] is not None
+    assert status["effective"] is None
+
+
 def test_compact_command_uses_core_helper(tmp_path):
     db, tid = _new_thread(tmp_path)
     user = ts.append_message(db, tid, "user", "hello")

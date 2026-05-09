@@ -102,6 +102,7 @@ from .api import (
     list_thread_compactions,
     maybe_auto_compact_thread,
     resolve_compaction_start_message,
+    show_compaction_start,
     is_thread_continuable,
     # Thread diagnosis
     ThreadDiagnosis,
@@ -272,7 +273,7 @@ __all__ = [
     'COMPACTION_EVENT_TYPE', 'AutoCompactionResult', 'CompactionCommitResult', 'CompactionStartResolution',
     'commit_thread_compaction', 'current_effective_compaction_start_event_seq',
     'latest_effective_thread_compaction', 'latest_thread_compaction', 'list_thread_compactions', 'resolve_compaction_start_message',
-    'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread',
+    'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread', 'show_compaction_start',
     # Thread diagnosis
     'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text',
     # Thread scheduling API

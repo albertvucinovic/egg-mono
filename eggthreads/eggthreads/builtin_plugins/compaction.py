@@ -32,6 +32,22 @@ def compact_thread_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     return result.message
 
 
+def show_compaction_start_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
+    """Report the effective compaction start without changing thread state."""
+
+    import json
+
+    from ..api import show_compaction_start
+    from ..db import ThreadsDB
+
+    thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
+    if not thread_id:
+        return "Error: show_compaction_start requires a calling thread."
+
+    db = ctx.db if ctx.db is not None else ThreadsDB()
+    return json.dumps(show_compaction_start(db, thread_id), ensure_ascii=False, indent=2)
+
+
 def compact_thread_command(context: Any, arg: str):
     from ..api import commit_thread_compaction
     from ..command_catalog import CommandResult
@@ -82,6 +98,17 @@ def register_compaction_tool(registry: ToolRegistry) -> None:
         compact_thread_tool,
         accepts_context=True,
     )
+    registry.register(
+        "show_compaction_start",
+        (
+            "Read-only status for this thread's current effective compaction start. "
+            "Shows the compaction marker, start message id/event seq, and a bounded "
+            "preview of the start message. It does not fetch old pre-compaction history."
+        ),
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        show_compaction_start_tool,
+        accepts_context=True,
+    )
 
 
 def register_compaction_commands(registry: Any) -> None:
@@ -116,4 +143,5 @@ __all__ = [
     "compact_thread_tool",
     "register_compaction_commands",
     "register_compaction_tool",
+    "show_compaction_start_tool",
 ]

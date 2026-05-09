@@ -508,7 +508,7 @@ Status notes:
 
 Goal: let the LLM recover older details without sending the full old transcript by default.
 
-- [ ] Add `show_compaction_start` or equivalent helper if useful.
+- [x] Add `show_compaction_start` or equivalent helper if useful.
   - It can report the latest compaction start message and marker.
 - [ ] Add source search/fetch helpers over pre-start history.
   - Must skip `no_api`/hidden content by default.
@@ -524,7 +524,7 @@ Goal: let the LLM recover older details without sending the full old transcript 
 - [ ] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-09 21:52 UTC: First slice only. Added read-only `show_compaction_start(...)` helper plus model-visible `show_compaction_start` tool. It reports raw compaction count/latest raw marker, latest effective compaction marker, start message id/event seq, selector/created_by, and a bounded start-message preview. It does not fetch/search old pre-compaction history and does not mutate the thread. Focused tests passed: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 8 first-slice change.
 
 ## Phase 9 — UI/status and diagnostics
 

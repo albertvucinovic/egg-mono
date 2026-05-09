@@ -735,6 +735,58 @@ def latest_effective_thread_compaction(db: ThreadsDB, thread_id: str) -> Optiona
     return None
 
 
+def show_compaction_start(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
+    """Return read-only status for the current effective compaction start."""
+
+    raw_compactions = list_thread_compactions(db, thread_id)
+    effective = latest_effective_thread_compaction(db, thread_id)
+    status: Dict[str, Any] = {
+        'thread_id': thread_id,
+        'raw_compaction_count': len(raw_compactions),
+        'effective': None,
+    }
+    if raw_compactions:
+        status['latest_raw_compaction_event_seq'] = raw_compactions[-1].get('event_seq')
+    if not effective:
+        return status
+
+    start_msg_id = effective.get('start_msg_id')
+    start_message: Optional[Dict[str, Any]] = None
+    if isinstance(start_msg_id, str) and start_msg_id:
+        row = db.conn.execute(
+            "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND type='msg.create' AND msg_id=? ORDER BY event_seq ASC LIMIT 1",
+            (thread_id, start_msg_id),
+        ).fetchone()
+        if row:
+            try:
+                payload = json.loads(row['payload_json']) if isinstance(row['payload_json'], str) else (row['payload_json'] or {})
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            content = payload.get('content')
+            preview = content if isinstance(content, str) else ''
+            if len(preview) > 1000:
+                preview = preview[:1000] + '…'
+            start_message = {
+                'msg_id': start_msg_id,
+                'event_seq': int(row['event_seq']),
+                'role': payload.get('role'),
+                'content_preview': preview,
+            }
+
+    status['effective'] = {
+        'compaction_event_seq': effective.get('event_seq'),
+        'compaction_event_id': effective.get('event_id'),
+        'start_msg_id': start_msg_id,
+        'start_event_seq': effective.get('start_event_seq'),
+        'selector': effective.get('selector'),
+        'created_by': effective.get('created_by'),
+        'start_message': start_message,
+    }
+    return status
+
+
 def current_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optional[int]:
     """Return the latest raw compaction start event_seq, if any."""
 
