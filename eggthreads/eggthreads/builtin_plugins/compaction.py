@@ -45,70 +45,6 @@ def compact_thread_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     return result.message
 
 
-def show_compaction_start_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
-    """Report the effective compaction start without changing thread state."""
-
-    import json
-
-    from ..api import show_compaction_start
-
-    thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
-    if not thread_id:
-        return "Error: show_compaction_start requires a calling thread."
-
-    db = _context_db(ctx)
-    return json.dumps(show_compaction_start(db, thread_id), ensure_ascii=False, indent=2)
-
-
-def search_compaction_sources_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
-    """Search model-visible pre-compaction source history."""
-
-    import json
-
-    from ..api import search_compaction_sources
-
-    thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
-    if not thread_id:
-        return "Error: search_compaction_sources requires a calling thread."
-
-    db = _context_db(ctx)
-    return json.dumps(
-        search_compaction_sources(
-            db,
-            thread_id,
-            str(args.get("query") or ""),
-            max_results=args.get("max_results", 10),
-            max_chars=args.get("max_chars", 4000),
-        ),
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def fetch_compaction_source_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
-    """Fetch one model-visible pre-compaction source message."""
-
-    import json
-
-    from ..api import fetch_compaction_source
-
-    thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
-    if not thread_id:
-        return "Error: fetch_compaction_source requires a calling thread."
-
-    db = _context_db(ctx)
-    return json.dumps(
-        fetch_compaction_source(
-            db,
-            thread_id,
-            str(args.get("source_id") or ""),
-            max_chars=args.get("max_chars", 4000),
-        ),
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
 def compact_thread_command(context: Any, arg: str):
     from ..api import commit_thread_compaction
     from ..command_catalog import CommandResult
@@ -159,57 +95,6 @@ def register_compaction_tool(registry: ToolRegistry) -> None:
         compact_thread_tool,
         accepts_context=True,
     )
-    registry.register(
-        "show_compaction_start",
-        (
-            "Read-only status for this thread's current effective compaction start. "
-            "Shows the compaction marker, start message id/event seq, and a bounded "
-            "preview of the start message. It does not fetch old pre-compaction history."
-        ),
-        {"type": "object", "properties": {}, "additionalProperties": False},
-        show_compaction_start_tool,
-        accepts_context=True,
-    )
-    registry.register(
-        "search_compaction_sources",
-        (
-            "Search this thread's older pre-compaction source history for a text query. "
-            "Returns only model-visible messages before the current compaction start, skips "
-            "hidden/no_api content, masks secrets, and bounds the number of results and total "
-            "returned characters. Use when exact old details matter after compaction."
-        ),
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Required case-insensitive text to search for."},
-                "max_results": {"type": "integer", "description": "Optional result limit; capped by Egg."},
-                "max_chars": {"type": "integer", "description": "Optional total character budget; capped by Egg."},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-        search_compaction_sources_tool,
-        accepts_context=True,
-    )
-    registry.register(
-        "fetch_compaction_source",
-        (
-            "Fetch one source message returned by search_compaction_sources from older "
-            "pre-compaction history. Only model-visible pre-start messages can be fetched; "
-            "hidden/no_api content is skipped, secrets are masked, and output is bounded."
-        ),
-        {
-            "type": "object",
-            "properties": {
-                "source_id": {"type": "string", "description": "Source/message id returned by search_compaction_sources."},
-                "max_chars": {"type": "integer", "description": "Optional character budget; capped by Egg."},
-            },
-            "required": ["source_id"],
-            "additionalProperties": False,
-        },
-        fetch_compaction_source_tool,
-        accepts_context=True,
-    )
 
 
 def register_compaction_commands(registry: Any) -> None:
@@ -242,9 +127,6 @@ __all__ = [
     "CompactionPlugin",
     "compact_thread_command",
     "compact_thread_tool",
-    "fetch_compaction_source_tool",
     "register_compaction_commands",
     "register_compaction_tool",
-    "search_compaction_sources_tool",
-    "show_compaction_start_tool",
 ]
