@@ -141,6 +141,10 @@ Likely files:
 
 ### Phase 3 — Terminal static console panels
 
+Status: Implemented static console panel display verbosity. `max` preserves existing panel bodies; `medium` uses header-only reasoning/tool-result panels and one-line tool-call rows; `min` prints user/assistant content plus hidden-detail summary panels between visible messages. Active streaming panels/previews were not changed.
+
+Test notes: `pytest -q egg/tests/test_panels.py::TestConsolePrintMessage` (14 passed); `pytest -q egg/tests/test_panels.py` (52 passed).
+
 Update `PanelsMixin.console_print_message(...)`, which prints static transcript panels, to respect the same level.
 
 Static console panels are already completed messages, so apply verbosity normally. Active streaming panels/previews should remain unchanged for `max`/`medium`.

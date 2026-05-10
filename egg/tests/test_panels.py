@@ -437,6 +437,127 @@ class TestConsolePrintMessage:
 
         assert any('3.0 tps' in t for t in tool_titles)
 
+    @staticmethod
+    def _collect_panel_bodies(printed):
+        bodies = []
+        for args, _kwargs in printed:
+            for arg in args:
+                renderable = getattr(arg, "renderable", None)
+                if renderable is not None:
+                    bodies.append(str(getattr(renderable, "plain", renderable)))
+        return bodies
+
+
+    def test_display_verbosity_default_max_keeps_detail_bodies(self, egg_app, monkeypatch):
+        """Default max panels should keep reasoning and tool-result bodies."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.console_print_message({
+            'role': 'assistant',
+            'content': 'Answer body',
+            'reasoning': 'Private reasoning body',
+        })
+        egg_app.console_print_message({'role': 'tool', 'name': 'bash', 'content': 'Completed tool result body'})
+
+        joined_bodies = "\n".join(self._collect_panel_bodies(printed))
+        assert 'Private reasoning body' in joined_bodies
+        assert 'Completed tool result body' in joined_bodies
+
+    def test_display_verbosity_medium_collapses_reasoning_and_tool_results(self, egg_app, monkeypatch):
+        """Medium panels should retain titles/ids but hide noisy bodies."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+        egg_app._display_verbosity = "medium"
+
+        egg_app.console_print_message({
+            'role': 'assistant',
+            'content': 'Answer body',
+            'reasoning': 'Private reasoning body',
+            'tool_calls': [{
+                'id': 'call_full_1234567890',
+                'function': {'name': 'bash', 'arguments': {'cmd': 'echo hello'}},
+            }],
+            'msg_id': 'msg_assistant_medium',
+            'tps': 4.2,
+        })
+        egg_app.console_print_message({
+            'role': 'tool',
+            'name': 'bash',
+            'content': 'Completed tool result body',
+            'msg_id': 'msg_tool_medium',
+            'tool_call_id': 'call_full_1234567890',
+            'tps': 3.0,
+        })
+
+        titles = self._collect_panel_titles(printed)
+        bodies = self._collect_panel_bodies(printed)
+
+        assert any('Reasoning' in title and 'msg_id: msg_assistant_medium' in title and '4.2 tps' in title for title in titles)
+        assert any('Tool Calls' in title and 'msg_id: msg_assistant_medium' in title and '4.2 tps' in title for title in titles)
+        assert any('bash' in title and 'msg_id: msg_tool_medium' in title and 'tool_call_id: call_full_1234567890' in title for title in titles)
+        joined_bodies = "\n".join(bodies)
+        assert 'Answer body' in joined_bodies
+        assert 'Private reasoning body' not in joined_bodies
+        assert 'Completed tool result body' not in joined_bodies
+        assert 'call_full_1234567890' in joined_bodies
+        assert 'echo hello' in joined_bodies
+
+    def test_display_verbosity_min_prints_conversation_and_hidden_summary(self, egg_app, monkeypatch):
+        """Min static view should summarize hidden details between visible messages."""
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        append_message(egg_app.db, egg_app.current_thread, "system", "ordinary system prompt")
+        user1 = append_message(egg_app.db, egg_app.current_thread, "user", "first question")
+        assistant = append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "assistant answer",
+            extra={
+                "reasoning": "private reasoning body",
+                "tool_calls": [{
+                    "id": "call_full_1234567890",
+                    "function": {"name": "bash", "arguments": {"cmd": "echo hello"}},
+                }],
+            },
+        )
+        tool = append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "completed tool result body",
+            extra={"name": "bash", "tool_call_id": "call_full_1234567890"},
+        )
+        user2 = append_message(egg_app.db, egg_app.current_thread, "user", "next question")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.print_static_view_current()
+
+        titles = self._collect_panel_titles(printed)
+        bodies = self._collect_panel_bodies(printed)
+        joined_bodies = "\n".join(bodies)
+
+        assert any('User' in title and f'msg_id: {user1}' in title for title in titles)
+        assert any('Assistant' in title and f'msg_id: {assistant}' in title for title in titles)
+        assert any('User' in title and f'msg_id: {user2}' in title for title in titles)
+        assert any('Hidden Details' in title for title in titles)
+        assert 'first question' in joined_bodies
+        assert 'assistant answer' in joined_bodies
+        assert 'next question' in joined_bodies
+        assert 'ordinary system prompt' not in joined_bodies
+        assert 'private reasoning body' not in joined_bodies
+        assert 'completed tool result body' not in joined_bodies
+        assert 'Hidden details: 1 reasoning block.' in joined_bodies
+        assert 'Hidden details: 1 tool call, 1 tool result.' in joined_bodies
+        assert f'msg_id: {assistant}' in joined_bodies
+        assert f'msg_id: {tool}' in joined_bodies
+        assert 'tool_call_id: call_full_1234567890' in joined_bodies
+
     def test_uses_markdown_for_markdown_content(self, egg_app, monkeypatch):
         """Should use Markdown rendering for markdown content."""
         printed = []
