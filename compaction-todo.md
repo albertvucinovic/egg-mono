@@ -534,16 +534,16 @@ Goal: make auto-compaction usable in normal Egg runs, prefer summary-producing c
 
 ### Summary-producing automatic compaction
 
-- [ ] Add auto-summary mode for threshold compaction.
+- [x] Add auto-summary mode for threshold compaction.
   - In summary mode, threshold pressure at a safe RA1/user-turn boundary appends an automatic compaction request instead of directly compacting to `last_llm`.
   - The request asks the assistant to write a concise continuation summary as normal assistant content and then call `compact_thread()` with omitted `start_message`.
   - The eventual `compact_thread` tool call emits the same `thread.compaction` start-pointer event.
   - Append a `thread.compaction_summary_in_progress` event alongside the automatic request so threshold checks do not repeatedly append summary requests while one is pending.
   - Avoid loops: if an effective pending summary-in-progress marker exists after the current effective compaction start, do not append another request.
-- [ ] Preserve direct mode.
+- [x] Preserve direct mode.
   - When `EGG_COMPACT_SUMMARY` is false-like, keep the existing direct compaction behavior to `last_llm`.
   - Direct mode must still reuse `commit_thread_compaction` and all normal no-op validation.
-- [ ] Add focused tests.
+- [x] Add focused tests.
   - Threshold in summary mode appends exactly one summary request and in-progress marker at a safe boundary.
   - Below threshold does not append.
   - Existing pending summary marker prevents duplicates.
@@ -558,6 +558,12 @@ Status notes:
   - Tests: `pytest -q eggthreads/tests/test_compaction.py` passed; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py` passed.
   - Next: implement the Summary mode auto-compaction slice (`EGG_COMPACT_SUMMARY` default true plus `thread.compaction_summary_in_progress` duplicate-prevention helpers).
   - Caveats: no summary mode, `/compactWithSummary`, diagnostics, child token reporting, or hardening changes were made.
+- 2026-05-10: Summary mode auto-compaction slice implemented. Added `EGG_COMPACT_SUMMARY` default-true mode selection, `thread.compaction_summary_in_progress` raw/effective helpers with `/continue` erasure semantics, automatic summary request appending at the existing RA1 boundary, duplicate prevention while a pending marker is effective after the current compaction start, and direct-mode preservation via false-like env values (`0`, `false`, `no`, `off`) using the existing `commit_thread_compaction(..., selector="last_llm")` path. Summary mode now avoids immediate re-request loops after a satisfying compaction until new provider-visible user/assistant context appears.
+  - Changed files: `eggthreads/eggthreads/api.py`, `eggthreads/eggthreads/__init__.py`, `eggthreads/eggthreads/runner.py`, `eggthreads/tests/test_compaction.py`, `compaction-todo.md`.
+  - Commit: this Summary mode auto-compaction slice change.
+  - Tests: `pytest -q eggthreads/tests/test_compaction.py` passed; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py` passed.
+  - Next: implement the Manual summary command slice (`/compactWithSummary`) using the same summary-request text and normal scheduling/message machinery.
+  - Caveats: `/compactWithSummary`, child status token reporting, diagnostics, and provider-protocol hardening were intentionally not implemented.
 
 ## REPL thread context design
 

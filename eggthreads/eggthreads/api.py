@@ -591,6 +591,17 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
 
 COMPACTION_EVENT_TYPE = 'thread.compaction'
 COMPACTION_CONTEXT_LENGTH_EVENT_TYPE = 'thread.compaction_context_length'
+COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE = 'thread.compaction_summary_in_progress'
+
+AUTO_COMPACTION_SUMMARY_REQUEST = (
+    "Automatic compaction request: the current provider context has reached "
+    "the configured token threshold. Write a concise continuation summary as "
+    "normal assistant content, preserving the details needed to continue the "
+    "current work, including any pending user request. After the summary, call "
+    "compact_thread() with start_message omitted."
+)
+
+_FALSE_LIKE_ENV_VALUES = {'0', 'false', 'no', 'off'}
 
 
 @dataclass
@@ -614,6 +625,16 @@ class CompactionCommitResult:
     start_msg_id: Optional[str]
     start_event_seq: Optional[int]
     compaction_event_seq: Optional[int]
+    message: str
+
+
+@dataclass
+class CompactionSummaryRequestResult:
+    """Result of appending an automatic summary-producing compaction request."""
+
+    success: bool
+    request_msg_id: Optional[str]
+    marker_event_seq: Optional[int]
     message: str
 
 
@@ -726,6 +747,58 @@ def list_thread_compaction_context_lengths(db: ThreadsDB, thread_id: str) -> Lis
     cur = db.conn.execute(
         "SELECT event_seq, event_id, ts, payload_json FROM events WHERE thread_id=? AND type=? ORDER BY event_seq ASC",
         (thread_id, COMPACTION_CONTEXT_LENGTH_EVENT_TYPE),
+    )
+    out: List[Dict[str, Any]] = []
+    for row in cur.fetchall():
+        try:
+            payload = json.loads(row['payload_json']) if isinstance(row['payload_json'], str) else (row['payload_json'] or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        item = dict(payload)
+        item['event_seq'] = int(row['event_seq'])
+        item['event_id'] = row['event_id']
+        item['ts'] = row['ts']
+        out.append(item)
+    return out
+
+
+def append_compaction_summary_in_progress(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    request_msg_id: Optional[str] = None,
+    created_by: str = 'auto_compaction',
+) -> int:
+    """Append a marker for an automatic summary compaction request.
+
+    The marker is a control event, not provider-visible content.  It prevents
+    repeated threshold checks from appending duplicate summary requests while
+    the assistant has not yet satisfied the request by emitting a later
+    effective ``thread.compaction`` event.
+    """
+
+    payload: Dict[str, Any] = {
+        'created_by': created_by,
+        'created_at': _utcnow_iso(),
+    }
+    if request_msg_id:
+        payload['request_msg_id'] = request_msg_id
+    return int(db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_=COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE,
+        payload=payload,
+    ))
+
+
+def list_thread_compaction_summary_in_progress_events(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
+    """Return raw summary-in-progress markers in event order."""
+
+    cur = db.conn.execute(
+        "SELECT event_seq, event_id, ts, payload_json FROM events WHERE thread_id=? AND type=? ORDER BY event_seq ASC",
+        (thread_id, COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE),
     )
     out: List[Dict[str, Any]] = []
     for row in cur.fetchall():
@@ -943,6 +1016,24 @@ def resolve_auto_compact_threshold(
     return AutoCompactionThresholdResolution(True, 150000, 'default', 'Auto compaction threshold using fallback default.')
 
 
+def auto_compact_summary_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Return whether automatic compaction should request a summary.
+
+    ``EGG_COMPACT_SUMMARY`` defaults to enabled.  Only explicit false-like
+    values (``0``, ``false``, ``no``, ``off``) select the direct compaction
+    policy.
+    """
+
+    env = os.environ if environ is None else environ
+    raw = env.get('EGG_COMPACT_SUMMARY') if env is not None else None
+    if raw is None:
+        return True
+    text = str(raw).strip().lower()
+    if not text:
+        return True
+    return text not in _FALSE_LIKE_ENV_VALUES
+
+
 def latest_effective_thread_compaction(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
     """Return the latest ``thread.compaction`` still active in the effective view."""
 
@@ -960,6 +1051,53 @@ def latest_effective_thread_compaction(db: ThreadsDB, thread_id: str) -> Optiona
             continue
         return compaction
     return None
+
+
+def latest_effective_thread_compaction_summary_in_progress(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the latest pending automatic summary marker, if any.
+
+    A marker is pending only when it is still present in the effective thread
+    view, appears after the current effective compaction start, and has not
+    been satisfied by a later effective ``thread.compaction`` event.
+    """
+
+    erased_ranges = _continue_erased_event_ranges(db, thread_id)
+    skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    current = latest_effective_thread_compaction(db, thread_id)
+    current_start_seq = -1
+    current_compaction_event_seq = -1
+    if current is not None:
+        try:
+            current_start_seq = int(current.get('start_event_seq'))
+        except Exception:
+            current_start_seq = -1
+        try:
+            current_compaction_event_seq = int(current.get('event_seq'))
+        except Exception:
+            current_compaction_event_seq = -1
+
+    for marker in reversed(list_thread_compaction_summary_in_progress_events(db, thread_id)):
+        try:
+            marker_seq = int(marker.get('event_seq'))
+        except Exception:
+            continue
+        if _event_erased_by_continue(marker_seq, erased_ranges):
+            continue
+        request_msg_id = marker.get('request_msg_id')
+        if isinstance(request_msg_id, str) and (request_msg_id in skipped or request_msg_id in deleted):
+            continue
+        if marker_seq <= current_start_seq:
+            continue
+        if marker_seq <= current_compaction_event_seq:
+            continue
+        return marker
+    return None
+
+
+def has_effective_thread_compaction_summary_in_progress(db: ThreadsDB, thread_id: str) -> bool:
+    """Return whether an automatic summary compaction request is pending."""
+
+    return latest_effective_thread_compaction_summary_in_progress(db, thread_id) is not None
 
 
 def current_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optional[int]:
@@ -1166,6 +1304,71 @@ def commit_thread_compaction(
         int(event_seq),
         f"Compaction committed; provider context now starts at {resolution.msg_id[-8:] if resolution.msg_id else 'unknown'}.",
     )
+
+
+def append_auto_compaction_summary_request(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    content: str = AUTO_COMPACTION_SUMMARY_REQUEST,
+) -> CompactionSummaryRequestResult:
+    """Append one model-visible automatic summary request plus a pending marker."""
+
+    if latest_effective_thread_compaction_summary_in_progress(db, thread_id) is not None:
+        return CompactionSummaryRequestResult(
+            False,
+            None,
+            None,
+            "Automatic summary compaction request already pending.",
+        )
+
+    request_msg_id = append_message(
+        db,
+        thread_id,
+        'user',
+        content,
+        extra={'created_by': 'auto_compaction', 'auto_compaction_request': True},
+    )
+    marker_seq = append_compaction_summary_in_progress(
+        db,
+        thread_id,
+        request_msg_id=request_msg_id,
+        created_by='auto_compaction',
+    )
+    return CompactionSummaryRequestResult(
+        True,
+        request_msg_id,
+        marker_seq,
+        "Automatic summary compaction request appended.",
+    )
+
+
+def _has_compaction_candidate_after_current_effective_start(db: ThreadsDB, thread_id: str) -> bool:
+    start_seq = current_effective_compaction_start_event_seq(db, thread_id)
+    if start_seq is None:
+        for _event_seq, _msg_id, payload in _compaction_candidate_messages(db, thread_id):
+            if payload.get('no_api') or payload.get('auto_compaction_request'):
+                continue
+            if payload.get('role') in ('user', 'assistant'):
+                return True
+        return False
+
+    min_event_seq = int(start_seq)
+    last_llm_seq: Optional[int] = None
+    last_non_request_user_seq: Optional[int] = None
+    for event_seq, _msg_id, payload in _compaction_candidate_messages(db, thread_id):
+        if event_seq <= min_event_seq:
+            continue
+        if payload.get('no_api') or payload.get('auto_compaction_request'):
+            continue
+        role = payload.get('role')
+        if role == 'assistant':
+            last_llm_seq = event_seq
+        elif role == 'user':
+            last_non_request_user_seq = event_seq
+    if last_llm_seq is None:
+        return last_non_request_user_seq is not None
+    return last_non_request_user_seq is not None and last_non_request_user_seq > last_llm_seq
 
 
 
@@ -1408,17 +1611,21 @@ def maybe_auto_compact_thread(
     threshold_tokens: Optional[int],
     context_tokens: Optional[int] = None,
     selector: str = 'last_llm',
+    summary_mode: Optional[bool] = None,
 ) -> AutoCompactionResult:
-    """Commit a small automatic compaction at a safe turn boundary if needed.
+    """Maybe perform automatic compaction at a safe turn boundary.
 
-    This first automatic policy is intentionally narrow: callers invoke it at
-    a user-turn/scheduler boundary, and it only compacts when the effective
-    provider-context token estimate is at or above ``threshold_tokens``.  The
-    boundary selector defaults to ``last_llm`` so an automatic check before the
-    next user-triggered RA1 turn preserves the last assistant result as the new
-    provider-context start.  The shared compaction helper still performs all
-    selector validation and no-op handling.
+    Callers invoke this at a user-turn/scheduler boundary, and it only acts
+    when the effective provider-context token estimate is at or above
+    ``threshold_tokens``.  In summary mode it appends one normal model-visible
+    request asking the assistant to summarize and call ``compact_thread()``;
+    otherwise it uses the direct ``last_llm`` start-pointer policy.  Direct
+    mode still goes through the shared compaction helper and all normal
+    selector validation/no-op handling.
     """
+
+    if summary_mode is None:
+        summary_mode = auto_compact_summary_enabled()
 
     if threshold_tokens is None:
         return AutoCompactionResult(False, False, int(context_tokens or 0), None, None, "Auto compaction disabled.")
@@ -1441,6 +1648,26 @@ def maybe_auto_compact_thread(
     context_int = int(context_tokens or 0)
     if context_int < threshold_int:
         return AutoCompactionResult(False, False, context_int, threshold_int, None, "Auto compaction threshold not reached.")
+
+    if summary_mode:
+        if not _has_compaction_candidate_after_current_effective_start(db, thread_id):
+            return AutoCompactionResult(
+                False,
+                True,
+                context_int,
+                threshold_int,
+                None,
+                "No new provider-visible user or assistant message after current compaction start.",
+            )
+        summary_result = append_auto_compaction_summary_request(db, thread_id)
+        return AutoCompactionResult(
+            bool(summary_result.success),
+            True,
+            context_int,
+            threshold_int,
+            None,
+            summary_result.message,
+        )
 
     result = commit_thread_compaction(
         db,

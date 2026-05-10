@@ -24,6 +24,10 @@ def _events(db, tid, type_="thread.compaction"):
     return [(int(seq), json.loads(payload)) for seq, payload in cur.fetchall()]
 
 
+def _snapshot_messages(db, tid):
+    return ts.create_snapshot(db, tid)["messages"]
+
+
 def test_commit_compaction_resolves_default_and_last_user(tmp_path):
     db, tid = _new_thread(tmp_path)
     user1 = ts.append_message(db, tid, "user", "first")
@@ -231,12 +235,12 @@ def test_recompaction_after_continue_uses_effective_start(tmp_path):
     assert old not in [m["msg_id"] for m in filtered]
 
 
-def test_maybe_auto_compact_triggers_at_threshold_with_last_llm(tmp_path):
+def test_maybe_auto_compact_direct_mode_triggers_at_threshold_with_last_llm(tmp_path):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old")
     assistant = ts.append_message(db, tid, "assistant", "assistant summary")
 
-    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10)
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=False)
 
     assert result.triggered is True
     assert result.attempted is True
@@ -268,13 +272,139 @@ def test_maybe_auto_compact_does_not_emit_again_without_new_llm(tmp_path):
     ts.append_message(db, tid, "user", "old")
     ts.append_message(db, tid, "assistant", "assistant summary")
 
-    first = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10)
-    second = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10)
+    first = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=False)
+    second = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=False)
 
     assert first.triggered is True
     assert second.triggered is False
     assert second.attempted is True
     assert len(_events(db, tid)) == 1
+
+
+def test_auto_compact_summary_mode_env_defaults_true_and_false_like() -> None:
+    assert ts.auto_compact_summary_enabled({}) is True
+    assert ts.auto_compact_summary_enabled({"EGG_COMPACT_SUMMARY": ""}) is True
+    assert ts.auto_compact_summary_enabled({"EGG_COMPACT_SUMMARY": "yes"}) is True
+
+    for value in ("0", "false", "no", "off", " False "):
+        assert ts.auto_compact_summary_enabled({"EGG_COMPACT_SUMMARY": value}) is False
+
+
+def test_maybe_auto_compact_summary_mode_appends_request_and_marker_once(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old context")
+    ts.append_message(db, tid, "assistant", "previous answer")
+
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+    duplicate = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+
+    assert result.triggered is True
+    assert result.attempted is True
+    assert result.compaction is None
+    assert duplicate.triggered is False
+    assert duplicate.attempted is True
+    assert _events(db, tid) == []
+
+    messages = _snapshot_messages(db, tid)
+    assert len([m for m in messages if m.get("auto_compaction_request")]) == 1
+    request = messages[-1]
+    assert request["role"] == "user"
+    assert request["created_by"] == "auto_compaction"
+    assert "concise continuation summary" in request["content"]
+    assert "compact_thread()" in request["content"]
+    assert "start_message omitted" in request["content"]
+
+    markers = ts.list_thread_compaction_summary_in_progress_events(db, tid)
+    assert len(markers) == 1
+    assert markers[0]["created_by"] == "auto_compaction"
+    assert markers[0]["request_msg_id"] == request["msg_id"]
+    assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid)["event_seq"] == markers[0]["event_seq"]
+
+
+def test_maybe_auto_compact_defaults_to_summary_mode(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old context")
+    ts.append_message(db, tid, "assistant", "previous answer")
+    monkeypatch.delenv("EGG_COMPACT_SUMMARY", raising=False)
+
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10)
+
+    assert result.triggered is True
+    assert _events(db, tid) == []
+    assert len(ts.list_thread_compaction_summary_in_progress_events(db, tid)) == 1
+
+
+def test_maybe_auto_compact_summary_mode_noops_below_threshold(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    ts.append_message(db, tid, "assistant", "assistant summary")
+
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=100, context_tokens=99, summary_mode=True)
+
+    assert result.triggered is False
+    assert result.attempted is False
+    assert _events(db, tid) == []
+    assert ts.list_thread_compaction_summary_in_progress_events(db, tid) == []
+
+
+def test_compaction_summary_marker_uses_effective_continue_view(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    ts.append_message(db, tid, "assistant", "previous answer")
+    first = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+    assert first.triggered is True
+    assert ts.has_effective_thread_compaction_summary_in_progress(db, tid) is True
+
+    continued = ts.continue_thread(db, tid, old)
+    assert continued.success is True
+    assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
+
+    ts.append_message(db, tid, "assistant", "retry answer")
+    retry = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+
+    assert retry.triggered is True
+    assert len(ts.list_thread_compaction_summary_in_progress_events(db, tid)) == 2
+
+
+def test_compaction_summary_marker_cleared_by_later_compaction_until_new_context(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    ts.append_message(db, tid, "assistant", "previous answer")
+    request_result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+    assert request_result.triggered is True
+
+    summary_msg = ts.append_message(db, tid, "assistant", "Concise continuation summary")
+    compacted = ts.commit_thread_compaction(db, tid, created_by="assistant_tool")
+    after_compaction = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+
+    assert compacted.success is True
+    assert compacted.start_msg_id == summary_msg
+    assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
+    assert after_compaction.triggered is False
+    assert after_compaction.attempted is True
+    assert len(ts.list_thread_compaction_summary_in_progress_events(db, tid)) == 1
+
+    ts.append_message(db, tid, "user", "new useful context")
+    new_request = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+    assert new_request.triggered is True
+    assert len(ts.list_thread_compaction_summary_in_progress_events(db, tid)) == 2
+
+
+def test_compaction_summary_mode_waits_for_post_compaction_user_context(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    summary_msg = ts.append_message(db, tid, "assistant", "summary")
+    compacted = ts.commit_thread_compaction(db, tid, created_by="assistant_tool")
+    assert compacted.success is True
+    assert compacted.start_msg_id == summary_msg
+
+    assistant_only = ts.append_message(db, tid, "assistant", "assistant-only follow-up")
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+
+    assert result.triggered is False
+    assert result.attempted is True
+    assert ts.list_thread_compaction_summary_in_progress_events(db, tid) == []
+    assert assistant_only
 
 
 def test_auto_compact_threshold_thread_override_takes_precedence_and_continue_can_erase(tmp_path):
@@ -342,11 +472,11 @@ def test_auto_compact_threshold_precedence_config_model_env_default_and_disable(
     assert (default.enabled, default.threshold_tokens, default.source) == (True, 150000, "default")
 
 
-def test_runner_auto_compacts_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
+def test_runner_auto_compacts_summary_mode_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
-    old = ts.append_message(db, tid, "user", "old context")
-    assistant = ts.append_message(db, tid, "assistant", "previous answer")
-    next_user = ts.append_message(db, tid, "user", "next question")
+    ts.append_message(db, tid, "user", "old context")
+    ts.append_message(db, tid, "assistant", "previous answer")
+    ts.append_message(db, tid, "user", "next question")
     ts.create_snapshot(db, tid)
     seen_messages: list[list[dict]] = []
 
@@ -361,6 +491,47 @@ def test_runner_auto_compacts_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
         "eggthreads.token_count.provider_context_token_stats",
         lambda db_arg, tid_arg: {"context_tokens": 100},
     )
+    monkeypatch.delenv("EGG_COMPACT_SUMMARY", raising=False)
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    assert _events(db, tid) == []
+    markers = ts.list_thread_compaction_summary_in_progress_events(db, tid)
+    assert len(markers) == 1
+    messages = _snapshot_messages(db, tid)
+    request_messages = [m for m in messages if m.get("auto_compaction_request")]
+    assert len(request_messages) == 1
+    assert markers[0]["request_msg_id"] == request_messages[0]["msg_id"]
+    assert seen_messages
+    assert [m["content"] for m in seen_messages[0]] == [
+        "old context",
+        "previous answer",
+        "next question",
+        request_messages[0]["content"],
+    ]
+
+
+def test_runner_auto_compacts_direct_mode_when_summary_env_false(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old context")
+    assistant = ts.append_message(db, tid, "assistant", "previous answer")
+    ts.append_message(db, tid, "user", "next question")
+    ts.create_snapshot(db, tid)
+    seen_messages: list[list[dict]] = []
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            seen_messages.append(messages)
+            yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+    monkeypatch.setenv("EGG_COMPACT_SUMMARY", "0")
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 100},
+    )
 
     runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
     asyncio.run(runner.run_once())
@@ -369,17 +540,19 @@ def test_runner_auto_compacts_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
     assert len(events) == 1
     payload = events[0][1]
     assert payload["created_by"] == "auto_compaction"
+    assert payload["selector"] == "last_llm"
     assert payload["start_msg_id"] == assistant
+    assert ts.list_thread_compaction_summary_in_progress_events(db, tid) == []
     assert seen_messages
     assert [m["content"] for m in seen_messages[0]] == ["previous answer", "next question"]
-    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, ts.create_snapshot(db, tid)["messages"])
+    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, _snapshot_messages(db, tid))
     assert old not in [m.get("msg_id") for m in provider_view]
 
 
 def test_runner_auto_compacts_from_model_threshold_without_explicit_config(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
     ts.append_message(db, tid, "user", "old context")
-    assistant = ts.append_message(db, tid, "assistant", "previous answer")
+    ts.append_message(db, tid, "assistant", "previous answer")
     ts.append_message(db, tid, "user", "next question")
     ts.set_thread_model(
         db,
@@ -410,13 +583,14 @@ def test_runner_auto_compacts_from_model_threshold_without_explicit_config(tmp_p
         "eggthreads.token_count.provider_context_token_stats",
         lambda db_arg, tid_arg: {"context_tokens": 80},
     )
+    monkeypatch.delenv("EGG_COMPACT_SUMMARY", raising=False)
 
     runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig())
     asyncio.run(runner.run_once())
 
-    events = _events(db, tid)
-    assert len(events) == 1
-    assert events[0][1]["start_msg_id"] == assistant
+    assert _events(db, tid) == []
+    assert len(ts.list_thread_compaction_summary_in_progress_events(db, tid)) == 1
+    assert len([m for m in _snapshot_messages(db, tid) if m.get("auto_compaction_request")]) == 1
 
 
 def test_runner_thread_override_can_disable_auto_compaction(tmp_path, monkeypatch):

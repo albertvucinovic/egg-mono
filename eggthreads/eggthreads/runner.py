@@ -753,7 +753,7 @@ class ThreadRunner:
         # cycle.
         if ra.kind == 'RA1_llm':
             try:
-                from .api import create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
+                from .api import auto_compact_summary_enabled, create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
                 from .token_count import provider_context_token_stats
 
                 threshold = resolve_auto_compact_threshold(
@@ -772,6 +772,7 @@ class ThreadRunner:
                         self.thread_id,
                         threshold_tokens=threshold.threshold_tokens,
                         context_tokens=current_tokens,
+                        summary_mode=auto_compact_summary_enabled(),
                     )
                     if auto_result.triggered:
                         create_snapshot(self.db, self.thread_id)
