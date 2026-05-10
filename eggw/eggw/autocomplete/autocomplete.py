@@ -313,6 +313,15 @@ async def get_autocomplete(
                             "replace": len(arg_tok),
                         })
 
+            elif cmd == '/displayVerbosity':
+                for level in ['max', 'medium', 'min']:
+                    if not arg_tok or arg_tok.lower() in level:
+                        suggestions.append({
+                            "display": level,
+                            "insert": level,
+                            "replace": len(arg_tok),
+                        })
+
             elif cmd == '/togglePanel':
                 # Panel name suggestions
                 for panel in ['chat', 'children', 'system']:

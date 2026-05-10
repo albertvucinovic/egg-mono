@@ -168,6 +168,10 @@ Likely files:
 
 ### Phase 4 — Web parity
 
+Status: Implemented web display verbosity state, header selector, `/displayVerbosity <max|medium|min>` command response, static `ChatPanel` rendering for `max`/`medium`/`min`, and `min` status-only live streaming indicators. Did not add expand-by-id.
+
+Test notes: `PYTHONPATH=.:eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests/test_api.py::TestCommands` (11 passed); `npx --prefix eggw/frontend tsc -p eggw/frontend/tsconfig.json --noEmit` (passed).
+
 Add web-side display verbosity using the same level names.
 
 - Store UI preference in frontend state, default `max`.

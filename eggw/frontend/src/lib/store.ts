@@ -38,6 +38,8 @@ export interface ToolCall {
   summary?: string;
 }
 
+export type DisplayVerbosity = "max" | "medium" | "min";
+
 export interface StreamingToolOutput {
   id: string;
   name: string;
@@ -118,6 +120,8 @@ interface AppState {
   toggleBorders: () => void;
   enterMode: "send" | "newline";
   setEnterMode: (mode: "send" | "newline") => void;
+  displayVerbosity: DisplayVerbosity;
+  setDisplayVerbosity: (level: DisplayVerbosity) => void;
 
   // Theme
   theme: string;
@@ -270,6 +274,8 @@ export const useAppStore = create<AppState>((set) => ({
   toggleBorders: () => set((state) => ({ showBorders: !state.showBorders })),
   enterMode: "send",
   setEnterMode: (mode) => set({ enterMode: mode }),
+  displayVerbosity: "max",
+  setDisplayVerbosity: (level) => set({ displayVerbosity: level }),
 
   // Theme
   theme: "dark",

@@ -52,6 +52,7 @@ from .utility import (
     cmd_paste,
     cmd_enter_mode,
     cmd_toggle_borders,
+    cmd_display_verbosity,
     cmd_quit,
     cmd_reload,
     cmd_theme,
@@ -114,6 +115,7 @@ __all__ = [
     "cmd_paste",
     "cmd_enter_mode",
     "cmd_toggle_borders",
+    "cmd_display_verbosity",
     "cmd_quit",
     "cmd_reload",
     "cmd_theme",
@@ -251,6 +253,8 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return cmd_enter_mode(command_arg)
         elif command_name == "toggleBorders":
             return cmd_toggle_borders()
+        elif command_name == "displayVerbosity":
+            return cmd_display_verbosity(command_arg)
         elif command_name == "theme":
             return cmd_theme(command_arg)
         elif command_name == "quit":

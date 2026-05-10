@@ -38,6 +38,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     togglePanel,
     toggleBorders,
     setEnterMode,
+    setDisplayVerbosity,
     enterMode,
   } = useAppStore();
 
@@ -173,6 +174,9 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
         } else if (response.data?.action === "toggle_borders") {
           // Toggle panel borders
           toggleBorders();
+        } else if (response.data?.action === "set_display_verbosity" && response.data?.display_verbosity) {
+          // Set transcript display verbosity
+          setDisplayVerbosity(response.data.display_verbosity as "max" | "medium" | "min");
         } else if (response.data?.enter_mode) {
           // Set Enter key mode
           setEnterMode(response.data.enter_mode as "send" | "newline");

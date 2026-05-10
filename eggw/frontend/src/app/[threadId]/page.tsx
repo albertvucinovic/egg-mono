@@ -40,6 +40,8 @@ export default function ThreadPage() {
     toggleBorders,
     enterMode,
     setEnterMode,
+    displayVerbosity,
+    setDisplayVerbosity,
   } = useAppStore();
   const [showHelp, setShowHelp] = useState(false);
 
@@ -494,6 +496,25 @@ export default function ThreadPage() {
                   )}
                 />
               </button>
+            </div>
+          )}
+
+
+          {/* Display verbosity selector */}
+          {threadId && (
+            <div className="flex items-center gap-1.5">
+              <span style={{ color: "var(--muted)" }}>Verbosity:</span>
+              <select
+                value={displayVerbosity}
+                onChange={(e) => setDisplayVerbosity(e.target.value as "max" | "medium" | "min")}
+                className="border rounded px-1.5 py-0.5 text-xs"
+                style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+                title="Transcript display verbosity"
+              >
+                <option value="max">max</option>
+                <option value="medium">medium</option>
+                <option value="min">min</option>
+              </select>
             </div>
           )}
 

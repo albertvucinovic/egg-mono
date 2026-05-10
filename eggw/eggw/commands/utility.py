@@ -478,6 +478,7 @@ Utility:
   /setContextLimit [limit]       - Set or show max context tokens
   /setThreadPriority [opts]      - Set/show scheduler priority/timeouts
   /theme [name]                  - List or switch themes
+  /displayVerbosity <max|medium|min> - Set transcript display verbosity
   /togglePanel <name>            - Show/hide a panel
   /toggleBorders                 - Toggle panel borders
   /enterMode <send|newline>      - Set Enter key behavior
@@ -539,6 +540,29 @@ def cmd_enter_mode(mode: str) -> CommandResponse:
         success=True,
         message=f"Enter mode set to: {mode}",
         data={"enter_mode": mode},
+    )
+
+
+
+def cmd_display_verbosity(level_arg: str) -> CommandResponse:
+    """Handle /displayVerbosity command - set transcript verbosity (frontend-only)."""
+    level = level_arg.strip().lower()
+    allowed = {"max", "medium", "min"}
+    if not level:
+        return CommandResponse(
+            success=True,
+            message="Usage: /displayVerbosity <max|medium|min>",
+            data={"action": "display_verbosity_usage"},
+        )
+    if level not in allowed:
+        return CommandResponse(
+            success=False,
+            message="Usage: /displayVerbosity <max|medium|min>",
+        )
+    return CommandResponse(
+        success=True,
+        message=f"Display verbosity set to {level}.",
+        data={"action": "set_display_verbosity", "display_verbosity": level},
     )
 
 

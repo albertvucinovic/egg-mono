@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, type WheelEvent } from "react";
+import { useCallback, useEffect, useRef, type ReactNode, type WheelEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -11,7 +11,7 @@ import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { fetchMessages } from "@/lib/api";
-import { useAppStore, Message } from "@/lib/store";
+import { useAppStore, type Message, type DisplayVerbosity } from "@/lib/store";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
 
@@ -56,9 +56,121 @@ function toolStreamSavingText(name: string, frames: number = 0): string {
   return `${glyph} tool${name ? ` ${name}` : ""}: preview limit reached; saving output only`;
 }
 
+type HiddenDetailKind = "reasoning" | "tool_calls" | "tool_results";
+
+interface HiddenDetail {
+  kind: HiddenDetailKind;
+  header: string;
+}
+
+function oneLinePreview(value: unknown, maxChars = 160): string {
+  let raw: string;
+  if (typeof value === "string") {
+    raw = value;
+  } else {
+    try {
+      raw = JSON.stringify(value);
+    } catch {
+      raw = String(value ?? "");
+    }
+  }
+  const preview = raw.replace(/\s+/g, " ").trim();
+  return preview.length > maxChars ? `${preview.slice(0, maxChars - 3).trimEnd()}...` : preview;
+}
+
+function toolCallName(tc: any): string {
+  return tc?.name || tc?.function?.name || "unknown";
+}
+
+function toolCallArgs(tc: any): unknown {
+  const args = tc?.arguments ?? tc?.function?.arguments;
+  if (typeof args === "string") {
+    try {
+      return JSON.parse(args);
+    } catch {
+      return args;
+    }
+  }
+  return args;
+}
+
+function messageTimestampText(timestamp?: string): string | null {
+  if (!timestamp) return null;
+  try {
+    return new Date(timestamp).toLocaleString(undefined, {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  } catch {
+    return timestamp;
+  }
+}
+
+function messageMetadataText(message: Message, label: string): string {
+  const parts = [label];
+  if (message.model_key) parts.push(`model: ${message.model_key}`);
+  const tokenText = formatTokenCount(message.tokens);
+  if (tokenText) parts.push(tokenText);
+  const tpsText = formatStreamingTps(message.tps);
+  if (tpsText) parts.push(tpsText);
+  const tsText = messageTimestampText(message.timestamp);
+  if (tsText) parts.push(tsText);
+  if (message.id && !message.id.startsWith('temp-')) parts.push(`msg_id: ${message.id}`);
+  if (message.tool_call_id) parts.push(`tool_call_id: ${message.tool_call_id}`);
+  return parts.join(" | ");
+}
+
+function isImportantSystemMessage(message: Message): boolean {
+  if (message.role !== "system") return false;
+  if (message.id?.startsWith("cmd-")) return true;
+  const content = (message.content || "").trim().toLowerCase();
+  return content.startsWith("llm error:") ||
+    content.startsWith("error:") ||
+    content.startsWith("usage:") ||
+    content.startsWith("unknown command:") ||
+    content.startsWith("/");
+}
+
+function hiddenSummaryText(details: HiddenDetail[]): string {
+  const counts: Record<HiddenDetailKind, number> = { reasoning: 0, tool_calls: 0, tool_results: 0 };
+  details.forEach((detail) => { counts[detail.kind] += 1; });
+  const specs: Array<[HiddenDetailKind, string]> = [
+    ["tool_calls", "tool call"],
+    ["tool_results", "tool result"],
+    ["reasoning", "reasoning block"],
+  ];
+  const parts = specs
+    .filter(([kind]) => counts[kind] > 0)
+    .map(([kind, singular]) => `${counts[kind]} ${counts[kind] === 1 ? singular : `${singular}s`}`);
+  return `Hidden details: ${parts.join(", ")}.`;
+}
+
+function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
+  if (!details.length) return null;
+  return (
+    <div
+      className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
+      style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" }}
+      data-testid="hidden-details"
+    >
+      <div className="text-sm font-medium mb-2">{hiddenSummaryText(details)}</div>
+      <div className="space-y-1 text-xs font-mono" style={{ color: "var(--muted)" }}>
+        {details.map((detail, idx) => (
+          <div key={`${detail.kind}-${idx}`}>{detail.header}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface MessageBlockProps {
   message: Message;
   showBorders?: boolean;
+  displayVerbosity?: DisplayVerbosity;
 }
 
 function CompactionMarker({ message }: { message: Message }) {
@@ -92,7 +204,7 @@ function CompactionMarker({ message }: { message: Message }) {
   );
 }
 
-function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
+function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }: MessageBlockProps) {
   if (message.kind === "compaction_marker" || message.role === "compaction_marker") {
     return <CompactionMarker message={message} />;
   }
@@ -129,6 +241,13 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
 
   const messageTps = formatStreamingTps(message.tps);
   const tokenText = formatTokenCount(message.tokens);
+  const contentText = message.content || "";
+  const toolCalls = message.tool_calls || [];
+  const showReasoningBlock = Boolean(message.reasoning) && displayVerbosity !== "min";
+  const hideReasoningBody = displayVerbosity === "medium";
+  const hideToolBody = (displayVerbosity === "medium" || displayVerbosity === "min") && message.role === "tool";
+  const showContent = Boolean(contentText) && !hideToolBody;
+  const showToolCalls = toolCalls.length > 0 && displayVerbosity !== "min";
 
   return (
     <div
@@ -183,22 +302,30 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
       </div>
 
       {/* Reasoning (collapsible) */}
-      {message.reasoning && (
+      {showReasoningBlock && (
         <details
+          open={hideReasoningBody ? false : undefined}
           className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
         >
           <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
             Reasoning
+            {hideReasoningBody && (
+              <span className="ml-2 text-xs font-mono" style={{ color: "var(--muted)" }}>
+                {messageMetadataText(message, "Reasoning")}
+              </span>
+            )}
           </summary>
-          <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
-            {message.reasoning}
-          </div>
+          {!hideReasoningBody && (
+            <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
+              {message.reasoning}
+            </div>
+          )}
         </details>
       )}
 
       {/* Content */}
-      {message.content && (
+      {showContent && (
         <>
           {/* Shell command display */}
           {isShellCommand ? (
@@ -215,7 +342,7 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
             isLongToolOutput ? (
               <details className={`rounded ${showBorders ? 'border' : ''}`} style={{ background: "var(--code-bg)", borderColor: "var(--tool-msg-border)" }}>
                 <summary className="cursor-pointer p-2 text-sm" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
-                  Output ({message.content.length.toLocaleString()} chars) - click to expand
+                  Output ({contentText.length.toLocaleString()} chars) - click to expand
                 </summary>
                 <pre className="p-2 text-xs overflow-auto max-h-96 whitespace-pre-wrap" style={{ color: "var(--tool-msg-text, var(--foreground))" }}>
                   {message.content}
@@ -278,7 +405,7 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
                   },
                 }}
               >
-                {preprocessLatex(message.content)}
+                {preprocessLatex(contentText)}
               </ReactMarkdown>
             </div>
           )}
@@ -286,47 +413,56 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
       )}
 
       {/* Tool calls */}
-      {message.tool_calls && message.tool_calls.length > 0 && (
+      {showToolCalls && (
         <div className="mt-2 space-y-2">
-          {message.tool_calls.map((tc: any, idx: number) => {
-            // Extract the tool name - handle both formats
-            const toolName = tc.name || tc.function?.name || "unknown";
-            // Extract arguments - handle both formats
-            let args = tc.arguments || tc.function?.arguments;
-            if (typeof args === "string") {
-              try {
-                args = JSON.parse(args);
-              } catch {
-                // Keep as string
-              }
-            }
-            // For bash commands, extract the script
+          {displayVerbosity === "medium" && (
+            <div className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+              Tool Calls | {messageMetadataText(message, "Assistant")}
+            </div>
+          )}
+          {toolCalls.map((tc: any, idx: number) => {
+            const toolName = toolCallName(tc);
+            const args = toolCallArgs(tc);
             const isBash = toolName === "bash";
-            const script = isBash && args?.script;
+            const script = isBash && typeof args === "object" && args !== null && "script" in args
+              ? (args as any).script
+              : null;
+            const toolCallId = tc.id || tc.tool_call_id || "";
 
             return (
               <div
-                key={tc.id || idx}
+                key={toolCallId || idx}
                 className={`rounded p-2 ${showBorders ? 'border' : ''}`}
                 style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
               >
-                <div className="flex items-center gap-2 text-sm">
+                <div className="flex items-center gap-2 text-sm flex-wrap">
                   <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{toolName}</span>
-                  <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-                    {tc.id?.slice(-8)}
-                  </span>
+                  {toolCallId && (
+                    <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                      {displayVerbosity === "medium" ? `tool_call_id: ${toolCallId}` : toolCallId.slice(-8)}
+                    </span>
+                  )}
+                  {displayVerbosity === "medium" && (
+                    <span className="text-xs font-mono" style={{ color: "var(--foreground)" }}>
+                      {oneLinePreview(args)}
+                    </span>
+                  )}
                 </div>
-                {/* Special display for bash scripts */}
-                {isBash && script ? (
-                  <pre className="mt-1 text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-                    $ {script}
-                  </pre>
-                ) : (
-                  <pre className="mt-1 text-xs p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                    {typeof args === "string"
-                      ? args
-                      : JSON.stringify(args, null, 2)}
-                  </pre>
+                {displayVerbosity !== "medium" && (
+                  <>
+                    {/* Special display for bash scripts */}
+                    {isBash && script ? (
+                      <pre className="mt-1 text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
+                        $ {String(script)}
+                      </pre>
+                    ) : (
+                      <pre className="mt-1 text-xs p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                        {typeof args === "string"
+                          ? args
+                          : JSON.stringify(args, null, 2)}
+                      </pre>
+                    )}
+                  </>
                 )}
               </div>
             );
@@ -335,6 +471,66 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
       )}
     </div>
   );
+}
+
+function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
+  const details: HiddenDetail[] = [];
+  if (message.reasoning) {
+    details.push({ kind: "reasoning", header: messageMetadataText(message, "Reasoning") });
+  }
+  if (message.tool_calls?.length) {
+    message.tool_calls.forEach((tc: any) => {
+      const tcId = tc?.id || tc?.tool_call_id || "";
+      const idText = tcId ? ` | tool_call_id: ${tcId}` : "";
+      details.push({
+        kind: "tool_calls",
+        header: `${messageMetadataText(message, "ToolCall")}${idText} | ${toolCallName(tc)} | ${oneLinePreview(toolCallArgs(tc))}`,
+      });
+    });
+  }
+  if (message.role === "tool") {
+    const label = message.content ? `Tool Result (${message.content.length.toLocaleString()} chars)` : "Tool Result";
+    details.push({ kind: "tool_results", header: messageMetadataText(message, label) });
+  }
+  return details;
+}
+
+function renderMessagesForVerbosity(messages: Message[], displayVerbosity: DisplayVerbosity, showBorders: boolean): ReactNode[] {
+  if (displayVerbosity !== "min") {
+    return messages.map((msg, idx) => (
+      <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity={displayVerbosity} />
+    ));
+  }
+
+  const nodes: ReactNode[] = [];
+  let hidden: HiddenDetail[] = [];
+  const flushHidden = (key: string) => {
+    if (!hidden.length) return;
+    const details = hidden;
+    hidden = [];
+    nodes.push(<HiddenDetailsBlock key={`hidden-${key}-${nodes.length}`} details={details} showBorders={showBorders} />);
+  };
+
+  messages.forEach((msg, idx) => {
+    if (msg.kind === "compaction_marker" || msg.role === "compaction_marker") {
+      flushHidden(`marker-${idx}`);
+      nodes.push(<CompactionMarker key={msg.id || `marker-${idx}`} message={msg} />);
+      return;
+    }
+
+    const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean((msg.content || "").trim());
+    if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
+      flushHidden(`before-${msg.id || idx}`);
+      nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" />);
+      hidden.push(...collectHiddenDetailsForMessage(msg));
+      return;
+    }
+
+    hidden.push(...collectHiddenDetailsForMessage(msg));
+  });
+
+  flushHidden("end");
+  return nodes;
 }
 
 interface ChatPanelProps {
@@ -364,6 +560,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
     streamingKind,
     isStreaming,
     scrollTrigger,
+    displayVerbosity,
   } = useAppStore();
 
   // Stick-to-bottom scrolling: track if user intentionally scrolled away
@@ -740,9 +937,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
             </div>
           ) : (
             <>
-              {messages.map((msg, idx) => (
-                <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} />
-              ))}
+              {renderMessagesForVerbosity(messages, displayVerbosity, showBorders)}
 
               {/* Streaming content */}
               {isStreaming && (
@@ -758,143 +953,162 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                     <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
                   </div>
 
-                  {/* Streaming reasoning - direct DOM updates via ref */}
-                  <details
-                  open
-                  className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-                  style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
-                  id="streaming-reasoning-container"
-                  >
-                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
-                    Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
-                  </summary>
-                  <div
-                    ref={streamingReasoningRef}
-                    className="mt-2 text-sm whitespace-pre-wrap"
-                    style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
-                  />
-                  </details>
-
-                  {/* Streaming reasoning summary - display-only, not persisted as reasoning */}
-                  <details
-                  open
-                  className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-                  style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
-                  id="streaming-reasoning-summary-container"
-                  >
-                  <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
-                    Reasoning Summary <span className="text-xs animate-pulse">(streaming...)</span>
-                  </summary>
-                  <div
-                    ref={streamingReasoningSummaryRef}
-                    className="mt-2 text-sm whitespace-pre-wrap"
-                    style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
-                  />
-                  </details>
-
-                  {/* Streaming content - direct DOM updates via ref for O(1) performance */}
-                  <div
-                  ref={streamingContentRef}
-                  className="text-sm"
-                  style={{
-                    color: "var(--assistant-msg-text, var(--foreground))",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                  />
-
-                  {/* Streaming tool output preview */}
-                  {Object.keys(streamingToolOutputs).length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    {Object.entries(streamingToolOutputs).map(([toolId, tool]) => (
+                  {displayVerbosity === "min" ? (
+                    <div className="space-y-1 text-sm animate-pulse" style={{ color: "var(--accent)" }}>
+                      {streamingKind === "tool" ? (
+                        <>
+                          {Object.keys(streamingToolCalls).length > 0 && <div>Tool call streaming…</div>}
+                          {Object.keys(streamingToolOutputs).length > 0 && <div>Tool output streaming…</div>}
+                          {Object.keys(streamingToolCalls).length === 0 && Object.keys(streamingToolOutputs).length === 0 && <div>Tool output streaming…</div>}
+                        </>
+                      ) : (
+                        <>
+                          <div>Reasoning streaming…</div>
+                          <div>Content streaming…</div>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      {/* Streaming reasoning - direct DOM updates via ref */}
                       <details
-                        key={toolId}
-                        open
-                        className={`rounded ${showBorders ? 'border' : ''}`}
-                        style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
+                      open
+                      className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
+                      style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
+                      id="streaming-reasoning-container"
                       >
-                        <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                          <span className="font-medium" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>{tool.name || "tool"}</span>
-                          <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-                            {toolId.slice(-8)}
-                          </span>
-                          <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
-                        </summary>
-                        <div className="px-2 pb-2">
-                          {tool.summary && (
-                            <div
-                              data-testid="streaming-tool-summary"
-                              className="mb-2 text-xs animate-pulse"
-                              style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
-                            >
-                              {tool.summary}
-                            </div>
-                          )}
-                          <pre
-                            ref={(el) => {
-                              streamingToolOutputRefs.current[toolId] = el;
-                            }}
-                            data-testid="streaming-tool-output"
-                            className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words"
-                            style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}
-                          />
-                          {tool.suppressed && (
-                            <div
-                              data-testid="streaming-tool-output-suppressed"
-                              className="mt-2 text-xs animate-pulse"
-                              style={{ color: "var(--muted)" }}
-                            >
-                              {toolStreamSavingText(tool.name, tool.suppressedFrames)}
-                            </div>
-                          )}
-                        </div>
+                      <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+                        Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
+                      </summary>
+                      <div
+                        ref={streamingReasoningRef}
+                        className="mt-2 text-sm whitespace-pre-wrap"
+                        style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
+                      />
                       </details>
-                    ))}
-                  </div>
-                  )}
 
-                  {/* Streaming tool calls */}
-                  {Object.keys(streamingToolCalls).length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
-                      const isBash = tc.name === "bash";
-                      let parsedArgs: any = tc.arguments;
-                      try {
-                        parsedArgs = JSON.parse(tc.arguments);
-                      } catch {
-                        // Keep as string
-                      }
-                      const script = isBash && parsedArgs?.script;
+                      {/* Streaming reasoning summary - display-only, not persisted as reasoning */}
+                      <details
+                      open
+                      className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
+                      style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
+                      id="streaming-reasoning-summary-container"
+                      >
+                      <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+                        Reasoning Summary <span className="text-xs animate-pulse">(streaming...)</span>
+                      </summary>
+                      <div
+                        ref={streamingReasoningSummaryRef}
+                        className="mt-2 text-sm whitespace-pre-wrap"
+                        style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
+                      />
+                      </details>
 
-                      return (
-                        <details
-                          key={tcId}
-                          open
-                          className={`rounded ${showBorders ? 'border' : ''}`}
-                          style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
-                        >
-                          <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                            <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
-                            <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-                              {tcId.slice(-8)}
-                            </span>
-                            <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
-                          </summary>
-                          <div className="px-2 pb-2">
-                            {isBash && script ? (
-                              <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-                                $ {script}
-                              </pre>
-                            ) : (
-                              <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                                {tc.arguments || "..."}
-                              </pre>
-                            )}
-                          </div>
-                        </details>
-                      );
-                    })}
-                  </div>
+                      {/* Streaming content - direct DOM updates via ref for O(1) performance */}
+                      <div
+                      ref={streamingContentRef}
+                      className="text-sm"
+                      style={{
+                        color: "var(--assistant-msg-text, var(--foreground))",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                      }}
+                      />
+
+                      {/* Streaming tool output preview */}
+                      {Object.keys(streamingToolOutputs).length > 0 && (
+                      <div className="mt-2 space-y-2">
+                        {Object.entries(streamingToolOutputs).map(([toolId, tool]) => (
+                          <details
+                            key={toolId}
+                            open
+                            className={`rounded ${showBorders ? 'border' : ''}`}
+                            style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
+                          >
+                            <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
+                              <span className="font-medium" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>{tool.name || "tool"}</span>
+                              <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                                {toolId.slice(-8)}
+                              </span>
+                              <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
+                            </summary>
+                            <div className="px-2 pb-2">
+                              {tool.summary && (
+                                <div
+                                  data-testid="streaming-tool-summary"
+                                  className="mb-2 text-xs animate-pulse"
+                                  style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                                >
+                                  {tool.summary}
+                                </div>
+                              )}
+                              <pre
+                                ref={(el) => {
+                                  streamingToolOutputRefs.current[toolId] = el;
+                                }}
+                                data-testid="streaming-tool-output"
+                                className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words"
+                                style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}
+                              />
+                              {tool.suppressed && (
+                                <div
+                                  data-testid="streaming-tool-output-suppressed"
+                                  className="mt-2 text-xs animate-pulse"
+                                  style={{ color: "var(--muted)" }}
+                                >
+                                  {toolStreamSavingText(tool.name, tool.suppressedFrames)}
+                                </div>
+                              )}
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                      )}
+
+                      {/* Streaming tool calls */}
+                      {Object.keys(streamingToolCalls).length > 0 && (
+                      <div className="mt-2 space-y-2">
+                        {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
+                          const isBash = tc.name === "bash";
+                          let parsedArgs: any = tc.arguments;
+                          try {
+                            parsedArgs = JSON.parse(tc.arguments);
+                          } catch {
+                            // Keep as string
+                          }
+                          const script = isBash && parsedArgs?.script;
+
+                          return (
+                            <details
+                              key={tcId}
+                              open
+                              className={`rounded ${showBorders ? 'border' : ''}`}
+                              style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
+                            >
+                              <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
+                                <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
+                                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                                  {tcId.slice(-8)}
+                                </span>
+                                <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
+                              </summary>
+                              <div className="px-2 pb-2">
+                                {isBash && script ? (
+                                  <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
+                                    $ {script}
+                                  </pre>
+                                ) : (
+                                  <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                                    {tc.arguments || "..."}
+                                  </pre>
+                                )}
+                              </div>
+                            </details>
+                          );
+                        })}
+                      </div>
+                      )}
+                    </>
                   )}
               </div>
             )}

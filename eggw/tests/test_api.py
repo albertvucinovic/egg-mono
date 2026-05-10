@@ -445,6 +445,41 @@ class TestSSEEvents:
 class TestCommands:
     """Test slash commands."""
 
+    def test_display_verbosity_command_returns_frontend_action(self, client):
+        """eggw supports the UI-only /displayVerbosity command."""
+        create_resp = client.post("/api/threads", json={"name": "Display Verbosity"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/displayVerbosity medium"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["message"] == "Display verbosity set to medium."
+        assert data["data"] == {
+            "action": "set_display_verbosity",
+            "display_verbosity": "medium",
+        }
+
+    def test_display_verbosity_command_reports_usage(self, client):
+        """No /displayVerbosity argument returns usage for the browser UI."""
+        create_resp = client.post("/api/threads", json={"name": "Display Verbosity Usage"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/displayVerbosity"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["message"] == "Usage: /displayVerbosity <max|medium|min>"
+        assert data["data"]["action"] == "display_verbosity_usage"
+
     def test_execute_help_command(self, client):
         """Test executing /help command."""
         # Create thread
