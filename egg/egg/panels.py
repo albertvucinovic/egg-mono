@@ -1,13 +1,14 @@
 """Panel management mixin for the egg application."""
 from __future__ import annotations
 
+import io
 import json
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from rich.console import Group
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
@@ -24,6 +25,233 @@ class _StaticTranscriptRenderable:
 
     renderable: Any
     fallback: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _TranscriptScrollbackBlock:
+    """One lightweight transcript unit, rendered lazily on demand."""
+
+    kind: str
+    payload: Dict[str, Any]
+
+
+@dataclass
+class _TranscriptScrollbackCache:
+    """Rendered suffix cache for one terminal width / verbosity pair."""
+
+    next_block_index: int
+    rows: List[str]
+    complete: bool = False
+
+
+class TranscriptScrollbackSource:
+    """Lazy full-screen scrollback source for the current static transcript.
+
+    The source captures the current thread snapshot plus compaction marker
+    events, but it does not render any Rich panels until the renderer asks for
+    rows. Rows are rendered from the newest transcript block toward older
+    blocks and cached per terminal width and display verbosity.
+    """
+
+    def __init__(
+        self,
+        panels: Any,
+        thread_id: Optional[str] = None,
+        *,
+        refresh_snapshot: bool = True,
+    ) -> None:
+        self._panels = panels
+        self._db = panels.db
+        self._thread_id = thread_id or panels.current_thread
+        if refresh_snapshot:
+            self._refresh_snapshot_if_safe()
+        self._blocks = self._load_blocks()
+        self._caches: Dict[Tuple[int, str], _TranscriptScrollbackCache] = {}
+
+    def row_count(self, width: int) -> Optional[int]:
+        """Return the rendered row count only after this width is complete."""
+        cache = self._caches.get(self._cache_key(width))
+        if cache is None or not cache.complete:
+            return None
+        return len(cache.rows)
+
+    def rows_from_bottom(self, width: int, bottom_offset: int, height: int) -> Sequence[str]:
+        """Return a bottom-addressed lazy slice of transcript rows."""
+        height = max(0, int(height or 0))
+        if height <= 0:
+            return []
+        bottom_offset = max(0, int(bottom_offset or 0))
+        cache = self._ensure_rows(width, bottom_offset + height)
+        end = len(cache.rows) - bottom_offset
+        if end <= 0:
+            return []
+        start = max(0, end - height)
+        return cache.rows[start:end]
+
+    def _refresh_snapshot_if_safe(self) -> None:
+        """Mirror static-view snapshot refresh without touching active streams."""
+        try:
+            row = self._db.current_open(self._thread_id)
+        except Exception:
+            row = None
+        if row is not None:
+            return
+        try:
+            create_snapshot(self._db, self._thread_id)
+        except Exception:
+            pass
+
+    def _load_blocks(self) -> List[_TranscriptScrollbackBlock]:
+        """Read the current snapshot/messages and compaction marker events."""
+        try:
+            msgs = snapshot_messages(self._db, self._thread_id)
+        except Exception:
+            msgs = []
+        try:
+            markers_by_start_seq = self._panels._compaction_markers_by_start_seq(self._thread_id)
+        except Exception:
+            markers_by_start_seq = {}
+
+        blocks: List[_TranscriptScrollbackBlock] = []
+        if not msgs and not markers_by_start_seq:
+            blocks.append(_TranscriptScrollbackBlock('empty', {}))
+            return blocks
+
+        for msg in msgs or []:
+            if not isinstance(msg, dict):
+                continue
+            try:
+                event_seq_int = int(msg.get('event_seq'))
+            except Exception:
+                event_seq_int = -1
+            for marker in markers_by_start_seq.get(event_seq_int, []):
+                if isinstance(marker, dict):
+                    blocks.append(_TranscriptScrollbackBlock('marker', dict(marker)))
+            blocks.append(_TranscriptScrollbackBlock('message', dict(msg)))
+        return blocks
+
+    def _cache_key(self, width: int) -> Tuple[int, str]:
+        width = max(1, int(width or 0))
+        try:
+            verbosity = self._panels._panel_display_verbosity_level()
+        except Exception:
+            verbosity = str(getattr(self._panels, '_display_verbosity', 'max') or 'max')
+        verbosity = str(verbosity or 'max').strip().lower()
+        if verbosity not in {'max', 'medium', 'min'}:
+            verbosity = 'max'
+        return width, verbosity
+
+    def _ensure_rows(self, width: int, needed_from_bottom: int) -> _TranscriptScrollbackCache:
+        key = self._cache_key(width)
+        cache = self._caches.get(key)
+        if cache is None:
+            cache = _TranscriptScrollbackCache(
+                next_block_index=len(self._blocks) - 1,
+                rows=[],
+            )
+            self._caches[key] = cache
+
+        needed_from_bottom = max(0, int(needed_from_bottom or 0))
+        while not cache.complete and len(cache.rows) < needed_from_bottom:
+            if cache.next_block_index < 0:
+                cache.complete = True
+                break
+            block = self._blocks[cache.next_block_index]
+            cache.next_block_index -= 1
+            block_rows = self._render_block_rows(block, key[0], key[1])
+            if block_rows:
+                cache.rows[:0] = block_rows
+        if cache.next_block_index < 0:
+            cache.complete = True
+        return cache
+
+    def _render_block_rows(
+        self,
+        block: _TranscriptScrollbackBlock,
+        width: int,
+        verbosity: str,
+    ) -> List[str]:
+        items: List[_StaticTranscriptRenderable] = []
+        if block.kind == 'message':
+            hidden_details = None
+            if verbosity == 'min':
+                try:
+                    hidden_details = self._panels._new_static_hidden_details_state()
+                except Exception:
+                    hidden_details = None
+            try:
+                items.extend(self._panels._static_transcript_message_renderables(
+                    block.payload,
+                    hidden_details,
+                ))
+            except Exception:
+                items = []
+            if verbosity == 'min' and isinstance(hidden_details, dict):
+                try:
+                    hidden_item = self._panels._static_hidden_details_renderable(hidden_details)
+                except Exception:
+                    hidden_item = None
+                if hidden_item is not None:
+                    items.append(hidden_item)
+        elif block.kind == 'marker':
+            try:
+                items.append(self._panels._static_transcript_compaction_marker_renderable(block.payload))
+            except Exception:
+                pass
+        elif block.kind == 'empty':
+            try:
+                renderable = Panel('[dim]No messages yet[/dim]', border_style='blue', box=self._panels._get_static_box())
+            except Exception:
+                renderable = 'No messages yet'
+            items.append(_StaticTranscriptRenderable(renderable, 'No messages yet'))
+
+        rows: List[str] = []
+        for item in items:
+            rows.extend(self._render_static_transcript_item_rows(item, width))
+        return rows
+
+    def _render_static_transcript_item_rows(
+        self,
+        item: _StaticTranscriptRenderable,
+        width: int,
+    ) -> List[str]:
+        """Render one transcript item to sanitized ANSI terminal rows."""
+        width = max(1, int(width or 0))
+        try:
+            color_system = self._panels.console.color_system
+        except Exception:
+            color_system = 'truecolor'
+
+        fallback = item.fallback
+        if fallback is None:
+            fallback = getattr(item.renderable, 'plain', str(item.renderable))
+        for renderable in (item.renderable, fallback):
+            try:
+                buf = io.StringIO()
+                console = Console(
+                    file=buf,
+                    width=width,
+                    force_terminal=True,
+                    color_system=color_system or 'truecolor',
+                )
+                console.print(renderable)
+                text = self._sanitize_rendered_ansi(buf.getvalue())
+                lines = text.split('\n')
+                if lines and lines[-1] == '':
+                    lines.pop()
+                return lines
+            except Exception:
+                continue
+        return []
+
+    @staticmethod
+    def _sanitize_rendered_ansi(text: str) -> str:
+        try:
+            from eggdisplay import FullScreenDiffRenderer  # type: ignore
+
+            return FullScreenDiffRenderer._sanitize_rendered_ansi(text)
+        except Exception:
+            return text
 
 
 class PanelsMixin:

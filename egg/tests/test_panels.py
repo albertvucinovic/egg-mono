@@ -713,6 +713,76 @@ class TestPrintStaticViewCurrent:
         assert rendered[-6:] == [f"message {i}" for i in range(6)]
 
 
+class TestTranscriptScrollbackSource:
+    """Tests for the lazy full-screen transcript scrollback source."""
+
+    @staticmethod
+    def _fallback_rows(item, _width):
+        return [str(item.fallback)]
+
+    def test_bottom_window_renders_only_enough_tail_blocks(self, egg_app, monkeypatch):
+        """A bottom viewport request should not render the full transcript."""
+        from egg.panels import TranscriptScrollbackSource, _StaticTranscriptRenderable
+        from eggthreads import append_message, create_snapshot
+
+        for i in range(10):
+            append_message(egg_app.db, egg_app.current_thread, "user", f"tail-lazy-{i}")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        rendered = []
+
+        def fake_message_renderables(message, hidden_details=None):
+            content = str(message.get("content") or "")
+            rendered.append(content)
+            return [_StaticTranscriptRenderable(content, content)]
+
+        monkeypatch.setattr(egg_app, "_static_transcript_message_renderables", fake_message_renderables)
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        monkeypatch.setattr(source, "_render_static_transcript_item_rows", self._fallback_rows)
+
+        rows = list(source.rows_from_bottom(80, bottom_offset=0, height=3))
+
+        assert rows == ["tail-lazy-7", "tail-lazy-8", "tail-lazy-9"]
+        assert rendered == ["tail-lazy-9", "tail-lazy-8", "tail-lazy-7"]
+        assert "tail-lazy-0" not in rendered
+        assert source.row_count(80) is None
+
+    def test_rows_are_cached_by_width_and_verbosity(self, egg_app, monkeypatch):
+        """Rendered rows are reused for the same width/verbosity cache key."""
+        from egg.panels import TranscriptScrollbackSource, _StaticTranscriptRenderable
+        from eggthreads import append_message, create_snapshot
+
+        for i in range(4):
+            append_message(egg_app.db, egg_app.current_thread, "user", f"cache-lazy-{i}")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        rendered = []
+
+        def fake_message_renderables(message, hidden_details=None):
+            content = str(message.get("content") or "")
+            rendered.append((egg_app._display_verbosity, content))
+            return [_StaticTranscriptRenderable(content, content)]
+
+        monkeypatch.setattr(egg_app, "_static_transcript_message_renderables", fake_message_renderables)
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        monkeypatch.setattr(source, "_render_static_transcript_item_rows", self._fallback_rows)
+
+        assert list(source.rows_from_bottom(80, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
+        assert rendered == [("max", "cache-lazy-3"), ("max", "cache-lazy-2")]
+
+        assert list(source.rows_from_bottom(80, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
+        assert rendered == [("max", "cache-lazy-3"), ("max", "cache-lazy-2")]
+
+        assert list(source.rows_from_bottom(81, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
+        assert rendered[-2:] == [("max", "cache-lazy-3"), ("max", "cache-lazy-2")]
+
+        egg_app._display_verbosity = "medium"
+        assert list(source.rows_from_bottom(80, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
+        assert rendered[-2:] == [("medium", "cache-lazy-3"), ("medium", "cache-lazy-2")]
+
+
 class TestRedrawStaticView:
     """Tests for redraw_static_view()."""
 

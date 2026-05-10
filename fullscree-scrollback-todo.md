@@ -63,11 +63,13 @@ Phases:
     - 2026-05-10: Extracted static transcript message, compaction marker, and hidden-detail renderable builders from `PanelsMixin`; `console_print_message()` and `console_print_compaction_marker()` now only print the returned renderables. Builder calls avoid `_live_print()` capture/monkeypatching and support caller-owned hidden-detail state for later lazy transcript rendering.
     - 2026-05-10: Added focused panel tests proving message/compaction builders return renderables without printing. Test runs: `python -m pytest egg/tests/test_panels.py::TestConsolePrintMessage -q` (16 passed), `python -m pytest egg/tests/test_formatting.py egg/tests/test_panels.py egg/tests/test_integration_workflow.py -q` (111 passed), `python -m pytest egg/tests -q` (388 passed).
 
-- [ ] Phase 3 — Lazy `TranscriptScrollbackSource`
+- [x] Phase 3 — Lazy `TranscriptScrollbackSource`
   - Implement a source class in `egg` that reads the current snapshot/events and lazily renders transcript blocks from newest to oldest.
   - Cache rows by width/verbosity and avoid full-history rendering for bottom viewport requests.
   - Add focused tests proving the bottom window only renders enough tail blocks.
   - Status notes:
+    - 2026-05-10: Added `TranscriptScrollbackSource` in `egg.panels`; it captures current snapshot messages plus compaction marker events as lightweight blocks, renders blocks lazily from newest to oldest via the Phase 2 static transcript builders, and caches rendered suffix rows per terminal width/display verbosity. `row_count()` stays unknown until a cache has rendered to the transcript top, so bottom viewport requests do not force full-history rendering.
+    - 2026-05-10: Added focused source tests proving a bottom window renders only the needed tail blocks and reuses the width/verbosity cache while re-rendering on width or verbosity changes. Current min-verbosity hidden-detail summaries are local to lazily rendered blocks/windows; exact cross-window aggregation for older off-window hidden-only details would require broader ordering state and is deferred. Test runs: `python -m pytest egg/tests/test_panels.py::TestTranscriptScrollbackSource -q` (2 passed), `python -m pytest egg/tests/test_panels.py -q` (58 passed), `python -m pytest egg/tests/test_panels.py eggdisplay/tests/test_renderers_terminal_safety.py -q` (73 passed), `python -m pytest egg/tests -q` (390 passed).
 
 - [ ] Phase 4 — Full-screen wiring and redraw behavior
   - Install the source on full-screen renderers in `EggDisplayApp.run()` before initial paint/history display.
