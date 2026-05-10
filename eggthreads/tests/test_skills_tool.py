@@ -7,6 +7,8 @@ def test_skill_registry_loads_description_from_markdown() -> None:
     skills = {skill.name: skill for skill in ts.list_skills()}
     assert "rlm" in skills
     assert "persistent REPL variables" in skills["rlm"].description
+    assert "worker-manager" in skills
+    assert "worker subthreads" in skills["worker-manager"].description
 
 
 def test_skill_tool_lists_and_loads_documents() -> None:
@@ -26,6 +28,10 @@ def test_skill_tool_lists_and_loads_documents() -> None:
     assert "# Skill: rlm" in doc
     assert "chunk_text" in doc
     assert "special RLM runtime module" in doc
+
+    worker_doc = tools.execute("skill", {"name": "worker-manager"})
+    assert "# Skill: worker-manager" in worker_doc
+    assert "Spawn template" in worker_doc
 
 
 def test_eggtools_exposes_skill_helper_in_memory_repl(tmp_path, monkeypatch) -> None:
