@@ -3,7 +3,7 @@ from __future__ import annotations
 """Shared UI command/autocomplete catalog for Egg frontends."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping
 
@@ -119,8 +119,32 @@ class CommandRegistry:
         return names
 
     def execute(self, name: str, context: CommandContext, arg: str = "") -> CommandResult:
-        result = self.get(name).handler(context, arg)
-        return result if isinstance(result, CommandResult) else CommandResult()
+        normalized = _normalize_command_name(name)
+        spec = self.get(normalized)
+        logged_messages: list[str] = []
+        original_log_system = context.log_system
+
+        def capture_log(message: str) -> None:
+            text = str(message).strip()
+            if text:
+                logged_messages.append(text)
+            if original_log_system is not None:
+                original_log_system(message)
+
+        run_context = replace(context, log_system=capture_log)
+        raw_result = spec.handler(run_context, arg)
+        result = raw_result if isinstance(raw_result, CommandResult) else CommandResult()
+        message = result.message.strip() if isinstance(result.message, str) else ""
+        if not message:
+            if logged_messages:
+                message = "\n".join(logged_messages)
+            elif result.exit_app:
+                message = f"/{normalized} accepted."
+            elif result.clear_input:
+                message = f"/{normalized} completed."
+            else:
+                message = f"/{normalized} did not complete."
+        return replace(result, message=message)
 
     def complete(self, name: str, context: CommandContext, arg: str = "") -> list[str | Mapping[str, Any]]:
         completer = self.get(name).complete
@@ -208,7 +232,7 @@ def _core_help_handler(context: CommandContext, arg: str) -> CommandResult:
     except Exception:
         if context.log_system is not None:
             context.log_system(help_text)
-    return CommandResult(clear_input=True)
+    return CommandResult(clear_input=True, message="Help (see console for full).")
 
 
 def _core_quit_handler(context: CommandContext, arg: str) -> CommandResult:

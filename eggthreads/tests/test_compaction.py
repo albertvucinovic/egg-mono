@@ -199,7 +199,8 @@ def test_compact_with_summary_command_appends_model_visible_request(tmp_path):
 
     assert result.clear_input is True
     assert result.start_schedulers == (tid,)
-    assert result.message is None
+    assert result.message is not None
+    assert "Queued compaction summary request" in result.message
     assert started == [tid]
     assert seen and "Queued compaction summary request" in seen[-1]
 

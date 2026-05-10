@@ -42,9 +42,37 @@ def test_command_registry_executes_registered_command() -> None:
     result = registry.execute("/ex", ctx, "value")
 
     assert result == CommandResult(clear_input=False, message="done")
-    assert seen == {"ctx": ctx, "arg": "value"}
+    assert seen["arg"] == "value"
+    assert getattr(seen["ctx"], "current_thread") == ctx.current_thread
     assert registry.get("example").usage == "/example <arg>"
     assert registry.names(include_aliases=True) == ["example", "ex"]
+
+
+def test_command_registry_returns_logged_message_when_handler_omits_message() -> None:
+    logs: list[str] = []
+    registry = CommandRegistry()
+
+    def handler(ctx: CommandContext, arg: str) -> CommandResult:
+        assert ctx.log_system is not None
+        ctx.log_system("handler logged reply")
+        return CommandResult(clear_input=True)
+
+    registry.register(CommandSpec(name="example", handler=handler))
+
+    result = registry.execute("example", CommandContext(log_system=logs.append))
+
+    assert result.clear_input is True
+    assert result.message == "handler logged reply"
+    assert logs == ["handler logged reply"]
+
+
+def test_command_registry_returns_fallback_message_when_handler_is_silent() -> None:
+    registry = CommandRegistry()
+    registry.register(CommandSpec(name="example", handler=lambda ctx, arg: CommandResult(clear_input=True)))
+
+    result = registry.execute("example", CommandContext())
+
+    assert result == CommandResult(clear_input=True, message="/example completed.")
 
 
 def test_command_registry_rejects_duplicate_names_and_aliases() -> None:

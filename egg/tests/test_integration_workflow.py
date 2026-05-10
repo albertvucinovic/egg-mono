@@ -47,6 +47,32 @@ class TestCommandRegistryDispatch:
 
         assert any("Command says hello" in msg for msg in egg_app._system_log)
 
+    def test_handle_command_does_not_double_log_returned_logged_message(self, egg_app):
+        from eggthreads.command_catalog import CommandResult
+
+        class Registry:
+            def get(self, name):
+                return object()
+
+            def execute(self, name, ctx, arg):
+                ctx.log_system("Command already logged")
+                return CommandResult(message="Command already logged")
+
+        egg_app.command_registry = Registry()
+
+        before = len(egg_app._system_log)
+        egg_app.handle_command("/example")
+
+        assert egg_app._system_log[before:] == ["Command already logged"]
+
+    def test_handle_command_logs_set_auto_compact_threshold_reply(self, egg_app):
+        before = len(egg_app._system_log)
+
+        egg_app.handle_command("/setAutoCompactThreshold 12345")
+
+        new_logs = egg_app._system_log[before:]
+        assert any("Auto-compaction threshold set" in msg and "12,345" in msg for msg in new_logs)
+
     def test_handle_command_reports_unknown_registry_command(self, egg_app):
         class Registry:
             def get(self, name):

@@ -496,13 +496,21 @@ class EggDisplayApp(
             self.log_system(f'Unknown command: /{cmd}')
             return
 
+        log_count = len(getattr(self, '_system_log', []))
         result = registry.execute(cmd, self._command_context(), arg)
         try:
             message = getattr(result, 'message', None)
         except Exception:
             message = None
         if isinstance(message, str) and message.strip():
-            self.log_system(message.strip())
+            text = message.strip()
+            new_logs = getattr(self, '_system_log', [])[log_count:]
+            already_logged = any(str(log).strip() == text for log in new_logs)
+            if not already_logged:
+                joined_logs = "\n".join(str(log).strip() for log in new_logs if str(log).strip())
+                already_logged = joined_logs == text
+            if not already_logged:
+                self.log_system(text)
 
     # ---------------- Main loop ----------------
     async def run(self):
