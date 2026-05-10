@@ -22,7 +22,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Protocol, Sequence
 
 from rich.console import Console
 
@@ -59,6 +59,27 @@ class _StreamRowsState:
     logical_start_rows_len: int = 0
     logical_has_content: bool = False
     render_empty_current: bool = False
+
+
+class FullScreenScrollbackSource(Protocol):
+    """Lazy row provider for :class:`FullScreenDiffRenderer` history.
+
+    Rows are ANSI-rendered terminal rows, already wrapped for ``width`` and
+    ordered top-to-bottom. ``rows_from_bottom(width, bottom_offset, height)``
+    returns up to ``height`` rows ending ``bottom_offset`` rows above the
+    source bottom; ``bottom_offset=0`` returns the newest/tail rows. Returning
+    fewer rows than requested means the source top was reached.
+
+    ``row_count(width)`` should return the total rendered row count when it is
+    cheaply available, or ``None`` when answering would require eagerly
+    rendering the full history.
+    """
+
+    def row_count(self, width: int) -> Optional[int]:
+        """Return total rows for ``width`` if cheaply known, otherwise ``None``."""
+
+    def rows_from_bottom(self, width: int, bottom_offset: int, height: int) -> Sequence[str]:
+        """Return a bottom-addressed slice of rows in display order."""
 
 
 class _DiffRendererBase:
@@ -364,7 +385,9 @@ class FullScreenDiffRenderer(_DiffRendererBase):
 
     def __init__(self, initial=None, *, console: Optional[Console] = None,
                  refresh_per_second: int = 30, screen: bool = False,
-                 alt_screen: bool = True, **_):
+                 alt_screen: bool = True,
+                 scrollback_source: Optional[FullScreenScrollbackSource] = None,
+                 **_):
         super().__init__(console=console)
         self._initial = initial
         self._alt_screen = bool(alt_screen)
@@ -396,6 +419,12 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         # wheel event/PageUp; the cache is invalidated only when the stream
         # buffer changes or the terminal width changes.
         self._stream_rows_state = _StreamRowsState()
+        # Optional persistent history source. Unlike ``_scrollback`` (rows
+        # appended during this renderer session via print_above), this source is
+        # bottom-addressed so older transcript rows can be fetched lazily for
+        # just the visible viewport while scrolling.
+        self._scrollback_source: Optional[FullScreenScrollbackSource] = scrollback_source
+        self._source_row_count_by_width: dict[int, int] = {}
 
     # -- context manager ----------------------------------------------------
 
@@ -426,6 +455,8 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         sys.stdout.write(out)
         sys.stdout.flush()
         self._scrollback = []
+        self._scrollback_source = None
+        self._source_row_count_by_width.clear()
         self._live_lines = []
         self._prev_viewport = []
 
@@ -436,6 +467,19 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         lines, width = self._render_to_lines(renderable)
         self._live_lines = lines
         self._paint(width)
+
+    def set_scrollback_source(self, source: Optional[FullScreenScrollbackSource]) -> None:
+        """Install or clear the lazy persistent scrollback source.
+
+        The source, when present, is composed before rows appended with
+        :meth:`print_above`. Installing a source does not copy any rows into
+        ``_scrollback``; paints ask only for the bottom-addressed slice needed
+        for the current viewport/scroll offset.
+        """
+        self._scrollback_source = source
+        self._source_row_count_by_width.clear()
+        if self._prev_viewport or self._live_lines or self._scrollback or self._stream_buffer:
+            self._paint(self._viewport_w or self._term_width())
 
     def print_above(self, *objects, **kwargs) -> None:
         """Append content to the scrollback model and repaint.
@@ -647,15 +691,157 @@ class FullScreenDiffRenderer(_DiffRendererBase):
             append_text_by_cells(ansi_text[i:next_special])
             i = next_special
 
+    def _source_row_count_if_available(
+        self,
+        width: int,
+        *,
+        query_source: bool = True,
+    ) -> Optional[int]:
+        """Return source row count for *width* when known without full rendering."""
+        source = self._scrollback_source
+        if source is None:
+            return 0
+        width = int(width or self._term_width() or 80)
+        if width in self._source_row_count_by_width:
+            return self._source_row_count_by_width[width]
+        if not query_source:
+            return None
+        count = source.row_count(width)
+        if count is None:
+            return None
+        count = max(0, int(count))
+        self._source_row_count_by_width[width] = count
+        return count
+
+    def _source_rows_from_bottom(self, width: int, bottom_offset: int, height: int) -> List[str]:
+        """Fetch a source slice and record any source-top count inference."""
+        source = self._scrollback_source
+        height = max(0, int(height))
+        if source is None or height <= 0:
+            return []
+        width = int(width or self._term_width() or 80)
+        bottom_offset = max(0, int(bottom_offset))
+        rows = list(source.rows_from_bottom(width, bottom_offset, height))
+        if len(rows) > height:
+            # The public contract says sources return at most ``height`` rows;
+            # trim defensively so a bad source cannot overfill the viewport.
+            rows = rows[-height:]
+        if len(rows) < height:
+            # A short bottom-addressed response means the source top was hit:
+            # N - bottom_offset == len(rows), therefore N is known exactly for
+            # the one-page-at-a-time probes produced by ``scroll``.
+            inferred_count = bottom_offset + len(rows)
+            cached = self._source_row_count_by_width.get(width)
+            if cached is None or inferred_count < cached:
+                self._source_row_count_by_width[width] = inferred_count
+        return rows
+
+    def _local_non_live_len(self, stream_rows: Sequence[str]) -> int:
+        return len(self._scrollback) + len(stream_rows)
+
+    def _known_max_scroll_offset(
+        self,
+        width: int,
+        stream_rows: Sequence[str],
+        non_live_h: int,
+        *,
+        query_source: bool = True,
+    ) -> Optional[int]:
+        source_count = self._source_row_count_if_available(width, query_source=query_source)
+        if source_count is None:
+            return None
+        return max(0, source_count + self._local_non_live_len(stream_rows) - max(0, int(non_live_h)))
+
     def _max_scroll_offset(self, width: int) -> int:
-        """Return the largest valid in-app scroll offset for current content."""
+        """Return the largest currently known in-app scroll offset."""
 
         width = int(width or self._term_width() or 80)
         vh = self._term_height()
         stream_rows = self._stream_rows(width) if self._stream_buffer else []
         live_h = min(len(self._live_lines), vh)
         non_live_h = max(0, vh - live_h)
-        return max(0, len(self._scrollback) + len(stream_rows) - non_live_h)
+        known = self._known_max_scroll_offset(width, stream_rows, non_live_h)
+        if known is not None:
+            return known
+
+        # The source exists but its total height is unknown. Permit scrolling
+        # into the lazy source without probing the whole history up front, but
+        # cap a single jump to one visible history page beyond the current
+        # position so an oversized PageUp/test delta doesn't leap far past the
+        # source top and render only blanks. Repeated scrolls keep discovering
+        # older rows lazily.
+        local_max = max(0, self._local_non_live_len(stream_rows) - non_live_h)
+        return max(local_max, int(self._scroll_offset) + max(1, non_live_h))
+
+    def _local_non_live_slice(
+        self,
+        stream_rows: Sequence[str],
+        start: int,
+        end: int,
+    ) -> List[str]:
+        """Return rows from ``_scrollback + stream_rows`` without joining them."""
+        start = max(0, int(start))
+        end = max(start, int(end))
+        scrollback_len = len(self._scrollback)
+        rows: List[str] = []
+        if start < scrollback_len:
+            scrollback_end = min(end, scrollback_len)
+            if scrollback_end > start:
+                rows.extend(self._scrollback[start:scrollback_end])
+        if end > scrollback_len:
+            stream_start = max(0, start - scrollback_len)
+            stream_end = min(len(stream_rows), end - scrollback_len)
+            if stream_end > stream_start:
+                rows.extend(stream_rows[stream_start:stream_end])
+        return rows
+
+    def _visible_non_live_rows(
+        self,
+        width: int,
+        stream_rows: Sequence[str],
+        height: int,
+        offset: int,
+    ) -> List[str]:
+        """Compose visible source + scrollback + stream rows for the history area."""
+        height = max(0, int(height))
+        if height <= 0:
+            return []
+        offset = max(0, int(offset))
+        local_len = self._local_non_live_len(stream_rows)
+
+        if offset < local_len:
+            local_end = local_len - offset
+            local_visible_count = min(height, local_end)
+            local_start = local_end - local_visible_count
+            rows: List[str] = []
+            source_height = height - local_visible_count
+            if source_height > 0:
+                rows.extend(self._source_rows_from_bottom(width, 0, source_height))
+            rows.extend(self._local_non_live_slice(stream_rows, local_start, local_end))
+        else:
+            source_bottom_offset = offset - local_len
+            rows = self._source_rows_from_bottom(width, source_bottom_offset, height)
+
+        if len(rows) < height:
+            rows = [""] * (height - len(rows)) + rows
+        return rows[:height]
+
+    def _clamp_scroll_offset_if_known(
+        self,
+        width: int,
+        stream_rows: Sequence[str],
+        non_live_h: int,
+        *,
+        query_source: bool = True,
+    ) -> bool:
+        """Clamp ``_scroll_offset`` when total history height is known."""
+        known = self._known_max_scroll_offset(
+            width, stream_rows, non_live_h, query_source=query_source
+        )
+        if known is None or self._scroll_offset <= known:
+            return False
+        self._scroll_offset = known
+        return True
 
     def _stream_rows_from_ansi(self, ansi_text: str, width: int) -> List[str]:
         """Split an ANSI-rendered string into terminal-width visual rows."""
@@ -740,8 +926,9 @@ class FullScreenDiffRenderer(_DiffRendererBase):
                 rows.append(current)
         return rows
 
-    def _paint(self, width: int) -> None:
-        """Compute the visible viewport and emit row-level diff to stdout."""
+    def _compose_visible_viewport(self, width: int) -> List[str]:
+        """Return the current viewport rows and update scroll bookkeeping."""
+        width = int(width or self._term_width() or 80)
         vh = self._term_height()
         stream_rows = self._stream_rows(width) if self._stream_buffer else []
         # Keep a scrolled-up user's view stable while the stream buffer
@@ -755,42 +942,42 @@ class FullScreenDiffRenderer(_DiffRendererBase):
                 self._scroll_offset = max(0, self._scroll_offset + delta)
         self._last_stream_rows = len(stream_rows)
         # The live region is always pinned to the bottom of the viewport;
-        # scrolling only affects the history area (scrollback + in-flight
-        # stream) above it.
-        scrollback_len = len(self._scrollback)
-        stream_len = len(stream_rows)
-        non_live_len = scrollback_len + stream_len
+        # scrolling only affects the history area (source + scrollback +
+        # in-flight stream) above it.
         live = self._live_lines
         live_h = min(len(live), vh)
         non_live_h = max(0, vh - live_h)
 
-        max_offset = max(0, non_live_len - non_live_h)
-        if self._scroll_offset > max_offset:
-            self._scroll_offset = max_offset
-        offset = self._scroll_offset
+        # Preserve the exact no-source behavior by clamping immediately against
+        # the fully-known local model. With a lazy source, avoid asking for a
+        # total count during the initial bottom paint; only clamp when the user
+        # is already scrolled up or when a source response below infers the top.
+        if self._scrollback_source is None or self._scroll_offset > 0:
+            self._clamp_scroll_offset_if_known(width, stream_rows, non_live_h)
 
-        if non_live_h > 0:
-            end = non_live_len - offset
-            start = max(0, end - non_live_h)
-            non_live_visible: List[str] = []
-            if start < scrollback_len:
-                scrollback_end = min(end, scrollback_len)
-                if scrollback_end > start:
-                    non_live_visible.extend(self._scrollback[start:scrollback_end])
-            if end > scrollback_len:
-                stream_start = max(0, start - scrollback_len)
-                stream_end = end - scrollback_len
-                if stream_end > stream_start:
-                    non_live_visible.extend(stream_rows[stream_start:stream_end])
-            if len(non_live_visible) < non_live_h:
-                non_live_visible = [""] * (non_live_h - len(non_live_visible)) + non_live_visible
-        else:
-            non_live_visible = []
+        non_live_visible = self._visible_non_live_rows(
+            width, stream_rows, non_live_h, self._scroll_offset
+        )
+        # A short source response can reveal the exact source height. If the
+        # current offset is now known to be beyond the top, clamp and recompute
+        # so the viewport shows the real top rows rather than padded blanks.
+        if self._clamp_scroll_offset_if_known(
+            width, stream_rows, non_live_h, query_source=False
+        ):
+            non_live_visible = self._visible_non_live_rows(
+                width, stream_rows, non_live_h, self._scroll_offset
+            )
 
         visible = non_live_visible + live[:live_h]
         if len(visible) < vh:
             visible = [""] * (vh - len(visible)) + visible
-        visible = visible[:vh]
+        return visible[:vh]
+
+    def _paint(self, width: int) -> None:
+        """Compute the visible viewport and emit row-level diff to stdout."""
+        width = int(width or self._term_width() or 80)
+        vh = self._term_height()
+        visible = self._compose_visible_viewport(width)
 
         size_changed = (
             not self._prev_viewport
@@ -851,5 +1038,6 @@ def DiffRenderer(*args, mode: Optional[str] = None, **kwargs):
 __all__ = [
     "InlineDiffRenderer",
     "FullScreenDiffRenderer",
+    "FullScreenScrollbackSource",
     "DiffRenderer",
 ]

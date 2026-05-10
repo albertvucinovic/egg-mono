@@ -61,39 +61,10 @@ class TinyTerminalRenderer(FullScreenDiffRenderer):
 
     def _paint(self, width: int) -> None:
         # Avoid writing terminal control sequences during unit tests while still
-        # exercising the same viewport composition and scroll-offset logic.
-        vh = self._term_height()
-        stream_rows = self._stream_rows(width) if self._stream_buffer else []
-        if self._scroll_offset > 0:
-            delta = len(stream_rows) - self._last_stream_rows
-            if delta:
-                self._scroll_offset = max(0, self._scroll_offset + delta)
-        self._last_stream_rows = len(stream_rows)
-
-        non_live = list(self._scrollback) + stream_rows
-        live = list(self._live_lines)
-        live_h = min(len(live), vh)
-        non_live_h = max(0, vh - live_h)
-
-        max_offset = max(0, len(non_live) - non_live_h)
-        if self._scroll_offset > max_offset:
-            self._scroll_offset = max_offset
-        offset = self._scroll_offset
-
-        if non_live_h > 0:
-            end = len(non_live) - offset
-            start = max(0, end - non_live_h)
-            non_live_visible = non_live[start:end]
-            if len(non_live_visible) < non_live_h:
-                non_live_visible = [""] * (non_live_h - len(non_live_visible)) + non_live_visible
-        else:
-            non_live_visible = []
-
-        visible = non_live_visible + live[:live_h]
-        if len(visible) < vh:
-            visible = [""] * (vh - len(visible)) + visible
-        self._prev_viewport = visible[:vh]
-        self._viewport_h = vh
+        # exercising the renderer's real viewport composition and scroll-offset
+        # logic.
+        self._prev_viewport = self._compose_visible_viewport(width)
+        self._viewport_h = self._term_height()
         self._viewport_w = width
 
 
@@ -225,3 +196,84 @@ def test_fullscreen_incremental_stream_rows_match_full_rebuild_for_markup() -> N
     assert r._stream_rows(4) == r._stream_rows_from_ansi(r._stream_buffer, 4)
 
 
+class RecordingScrollbackSource:
+    def __init__(self, rows: list[str], *, total: int | None = None):
+        self.rows = rows
+        self.total = len(rows) if total is None else total
+        self.row_count_calls: list[int] = []
+        self.requests: list[tuple[int, int, int]] = []
+
+    def row_count(self, width: int) -> int | None:
+        self.row_count_calls.append(width)
+        return self.total
+
+    def rows_from_bottom(self, width: int, bottom_offset: int, height: int) -> list[str]:
+        self.requests.append((width, bottom_offset, height))
+        if height <= 0:
+            return []
+        end = len(self.rows) - max(0, bottom_offset)
+        if end <= 0:
+            return []
+        start = max(0, end - height)
+        return self.rows[start:end]
+
+
+def test_fullscreen_virtual_source_initial_paint_requests_visible_tail_only() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    source = RecordingScrollbackSource([f"s{i}" for i in range(100)], total=None)
+    r.set_scrollback_source(source)
+    r._live_lines = ["LIVE"]
+
+    r._paint(20)
+
+    assert r._prev_viewport == ["s96", "s97", "s98", "s99", "LIVE"]
+    assert source.requests == [(20, 0, 4)]
+    assert source.row_count_calls == []
+
+
+def test_fullscreen_virtual_source_composes_before_scrollback_stream_and_live() -> None:
+    r = TinyTerminalRenderer(width=20, height=6)
+    source = RecordingScrollbackSource(["s0", "s1", "s2"], total=3)
+    r.set_scrollback_source(source)
+    r._scrollback = ["p0", "p1"]
+    r._stream_buffer = "t0\nt1"
+    r._append_stream_rows(r._stream_buffer, 20)
+    r._live_lines = ["LIVE"]
+
+    r._paint(20)
+
+    assert r._prev_viewport == ["s2", "p0", "p1", "t0", "t1", "LIVE"]
+    assert source.requests == [(20, 0, 1)]
+
+
+def test_fullscreen_virtual_source_scrolling_requests_older_rows() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    source = RecordingScrollbackSource([f"s{i}" for i in range(8)], total=8)
+    r.set_scrollback_source(source)
+    r._live_lines = ["LIVE"]
+    r._scrollback = ["p0", "p1"]
+
+    r._paint(20)
+    assert r._prev_viewport == ["s6", "s7", "p0", "p1", "LIVE"]
+
+    r.scroll(3)
+
+    assert r._scroll_offset == 3
+    assert r._prev_viewport == ["s3", "s4", "s5", "s6", "LIVE"]
+    assert source.requests[-1] == (20, 1, 4)
+
+
+def test_fullscreen_virtual_source_top_clamps_when_source_is_short() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    source = RecordingScrollbackSource(["s0", "s1", "s2"], total=None)
+    r.set_scrollback_source(source)
+    r._live_lines = ["LIVE"]
+
+    r._paint(20)
+    assert r._prev_viewport == ["", "s0", "s1", "s2", "LIVE"]
+
+    r.scroll(999)
+
+    assert r._scroll_offset == 0
+    assert r._prev_viewport == ["", "s0", "s1", "s2", "LIVE"]
+    assert source.row_count_calls == []

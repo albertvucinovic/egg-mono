@@ -46,12 +46,14 @@ Design:
 
 Phases:
 
-- [ ] Phase 1 — Renderer virtual source API
+- [x] Phase 1 — Renderer virtual source API
   - Add a minimal public source protocol/data shape to `eggdisplay/eggdisplay/renderers.py`.
   - Update `FullScreenDiffRenderer._paint()` and `_max_scroll_offset()`/scroll behavior to compose source rows lazily with `_scrollback`, stream rows, and live rows.
   - Keep behavior identical when no source is installed.
   - Add unit tests in `eggdisplay/tests/test_renderers_terminal_safety.py` or a focused renderer test file.
   - Status notes:
+    - 2026-05-10: Added `FullScreenScrollbackSource` protocol and `set_scrollback_source()` on `FullScreenDiffRenderer`; paints now compose virtual source rows before in-session `_scrollback`, stream rows, and live rows while keeping the no-source path on the existing local model. Initial source paint asks only for the visible bottom slice and does not query total row count.
+    - 2026-05-10: Added focused renderer tests for visible-tail source requests, source/local/stream/live composition, scrolling to older source rows, and top clamp behavior. Test runs: `python -m pytest eggdisplay/tests/test_renderers_terminal_safety.py -q` (15 passed), `python -m pytest eggdisplay/tests -q` (45 passed).
 
 - [ ] Phase 2 — Pure static transcript renderables
   - Extract reusable renderable-producing methods from `egg/egg/panels.py` for messages and compaction markers.
