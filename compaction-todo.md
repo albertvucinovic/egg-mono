@@ -504,6 +504,56 @@ Goal: implement threshold-triggered compaction using the same semantics as user/
 Status notes:
 - 2026-05-09 21:58 UTC: Implemented the smallest Phase 7 behavior as direct threshold compaction to `last_llm` at the RA1 boundary. Added `provider_context_token_stats(...)` so the threshold uses effective provider context instead of raw UI history, `maybe_auto_compact_thread(...)` so auto compaction reuses `commit_thread_compaction`, and `RunnerConfig.auto_compact_threshold_tokens` checked only after acquiring the per-thread lease and before opening an LLM stream/provider call. Re-trigger hysteresis is provided by core forward-only validation: after compacting to the latest assistant, a repeated check without a newer assistant no-ops and emits no second event. Tests cover threshold trigger/no-trigger, no duplicate without new LLM, RA1-boundary provider view, deferral during tool turns, and provider-token counting after compaction. Tests passed: `pytest -q eggthreads/tests/test_compaction.py`; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py`. Commit: this Phase 7 change.
 
+## Phase 7.5 — Auto-compaction configuration and summary mode
+
+Goal: make auto-compaction usable from normal Egg runs and add a summary-producing path, while preserving the simple start-pointer compaction primitive.
+
+### Token threshold policy
+
+- [ ] Add `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` as a fallback auto-compaction threshold.
+  - Requested fallback/default value: `150000`.
+  - Treat unset/empty as using the fallback, unless a later config layer explicitly disables auto-compaction.
+  - A non-positive value may disable auto-compaction if that matches existing config style; confirm during implementation.
+- [ ] Derive a better default threshold from model context metadata when available.
+  - Inspect model configuration from `models.json` / model registry for a max context/window token setting.
+  - Use roughly 80% of that model limit as the preferred threshold.
+  - Fall back to `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` / `150000` when model metadata is missing.
+  - Keep explicit `RunnerConfig.auto_compact_threshold_tokens` highest priority for tests/programmatic callers.
+- [ ] Document/test precedence.
+  - Suggested order: explicit runner config > model-derived 80% context window > env fallback/default.
+  - Add focused tests for env fallback, model-derived threshold if feasible, and explicit config override.
+
+### Summary-producing manual compaction
+
+- [ ] Add `/compactWithSummary` user command.
+  - It should enqueue a normal user-command-like request asking the assistant to write a concise continuation summary and then call `compact_thread()` with omitted `start_message`.
+  - The summary must be normal assistant content, not stored as magic compaction metadata.
+  - It should behave like other user commands: clear visible feedback to the user, scheduler starts/continues as needed, no silent failure.
+  - Reuse existing message/tool scheduling and `compact_thread`; do not implement a parallel summary storage path.
+- [ ] Add tests for `/compactWithSummary` command behavior.
+  - Command appends a normal request message.
+  - Request includes clear instructions to call `compact_thread()` after writing summary.
+  - Command logs/returns user-visible confirmation.
+
+### Summary-producing automatic compaction
+
+- [ ] Add auto-summary mode for threshold compaction.
+  - Instead of directly compacting to `last_llm`, append an automatic compaction request at a safe user-turn/RA1 boundary.
+  - The request asks the assistant to write a continuation summary as normal assistant content and then call `compact_thread()` with omitted `start_message`.
+  - The eventual `compact_thread` tool call emits the same `thread.compaction` start-pointer event.
+  - Avoid loops: do not repeatedly append auto-summary requests while one is already pending or while no newer useful context exists.
+- [ ] Decide the control surface for direct vs summary auto-compaction.
+  - Open question for next thread: should summary mode become the default, should direct `last_llm` remain as emergency fallback, and should there be a config/env switch?
+  - Until decided, implement with the smallest clear policy and document it in this TODO before coding.
+- [ ] Add focused tests.
+  - Threshold appends a summary request at safe boundary.
+  - Below threshold does not append.
+  - Existing pending summary request prevents duplicates.
+  - Assistant summary + `compact_thread()` produces normal compaction boundary.
+
+Status notes:
+- Not started. Discuss auto-compaction policy further before broad implementation, especially default summary-vs-direct behavior and exact model context metadata keys.
+
 ## REPL thread context design
 
 The REPL is the main decompaction surface. It should be hydrated automatically with a clear, consumer-friendly view of the whole effective thread context, not only the compacted-away part.
@@ -654,6 +704,15 @@ Goal: make compaction visible to humans without hiding history.
   - Show raw compaction marker history and identify the current marker.
   - Show current prompt start msg id/event seq and provider-context token estimate if available.
   - This is for humans/debugging, not a default model-visible status tool.
+- [ ] Update token/context reporting names and values.
+  - `context_tokens` should mean the current API/provider context length after compaction.
+  - `full_thread_tokens` should mean all visible/effective thread history length before compaction filtering.
+  - Update `/cost`, diagnostics, status panels, and any API/status output that currently reports only one ambiguous token count.
+  - Preserve backward compatibility carefully where external callers may already read `context_tokens`; after this change, it should intentionally mean current provider context.
+- [ ] Update child status tools with both token counts and compaction info.
+  - `get_child_status` should report `context_tokens` for current after-compaction context.
+  - It should also report `full_thread_tokens`.
+  - Include concise compaction info when present: compacted boolean, current prompt start msg id/event seq, marker event seq, and raw marker count if cheap.
 - [ ] Ensure message ids are visible/copyable enough for `/compact <msg_id>` and `/continue <msg_id>` workflows.
 - [x] Commit.
 
@@ -691,6 +750,8 @@ Resolve these only when implementation pressure makes them concrete:
 - Should explicit `<msg_id>` allow only user/assistant messages forever, or should advanced/debug mode allow system/tool messages with provider sanitization?
 - How should strict providers handle a compacted context that starts with an assistant/LLM message?
 - Should automatic compaction directly choose `last_llm`/`last_message`, or should it ask the assistant to write a summary and call the tool?
+- For auto-summary mode, should summary compaction become default whenever threshold is reached, or should direct `last_llm` compaction remain the default with summary mode opt-in?
+- What exact model config keys represent max context/window tokens across providers/models, and how should missing/ambiguous values fall back to `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` / 150000?
 - What is the cleanest way to make non-message control events ineffective after `/continue`?
 - How visible should compaction tool results be in the UI/provider context after the boundary?
 - Should any source exploration remain as a user command, or should hydrated REPL context be the only decompaction surface besides UI scrollback?
