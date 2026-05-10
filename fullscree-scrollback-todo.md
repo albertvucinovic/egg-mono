@@ -55,11 +55,13 @@ Phases:
     - 2026-05-10: Added `FullScreenScrollbackSource` protocol and `set_scrollback_source()` on `FullScreenDiffRenderer`; paints now compose virtual source rows before in-session `_scrollback`, stream rows, and live rows while keeping the no-source path on the existing local model. Initial source paint asks only for the visible bottom slice and does not query total row count.
     - 2026-05-10: Added focused renderer tests for visible-tail source requests, source/local/stream/live composition, scrolling to older source rows, and top clamp behavior. Test runs: `python -m pytest eggdisplay/tests/test_renderers_terminal_safety.py -q` (15 passed), `python -m pytest eggdisplay/tests -q` (45 passed).
 
-- [ ] Phase 2 — Pure static transcript renderables
+- [x] Phase 2 — Pure static transcript renderables
   - Extract reusable renderable-producing methods from `egg/egg/panels.py` for messages and compaction markers.
   - Keep `console_print_message()` and `console_print_compaction_marker()` as thin printers over these renderables.
   - Preserve existing static transcript output and tests.
   - Status notes:
+    - 2026-05-10: Extracted static transcript message, compaction marker, and hidden-detail renderable builders from `PanelsMixin`; `console_print_message()` and `console_print_compaction_marker()` now only print the returned renderables. Builder calls avoid `_live_print()` capture/monkeypatching and support caller-owned hidden-detail state for later lazy transcript rendering.
+    - 2026-05-10: Added focused panel tests proving message/compaction builders return renderables without printing. Test runs: `python -m pytest egg/tests/test_panels.py::TestConsolePrintMessage -q` (16 passed), `python -m pytest egg/tests/test_formatting.py egg/tests/test_panels.py egg/tests/test_integration_workflow.py -q` (111 passed), `python -m pytest egg/tests -q` (388 passed).
 
 - [ ] Phase 3 — Lazy `TranscriptScrollbackSource`
   - Implement a source class in `egg` that reads the current snapshot/events and lazily renders transcript blocks from newest to oldest.

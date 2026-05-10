@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,14 @@ from rich import box as rich_box
 from eggthreads import create_snapshot
 
 from .utils import snapshot_messages, looks_markdown
+
+
+@dataclass(frozen=True)
+class _StaticTranscriptRenderable:
+    """Renderable plus plain fallback for static transcript printing."""
+
+    renderable: Any
+    fallback: Optional[str] = None
 
 
 class PanelsMixin:
@@ -502,8 +511,27 @@ class PanelsMixin:
             self._system_log = []
         self._system_log.append(msg)
 
+    def _print_static_transcript_renderable(self, item: _StaticTranscriptRenderable) -> None:
+        """Print one prebuilt static transcript renderable with its fallback."""
+        try:
+            self._live_print(item.renderable)
+        except Exception:
+            fallback = item.fallback
+            if fallback is None:
+                fallback = getattr(item.renderable, 'plain', str(item.renderable))
+            self._live_print(fallback)
+
     def console_print_compaction_marker(self, marker: Dict[str, Any]) -> None:
         """Print a visible compaction boundary divider to the console."""
+        self._print_static_transcript_renderable(
+            self._static_transcript_compaction_marker_renderable(marker)
+        )
+
+    def _static_transcript_compaction_marker_renderable(
+        self,
+        marker: Dict[str, Any],
+    ) -> _StaticTranscriptRenderable:
+        """Build the rich renderable for a static transcript compaction marker."""
         try:
             text = self._compaction_marker_text(marker)
         except Exception:
@@ -511,9 +539,15 @@ class PanelsMixin:
             start_short = start_msg_id[-8:] if start_msg_id else 'unknown'
             text = f"Compaction boundary: API context now starts at msg_{start_short}."
         try:
-            self._live_print(Panel(Text(text, no_wrap=False, overflow='fold', style='bold red'), title='[bold red]Compaction Boundary[/bold red]', border_style='red', box=self._get_static_box()))
+            renderable = Panel(
+                Text(text, no_wrap=False, overflow='fold', style='bold red'),
+                title='[bold red]Compaction Boundary[/bold red]',
+                border_style='red',
+                box=self._get_static_box(),
+            )
         except Exception:
-            self._live_print(text)
+            renderable = text
+        return _StaticTranscriptRenderable(renderable, text)
 
     def _panel_display_verbosity_level(self) -> str:
         """Return the current display verbosity for static console panels."""
@@ -534,37 +568,79 @@ class PanelsMixin:
                 return preview[: max_chars - 3].rstrip() + "..."
             return preview
 
-    def _reset_static_hidden_details(self) -> None:
-        self._static_hidden_details = {
+    def _new_static_hidden_details_state(self) -> Dict[str, Any]:
+        return {
             'counts': {'reasoning': 0, 'tool_calls': 0, 'tool_results': 0},
             'headers': [],
         }
 
-    def _record_static_hidden_detail(self, kind: str, header: str) -> None:
-        state = getattr(self, '_static_hidden_details', None)
-        if not isinstance(state, dict):
-            self._reset_static_hidden_details()
-            state = self._static_hidden_details
-        counts = state.get('counts')
+    def _reset_static_hidden_details(self) -> None:
+        self._static_hidden_details = self._new_static_hidden_details_state()
+
+    def _ensure_static_hidden_details_state(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if isinstance(state, dict):
+            target = state
+        else:
+            target = getattr(self, '_static_hidden_details', None)
+            if not isinstance(target, dict):
+                self._reset_static_hidden_details()
+                target = self._static_hidden_details
+        counts = target.get('counts')
         if not isinstance(counts, dict):
             counts = {'reasoning': 0, 'tool_calls': 0, 'tool_results': 0}
-            state['counts'] = counts
-        if kind in counts:
-            counts[kind] = int(counts.get(kind) or 0) + 1
-        headers = state.get('headers')
+            target['counts'] = counts
+        for key in ('reasoning', 'tool_calls', 'tool_results'):
+            try:
+                counts[key] = int(counts.get(key) or 0)
+            except Exception:
+                counts[key] = 0
+        headers = target.get('headers')
         if not isinstance(headers, list):
             headers = []
-            state['headers'] = headers
+            target['headers'] = headers
+        return target
+
+    def _clear_static_hidden_details_state(self, state: Dict[str, Any]) -> None:
+        state['counts'] = {'reasoning': 0, 'tool_calls': 0, 'tool_results': 0}
+        state['headers'] = []
+
+    def _record_static_hidden_detail_in_state(
+        self,
+        state: Dict[str, Any],
+        kind: str,
+        header: str,
+    ) -> None:
+        target = self._ensure_static_hidden_details_state(state)
+        counts = target['counts']
+        if kind in counts:
+            counts[kind] = int(counts.get(kind) or 0) + 1
+        headers = target['headers']
         if header:
             headers.append(str(header))
 
-    def _flush_static_hidden_details(self) -> None:
-        state = getattr(self, '_static_hidden_details', None)
+    def _record_static_hidden_detail(self, kind: str, header: str) -> None:
+        self._record_static_hidden_detail_in_state(
+            self._ensure_static_hidden_details_state(),
+            kind,
+            header,
+        )
+
+    def _static_hidden_details_renderable(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[_StaticTranscriptRenderable]:
+        """Consume pending min-verbosity hidden-detail state into a renderable."""
+        if state is None:
+            state = getattr(self, '_static_hidden_details', None)
         if not isinstance(state, dict):
-            return
+            return None
+        state = self._ensure_static_hidden_details_state(state)
         counts = state.get('counts') if isinstance(state.get('counts'), dict) else {}
         if not any(int(counts.get(key) or 0) for key in ('tool_calls', 'tool_results', 'reasoning')):
-            return
+            return None
         parts: List[str] = []
         for key, singular in (
             ('tool_calls', 'tool call'),
@@ -581,42 +657,39 @@ class PanelsMixin:
         if headers:
             body += "\n" + "\n".join(f"  {header}" for header in headers)
         try:
-            self._live_print(Panel(Text(body, no_wrap=False, overflow='fold', style='yellow'), title='[bold yellow]Hidden Details[/bold yellow]', border_style='yellow', box=self._get_static_box()))
+            renderable = Panel(
+                Text(body, no_wrap=False, overflow='fold', style='yellow'),
+                title='[bold yellow]Hidden Details[/bold yellow]',
+                border_style='yellow',
+                box=self._get_static_box(),
+            )
         except Exception:
-            self._live_print(body)
-        self._reset_static_hidden_details()
+            renderable = body
+        self._clear_static_hidden_details_state(state)
+        return _StaticTranscriptRenderable(renderable, body)
 
-    def console_print_message(self, m: Dict[str, Any]) -> None:
-        """Print a single message to the console with rich formatting."""
-        def fmt_ts(val: Any) -> str:
-            if not val:
-                return ""
-            s = str(val)
-            # SQLite ts is typically ISO-like (e.g. '2024-01-01T12:34:56.789Z')
-            # Try a few common formats; fall back to raw string on failure.
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-                try:
-                    dt = datetime.strptime(s, fmt)
-                    return dt.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    continue
-            return s
+    def _flush_static_hidden_details(self) -> None:
+        item = self._static_hidden_details_renderable()
+        if item is not None:
+            self._print_static_transcript_renderable(item)
 
-        role = m.get('role')
-        content = (m.get('content') or '').strip()
-        model_key = (m.get('model_key') or '').strip()
-        msg_id = m.get('msg_id') or ''
-        ts_str = fmt_ts(m.get('ts'))
-        verbosity = self._panel_display_verbosity_level()
+    def _static_transcript_ts_text(self, val: Any) -> str:
+        """Format a message timestamp for static transcript panel titles."""
+        if not val:
+            return ""
+        s = str(val)
+        # SQLite ts is typically ISO-like (e.g. '2024-01-01T12:34:56.789Z')
+        # Try a few common formats; fall back to raw string on failure.
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                dt = datetime.strptime(s, fmt)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
+        return s
 
-        def fmt_tps(v: Any) -> str:
-            return self._fmt_header_metric(v, 'tps')
-
-        msg_tps = fmt_tps(m.get('tps'))
-
-        # Best-effort lookup of per-message token stats from the
-        # current thread snapshot so we can annotate box titles in the
-        # static console view.
+    def _static_transcript_message_token_counts(self, msg_id: Any) -> Dict[str, int]:
+        """Best-effort per-message token counts for static transcript titles."""
         pm_tokens: Dict[str, int] = {"content": 0, "reasoning": 0, "tool_calls": 0, "total": 0}
         try:
             if msg_id:
@@ -637,6 +710,55 @@ class PanelsMixin:
                             ))
         except Exception:
             pm_tokens = {"content": 0, "reasoning": 0, "tool_calls": 0, "total": 0}
+        return pm_tokens
+
+    def _static_transcript_panel_renderable(
+        self,
+        renderable: Any,
+        title: str,
+        border: str,
+        *,
+        fallback: Optional[str] = None,
+    ) -> _StaticTranscriptRenderable:
+        """Build a static transcript Panel renderable with a plain fallback."""
+        if fallback is None:
+            fallback = f"[{border}]{title}[/] {getattr(renderable, 'plain', str(renderable))}"
+        try:
+            panel_renderable = Panel(
+                renderable,
+                title=title,
+                border_style=border,
+                box=self._get_static_box(),
+            )
+        except Exception:
+            panel_renderable = fallback
+        return _StaticTranscriptRenderable(panel_renderable, fallback)
+
+    def _static_transcript_message_renderables(
+        self,
+        m: Dict[str, Any],
+        hidden_details: Optional[Dict[str, Any]] = None,
+    ) -> List[_StaticTranscriptRenderable]:
+        """Build rich renderables for one static transcript message without printing.
+
+        ``hidden_details`` carries min-verbosity summary state across messages.
+        Callers that render out of band (for example a virtual scrollback
+        source) can pass their own state to avoid touching console-printer
+        state.
+        """
+        items: List[_StaticTranscriptRenderable] = []
+        if hidden_details is None:
+            hidden_details = self._new_static_hidden_details_state()
+        else:
+            hidden_details = self._ensure_static_hidden_details_state(hidden_details)
+        role = m.get('role')
+        content = (m.get('content') or '').strip()
+        model_key = (m.get('model_key') or '').strip()
+        msg_id = m.get('msg_id') or ''
+        ts_str = self._static_transcript_ts_text(m.get('ts'))
+        verbosity = self._panel_display_verbosity_level()
+        msg_tps = self._fmt_header_metric(m.get('tps'), 'tps')
+        pm_tokens = self._static_transcript_message_token_counts(msg_id)
 
         def full_title_for(title: str) -> str:
             # Build a unified title with optional timestamp and msg_id.
@@ -647,13 +769,18 @@ class PanelsMixin:
                 parts.append(f"[dim]msg_id: {msg_id}[/dim]")
             return " | ".join(parts)
 
-        def panel(renderable, title: str, border: str) -> str:
+        def append_hidden_details() -> None:
+            item = self._static_hidden_details_renderable(hidden_details)
+            if item is not None:
+                items.append(item)
+
+        def panel(renderable: Any, title: str, border: str) -> str:
             full_title = full_title_for(title)
-            try:
-                self._live_print(Panel(renderable, title=full_title, border_style=border, box=self._get_static_box()))
-            except Exception:
-                # Fallback to plain text if Panel fails for any reason
-                self._live_print(f"[{border}]{full_title}[/] {getattr(renderable, 'plain', str(renderable))}")
+            items.append(self._static_transcript_panel_renderable(
+                renderable,
+                full_title,
+                border,
+            ))
             return full_title
 
         if role == 'system':
@@ -661,19 +788,19 @@ class PanelsMixin:
             if isinstance(content, str) and content.lower().startswith('llm error:'):
                 title = '[bold red]Error[/bold red]'
                 if verbosity == 'min':
-                    self._flush_static_hidden_details()
+                    append_hidden_details()
                 panel(Text(content, no_wrap=False, overflow='fold', style='red'), title, 'red')
-                return
+                return items
             if verbosity == 'min':
-                return
+                return items
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
             panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
-            return
+            return items
 
         if role == 'user':
             if verbosity == 'min':
-                self._flush_static_hidden_details()
+                append_hidden_details()
             title = '[bold green]User[/bold green]'
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
@@ -683,7 +810,7 @@ class PanelsMixin:
                 if tok_text:
                     title += f" [dim]({tok_text})[/dim]"
             panel(Text(content, no_wrap=False, overflow='fold', style='green'), title, 'green')
-            return
+            return items
 
         if role == 'assistant':
             title = '[bold cyan]Assistant[/bold cyan]'
@@ -712,10 +839,10 @@ class PanelsMixin:
                 elif verbosity == 'medium':
                     panel(Text('', no_wrap=False, overflow='fold', style='magenta'), reason_title, 'magenta')
                 else:
-                    self._record_static_hidden_detail('reasoning', full_title_for(reason_title))
+                    self._record_static_hidden_detail_in_state(hidden_details, 'reasoning', full_title_for(reason_title))
             if content:
                 if verbosity == 'min':
-                    self._flush_static_hidden_details()
+                    append_hidden_details()
                 if looks_markdown(content):
                     panel(Markdown(content), title, 'cyan')
                 else:
@@ -760,9 +887,13 @@ class PanelsMixin:
                 tc_title = " | ".join(tc_title_parts)
                 if verbosity == 'min':
                     for line in lines:
-                        self._record_static_hidden_detail('tool_calls', f"{tc_title} | {line}")
+                        self._record_static_hidden_detail_in_state(hidden_details, 'tool_calls', f"{tc_title} | {line}")
                 else:
-                    self._live_print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'), title=tc_title, border_style='yellow', box=self._get_static_box()))
+                    items.append(self._static_transcript_panel_renderable(
+                        Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'),
+                        tc_title,
+                        'yellow',
+                    ))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
             if isinstance(tstream, dict) and tstream:
@@ -770,7 +901,11 @@ class PanelsMixin:
                     if txt:
                         out_title = f'[bold yellow]Tool Output: {nm}[/bold yellow]'
                         if verbosity == 'max':
-                            self._live_print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=out_title, border_style='yellow', box=self._get_static_box()))
+                            items.append(self._static_transcript_panel_renderable(
+                                Text(txt, no_wrap=False, overflow='fold', style='yellow'),
+                                out_title,
+                                'yellow',
+                            ))
                         elif verbosity == 'medium':
                             title_parts = [out_title]
                             if model_key:
@@ -781,7 +916,11 @@ class PanelsMixin:
                                 title_parts.append(f"[dim]{ts_str}[/dim]")
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
-                            self._live_print(Panel(Text('', no_wrap=False, overflow='fold', style='yellow'), title=" | ".join(title_parts), border_style='yellow', box=self._get_static_box()))
+                            items.append(self._static_transcript_panel_renderable(
+                                Text('', no_wrap=False, overflow='fold', style='yellow'),
+                                " | ".join(title_parts),
+                                'yellow',
+                            ))
                         else:
                             title_parts = [out_title]
                             if model_key:
@@ -792,14 +931,18 @@ class PanelsMixin:
                                 title_parts.append(f"[dim]{ts_str}[/dim]")
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
-                            self._record_static_hidden_detail('tool_results', " | ".join(title_parts))
+                            self._record_static_hidden_detail_in_state(hidden_details, 'tool_results', " | ".join(title_parts))
             tc_stream = m.get('tool_calls_stream') or {}
             if isinstance(tc_stream, dict) and tc_stream:
                 for nm, txt in tc_stream.items():
                     if txt:
                         call_title = f'[bold yellow]Tool Call Args (streamed): {nm}[/bold yellow]'
                         if verbosity == 'max':
-                            self._live_print(Panel(Text(txt, no_wrap=False, overflow='fold', style='yellow'), title=call_title, border_style='yellow', box=self._get_static_box()))
+                            items.append(self._static_transcript_panel_renderable(
+                                Text(txt, no_wrap=False, overflow='fold', style='yellow'),
+                                call_title,
+                                'yellow',
+                            ))
                         elif verbosity == 'medium':
                             preview = self._panel_one_line_preview(txt)
                             title_parts = [call_title]
@@ -811,7 +954,11 @@ class PanelsMixin:
                                 title_parts.append(f"[dim]{ts_str}[/dim]")
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
-                            self._live_print(Panel(Text(preview, no_wrap=False, overflow='fold', style='yellow'), title=" | ".join(title_parts), border_style='yellow', box=self._get_static_box()))
+                            items.append(self._static_transcript_panel_renderable(
+                                Text(preview, no_wrap=False, overflow='fold', style='yellow'),
+                                " | ".join(title_parts),
+                                'yellow',
+                            ))
                         else:
                             title_parts = [call_title]
                             if model_key:
@@ -822,8 +969,8 @@ class PanelsMixin:
                                 title_parts.append(f"[dim]{ts_str}[/dim]")
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
-                            self._record_static_hidden_detail('tool_calls', " | ".join(title_parts))
-            return
+                            self._record_static_hidden_detail_in_state(hidden_details, 'tool_calls', " | ".join(title_parts))
+            return items
 
         if role == 'tool':
             name = m.get('name') or 'Tool'
@@ -849,14 +996,21 @@ class PanelsMixin:
             elif verbosity == 'medium':
                 panel(Text('', no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             else:
-                self._record_static_hidden_detail('tool_results', full_title_for(title))
-            return
+                self._record_static_hidden_detail_in_state(hidden_details, 'tool_results', full_title_for(title))
+            return items
 
         # Fallback generic
         title = (role or 'Message')
         if model_key:
             title += f" [dim](model: {model_key})[/dim]"
         panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
+        return items
+
+    def console_print_message(self, m: Dict[str, Any]) -> None:
+        """Print a single message to the console with rich formatting."""
+        hidden_details = self._ensure_static_hidden_details_state()
+        for item in self._static_transcript_message_renderables(m, hidden_details):
+            self._print_static_transcript_renderable(item)
 
     def console_print_block(self, title: str, text: str, border_style: str = 'blue', markup: bool = True) -> None:
         """Print a titled block to the console."""

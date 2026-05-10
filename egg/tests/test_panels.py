@@ -317,6 +317,38 @@ class TestConsolePrintMessage:
                     titles.append(str(title))
         return titles
 
+    def test_static_message_builder_returns_renderables_without_printing(self, egg_app, monkeypatch):
+        """Static message builder should be reusable without console side effects."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'user',
+            'content': 'Hello',
+            'msg_id': 'msg_builder_123',
+        })
+
+        assert printed == []
+        assert len(items) == 1
+        panel = items[0].renderable
+        assert 'User' in str(getattr(panel, 'title', ''))
+        assert 'msg_builder_123' in str(getattr(panel, 'title', ''))
+
+    def test_static_compaction_builder_returns_renderable_without_printing(self, egg_app, monkeypatch):
+        """Compaction marker builder should be reusable without console side effects."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        item = egg_app._static_transcript_compaction_marker_renderable({
+            'start_msg_id': 'msg_compaction_builder_12345678',
+        })
+
+        assert printed == []
+        panel = item.renderable
+        assert 'Compaction Boundary' in str(getattr(panel, 'title', ''))
+        body = getattr(panel, 'renderable', None)
+        assert 'msg_12345678' in str(getattr(body, 'plain', body))
+
     def test_prints_user_message(self, egg_app, monkeypatch):
         """Should print user message with green style."""
         printed = []
