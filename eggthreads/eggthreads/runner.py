@@ -746,41 +746,6 @@ class ThreadRunner:
         if not self.db.try_open_stream(self.thread_id, invoke_id, lease_until, owner=self.owner, purpose=purpose):
             return False
 
-        # Optional first auto-compaction policy.  Run it after acquiring the
-        # per-thread lease (so concurrent runners cannot race to compact) but
-        # before opening an RA1 stream or calling the provider.  This keeps the
-        # mutation at a turn boundary rather than inside an assistant/tool
-        # cycle.
-        if ra.kind == 'RA1_llm':
-            try:
-                from .api import auto_compact_summary_enabled, create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
-                from .token_count import provider_context_token_stats
-
-                threshold = resolve_auto_compact_threshold(
-                    self.db,
-                    self.thread_id,
-                    self.cfg.auto_compact_threshold_tokens,
-                    models_path=self.models_path,
-                    all_models_path=self.all_models_path,
-                )
-                if threshold.enabled and threshold.threshold_tokens is not None:
-                    create_snapshot(self.db, self.thread_id)
-                    stats = provider_context_token_stats(self.db, self.thread_id)
-                    current_tokens = int(stats.get('context_tokens') or 0)
-                    auto_result = maybe_auto_compact_thread(
-                        self.db,
-                        self.thread_id,
-                        threshold_tokens=threshold.threshold_tokens,
-                        context_tokens=current_tokens,
-                        summary_mode=auto_compact_summary_enabled(),
-                    )
-                    if auto_result.triggered:
-                        create_snapshot(self.db, self.thread_id)
-            except Exception as e:
-                # Token accounting/auto-compaction is best-effort; do not block
-                # the existing RA1 path on advisory compaction.
-                print(f"Warning: auto compaction check failed: {e}")
-
         # Resolve current model for this turn from eggthreads API so that
         # the provider call and the event annotations stay in sync. Fall
         # back to the LLM client's current_model_key if needed.
@@ -1012,11 +977,52 @@ class ThreadRunner:
         except Exception:
             pass
 
+        has_pending_assistant_tool = False
+        if ra.kind == 'RA1_llm' and not was_cancelled:
+            try:
+                has_pending_assistant_tool = any(
+                    tc.parent_role == 'assistant' and not tc.published
+                    for tc in build_tool_call_states(self.db, self.thread_id).values()
+                )
+            except Exception:
+                has_pending_assistant_tool = False
+
+        if ra.kind == 'RA1_llm' and not was_cancelled and not has_pending_assistant_tool:
+            try:
+                from .api import auto_compact_summary_enabled, create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
+                from .token_count import provider_context_token_stats
+
+                threshold = resolve_auto_compact_threshold(
+                    self.db,
+                    self.thread_id,
+                    self.cfg.auto_compact_threshold_tokens,
+                    models_path=self.models_path,
+                    all_models_path=self.all_models_path,
+                )
+                if threshold.enabled and threshold.threshold_tokens is not None:
+                    create_snapshot(self.db, self.thread_id)
+                    stats = provider_context_token_stats(self.db, self.thread_id)
+                    current_tokens = int(stats.get('context_tokens') or 0)
+                    auto_result = maybe_auto_compact_thread(
+                        self.db,
+                        self.thread_id,
+                        threshold_tokens=threshold.threshold_tokens,
+                        context_tokens=current_tokens,
+                        summary_mode=auto_compact_summary_enabled(),
+                    )
+                    if auto_result.triggered:
+                        create_snapshot(self.db, self.thread_id)
+            except Exception as e:
+                # Token accounting/auto-compaction is best-effort; do not block
+                # the existing runner path on advisory compaction.
+                print(f"Warning: auto compaction check failed: {e}")
+
         # Attempt lease release (no-op if preempted)
         try:
             self.db.release(self.thread_id, invoke_id)
         except Exception:
             pass
+
         if was_cancelled:
             raise asyncio.CancelledError
         return True

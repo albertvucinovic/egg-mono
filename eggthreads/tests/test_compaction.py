@@ -802,7 +802,7 @@ def test_auto_compact_threshold_precedence_config_model_env_default_and_disable(
     assert (default.enabled, default.threshold_tokens, default.source) == (True, 150000, "default")
 
 
-def test_runner_auto_compacts_summary_mode_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
+def test_runner_auto_compacts_summary_mode_after_llm_turn(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
     ts.append_message(db, tid, "user", "old context")
     ts.append_message(db, tid, "assistant", "previous answer")
@@ -838,14 +838,13 @@ def test_runner_auto_compacts_summary_mode_at_ra1_boundary_before_llm(tmp_path, 
         "old context",
         "previous answer",
         "next question",
-        request_messages[0]["content"],
     ]
 
 
 def test_runner_auto_compacts_direct_mode_when_summary_env_false(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old context")
-    assistant = ts.append_message(db, tid, "assistant", "previous answer")
+    ts.append_message(db, tid, "assistant", "previous answer")
     ts.append_message(db, tid, "user", "next question")
     ts.create_snapshot(db, tid)
     seen_messages: list[list[dict]] = []
@@ -871,10 +870,12 @@ def test_runner_auto_compacts_direct_mode_when_summary_env_false(tmp_path, monke
     payload = events[0][1]
     assert payload["created_by"] == "auto_compaction"
     assert payload["selector"] == "last_llm"
-    assert payload["start_msg_id"] == assistant
     assert ts.list_thread_compaction_summary_in_progress_events(db, tid) == []
     assert seen_messages
-    assert [m["content"] for m in seen_messages[0]] == ["previous answer", "next question"]
+    assert [m["content"] for m in seen_messages[0]] == ["old context", "previous answer", "next question"]
+    messages = _snapshot_messages(db, tid)
+    final_assistant = next(m for m in reversed(messages) if m.get("role") == "assistant")
+    assert payload["start_msg_id"] == final_assistant["msg_id"]
     provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, _snapshot_messages(db, tid))
     assert old not in [m.get("msg_id") for m in provider_view]
 
@@ -977,6 +978,43 @@ def test_runner_does_not_auto_compact_during_tool_turn(tmp_path, monkeypatch):
     )
 
     runner = ThreadRunner(db, tid, llm=object(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    assert calls == []
+    assert _events(db, tid) == []
+
+
+def test_runner_does_not_auto_compact_after_llm_with_pending_assistant_tool(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "needs tool")
+    ts.create_snapshot(db, tid)
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            yield {
+                "type": "done",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tc-auto-wait",
+                            "type": "function",
+                            "function": {"name": "compact_thread", "arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: calls.append("token") or {"context_tokens": 100},
+    )
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
     asyncio.run(runner.run_once())
 
     assert calls == []
