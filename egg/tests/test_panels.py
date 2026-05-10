@@ -927,6 +927,127 @@ class TestFullScreenScrollbackWiring:
         assert renderer.update_calls == 1
         assert printed == []
 
+    def test_full_screen_min_updates_consecutive_hidden_summary_in_place(self, egg_app):
+        """Full-screen min hidden-only messages should update one local summary item."""
+
+        class Renderer:
+            def __init__(self):
+                self.sources = []
+                self.replacements = []
+                self.printed = []
+                self.local_items = []
+
+            def set_scrollback_source(self, source):
+                self.sources.append(source)
+
+            def replace_recent_scrollback(self, row_count, *args, **kwargs):
+                self.replacements.append((row_count, args, kwargs))
+                if row_count:
+                    del self.local_items[-row_count:]
+                self.local_items.extend(args)
+                return len(args)
+
+            def print_above(self, *args, **kwargs):
+                self.printed.append((args, kwargs))
+                self.local_items.extend(args)
+
+        renderer = Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        egg_app._display_verbosity = "min"
+
+        egg_app.console_print_message({
+            "role": "assistant",
+            "content": "",
+            "reasoning": "private reasoning",
+            "tool_calls": [{
+                "id": "call_bash_1",
+                "function": {"name": "bash", "arguments": {"cmd": "echo 1"}},
+            }],
+        })
+        egg_app.console_print_message({
+            "role": "tool",
+            "name": "bash",
+            "content": "result one",
+            "tool_call_id": "call_bash_1",
+        })
+        egg_app.console_print_message({
+            "role": "assistant",
+            "content": "",
+            "reasoning": "more reasoning",
+            "tool_calls": [{
+                "id": "call_python_1",
+                "function": {"name": "python_repl", "arguments": {"code": "print(1)"}},
+            }],
+        })
+        egg_app.console_print_message({
+            "role": "tool",
+            "name": "python_repl",
+            "content": "result two",
+            "tool_call_id": "call_python_1",
+        })
+
+        assert [row_count for row_count, _args, _kwargs in renderer.replacements] == [0, 1, 1, 1]
+        assert renderer.printed == []
+        assert len(renderer.local_items) == 1
+        bodies = []
+        for _row_count, args, _kwargs in renderer.replacements:
+            for arg in args:
+                renderable = getattr(arg, "renderable", None)
+                if renderable is not None:
+                    bodies.append(str(getattr(renderable, "plain", renderable)))
+        assert bodies[-1].count("Executed") == 1
+        assert "Executed 2 tools, got 2 tool results, 2 reasoning blocks" in bodies[-1]
+        assert "Tools: bash, python_repl" in bodies[-1]
+
+    def test_full_screen_min_visible_message_finalizes_and_resets_summary_update(self, egg_app):
+        """Visible messages bound a full-screen min summary run."""
+
+        class Renderer:
+            def __init__(self):
+                self.sources = []
+                self.replacements = []
+                self.printed = []
+
+            def set_scrollback_source(self, source):
+                self.sources.append(source)
+
+            def replace_recent_scrollback(self, row_count, *args, **kwargs):
+                self.replacements.append((row_count, args, kwargs))
+                return 1
+
+            def print_above(self, *args, **kwargs):
+                self.printed.append((args, kwargs))
+
+        renderer = Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        egg_app._display_verbosity = "min"
+
+        egg_app.console_print_message({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_bash_1",
+                "function": {"name": "bash", "arguments": "{}"},
+            }],
+        })
+        egg_app.console_print_message({"role": "tool", "name": "bash", "content": "ok"})
+        egg_app.console_print_message({"role": "assistant", "content": "visible answer"})
+        egg_app.console_print_message({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_python_1",
+                "function": {"name": "python_repl", "arguments": "{}"},
+            }],
+        })
+
+        assert [row_count for row_count, _args, _kwargs in renderer.replacements] == [0, 1, 1, 0]
+        assert len(renderer.printed) == 1
+        visible_arg = renderer.printed[0][0][0]
+        assert "Assistant" in str(getattr(visible_arg, "title", ""))
+
     def test_in_session_rows_survive_until_source_replacement(self, egg_app):
         from eggthreads import append_message, create_snapshot
 

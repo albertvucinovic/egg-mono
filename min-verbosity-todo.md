@@ -44,11 +44,15 @@ Phases:
     - Focused static panel tests now assert run-summary text/no `Hidden details:` output, including merged consecutive hidden activity before the next visible message.
     - Lazy `TranscriptScrollbackSource` block rendering now uses the same summary renderable; exact aggregation across separately rendered lazy blocks/window boundaries remains limited in Phase 2 and is left for the full-screen in-place/source-refresh work rather than a broad lazy-source refactor.
 
-- [ ] Phase 3 — Full-screen in-place summary update
+- [x] Phase 3 — Full-screen in-place summary update
   - Ensure consecutive in-session hidden activity in full-screen updates one summary item instead of appending repeated summaries.
   - Prefer source refresh/local-row replacement over private renderer mutation unless the renderer has/gets a small public API.
   - Add regressions for repeated tool calls/results/reasoning producing one summary item that updates counts.
   - Status notes:
+    - Added `FullScreenDiffRenderer.replace_recent_scrollback(row_count, ...)` as a small public API for replacing the newest locally appended rows while preserving scroll position; `print_above()` now delegates to it for append-only behavior.
+    - `PanelsMixin` tracks the rendered row count for the current full-screen min hidden-activity summary and refreshes that local row in place for consecutive hidden-only messages; visible user/assistant/error panels finalize the run and reset tracking.
+    - Source replacement/redraw resets pending min summary state/tracking so locally replaced rows do not leak across a refreshed transcript source.
+    - Added focused regressions for repeated in-session reasoning/tool-call/tool-result activity producing one local summary item with updated counts, plus renderer row-replacement coverage.
 
 - [ ] Phase 4 — Min streaming simplification
   - In `min`, full-screen streaming should show only a small animated/type indicator (`llm`, `tool`, etc.) and no raw stream content/reasoning/tool output.

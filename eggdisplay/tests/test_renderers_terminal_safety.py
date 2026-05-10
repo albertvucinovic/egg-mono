@@ -68,6 +68,34 @@ class TinyTerminalRenderer(FullScreenDiffRenderer):
         self._viewport_w = width
 
 
+def test_fullscreen_replace_recent_scrollback_updates_local_tail() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    r._live_lines = ["LIVE"]
+
+    first_rows = r.replace_recent_scrollback(0, "first")
+    second_rows = r.replace_recent_scrollback(first_rows, "second")
+
+    assert first_rows == 1
+    assert second_rows == 1
+    assert r._scrollback == ["second"]
+    assert r._prev_viewport[-2:] == ["second", "LIVE"]
+
+
+def test_fullscreen_replace_recent_scrollback_preserves_scrolled_view() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    r._scrollback = ["h0", "h1", "h2", "h3", "h4", "summary"]
+    r._live_lines = ["LIVE"]
+    r._paint(20)
+    r.scroll(1)
+    before = list(r._prev_viewport)
+
+    r.replace_recent_scrollback(1, "updated\nsummary")
+
+    assert r._scroll_offset == 2
+    assert r._scrollback[-2:] == ["updated", "summary"]
+    assert r._prev_viewport == before
+
+
 def test_stream_rows_uses_terminal_cell_width_for_wide_and_combining_text() -> None:
     r = FullScreenDiffRenderer()
 

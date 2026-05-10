@@ -493,16 +493,42 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         up to ``_SCROLLBACK_CAP``) without ever entering the terminal's
         own archive.
         """
+        self.replace_recent_scrollback(0, *objects, **kwargs)
+
+    def replace_recent_scrollback(self, row_count: int, *objects, **kwargs) -> int:
+        """Replace the newest locally appended scrollback rows and repaint.
+
+        ``row_count`` is the number of rows previously appended with
+        :meth:`print_above` (or this method) that should be replaced. Passing
+        zero appends normally. The return value is the number of rows occupied
+        by the newly rendered content, suitable for a later replacement call.
+
+        This operates only on in-session local scrollback; any lazy persistent
+        scrollback source remains untouched.
+        """
+        try:
+            old_count = max(0, int(row_count or 0))
+        except Exception:
+            old_count = 0
+        old_count = min(old_count, len(self._scrollback))
+
         ansi = self._rich_print_to_str(*objects, **kwargs)
-        if not ansi:
-            return
-        lines = ansi.split("\n")
-        if lines and lines[-1] == "":
-            lines.pop()
-        # If user is scrolled up, preserve their visual position by
-        # offsetting to match the amount of new content appended below.
-        if self._scroll_offset > 0 and lines:
-            self._scroll_offset += len(lines)
+        if not ansi and not old_count:
+            return 0
+        lines: List[str] = []
+        if ansi:
+            lines = ansi.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()
+
+        if old_count:
+            del self._scrollback[-old_count:]
+
+        # If user is scrolled up, preserve their visual position by offsetting
+        # to match the net row-count change below their viewport.
+        if self._scroll_offset > 0:
+            self._scroll_offset = max(0, self._scroll_offset + len(lines) - old_count)
+
         self._scrollback.extend(lines)
         if len(self._scrollback) > self._SCROLLBACK_CAP:
             excess = len(self._scrollback) - self._SCROLLBACK_CAP
@@ -512,6 +538,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
             if self._scroll_offset > 0:
                 self._scroll_offset = max(0, self._scroll_offset - excess)
         self._paint(self._viewport_w or self._term_width())
+        return len(lines)
 
     def clear_scrollback(self) -> None:
         """Drop all accumulated scrollback content and repaint."""

@@ -31,6 +31,7 @@ class _StaticTranscriptRenderable:
 
     renderable: Any
     fallback: Optional[str] = None
+    kind: str = ''
 
 
 @dataclass(frozen=True)
@@ -397,6 +398,7 @@ class PanelsMixin:
                 except Exception:
                     pass
             renderer.set_scrollback_source(source)
+            self._reset_static_hidden_details()
             self._mark_static_transcript_printed()
         except Exception:
             return False
@@ -835,13 +837,24 @@ class PanelsMixin:
 
     def _print_static_transcript_renderable(self, item: _StaticTranscriptRenderable) -> None:
         """Print one prebuilt static transcript renderable with its fallback."""
+        self._print_static_transcript_renderable_via(
+            item,
+            lambda obj: self._live_print(obj),
+        )
+
+    def _print_static_transcript_renderable_via(
+        self,
+        item: _StaticTranscriptRenderable,
+        printer: Any,
+    ) -> Any:
+        """Print one static transcript item using *printer*, falling back to text."""
         try:
-            self._live_print(item.renderable)
+            return printer(item.renderable)
         except Exception:
             fallback = item.fallback
             if fallback is None:
                 fallback = getattr(item.renderable, 'plain', str(item.renderable))
-            self._live_print(fallback)
+            return printer(fallback)
 
     def console_print_compaction_marker(self, marker: Dict[str, Any]) -> None:
         """Print a visible compaction boundary divider to the console."""
@@ -895,8 +908,13 @@ class PanelsMixin:
             'summary': MinHiddenActivitySummary(),
         }
 
+    def _reset_static_min_run_tracking(self) -> None:
+        """Forget any full-screen local row currently used for a min summary."""
+        self._static_min_summary_row_count = 0
+
     def _reset_static_hidden_details(self) -> None:
         self._static_hidden_details = self._new_static_hidden_details_state()
+        self._reset_static_min_run_tracking()
 
     def _ensure_static_hidden_details_state(
         self,
@@ -921,6 +939,17 @@ class PanelsMixin:
             summary.clear()
         else:
             state['summary'] = MinHiddenActivitySummary()
+
+    def _has_static_hidden_details_activity(
+        self,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if state is None:
+            state = getattr(self, '_static_hidden_details', None)
+        if not isinstance(state, dict):
+            return False
+        summary = state.get('summary')
+        return isinstance(summary, MinHiddenActivitySummary) and summary.has_activity()
 
     def _static_min_summary_token_count(self, tokens: Any, fallback_text: Any = "") -> int:
         try:
@@ -963,8 +992,10 @@ class PanelsMixin:
     def _static_hidden_details_renderable(
         self,
         state: Optional[Dict[str, Any]] = None,
+        *,
+        consume: bool = True,
     ) -> Optional[_StaticTranscriptRenderable]:
-        """Consume pending min-verbosity hidden-detail state into a renderable."""
+        """Render pending min-verbosity hidden-detail state into a summary item."""
         if state is None:
             state = getattr(self, '_static_hidden_details', None)
         if not isinstance(state, dict):
@@ -984,13 +1015,59 @@ class PanelsMixin:
             )
         except Exception:
             renderable = body
-        self._clear_static_hidden_details_state(state)
-        return _StaticTranscriptRenderable(renderable, body)
+        if consume:
+            self._clear_static_hidden_details_state(state)
+        return _StaticTranscriptRenderable(renderable, body, 'min_summary')
 
     def _flush_static_hidden_details(self) -> None:
         item = self._static_hidden_details_renderable()
         if item is not None:
             self._print_static_transcript_renderable(item)
+        self._reset_static_min_run_tracking()
+
+    def _replace_full_screen_static_min_summary(
+        self,
+        item: _StaticTranscriptRenderable,
+    ) -> bool:
+        """Print/update the current local min summary row in full-screen mode."""
+        renderer = getattr(self, '_renderer', None)
+        if not (
+            self._is_full_screen_scrollback_renderer(renderer)
+            and hasattr(renderer, 'replace_recent_scrollback')
+        ):
+            return False
+        previous_rows = max(0, int(getattr(self, '_static_min_summary_row_count', 0) or 0))
+
+        def replace(renderable: Any) -> Any:
+            return renderer.replace_recent_scrollback(previous_rows, renderable)
+
+        try:
+            new_rows = self._print_static_transcript_renderable_via(item, replace)
+        except Exception:
+            return False
+        try:
+            self._static_min_summary_row_count = max(0, int(new_rows or 0))
+        except Exception:
+            self._static_min_summary_row_count = 0
+        return True
+
+    def _update_full_screen_static_min_summary(self) -> bool:
+        """Refresh the in-place full-screen summary for pending hidden activity."""
+        if self._panel_display_verbosity_level() != 'min':
+            return False
+        renderer = getattr(self, '_renderer', None)
+        if not (
+            self._is_full_screen_scrollback_renderer(renderer)
+            and hasattr(renderer, 'replace_recent_scrollback')
+        ):
+            return False
+        state = self._ensure_static_hidden_details_state()
+        if not self._has_static_hidden_details_activity(state):
+            return False
+        item = self._static_hidden_details_renderable(state, consume=False)
+        if item is None:
+            return False
+        return self._replace_full_screen_static_min_summary(item)
 
     def _static_transcript_ts_text(self, val: Any) -> str:
         """Format a message timestamp for static transcript panel titles."""
@@ -1363,8 +1440,21 @@ class PanelsMixin:
     def console_print_message(self, m: Dict[str, Any]) -> None:
         """Print a single message to the console with rich formatting."""
         hidden_details = self._ensure_static_hidden_details_state()
-        for item in self._static_transcript_message_renderables(m, hidden_details):
-            self._print_static_transcript_renderable(item)
+        before_hidden = self._has_static_hidden_details_activity(hidden_details)
+        items = self._static_transcript_message_renderables(m, hidden_details)
+
+        if not items:
+            if before_hidden or self._has_static_hidden_details_activity(hidden_details):
+                self._update_full_screen_static_min_summary()
+            return
+
+        for item in items:
+            if item.kind == 'min_summary':
+                if not self._replace_full_screen_static_min_summary(item):
+                    self._print_static_transcript_renderable(item)
+            else:
+                self._print_static_transcript_renderable(item)
+            self._reset_static_min_run_tracking()
 
     def console_print_block(self, title: str, text: str, border_style: str = 'blue', markup: bool = True) -> None:
         """Print a titled block to the console."""
