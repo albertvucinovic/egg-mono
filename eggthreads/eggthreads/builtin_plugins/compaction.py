@@ -151,6 +151,9 @@ def set_auto_compact_threshold_command(context: Any, arg: str):
     log = getattr(context, "log_system", None)
     if callable(log):
         log(message)
+    printer = getattr(context, "console_print_block", None)
+    if callable(printer):
+        printer("Auto-compaction", message, border_style="cyan")
     return CommandResult(clear_input=True, message=message)
 
 

@@ -275,18 +275,27 @@ def test_compact_with_summary_command_returns_confirmation_without_logger(tmp_pa
 
 def test_set_auto_compact_threshold_command_appends_context_length_event(tmp_path):
     db, tid = _new_thread(tmp_path)
+    logs: list[str] = []
+    blocks: list[tuple[str, str, str]] = []
 
     registry = create_default_command_registry()
     assert "setAutoCompactThreshold" in registry.names()
 
     result = registry.execute(
         "setAutoCompactThreshold",
-        CommandContext(db=db, current_thread=tid),
+        CommandContext(
+            db=db,
+            current_thread=tid,
+            log_system=logs.append,
+            console_print_block=lambda title, text, border_style="blue", **_kwargs: blocks.append((title, text, border_style)),
+        ),
         "12345",
     )
 
     assert result.clear_input is True
     assert result.message and "12,345" in result.message
+    assert logs == [result.message]
+    assert blocks == [("Auto-compaction", result.message, "cyan")]
     events = ts.list_thread_compaction_context_lengths(db, tid)
     assert len(events) == 1
     assert events[0]["threshold_tokens"] == 12345
