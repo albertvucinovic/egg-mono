@@ -6,7 +6,7 @@ import json
 import eggthreads as ts
 from eggthreads.command_catalog import CommandContext, create_default_command_registry
 from eggthreads.runner import RunnerConfig, ThreadRunner
-from eggthreads.tools import create_tool_registry
+from eggthreads.tools import ToolStreamContext, create_tool_registry
 
 
 def _new_thread(tmp_path):
@@ -98,10 +98,45 @@ def test_compact_thread_tool_is_registered_and_emits_event(tmp_path):
 
     out = registry.execute("compact_thread", {}, thread_id=tid, db=db)
 
-    assert "Compaction committed" in out
+    assert out == "Thread compacted."
     events = _events(db, tid)
     assert len(events) == 1
     assert events[0][1]["start_msg_id"] == user
+
+
+def test_compact_thread_tool_allows_current_tool_call_parent_as_default_start(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "summarize please")
+    assistant = ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "Summary text before compacting.",
+        extra={"tool_calls": [{"id": "call-compact", "function": {"name": "compact_thread", "arguments": "{}"}}]},
+    )
+
+    registry = create_tool_registry()
+    out = registry.execute(
+        "compact_thread",
+        {},
+        thread_id=tid,
+        db=db,
+        stream=ToolStreamContext(
+            db=db,
+            thread_id=tid,
+            invoke_id="invoke-test",
+            tool_call_id="call-compact",
+            tool_name="compact_thread",
+        ),
+    )
+
+    assert out == "Thread compacted."
+    events = _events(db, tid)
+    assert len(events) == 1
+    payload = events[0][1]
+    assert payload["start_msg_id"] == assistant
+    assert payload["tool_call_id"] == "call-compact"
+    assert payload["committed_from_msg_id"] == assistant
 
 
 def test_compact_thread_tool_schema_guides_non_spontaneous_use() -> None:

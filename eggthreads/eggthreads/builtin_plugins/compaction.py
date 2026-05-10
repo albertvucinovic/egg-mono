@@ -27,6 +27,7 @@ def compact_thread_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     """Commit a compaction boundary for the calling thread."""
 
     from ..api import commit_thread_compaction
+    from ..tool_state import build_tool_call_states
 
     thread_id = ctx.thread_id or str(args.get("_thread_id") or "").strip()
     if not thread_id:
@@ -35,14 +36,30 @@ def compact_thread_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
     db = _context_db(ctx)
     selector = args.get("start_message")
     selector_text = str(selector).strip() if selector is not None else None
+    tool_call_id = None
+    if ctx.stream is not None and getattr(ctx.stream, "tool_call_id", None):
+        tool_call_id = str(ctx.stream.tool_call_id)
+    elif args.get("_tool_call_id"):
+        tool_call_id = str(args.get("_tool_call_id"))
+
+    committed_from_msg_id = str(args.get("_msg_id") or "") or None
+    if not committed_from_msg_id and tool_call_id:
+        try:
+            state = build_tool_call_states(db, thread_id).get(tool_call_id)
+            if state is not None and state.parent_msg_id:
+                committed_from_msg_id = state.parent_msg_id
+        except Exception:
+            committed_from_msg_id = None
+
     result = commit_thread_compaction(
         db,
         thread_id,
         selector_text,
         created_by="assistant_tool",
-        committed_from_msg_id=str(args.get("_msg_id") or "") or None,
+        tool_call_id=tool_call_id,
+        committed_from_msg_id=committed_from_msg_id,
     )
-    return result.message
+    return "Thread compacted." if result.success else result.message
 
 
 def compact_thread_command(context: Any, arg: str):

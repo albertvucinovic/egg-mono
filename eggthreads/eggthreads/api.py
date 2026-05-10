@@ -1220,6 +1220,9 @@ def _tool_call_ids_from_payload(payload: Dict[str, Any]) -> List[str]:
 def _compaction_protocol_rejection_reason(
     selected: tuple[int, str, Dict[str, Any]],
     candidates: List[tuple[int, str, Dict[str, Any]]],
+    *,
+    pending_tool_call_id: Optional[str] = None,
+    pending_tool_parent_msg_id: Optional[str] = None,
 ) -> Optional[str]:
     """Return why a selected start would break provider tool-call protocol.
 
@@ -1273,6 +1276,13 @@ def _compaction_protocol_rejection_reason(
             while remaining:
                 row = ordered[idx] if 0 <= idx < len(ordered) else None
                 if row is None or row[2].get('role') != 'tool':
+                    if (
+                        pending_tool_call_id
+                        and pending_tool_parent_msg_id
+                        and selected[1] == pending_tool_parent_msg_id
+                        and remaining == {pending_tool_call_id}
+                    ):
+                        return None
                     return "assistant tool_calls are not followed by all required tool results"
                 tcid = row[2].get('tool_call_id')
                 if not isinstance(tcid, str) or tcid not in remaining:
@@ -1283,7 +1293,14 @@ def _compaction_protocol_rejection_reason(
     return None
 
 
-def resolve_compaction_start_message(db: ThreadsDB, thread_id: str, selector: Optional[str] = None) -> CompactionStartResolution:
+def resolve_compaction_start_message(
+    db: ThreadsDB,
+    thread_id: str,
+    selector: Optional[str] = None,
+    *,
+    pending_tool_call_id: Optional[str] = None,
+    pending_tool_parent_msg_id: Optional[str] = None,
+) -> CompactionStartResolution:
     """Resolve a compaction start selector to a valid user/assistant message.
 
     Supported selectors are an explicit ``msg_id``, ``last_user``,
@@ -1343,7 +1360,12 @@ def resolve_compaction_start_message(db: ThreadsDB, thread_id: str, selector: Op
 
     event_seq, msg_id, payload = selected
     role = payload.get('role')
-    protocol_reason = _compaction_protocol_rejection_reason(selected, candidates)
+    protocol_reason = _compaction_protocol_rejection_reason(
+        selected,
+        candidates,
+        pending_tool_call_id=pending_tool_call_id,
+        pending_tool_parent_msg_id=pending_tool_parent_msg_id,
+    )
     if protocol_reason:
         return CompactionStartResolution(
             False,
@@ -1367,7 +1389,13 @@ def commit_thread_compaction(
 ) -> CompactionCommitResult:
     """Append a ``thread.compaction`` event that sets provider-context start."""
 
-    resolution = resolve_compaction_start_message(db, thread_id, selector)
+    resolution = resolve_compaction_start_message(
+        db,
+        thread_id,
+        selector,
+        pending_tool_call_id=tool_call_id,
+        pending_tool_parent_msg_id=committed_from_msg_id,
+    )
     if not resolution.success:
         return CompactionCommitResult(False, resolution.selector, resolution.msg_id, resolution.event_seq, None, resolution.message)
 
