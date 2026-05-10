@@ -124,6 +124,31 @@ class TestFormatMessagesText:
         assert "Hello!" in text
         assert "Hi there!" in text
 
+    def test_includes_full_message_ids_for_copyable_commands(self, isolated_db):
+        """Text transcript includes full msg_ids for /compact and /continue."""
+        from eggthreads import append_message, create_root_thread, create_snapshot
+
+        tid = create_root_thread(isolated_db, name="MessageIds")
+        user = append_message(isolated_db, tid, "user", "hello")
+        assistant = append_message(isolated_db, tid, "assistant", "hi")
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._live_state = {"active_invoke": None, "content": "", "tools": {}, "tc_text": {}, "tc_order": []}
+
+        from egg.formatting import FormattingMixin
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert f"msg_id: {user}" in text
+        assert f"msg_id: {assistant}" in text
+
 
     def test_shows_compaction_marker_without_hiding_history(self, isolated_db):
         """Chat transcript text should include a divider and keep old messages."""

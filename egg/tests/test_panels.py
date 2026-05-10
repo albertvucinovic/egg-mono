@@ -512,6 +512,21 @@ class TestPrintStaticViewCurrent:
         assert any("Assistant" in title for title in titles)
         assert old and after
 
+    def test_static_message_titles_include_full_message_ids(self, egg_app, monkeypatch):
+        """Static terminal panels show full msg_ids for copy/paste workflows."""
+        from eggthreads import append_message, create_snapshot
+
+        msg_id = append_message(egg_app.db, egg_app.current_thread, "user", "copy me")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.print_static_view_current()
+
+        titles = [str(getattr(arg, "title", "")) for args, _kw in printed for arg in args]
+        assert any(f"msg_id: {msg_id}" in title for title in titles)
+
 
 class TestRedrawStaticView:
     """Tests for redraw_static_view()."""

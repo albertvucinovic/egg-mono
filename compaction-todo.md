@@ -725,7 +725,7 @@ Goal: make compaction visible to humans without hiding history, and report token
   - `get_child_status` should report `context_tokens` for current after-compaction context.
   - It should also report `full_thread_tokens`.
   - Include concise compaction info when present: compacted boolean, current prompt start msg id/event seq, marker event seq, and raw marker count if cheap.
-- [ ] Ensure message ids are visible/copyable enough for `/compact <msg_id>` and `/continue <msg_id>` workflows.
+- [x] Ensure message ids are visible/copyable enough for `/compact <msg_id>` and `/continue <msg_id>` workflows.
 - [x] Commit.
 
 Status notes:
@@ -736,6 +736,12 @@ Status notes:
   - Tests: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_child_status.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_command_registry.py eggthreads/tests/test_plugin_tool_registry.py egg/tests/test_formatting.py::TestCurrentTokenStats egg/tests/test_commands_utility.py::TestCmdCost` passed; `python -m compileall -q eggthreads/eggthreads egg/egg eggw/eggw && pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_child_status.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py egg/tests/test_formatting.py::TestCurrentTokenStats egg/tests/test_commands_utility.py::TestCmdCost` passed (114 tests); `PYTHONPATH=eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests/test_api.py::TestTokenStats::test_get_stats` passed; `cd eggw/frontend && npx tsc --noEmit --pretty false` passed.
   - Next: finish the remaining Phase 9 message-id visibility/copyability check, or proceed to the Phase 10 hardening slice if no UI copyability change is needed.
   - Caveats: provider-protocol hardening and unrelated cleanup were intentionally not implemented.
+- 2026-05-10: Message-id visibility/copyability check completed. Verified existing Phase 9 marker tests for terminal and web, and confirmed the web UI already copied full message ids from the message `id` field. Made the minimal remaining UI improvement so full `msg_id` values are directly visible in terminal transcript text/static panel titles and in the web message header while retaining click-to-copy behavior. Added focused tests that terminal formatting/static panels and the web message API expose full ids for `/compact <msg_id>` and `/continue <msg_id>` workflows. No `/compactionStatus`, diagnostics command, Phase 10 hardening, or unrelated UI cleanup was added.
+  - Changed files: `egg/egg/formatting.py`, `egg/egg/panels.py`, `egg/tests/test_formatting.py`, `egg/tests/test_panels.py`, `eggw/frontend/src/components/ChatPanel.tsx`, `eggw/tests/test_api.py`, `compaction-todo.md`.
+  - Commit: this Message-id visibility/copyability slice change.
+  - Tests: `pytest -q egg/tests/test_formatting.py::TestFormatMessagesText egg/tests/test_panels.py::TestPrintStaticViewCurrent` passed; `PYTHONPATH=eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests/test_api.py::TestMessageOperations` passed; `cd eggw/frontend && npx tsc --noEmit --pretty false` passed; `python -m compileall -q egg/egg eggw/eggw && pytest -q egg/tests/test_formatting.py::TestFormatMessagesText egg/tests/test_panels.py::TestPrintStaticViewCurrent eggthreads/tests/test_compaction.py eggthreads/tests/test_command_registry.py && PYTHONPATH=eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests/test_api.py::TestMessageOperations` passed.
+  - Next: start Phase 10 hardening slice, beginning with provider protocol edge cases around assistant/tool-call compaction starts.
+  - Caveats: terminal live/static headers now show full message ids, which is intentionally more verbose to support copy/paste workflows.
 
 ## Phase 10 — Hardening and cleanup
 

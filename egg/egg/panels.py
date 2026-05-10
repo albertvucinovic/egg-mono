@@ -572,7 +572,7 @@ class PanelsMixin:
             if ts_str:
                 parts.append(f"[dim]{ts_str}[/dim]")
             if msg_id:
-                parts.append(f"[dim]{msg_id[-8:]}[/dim]")
+                parts.append(f"[dim]msg_id: {msg_id}[/dim]")
             full_title = " | ".join(parts)
             try:
                 self._live_print(Panel(renderable, title=full_title, border_style=border, box=self._get_static_box()))
@@ -660,7 +660,7 @@ class PanelsMixin:
                 if ts_str:
                     tc_title_parts.append(f"[dim]{ts_str}[/dim]")
                 if msg_id:
-                    tc_title_parts.append(f"[dim]{msg_id[-8:]}[/dim]")
+                    tc_title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
                 tc_title = " | ".join(tc_title_parts)
                 self._live_print(Panel(Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'), title=tc_title, border_style='yellow', box=self._get_static_box()))
             # Streamed-only metadata if present in snapshot (optional)

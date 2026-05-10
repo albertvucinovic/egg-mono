@@ -227,6 +227,8 @@ class FormattingMixin:
             return "No messages yet."
         emitted_marker_keys: Set[tuple[int, int]] = set()
         for m in msgs:
+            msg_id = str(m.get('msg_id') or '')
+            msg_id_text = f" [msg_id: {msg_id}]" if msg_id else ""
             try:
                 event_seq_int = int(m.get('event_seq'))
             except Exception:
@@ -248,10 +250,10 @@ class FormattingMixin:
             if role == 'assistant':
                 reas = (m.get('reasoning') or m.get('reasoning_content') or '').strip()
                 if reas:
-                    lines.append(f"[Reasoning{tps_text}]\n{reas}")
+                    lines.append(f"[Reasoning{tps_text}{msg_id_text}]\n{reas}")
                 content = (m.get('content') or '').strip()
                 if content:
-                    lines.append(f"[Assistant{tps_text}]\n{content}")
+                    lines.append(f"[Assistant{tps_text}{msg_id_text}]\n{content}")
                 # Final tool calls summary (if any)
                 tcs = m.get('tool_calls') or []
                 if isinstance(tcs, list) and tcs:
@@ -278,7 +280,7 @@ class FormattingMixin:
             elif role == 'user':
                 content = (m.get('content') or '').strip()
                 if content:
-                    lines.append(f"[User]\n{content}")
+                    lines.append(f"[User{msg_id_text}]\n{content}")
             elif role == 'tool':
                 # Distinguish between genuine assistant tool outputs and
                 # user-initiated command outputs that are stored as
@@ -289,11 +291,11 @@ class FormattingMixin:
                     name = m.get('name') or 'tool'
                 content = (m.get('content') or '').strip()
                 if content:
-                    lines.append(f"[Tool: {name}{tps_text}]\n{content}")
+                    lines.append(f"[Tool: {name}{tps_text}{msg_id_text}]\n{content}")
             elif role == 'system':
                 content = (m.get('content') or '').strip()
                 if content:
-                    lines.append(f"[System]\n{content}")
+                    lines.append(f"[System{msg_id_text}]\n{content}")
         return "\n\n".join(lines)
 
     def format_model_info(self, concrete_model_info, model_key=None):

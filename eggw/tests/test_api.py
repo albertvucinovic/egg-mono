@@ -184,6 +184,25 @@ class TestMessageOperations:
         assert len(data) >= 1
         assert any(m["content"] == "Test message" for m in data)
 
+    def test_get_messages_returns_full_message_ids_for_copyable_ui(self, client):
+        """Web transcript API exposes full ids used by /compact and /continue."""
+        create_resp = client.post("/api/threads", json={"name": "Message IDs"})
+        thread_id = create_resp.json()["id"]
+
+        send_resp = client.post(
+            f"/api/threads/{thread_id}/messages",
+            json={"content": "Copy my id"},
+        )
+        msg_id = send_resp.json()["message_id"]
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        data = response.json()
+        message = next(m for m in data if m.get("content") == "Copy my id")
+        assert message["id"] == msg_id
+        assert len(message["id"]) > 8
+
     def test_get_messages_includes_compaction_marker_and_full_history(self, client):
         """Web transcript API returns a divider marker without hiding old messages."""
         from eggthreads import append_message, commit_thread_compaction, create_snapshot

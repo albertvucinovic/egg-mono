@@ -166,11 +166,13 @@ function MessageBlock({ message, showBorders = true }: MessageBlockProps) {
             className="font-mono cursor-pointer hover:underline"
             style={{ color: "var(--muted)" }}
             title={`Click to copy: ${message.id}`}
+            aria-label={`Message id ${message.id}; click to copy`}
+            data-testid="message-id"
             onClick={() => {
               navigator.clipboard.writeText(message.id);
             }}
           >
-            [{message.id.slice(-8)}]
+            [msg_id: {message.id}]
           </span>
         )}
         {message.tool_call_id && (
