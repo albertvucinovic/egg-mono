@@ -7,6 +7,25 @@ import uuid
 import pytest
 
 
+class TestMinHiddenActivitySummary:
+    """Tests for shared min-verbosity hidden activity summaries."""
+
+    def test_formats_counts_tools_names_and_tokens(self):
+        from egg.min_run_summary import MinHiddenActivitySummary, format_min_hidden_activity_summary
+
+        summary = MinHiddenActivitySummary()
+        summary.add_tool_execution(name="bash", tokens=40, tool_call_id="call_bash")
+        summary.add_tool_execution(name="python_repl", tokens=20, tool_call_id="call_python")
+        summary.add_tool_result(name="bash", tokens=30)
+        summary.add_tool_result(name="python_repl", tokens=20)
+        summary.add_reasoning_block(tokens=13)
+
+        assert format_min_hidden_activity_summary(summary) == (
+            "Executed 2 tools, got 2 tool results, 1 reasoning block, total tokens 123\n"
+            "Tools: bash, python_repl"
+        )
+
+
 class TestFormatThreadLine:
     """Tests for format_thread_line()."""
 
@@ -257,8 +276,8 @@ class TestFormatMessagesText:
         assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" in text
         assert "completed tool result body" not in text
 
-    def test_display_verbosity_min_shows_conversation_and_hidden_detail_summary(self, isolated_db):
-        """Min should show user/assistant bodies and summarize hidden details between them."""
+    def test_display_verbosity_min_shows_conversation_and_run_summary(self, isolated_db):
+        """Min should show user/assistant bodies and summarize hidden activity runs."""
         from eggthreads import append_message, create_root_thread, create_snapshot
         from egg.formatting import FormattingMixin
 
@@ -308,13 +327,80 @@ class TestFormatMessagesText:
         assert "ordinary system prompt" not in text
         assert "private reasoning body" not in text
         assert "completed tool result body" not in text
-        assert "Hidden details: 1 reasoning block." in text
-        assert "Hidden details: 1 tool call, 1 tool result." in text
-        assert f"[Reasoning [msg_id: {assistant}]]" in text
-        assert "[ToolCall [tool_call_id: call_full_1234567890]] bash" in text
-        assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" in text
-        assert text.index("Hidden details: 1 reasoning block.") < text.index("assistant answer")
-        assert text.index("Hidden details: 1 tool call, 1 tool result.") < text.index("next question")
+        assert "Hidden details:" not in text
+        assert "1 reasoning block" in text
+        assert "Executed 1 tool, got 1 tool result" in text
+        assert "total tokens" in text
+        assert "Tools: bash" in text
+        assert f"[Reasoning [msg_id: {assistant}]]" not in text
+        assert "[ToolCall [tool_call_id: call_full_1234567890]] bash" not in text
+        assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" not in text
+        assert text.index("1 reasoning block") < text.index("assistant answer")
+        assert text.index("Executed 1 tool, got 1 tool result") < text.index("next question")
+
+    def test_display_verbosity_min_merges_consecutive_hidden_activity(self, isolated_db):
+        """Consecutive hidden activity between visible messages becomes one summary item."""
+        from eggthreads import append_message, create_root_thread, create_snapshot
+        from egg.formatting import FormattingMixin
+
+        tid = create_root_thread(isolated_db, name="VerbosityMinMerged")
+        append_message(isolated_db, tid, "user", "run both tools")
+        append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "reasoning": "private reasoning body",
+                "tool_calls": [
+                    {
+                        "id": "call_bash_1234567890",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"script":"echo hello"}'},
+                    },
+                    {
+                        "id": "call_python_1234567890",
+                        "type": "function",
+                        "function": {"name": "python_repl", "arguments": '{"code":"print(1)"}'},
+                    },
+                ],
+            },
+        )
+        append_message(
+            isolated_db,
+            tid,
+            "tool",
+            "bash result body",
+            extra={"name": "bash", "tool_call_id": "call_bash_1234567890"},
+        )
+        append_message(
+            isolated_db,
+            tid,
+            "tool",
+            "python result body",
+            extra={"name": "python_repl", "tool_call_id": "call_python_1234567890"},
+        )
+        append_message(isolated_db, tid, "assistant", "done")
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._display_verbosity = "min"
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert "Executed 2 tools, got 2 tool results, 1 reasoning block" in text
+        assert "Tools: bash, python_repl" in text
+        assert text.count("Executed 2 tools, got 2 tool results, 1 reasoning block") == 1
+        assert "Hidden details:" not in text
+        assert "bash result body" not in text
+        assert "python result body" not in text
+        assert text.index("Executed 2 tools, got 2 tool results, 1 reasoning block") < text.index("done")
 
     def test_shows_compaction_marker_without_hiding_history(self, isolated_db):
         """Chat transcript text should include a divider and keep old messages."""

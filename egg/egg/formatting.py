@@ -15,6 +15,14 @@ from eggthreads import (
 )
 
 from .utils import snapshot_messages
+from .min_run_summary import (
+    MinHiddenActivitySummary,
+    count_min_hidden_text_tokens,
+    format_min_hidden_activity_summary,
+    min_message_token_count,
+    serialize_min_tool_call_tokens,
+    snapshot_per_message_token_stats,
+)
 
 
 class FormattingMixin:
@@ -239,35 +247,35 @@ class FormattingMixin:
             return "No messages yet."
 
         verbosity = self._display_verbosity_level()
-        hidden_counts: Dict[str, int] = {"reasoning": 0, "tool_calls": 0, "tool_results": 0}
-        hidden_headers: List[str] = []
+        per_message_tokens = snapshot_per_message_token_stats(self.db, thread_id) if verbosity == 'min' and messages is None else {}
+        if verbosity == 'min' and not per_message_tokens and messages is not None:
+            try:
+                from eggthreads import snapshot_token_stats
 
-        def add_hidden(kind: str, header: str) -> None:
-            if kind in hidden_counts:
-                hidden_counts[kind] += 1
-            if header:
-                hidden_headers.append(f"  {header}")
+                token_stats = snapshot_token_stats({'messages': [m for m in msgs if isinstance(m, dict)]})
+                pm = token_stats.get('per_message') if isinstance(token_stats, dict) else {}
+                if isinstance(pm, dict):
+                    per_message_tokens = {str(k): v for k, v in pm.items() if isinstance(v, dict)}
+            except Exception:
+                per_message_tokens = {}
+        hidden_summary = MinHiddenActivitySummary()
+
+        def add_hidden_reasoning(*, tokens: Any = 0) -> None:
+            hidden_summary.add_reasoning_block(tokens=tokens)
+
+        def add_hidden_tool_call(*, name: Any = None, tokens: Any = 0, tool_call_id: str = "") -> None:
+            hidden_summary.add_tool_execution(name=name, tokens=tokens, tool_call_id=tool_call_id)
+
+        def add_hidden_tool_result(*, name: Any = None, tokens: Any = 0) -> None:
+            hidden_summary.add_tool_result(name=name, tokens=tokens)
 
         def flush_hidden() -> None:
-            if verbosity != 'min' or not any(hidden_counts.values()):
+            if verbosity != 'min' or not hidden_summary.has_activity():
                 return
-            parts: List[str] = []
-            for key, singular in (
-                ("tool_calls", "tool call"),
-                ("tool_results", "tool result"),
-                ("reasoning", "reasoning block"),
-            ):
-                count = hidden_counts.get(key, 0)
-                if count:
-                    label = singular if count == 1 else f"{singular}s"
-                    parts.append(f"{count} {label}")
-            summary = f"Hidden details: {', '.join(parts)}."
-            if hidden_headers:
-                summary += "\n" + "\n".join(hidden_headers)
-            lines.append(summary)
-            for key in hidden_counts:
-                hidden_counts[key] = 0
-            hidden_headers.clear()
+            summary = format_min_hidden_activity_summary(hidden_summary)
+            if summary:
+                lines.append(summary)
+            hidden_summary.clear()
 
         def tool_call_info(tc: Any) -> tuple[str, str, str]:
             data = tc if isinstance(tc, dict) else {}
@@ -296,6 +304,8 @@ class FormattingMixin:
             for marker in markers_by_start_seq.get(event_seq_int, []):
                 key = (event_seq_int, int(marker.get('event_seq') or -1))
                 if key not in emitted_marker_keys:
+                    if verbosity == 'min':
+                        flush_hidden()
                     lines.append(self._compaction_marker_text(marker))
                     emitted_marker_keys.add(key)
 
@@ -316,7 +326,7 @@ class FormattingMixin:
                     elif verbosity == 'medium':
                         lines.append(reason_header)
                     else:
-                        add_hidden('reasoning', reason_header)
+                        add_hidden_reasoning(tokens=min_message_token_count(per_message_tokens, msg_id, 'reasoning', reas))
                 content = (m.get('content') or '').strip()
                 if content:
                     if verbosity == 'min':
@@ -346,10 +356,19 @@ class FormattingMixin:
                         if tc_lines:
                             lines.append(f"[Tool Calls{tps_text}{msg_id_text}]\n" + "\n".join(tc_lines))
                     else:
-                        for tc in tcs:
+                        tool_call_tokens = min_message_token_count(
+                            per_message_tokens,
+                            msg_id,
+                            'tool_calls',
+                            serialize_min_tool_call_tokens(tcs),
+                        )
+                        for idx, tc in enumerate(tcs):
                             name, _args_str, tc_id = tool_call_info(tc)
-                            tc_id_text = f" [tool_call_id: {tc_id}]" if tc_id else ""
-                            add_hidden('tool_calls', f"[ToolCall{tc_id_text}] {name}{msg_id_text}")
+                            add_hidden_tool_call(
+                                name=name,
+                                tokens=tool_call_tokens if idx == 0 else 0,
+                                tool_call_id=tc_id,
+                            )
                 # Streamed-only metadata (if snapshot captured)
                 tstream = m.get('tool_stream') or {}
                 if isinstance(tstream, dict):
@@ -361,7 +380,7 @@ class FormattingMixin:
                             elif verbosity == 'medium':
                                 lines.append(header)
                             else:
-                                add_hidden('tool_results', header)
+                                add_hidden_tool_result(name=nm, tokens=count_min_hidden_text_tokens(txt))
                 tc_stream = m.get('tool_calls_stream') or {}
                 if isinstance(tc_stream, dict):
                     for nm, txt in tc_stream.items():
@@ -373,7 +392,10 @@ class FormattingMixin:
                                 preview = self._one_line_display_preview(txt)
                                 lines.append(f"{header} {preview}" if preview else header)
                             else:
-                                add_hidden('tool_calls', header)
+                                add_hidden_tool_call(
+                                    tokens=count_min_hidden_text_tokens(txt),
+                                    tool_call_id=str(nm or ''),
+                                )
             elif role == 'user':
                 content = (m.get('content') or '').strip()
                 if content:
@@ -402,7 +424,10 @@ class FormattingMixin:
                         if verbosity == 'medium':
                             lines.append(header)
                         else:
-                            add_hidden('tool_results', header)
+                            add_hidden_tool_result(
+                                name=name,
+                                tokens=min_message_token_count(per_message_tokens, msg_id, 'content', content),
+                            )
             elif role == 'system':
                 content = (m.get('content') or '').strip()
                 if content:

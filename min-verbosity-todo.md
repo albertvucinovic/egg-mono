@@ -22,13 +22,17 @@ Implementation notes:
 
 Phases:
 
-- [ ] Phase 1 — Shared min run-summary model
+- [x] Phase 1 — Shared min run-summary model
   - Add focused helpers for min-verbosity hidden activity summaries.
   - Count tool executions/tool calls, tool results, and reasoning blocks.
   - Track tool names and token totals where available.
   - Format a single summary item with optional tool-list line.
   - Update `format_messages_text()` min behavior and tests.
   - Status notes:
+    - Implemented shared `egg.min_run_summary` helpers for min hidden activity runs.
+    - `format_messages_text()` now emits one run summary between visible messages, counts tool executions/results/reasoning blocks, includes known tool names, and totals hidden tokens from cached per-message stats or existing approximate token counting.
+    - Elapsed running time intentionally omitted in Phase 1 because accurate per-run timing is not cheaply available in text formatting.
+    - Focused formatting tests updated for no `Hidden details:` rows in min.
 
 - [ ] Phase 2 — Static panel renderables use run summaries
   - Replace `Hidden Details` min panels with the new run-summary renderable in `PanelsMixin` static transcript builders.
