@@ -53,18 +53,22 @@ def cost_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
 
     app = getattr(context, "app", None)
+    full_thread_tokens = None
     if app is not None and hasattr(app, "current_token_stats"):
         ctx_tokens, api = app.current_token_stats()
+        if isinstance(api, dict) and isinstance(api.get("full_thread_tokens"), int):
+            full_thread_tokens = api.get("full_thread_tokens")
     else:
         target = _target(context, "cost")
         if target is None:
             return CommandResult(clear_input=False)
         db, thread_id = target
         try:
-            from ..token_count import total_token_stats
+            from ..token_count import thread_token_stats
 
-            stats = total_token_stats(db, thread_id)
+            stats = thread_token_stats(db, thread_id)
             ctx_tokens = stats.get("context_tokens")
+            full_thread_tokens = stats.get("full_thread_tokens")
             api = stats.get("api_usage", stats)
         except Exception as e:
             _log(context, f"/cost error: {e}")
@@ -94,6 +98,8 @@ def cost_command(context: Any, arg: str):
         lines.append(f"  context_tokens:        {ctx_tokens} ({_fmt_tok(ctx_tokens)})")
     else:
         lines.append("  context_tokens:        (n/a)")
+    if isinstance(full_thread_tokens, int):
+        lines.append(f"  full_thread_tokens:    {full_thread_tokens} ({_fmt_tok(full_thread_tokens)})")
     lines.append(f"  total_input_tokens:    {ti} ({_fmt_tok(ti)})")
     lines.append(f"  cached_input_tokens:   {cached_in} ({_fmt_tok(cached_in)})")
     lines.append(f"  cached_tokens (last):  {cached_ctx} ({_fmt_tok(cached_ctx)})")
@@ -137,7 +143,7 @@ def cost_command(context: Any, arg: str):
 def set_context_limit_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
     from ..api import get_context_limit, set_context_limit
-    from ..token_count import total_token_stats
+    from ..token_count import thread_token_stats
 
     target = _target(context, "setContextLimit")
     if target is None:
@@ -150,7 +156,7 @@ def set_context_limit_command(context: Any, arg: str):
 
     if not text:
         current_limit = get_context_limit(db, thread_id)
-        stats = total_token_stats(db, thread_id)
+        stats = thread_token_stats(db, thread_id)
         current_tokens = stats.get("context_tokens", 0)
         lines: List[str] = [f"Thread {thread_id[-8:]} context limit:", "", f"  current_tokens:  {current_tokens:,} ({_fmt_tok(current_tokens)})"]
         if current_limit:
@@ -169,7 +175,7 @@ def set_context_limit_command(context: Any, arg: str):
             _log(context, "Context limit must be a positive integer")
             return CommandResult(clear_input=False)
         set_context_limit(db, thread_id, limit, reason="ui /setContextLimit")
-        stats = total_token_stats(db, thread_id)
+        stats = thread_token_stats(db, thread_id)
         current_tokens = stats.get("context_tokens", 0)
         pct = (current_tokens / limit * 100) if limit > 0 else 0
         block = "\n".join([

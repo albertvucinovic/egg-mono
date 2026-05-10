@@ -30,11 +30,38 @@ def test_get_child_thread_status_reports_context_and_errors(tmp_path):
     assert st.name == "child"
     assert st.state == "waiting_user"
     assert st.context_tokens > 0
+    assert st.full_thread_tokens >= st.context_tokens
+    assert st.compaction == {"compacted": False, "raw_marker_count": 0}
     assert st.context_limit == 1000
     assert st.context_limit_percent is not None
     assert st.error_count == 1
     assert st.recent_errors
     assert "provider exploded" in st.recent_errors[0]["message"]
+
+
+def test_get_child_thread_status_reports_compacted_context_and_full_tokens(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    old = ts.append_message(db, child, "user", "old " * 200)
+    start = ts.append_message(db, child, "assistant", "summary")
+    ts.commit_thread_compaction(db, child, start, created_by="test")
+    ts.create_snapshot(db, child)
+
+    st = ts.get_child_thread_status(db, parent, child)
+    payload = st.to_dict()
+
+    assert st.context_tokens < st.full_thread_tokens
+    assert payload["context_tokens"] == st.context_tokens
+    assert payload["full_thread_tokens"] == st.full_thread_tokens
+    assert payload["compaction"] == {
+        "compacted": True,
+        "current_prompt_start_msg_id": start,
+        "current_prompt_start_event_seq": ts.latest_effective_thread_compaction(db, child)["start_event_seq"],
+        "marker_event_seq": ts.latest_effective_thread_compaction(db, child)["event_seq"],
+        "raw_marker_count": 1,
+    }
+    assert old
 
 
 def test_get_child_thread_status_rejects_non_descendant(tmp_path):
@@ -70,6 +97,8 @@ def test_get_child_status_tool_uses_current_thread_context(tmp_path, monkeypatch
     assert payload["children"][0]["thread_id"] == child
     assert payload["children"][0]["state"] == "waiting_user"
     assert payload["children"][0]["context_tokens"] > 0
+    assert payload["children"][0]["full_thread_tokens"] >= payload["children"][0]["context_tokens"]
+    assert payload["children"][0]["compaction"] == {"compacted": False, "raw_marker_count": 0}
 
 
 def test_get_child_status_tool_defaults_to_direct_children(tmp_path, monkeypatch):

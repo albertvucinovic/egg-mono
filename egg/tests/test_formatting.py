@@ -227,11 +227,11 @@ class TestCurrentTokenStats:
         """Repeated panel ticks should not rescan token stats when events are unchanged."""
         calls = {"count": 0}
 
-        def fake_total_token_stats(db, thread_id, llm=None):
+        def fake_thread_token_stats(db, thread_id, llm=None):
             calls["count"] += 1
             return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
 
-        monkeypatch.setattr("eggthreads.total_token_stats", fake_total_token_stats)
+        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 3)
 
         assert egg_app.current_token_stats()[0] == 7
@@ -242,11 +242,11 @@ class TestCurrentTokenStats:
         """Idle token stats should not rescan for config-only event changes."""
         calls = {"count": 0}
 
-        def fake_total_token_stats(db, thread_id, llm=None):
+        def fake_thread_token_stats(db, thread_id, llm=None):
             calls["count"] += 1
             return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
 
-        monkeypatch.setattr("eggthreads.total_token_stats", fake_total_token_stats)
+        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 999)
 
         egg_app.current_token_stats()

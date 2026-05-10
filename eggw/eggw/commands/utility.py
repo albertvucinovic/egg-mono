@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from eggthreads import (
     approve_tool_calls_for_thread,
-    total_token_stats,
+    thread_token_stats,
     execute_bash_command,
     list_threads,
     get_thread_auto_approval_status,
@@ -249,9 +249,10 @@ async def cmd_skill(thread_id: str, name: str) -> CommandResponse:
 
 async def cmd_cost(thread_id: str) -> CommandResponse:
     """Handle /cost command - show token usage and cost (matches egg.py format)."""
-    stats = total_token_stats(core.db, thread_id, llm=core.llm_client)
+    stats = thread_token_stats(core.db, thread_id, llm=core.llm_client)
     api = stats.get("api_usage", {})
     ctx_tokens = stats.get("context_tokens", 0)
+    full_thread_tokens = stats.get("full_thread_tokens", ctx_tokens)
 
     if not api:
         return CommandResponse(
@@ -274,6 +275,7 @@ async def cmd_cost(thread_id: str) -> CommandResponse:
     lines = [
         f"Thread {thread_id[-8:]} token usage:",
         f"  context_tokens:        {ctx_tokens} ({fmt_tok(ctx_tokens)})",
+        f"  full_thread_tokens:    {full_thread_tokens} ({fmt_tok(full_thread_tokens)})",
         f"  total_input_tokens:    {ti} ({fmt_tok(ti)})",
         f"  cached_input_tokens:   {cached_total} ({fmt_tok(cached_total)})",
         f"  cached_tokens (last):  {cached_last} ({fmt_tok(cached_last)})",
@@ -311,6 +313,7 @@ async def cmd_cost(thread_id: str) -> CommandResponse:
         message="\n".join(lines),
         data={
             "context_tokens": ctx_tokens,
+            "full_thread_tokens": full_thread_tokens,
             "input_tokens": ti,
             "output_tokens": to,
             "reasoning_tokens": tr,
@@ -623,7 +626,7 @@ async def cmd_setContextLimit(thread_id: str, arg: str = "") -> CommandResponse:
     if not arg:
         # Show current limit and context usage
         current_limit = get_context_limit(core.db, thread_id)
-        stats = total_token_stats(core.db, thread_id)
+        stats = thread_token_stats(core.db, thread_id)
         current_tokens = stats.get('context_tokens', 0)
 
         lines = [
@@ -667,7 +670,7 @@ async def cmd_setContextLimit(thread_id: str, arg: str = "") -> CommandResponse:
         set_context_limit(core.db, thread_id, limit, reason="ui /setContextLimit")
 
         # Show updated status
-        stats = total_token_stats(core.db, thread_id)
+        stats = thread_token_stats(core.db, thread_id)
         current_tokens = stats.get('context_tokens', 0)
         pct = (current_tokens / limit * 100) if limit > 0 else 0
 

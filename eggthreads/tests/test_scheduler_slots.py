@@ -1441,11 +1441,11 @@ class TestContextLimit:
 
         from eggthreads.runner import ThreadRunner
 
-        # Mock total_token_stats to return tokens exceeding the limit
+        # Mock thread_token_stats to return tokens exceeding the limit
         mock_stats = {'context_tokens': 50000, 'output_tokens': 1000}
 
         async def test():
-            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+            with patch('eggthreads.token_count.thread_token_stats', return_value=mock_stats):
                 # Set global limit lower than current tokens
                 cfg = RunnerConfig(context_limit=32000)
                 runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
@@ -1467,11 +1467,11 @@ class TestContextLimit:
 
         from eggthreads.runner import ThreadRunner
 
-        # Mock total_token_stats to return tokens under the limit
+        # Mock thread_token_stats to return tokens under the limit
         mock_stats = {'context_tokens': 10000, 'output_tokens': 500}
 
         async def test():
-            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+            with patch('eggthreads.token_count.thread_token_stats', return_value=mock_stats):
                 # Set global limit higher than current tokens
                 cfg = RunnerConfig(context_limit=32000)
                 runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
@@ -1500,12 +1500,12 @@ class TestContextLimit:
 
         from eggthreads.runner import ThreadRunner
 
-        # Mock total_token_stats to return 50000 tokens
+        # Mock thread_token_stats to return 50000 tokens
         # Global limit is 32000 (would block), but per-thread is 100000 (should allow)
         mock_stats = {'context_tokens': 50000, 'output_tokens': 1000}
 
         async def test():
-            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+            with patch('eggthreads.token_count.thread_token_stats', return_value=mock_stats):
                 # Global limit would block (32000 < 50000), but per-thread allows (100000 > 50000)
                 cfg = RunnerConfig(context_limit=32000)
                 runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
@@ -1529,11 +1529,11 @@ class TestContextLimit:
 
         from eggthreads.runner import ThreadRunner
 
-        # Mock total_token_stats to return very high tokens
+        # Mock thread_token_stats to return very high tokens
         mock_stats = {'context_tokens': 1000000, 'output_tokens': 10000}
 
         async def test():
-            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+            with patch('eggthreads.token_count.thread_token_stats', return_value=mock_stats):
                 # No global limit set (None)
                 cfg = RunnerConfig(context_limit=None)
                 runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)
@@ -1561,11 +1561,11 @@ class TestContextLimit:
 
         from eggthreads.runner import ThreadRunner
 
-        # Mock total_token_stats to return tokens that exceed global limit
+        # Mock thread_token_stats to return tokens that exceed global limit
         mock_stats = {'context_tokens': 40000, 'output_tokens': 1000}
 
         async def test():
-            with patch('eggthreads.token_count.total_token_stats', return_value=mock_stats):
+            with patch('eggthreads.token_count.thread_token_stats', return_value=mock_stats):
                 # Set global limit that will be exceeded
                 cfg = RunnerConfig(context_limit=32000)
                 runner = ThreadRunner(db, root, llm=_make_mock_llm(), config=cfg)

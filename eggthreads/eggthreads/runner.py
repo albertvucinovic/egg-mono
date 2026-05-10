@@ -872,8 +872,8 @@ class ThreadRunner:
                 # Check context limit before making LLM call
                 if context_limit:
                     try:
-                        from .token_count import total_token_stats
-                        stats = total_token_stats(self.db, self.thread_id)
+                        from .token_count import thread_token_stats
+                        stats = thread_token_stats(self.db, self.thread_id)
                         current_tokens = stats.get('context_tokens', 0)
                         if current_tokens >= context_limit:
                             # Emit error instead of calling API

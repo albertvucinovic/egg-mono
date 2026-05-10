@@ -70,3 +70,19 @@ def test_extend_snapshot_token_stats_matches_full_recompute():
     snapshot["messages"].extend(tail)
 
     assert extend_snapshot_token_stats(snapshot, tail) == snapshot_token_stats(snapshot)
+
+
+def test_total_token_stats_records_snapshot_context_boundary(tmp_path):
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "before snapshot")
+    ts.create_snapshot(db, tid)
+    ts.append_message(db, tid, "user", "after snapshot")
+
+    stats = ts.total_token_stats(db, tid)
+
+    assert stats["snapshot_context_tokens"] > 0
+    assert stats["context_tokens"] > stats["snapshot_context_tokens"]

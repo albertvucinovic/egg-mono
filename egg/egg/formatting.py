@@ -368,9 +368,10 @@ class FormattingMixin:
         }
 
     def current_token_stats(self) -> tuple[Optional[int], Dict[str, Any]]:
-        """Return (context_tokens, api_usage) for the current thread.
+        """Return (provider context_tokens, api_usage) for the current thread.
 
-        Uses eggthreads' total_token_stats so that token usage (and
+        Uses eggthreads' thread_token_stats so that context_tokens reflects
+        the current provider/API context after compaction while api_usage (and
         cost, when configured) updates during streaming instead of only
         after snapshots are rebuilt.
 
@@ -390,7 +391,7 @@ class FormattingMixin:
             if active_invoke:
                 max_event_seq = int(self.db.max_event_seq(self.current_thread))
             else:
-                # When idle, ``total_token_stats()`` is driven by the cached
+                # When idle, ``thread_token_stats()`` is driven by the cached
                 # snapshot plus rare post-snapshot message/control events. Use
                 # the snapshot sequence as the stable key so unrelated events
                 # (for example model/config/tool approval changes) do not
@@ -416,16 +417,19 @@ class FormattingMixin:
         ctx_tokens: Optional[int] = None
         api_usage: Dict[str, Any] = {}
         try:
-            from eggthreads import total_token_stats
+            from eggthreads import thread_token_stats
 
-            ts = total_token_stats(self.db, self.current_thread, llm=self.llm_client)
+            ts = thread_token_stats(self.db, self.current_thread, llm=self.llm_client)
             if isinstance(ts, dict):
                 ct = ts.get('context_tokens')
                 if isinstance(ct, int):
                     ctx_tokens = ct
                 au = ts.get('api_usage')
                 if isinstance(au, dict):
-                    api_usage = au
+                    api_usage = dict(au)
+                    ft = ts.get('full_thread_tokens')
+                    if isinstance(ft, int):
+                        api_usage['full_thread_tokens'] = ft
         except Exception:
             ctx_tokens = None
             api_usage = {}

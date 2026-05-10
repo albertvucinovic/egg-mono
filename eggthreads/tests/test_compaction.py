@@ -720,6 +720,21 @@ def test_provider_context_token_stats_uses_effective_compaction_not_raw_history(
     assert start in provider["per_message"]
 
 
+def test_thread_token_stats_reports_provider_context_and_full_history(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old " * 200)
+    start = ts.append_message(db, tid, "assistant", "summary")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.create_snapshot(db, tid)
+
+    stats = ts.thread_token_stats(db, tid)
+
+    assert stats["context_tokens"] < stats["full_thread_tokens"]
+    assert start in stats["provider_per_message"]
+    assert old not in stats["provider_per_message"]
+    assert old in stats["per_message"]
+
+
 def _ids(messages):
     return [m.get("msg_id") for m in messages]
 

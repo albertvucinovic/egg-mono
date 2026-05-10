@@ -3299,6 +3299,8 @@ class ChildThreadStatus:
     short_recap: Optional[str]
     state: str
     context_tokens: int
+    full_thread_tokens: int = 0
+    compaction: Optional[Dict[str, Any]] = None
     context_limit: Optional[int] = None
     context_limit_percent: Optional[float] = None
     error_count: int = 0
@@ -3315,6 +3317,8 @@ class ChildThreadStatus:
             "short_recap": self.short_recap,
             "state": self.state,
             "context_tokens": int(self.context_tokens),
+            "full_thread_tokens": int(self.full_thread_tokens),
+            "compaction": dict(self.compaction or {"compacted": False}),
             "context_limit": self.context_limit,
             "context_limit_percent": self.context_limit_percent,
             "error_count": int(self.error_count),
@@ -3460,6 +3464,29 @@ def _last_event_meta(db: ThreadsDB, thread_id: str) -> tuple[int, Optional[str]]
     return -1, None
 
 
+def thread_compaction_status(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
+    """Return concise current compaction info for status surfaces."""
+
+    raw_count = len(list_thread_compactions(db, thread_id))
+    current = latest_effective_thread_compaction(db, thread_id)
+    if current is None:
+        return {"compacted": False, "raw_marker_count": raw_count}
+
+    def _int_or_none_local(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    return {
+        "compacted": True,
+        "current_prompt_start_msg_id": current.get("start_msg_id"),
+        "current_prompt_start_event_seq": _int_or_none_local(current.get("start_event_seq")),
+        "marker_event_seq": _int_or_none_local(current.get("event_seq")),
+        "raw_marker_count": raw_count,
+    }
+
+
 def get_child_thread_status(
     db: ThreadsDB,
     manager_thread_id: str,
@@ -3496,12 +3523,15 @@ def get_child_thread_status(
         state = "unknown"
 
     context_tokens = 0
+    full_thread_tokens = 0
+    compaction = thread_compaction_status(db, child)
     token_stats_error: Optional[str] = None
     try:
-        from .token_count import total_token_stats
+        from .token_count import thread_token_stats
 
-        stats = total_token_stats(db, child)
+        stats = thread_token_stats(db, child)
         context_tokens = int(stats.get("context_tokens") or 0)
+        full_thread_tokens = int(stats.get("full_thread_tokens") or context_tokens)
     except Exception as e:
         token_stats_error = f"{type(e).__name__}: {e}"
 
@@ -3520,6 +3550,8 @@ def get_child_thread_status(
         short_recap=row.short_recap,
         state=state,
         context_tokens=context_tokens,
+        full_thread_tokens=full_thread_tokens,
+        compaction=compaction,
         context_limit=context_limit,
         context_limit_percent=context_limit_percent,
         error_count=error_count,

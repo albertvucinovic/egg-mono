@@ -95,6 +95,7 @@ class ThreadTokenStats(BaseModel):
     total_tokens: int = 0
     cost_usd: Optional[float] = None
     context_tokens: int = 0
+    full_thread_tokens: int = 0
     streaming_tps: Optional[float] = None
 
 

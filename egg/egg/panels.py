@@ -229,7 +229,7 @@ class PanelsMixin:
                     if segs:
                         title_parts.append(" ".join(segs))
 
-                    # Approximate cost (computed by eggthreads.total_token_stats).
+                    # Approximate cost (computed by eggthreads.thread_token_stats).
                     try:
                         cu = api_usage.get('cost_usd') if isinstance(api_usage.get('cost_usd'), dict) else {}
                         total_cost = float(cu.get('total') or 0.0)

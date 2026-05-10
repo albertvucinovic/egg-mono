@@ -408,6 +408,8 @@ class TestTokenStats:
         assert "input_tokens" in data
         assert "output_tokens" in data
         assert "total_tokens" in data
+        assert "context_tokens" in data
+        assert "full_thread_tokens" in data
 
 
 class TestSSEEvents:

@@ -199,6 +199,8 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
                 <span className="text-right" style={{ color: "var(--tool-msg-border)" }}>{formatTokenCount(stats.cached_tokens || 0)}</span>
                 <span>Context:</span>
                 <span className="text-right">{formatTokenCount(stats.context_tokens || 0)}</span>
+                <span>Full Thread:</span>
+                <span className="text-right">{formatTokenCount(stats.full_thread_tokens || stats.context_tokens || 0)}</span>
                 {isStreaming && streamingKind === "llm" && typeof stats.streaming_tps === "number" && Number.isFinite(stats.streaming_tps) && stats.streaming_tps > 0 && (
                   <>
                     <span>TPS:</span>

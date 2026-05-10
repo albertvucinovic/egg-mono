@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from eggthreads import live_llm_tps_for_invoke, total_token_stats
+from eggthreads import live_llm_tps_for_invoke, thread_token_stats
 
 from ..models import ThreadTokenStats
 from .. import core
@@ -22,7 +22,7 @@ async def get_token_stats(thread_id: str):
         raise HTTPException(status_code=404, detail="Thread not found")
 
     # Get stats with cost estimates if llm_client is available
-    stats = total_token_stats(core.db, thread_id, llm=core.llm_client)
+    stats = thread_token_stats(core.db, thread_id, llm=core.llm_client)
 
     # Extract api_usage - fields are at top level of api_usage dict
     api_usage = stats.get("api_usage", {})
@@ -55,5 +55,6 @@ async def get_token_stats(thread_id: str):
         total_tokens=input_tokens + output_tokens,  # reasoning is part of output
         cost_usd=cost_info.get("total") if cost_info else None,
         context_tokens=stats.get("context_tokens", 0) or 0,
+        full_thread_tokens=stats.get("full_thread_tokens", stats.get("context_tokens", 0)) or 0,
         streaming_tps=streaming_tps,
     )

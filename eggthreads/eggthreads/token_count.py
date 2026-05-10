@@ -937,6 +937,17 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
 def _merge_token_stats(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     """Merge two token_stats dicts (snapshot + streaming tail)."""
 
+    return _merge_token_stats_with_boundary(a, b, include_snapshot_boundary=False)
+
+
+def _merge_token_stats_with_boundary(
+    a: Dict[str, Any],
+    b: Dict[str, Any],
+    *,
+    include_snapshot_boundary: bool,
+) -> Dict[str, Any]:
+    """Merge token stats, optionally recording the left-side context length."""
+
     def _int(x: Any) -> int:
         try:
             return int(x or 0)
@@ -948,6 +959,8 @@ def _merge_token_stats(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
         "context_tokens": _int(a.get("context_tokens")) + _int(b.get("context_tokens")),
         "api_usage": {},
     }
+    if include_snapshot_boundary:
+        out["snapshot_context_tokens"] = _int(a.get("context_tokens"))
 
     pm: Dict[str, Any] = {}
     for src in (a.get("per_message") or {}, b.get("per_message") or {}):
@@ -1208,10 +1221,47 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
                     snap_stats = _token_stats_for_messages(filtered_msgs)
 
     stream_stats = streaming_token_stats(db, thread_id)
-    total = _merge_token_stats(snap_stats, stream_stats)
+    total = _merge_token_stats_with_boundary(snap_stats, stream_stats, include_snapshot_boundary=True)
     if llm is not None:
         total = _attach_costs(total, llm=llm)
     return total
+
+
+def thread_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Dict[str, Any]:
+    """Return token stats with explicit full-history and provider-context counts.
+
+    ``context_tokens`` intentionally means the current effective provider/API
+    context after compaction.  ``full_thread_tokens`` is the full visible /
+    effective thread history before compaction filtering.  API usage and cost
+    fields remain based on the full effective history so historical usage does
+    not disappear after compaction.
+    """
+
+    full = total_token_stats(db, thread_id, llm=llm)
+    try:
+        provider = provider_context_token_stats(db, thread_id)
+    except Exception:
+        provider = {}
+
+    out = dict(full) if isinstance(full, dict) else {}
+    try:
+        out["full_thread_tokens"] = int((full or {}).get("context_tokens") or 0)
+    except Exception:
+        out["full_thread_tokens"] = 0
+    try:
+        provider_context_tokens = int((provider or {}).get("context_tokens") or 0)
+    except Exception:
+        provider_context_tokens = int(out.get("full_thread_tokens") or 0)
+    stream_context_tokens = 0
+    try:
+        if "snapshot_context_tokens" in (full or {}):
+            stream_context_tokens = int((full or {}).get("context_tokens") or 0) - int((full or {}).get("snapshot_context_tokens") or 0)
+    except Exception:
+        stream_context_tokens = 0
+    out["context_tokens"] = int(provider_context_tokens + max(0, stream_context_tokens))
+    if isinstance(provider, dict) and "per_message" in provider:
+        out["provider_per_message"] = provider.get("per_message") or {}
+    return out
 
 
 def provider_context_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
@@ -1267,6 +1317,7 @@ __all__ = [
     "extend_snapshot_token_stats",
     "streaming_token_stats",
     "total_token_stats",
+    "thread_token_stats",
     "provider_context_token_stats",
 ]
 
