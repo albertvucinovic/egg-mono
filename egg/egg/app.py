@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -488,19 +489,40 @@ class EggDisplayApp(
         cmd = parts[0]
         arg = parts[1] if len(parts) > 1 else ''
 
+        def _visible_feedback(message: str, *, border_style: str = 'blue') -> None:
+            try:
+                self.console_print_block(f"/{cmd}", message, border_style=border_style)
+            except Exception:
+                self.log_system(message)
+
         registry = getattr(self, 'command_registry', None)
         if registry is None:
-            self.log_system(f'Unknown command: /{cmd}')
+            message = f'Unknown command: /{cmd}'
+            self.log_system(message)
+            _visible_feedback(message, border_style='red')
             return
 
         try:
             registry.get(cmd)
         except KeyError:
-            self.log_system(f'Unknown command: /{cmd}')
+            message = f'Unknown command: /{cmd}'
+            self.log_system(message)
+            _visible_feedback(message, border_style='red')
             return
 
         log_count = len(getattr(self, '_system_log', []))
-        result = registry.execute(cmd, self._command_context(), arg)
+        block_count = 0
+        context = self._command_context()
+        original_printer = context.console_print_block
+
+        def capture_console_print_block(*args, **kwargs):
+            nonlocal block_count
+            block_count += 1
+            if original_printer is not None:
+                return original_printer(*args, **kwargs)
+            return None
+
+        result = registry.execute(cmd, replace(context, console_print_block=capture_console_print_block), arg)
         try:
             message = getattr(result, 'message', None)
         except Exception:
@@ -514,6 +536,8 @@ class EggDisplayApp(
                 already_logged = joined_logs == text
             if not already_logged:
                 self.log_system(text)
+            if block_count == 0:
+                _visible_feedback(text)
 
     # ---------------- Main loop ----------------
     async def run(self):
