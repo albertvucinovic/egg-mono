@@ -158,6 +158,27 @@ class TranscriptScrollbackSource:
             )
             self._caches[key] = cache
 
+        verbosity = key[1]
+        shared_hidden_details = None
+        if verbosity == 'min':
+            try:
+                shared_hidden_details = self._panels._new_static_hidden_details_state()
+            except Exception:
+                shared_hidden_details = None
+
+        def _flush_shared_hidden() -> None:
+            nonlocal shared_hidden_details
+            if isinstance(shared_hidden_details, dict):
+                try:
+                    hidden_item = self._panels._static_hidden_details_renderable(shared_hidden_details)
+                except Exception:
+                    hidden_item = None
+                if hidden_item is not None:
+                    hidden_rows = self._render_static_transcript_item_rows(hidden_item, key[0])
+                    if hidden_rows:
+                        cache.rows[:0] = hidden_rows
+                # shared_hidden_details was cleared by _static_hidden_details_renderable (consume=True)
+
         needed_from_bottom = max(0, int(needed_from_bottom or 0))
         while not cache.complete and len(cache.rows) < needed_from_bottom:
             if cache.next_block_index < 0:
@@ -165,37 +186,73 @@ class TranscriptScrollbackSource:
                 break
             block = self._blocks[cache.next_block_index]
             cache.next_block_index -= 1
-            block_rows = self._render_block_rows(block, key[0], key[1])
+
+            if verbosity != 'min' or self._is_min_block_visible(block):
+                # Visible boundary: flush accumulated hidden details first,
+                # then render the block without the shared state.
+                _flush_shared_hidden()
+                block_rows = self._render_block_rows(block, key[0], verbosity, hidden_details=None)
+            else:
+                # Hidden block: let it accumulate into the shared state.
+                block_rows = self._render_block_rows(block, key[0], verbosity, hidden_details=shared_hidden_details)
+
             if block_rows:
                 cache.rows[:0] = block_rows
+
+        # Flush any remaining accumulated hidden details at the end
+        _flush_shared_hidden()
+
         if cache.next_block_index < 0:
             cache.complete = True
         return cache
+
+    @staticmethod
+    def _is_min_block_visible(block: _TranscriptScrollbackBlock) -> bool:
+        """Return True if *block* produces visible output in min verbosity."""
+        if block.kind != 'message':
+            return True  # marker, empty are always visible
+        m = block.payload
+        if not isinstance(m, dict):
+            return True
+        role = m.get('role')
+        content = (m.get('content') or '').strip()
+        if role == 'user':
+            return True
+        if role == 'assistant':
+            return bool(content)
+        if role == 'system':
+            return isinstance(content, str) and content.lower().startswith('llm error:')
+        # tool messages are hidden in min
+        return False
 
     def _render_block_rows(
         self,
         block: _TranscriptScrollbackBlock,
         width: int,
         verbosity: str,
+        *,
+        hidden_details: Any = None,
     ) -> List[str]:
         items: List[_StaticTranscriptRenderable] = []
         if block.kind == 'message':
-            hidden_details = None
-            if verbosity == 'min':
+            own_details = None
+            if hidden_details is not None:
+                own_details = hidden_details
+            elif verbosity == 'min':
                 try:
-                    hidden_details = self._panels._new_static_hidden_details_state()
+                    own_details = self._panels._new_static_hidden_details_state()
                 except Exception:
-                    hidden_details = None
+                    own_details = None
             try:
                 items.extend(self._panels._static_transcript_message_renderables(
                     block.payload,
-                    hidden_details,
+                    own_details,
                 ))
             except Exception:
                 items = []
-            if verbosity == 'min' and isinstance(hidden_details, dict):
+            if hidden_details is None and verbosity == 'min' and isinstance(own_details, dict):
                 try:
-                    hidden_item = self._panels._static_hidden_details_renderable(hidden_details)
+                    hidden_item = self._panels._static_hidden_details_renderable(own_details)
                 except Exception:
                     hidden_item = None
                 if hidden_item is not None:

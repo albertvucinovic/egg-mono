@@ -1250,7 +1250,7 @@ class TestTranscriptScrollbackSource:
         assert rendered[-2:] == [("medium", "cache-lazy-3"), ("medium", "cache-lazy-2")]
 
     def test_min_hidden_activity_block_uses_run_summary(self, egg_app, monkeypatch):
-        """Lazy min render blocks should use summary text, not Hidden Details panels."""
+        """Lazy min render blocks should aggregate consecutive hidden activity."""
         from egg.panels import TranscriptScrollbackSource
         from eggthreads import append_message, create_snapshot
 
@@ -1285,15 +1285,93 @@ class TestTranscriptScrollbackSource:
         rows = list(source.rows_from_bottom(100, bottom_offset=0, height=20))
         text = "\n".join(rows)
 
+        # Visible messages are present
+        assert "before hidden run" in text
         assert "after hidden run" in text
+
+        # Hidden activity is aggregated into one summary
         assert "Executed 1 tool" in text
         assert "got 1 tool result" in text
         assert "1 reasoning block" in text
         assert "Tools: bash" in text
+
+        # No legacy Hidden Details panels
         assert "Hidden Details" not in text
         assert "Hidden details:" not in text
+
+        # Hidden raw content is not leaked
         assert "private reasoning body" not in text
         assert "lazy tool result body" not in text
+
+        # Aggregation: only one summary row (not one per hidden block)
+        summary_rows = [r for r in rows if "Executed" in r or "got" in r]
+        assert len(summary_rows) == 1, f"Expected 1 aggregated summary row, got {len(summary_rows)}: {summary_rows}"
+
+    def test_min_consecutive_hidden_blocks_aggregate_across_many(self, egg_app, monkeypatch):
+        """Several consecutive hidden blocks should produce a single summary."""
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        # Two hidden assistant tool-call messages followed by two tool results,
+        # with no visible message in between.
+        append_message(egg_app.db, egg_app.current_thread, "user", "start")
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {"id": "t1", "function": {"name": "bash", "arguments": {"cmd": "echo 1"}}},
+                ],
+            },
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {"id": "t2", "function": {"name": "python_repl", "arguments": {"code": "2+2"}}},
+                ],
+            },
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "result 1",
+            extra={"name": "bash", "tool_call_id": "t1"},
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "result 2",
+            extra={"name": "python_repl", "tool_call_id": "t2"},
+        )
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "done")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        monkeypatch.setattr(source, "_render_static_transcript_item_rows", self._fallback_rows)
+
+        rows = list(source.rows_from_bottom(100, bottom_offset=0, height=20))
+        text = "\n".join(rows)
+
+        assert "start" in text
+        assert "done" in text
+        assert "Executed 2 tools" in text
+        assert "got 2 tool results" in text
+        assert "bash" in text
+        assert "python_repl" in text
+        assert "Hidden Details" not in text
+
+        # Only one summary row
+        summary_rows = [r for r in rows if "Executed" in r or "got" in r]
+        assert len(summary_rows) == 1, f"Expected 1 aggregated summary row, got {len(summary_rows)}: {summary_rows}"
 
 
 class TestRedrawStaticView:
