@@ -797,31 +797,4 @@ Resolved decisions now captured in the phase plan:
 
 ## Suggested next implementation slices
 
-Use focused worker slices, in this order:
-
-1. **Threshold resolver slice**
-   - Add the thread-level compaction context length event helpers.
-   - Resolve threshold precedence: thread event > explicit runner config > 80% of model `max_tokens` > `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` > 150000.
-   - Wire the runner to use the resolver instead of only `RunnerConfig.auto_compact_threshold_tokens`.
-   - Add focused tests.
-
-2. **Summary mode auto-compaction slice**
-   - Add `EGG_COMPACT_SUMMARY` default true.
-   - Add `thread.compaction_summary_in_progress` duplicate-prevention helpers.
-   - In summary mode, append one automatic summary request plus in-progress marker at the RA1 boundary instead of direct compaction.
-   - Preserve direct mode when `EGG_COMPACT_SUMMARY` is false-like.
-   - Add focused tests.
-
-3. **Manual summary command slice**
-   - Add `/compactWithSummary` using the same summary-request text and normal scheduling/message machinery.
-   - Add command tests.
-
-4. **Token/status reporting slice**
-   - Update status surfaces so `context_tokens` means current provider/API context after compaction and `full_thread_tokens` means full visible/effective history.
-   - Update `get_child_status` with `context_tokens`, `full_thread_tokens`, and nested compaction info.
-   - Do not add `/compactionStatus`.
-
-5. **Hardening slice**
-   - Review provider protocol edge cases, especially assistant/tool-call starts.
-   - Ensure deleted/skipped start messages cause provider context to fall back safely.
-   - Add cheap invariant tests.
+The implementation slices listed here are complete through Phase 10 for the current MVP. If more compaction work is needed later, start from the remaining open design questions above and add a new focused phase before coding. Do not re-add `/compactionStatus` or model-visible source exploration tools unless explicitly requested.
