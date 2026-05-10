@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from rich.console import Console, Group
+from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
@@ -88,42 +88,6 @@ class PanelsMixin:
             renderer.print_above(*args, **kwargs)
         else:
             self.console.print(*args, **kwargs)
-
-    def _render_history_to_scrollback(self, objects: List[Any]) -> None:
-        """Append many static objects to full-screen scrollback in one paint."""
-        renderer = getattr(self, '_renderer', None)
-        if renderer is None or not hasattr(renderer, '_scrollback'):
-            for obj in objects:
-                self._live_print(obj)
-            return
-        try:
-            width = int(getattr(renderer, '_viewport_w', 0) or renderer._term_width())
-        except Exception:
-            width = 100
-        console = Console(width=width, record=True, color_system=getattr(self.console, 'color_system', None))
-        for obj in objects:
-            console.print(obj)
-        lines = console.export_text(styles=True).splitlines()
-        if not lines:
-            return
-        scrollback = getattr(renderer, '_scrollback')
-        scrollback.extend(lines)
-        cap = getattr(renderer, '_SCROLLBACK_CAP', None)
-        if isinstance(cap, int) and cap > 0 and len(scrollback) > cap:
-            excess = len(scrollback) - cap
-            del scrollback[:excess]
-            try:
-                if getattr(renderer, '_scroll_offset', 0) > 0:
-                    renderer._scroll_offset = max(0, renderer._scroll_offset - excess)
-            except Exception:
-                pass
-        try:
-            renderer.scroll_to_bottom()
-        except Exception:
-            try:
-                renderer._paint(width)
-            except Exception:
-                pass
 
     def _system_status_key(self) -> Any:
         """Cheap key for System panel sandbox/autoapproval title state."""
@@ -622,23 +586,6 @@ class PanelsMixin:
             self._live_print(body)
         self._reset_static_hidden_details()
 
-    def _message_static_renderables(self, m: Dict[str, Any]) -> List[Any]:
-        """Return renderables for one static transcript message."""
-        out: List[Any] = []
-        emit = out.append
-
-        def _old_live_print(*args, **kwargs):
-            for arg in args:
-                emit(arg)
-
-        old_live_print = self._live_print
-        try:
-            self._live_print = _old_live_print
-            self.console_print_message(m)
-        finally:
-            self._live_print = old_live_print
-        return out
-
     def console_print_message(self, m: Dict[str, Any]) -> None:
         """Print a single message to the console with rich formatting."""
         def fmt_ts(val: Any) -> str:
@@ -950,6 +897,19 @@ class PanelsMixin:
             except Exception:
                 self._live_print(heading)
         msgs = snapshot_messages(self.db, tid)
+        if not getattr(self, '_display_is_inline', False):
+            try:
+                max_messages = int(getattr(self, '_full_screen_static_message_limit', 80))
+            except Exception:
+                max_messages = 80
+            if max_messages > 0 and len(msgs) > max_messages:
+                omitted = len(msgs) - max_messages
+                msgs = msgs[-max_messages:]
+                self._live_print(Panel(
+                    f"[dim]Showing last {max_messages} messages; {omitted} earlier messages remain in thread history.[/dim]",
+                    border_style='blue',
+                    box=self._get_static_box(),
+                ))
         markers_by_start_seq = self._compaction_markers_by_start_seq(tid)
         verbosity = self._panel_display_verbosity_level()
         if verbosity == 'min':
@@ -957,7 +917,6 @@ class PanelsMixin:
         if not msgs and not markers_by_start_seq:
             self._live_print(Panel('[dim]No messages yet[/dim]', border_style='blue', box=self._get_static_box()))
         else:
-            buffered_renderables: Optional[List[Any]] = [] if not getattr(self, '_display_is_inline', False) else None
             for m in msgs:
                 if isinstance(m, dict):
                     try:
@@ -967,30 +926,10 @@ class PanelsMixin:
                     for marker in markers_by_start_seq.get(event_seq_int, []):
                         if verbosity == 'min':
                             self._flush_static_hidden_details()
-                        if buffered_renderables is None:
-                            self.console_print_compaction_marker(marker)
-                        else:
-                            try:
-                                text = self._compaction_marker_text(marker)
-                                buffered_renderables.append(Panel(Text(text, no_wrap=False, overflow='fold', style='bold red'), title='[bold red]Compaction Boundary[/bold red]', border_style='red', box=self._get_static_box()))
-                            except Exception:
-                                buffered_renderables.append(str(marker))
-                    if buffered_renderables is None:
-                        self.console_print_message(m)
-                    else:
-                        buffered_renderables.extend(self._message_static_renderables(m))
+                        self.console_print_compaction_marker(marker)
+                    self.console_print_message(m)
             if verbosity == 'min':
-                if buffered_renderables is None:
-                    self._flush_static_hidden_details()
-                else:
-                    old_live_print = self._live_print
-                    try:
-                        self._live_print = lambda *args, **_kwargs: buffered_renderables.extend(args)
-                        self._flush_static_hidden_details()
-                    finally:
-                        self._live_print = old_live_print
-            if buffered_renderables is not None:
-                self._render_history_to_scrollback(buffered_renderables)
+                self._flush_static_hidden_details()
         # Update last-printed seq to the latest rendered transcript event so we don't re-print.
         try:
             row = self.db.conn.execute(
