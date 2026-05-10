@@ -254,7 +254,7 @@ If a worker fails tests:
 
 1. Ask it to fix the root cause if the failure is in scope.
 2. If the fix expands scope, stop and ask the user.
-3. If the worker is confused or context-heavy, spawn a fresh worker with the failing test and relevant diff.
+3. If the worker is confused or unreliable, spawn a fresh worker with the failing test and relevant diff.
 
 If a worker leaves a messy partial edit:
 
@@ -275,7 +275,7 @@ When the user asks for a long loop, e.g. “wait in 300s increments for at least
    - implementation is complete;
    - user/design decision is required;
    - tests fail in a way that needs manager/user input;
-   - worker context is too high and a fresh worker is needed.
+   - the current worker is unreliable and a fresh worker/manager intervention is needed.
 
 Keep a compact manager-side ledger of:
 
