@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -741,6 +742,14 @@ class TestFullScreenScrollbackWiring:
         def scroll_to_bottom(self):
             self.bottom_calls += 1
 
+    class LocalRowsRenderer(Renderer):
+        def __init__(self):
+            super().__init__()
+            self.printed = []
+
+        def print_above(self, *args, **kwargs):
+            self.printed.append((args, kwargs))
+
     def test_install_transcript_source_marks_history_without_printing_messages(self, egg_app, monkeypatch):
         from egg.panels import TranscriptScrollbackSource
         from eggthreads import append_message, create_snapshot
@@ -853,6 +862,68 @@ class TestFullScreenScrollbackWiring:
         assert renderer.clear_calls == 1
         assert renderer.update_calls == 1
         assert printed == []
+
+    def test_in_session_rows_survive_until_source_replacement(self, egg_app):
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "user", "existing source row")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        renderer = self.LocalRowsRenderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+
+        assert egg_app._install_transcript_scrollback_source(renderer) is True
+        assert renderer.clear_calls == 0
+
+        egg_app.console_print_message({"role": "user", "content": "local until refresh"})
+
+        assert renderer.clear_calls == 0
+        assert len(renderer.printed) == 1
+        assert len(renderer.sources) == 1
+
+        egg_app.redraw_static_view(reason="manual")
+
+        assert renderer.clear_calls == 1
+        assert len(renderer.printed) == 1
+        assert len(renderer.sources) == 2
+
+    def test_full_screen_new_message_prints_locally_then_redraw_clears_local_rows(self, egg_app):
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "user", "initial history")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        renderer = self.LocalRowsRenderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        egg_app._install_transcript_scrollback_source(renderer)
+
+        msg_id = append_message(egg_app.db, egg_app.current_thread, "user", "new local row")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        row = egg_app.db.conn.execute(
+            "SELECT event_seq, msg_id, ts, payload_json FROM events WHERE msg_id=?",
+            (msg_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload.setdefault("msg_id", row["msg_id"])
+        payload.setdefault("event_seq", int(row["event_seq"]))
+        if row["ts"] is not None:
+            payload.setdefault("ts", row["ts"])
+
+        egg_app.console_print_message(payload)
+        egg_app._last_printed_seq_by_thread[egg_app.current_thread] = int(row["event_seq"])
+
+        assert renderer.clear_calls == 0
+        assert len(renderer.printed) == 1
+        assert len(renderer.sources) == 1
+
+        egg_app.redraw_static_view(reason="manual")
+
+        assert renderer.clear_calls == 1
+        assert len(renderer.printed) == 1
+        assert len(renderer.sources) == 2
+        assert renderer.update_calls == 1
 
     def test_full_screen_run_installs_source_before_initial_paint_without_history_printing(self, egg_app, monkeypatch):
         from egg.panels import TranscriptScrollbackSource

@@ -277,3 +277,42 @@ def test_fullscreen_virtual_source_top_clamps_when_source_is_short() -> None:
     assert r._scroll_offset == 0
     assert r._prev_viewport == ["", "s0", "s1", "s2", "LIVE"]
     assert source.row_count_calls == []
+
+
+def test_fullscreen_source_replacement_keeps_in_session_rows_at_bottom() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    r._live_lines = ["LIVE"]
+    r._scrollback = ["in-session"]
+    r.set_scrollback_source(RecordingScrollbackSource(["old0", "old1"], total=2))
+    r._paint(20)
+
+    r._scroll_offset = 2
+    r.set_scrollback_source(RecordingScrollbackSource(["new0", "new1", "new2"], total=3))
+
+    assert r._scroll_offset == 0
+    assert r._scrollback == ["in-session"]
+    assert r._prev_viewport == ["new0", "new1", "new2", "in-session", "LIVE"]
+
+
+def test_fullscreen_stream_end_then_final_print_has_no_stale_stream_rows() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    r._live_lines = ["LIVE"]
+    r.set_scrollback_source(RecordingScrollbackSource(["history"], total=1))
+
+    r.stream_begin()
+    r.stream_append("streaming draft")
+    assert any("streaming draft" in row for row in r._prev_viewport)
+
+    r.stream_end()
+    r.print_above("finalized")
+
+    assert not any("streaming draft" in row for row in r._prev_viewport)
+    assert sum("finalized" in row for row in r._prev_viewport) == 1
+
+    # A later transcript source refresh should replace the local finalized row
+    # with the sourced transcript copy, not show both.
+    r.clear_scrollback()
+    r.set_scrollback_source(RecordingScrollbackSource(["history", "finalized"], total=2))
+
+    assert r._scrollback == []
+    assert sum("finalized" in row for row in r._prev_viewport) == 1

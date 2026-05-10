@@ -271,3 +271,91 @@ def test_stream_appends_are_coalesced_for_renderer(tmp_path, monkeypatch):
 
     assert len(calls) == 1
     assert all(str(i) in calls[0] for i in range(10))
+
+
+def test_stream_close_then_final_message_prints_once_after_stream_end(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    from eggthreads import append_message, create_snapshot
+
+    append_message(app.db, tid, "user", "prompt before streaming")
+    create_snapshot(app.db, tid)
+
+    class Renderer:
+        def __init__(self):
+            self.sources = []
+            self.events = []
+
+        def set_scrollback_source(self, source):
+            self.sources.append(source)
+
+        def stream_begin(self):
+            self.events.append("stream_begin")
+
+        def stream_append(self, payload):
+            self.events.append(("stream_append", payload))
+
+        def stream_end(self):
+            self.events.append("stream_end")
+
+        def print_above(self, *args, **kwargs):
+            self.events.append("print_above")
+
+    renderer = Renderer()
+    app._renderer = renderer
+    app._display_is_inline = False
+    assert app._install_transcript_scrollback_source(renderer) is True
+
+    start_after = app._last_printed_seq_by_thread[tid]
+    app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="stream.open",
+        payload={"stream_kind": "llm"},
+        msg_id=_uid(),
+        invoke_id=invoke_id,
+    )
+    app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="stream.delta",
+        payload={"text": "draft"},
+        invoke_id=invoke_id,
+        chunk_seq=0,
+    )
+    app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="stream.close",
+        payload={"finish_reason": "stop"},
+        invoke_id=invoke_id,
+    )
+    final_msg_id = append_message(app.db, tid, "assistant", "final answer")
+
+    batch = list(app.db.events_since(tid, start_after))
+
+    import egg.streaming as streaming_mod
+
+    class _OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _OneBatchWatcher)
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert renderer.events.count("stream_end") == 1
+    assert renderer.events.count("print_above") == 1
+    assert renderer.events.index("stream_end") < renderer.events.index("print_above")
+    assert len(renderer.sources) == 1
+
+    final_seq = app.db.conn.execute(
+        "SELECT event_seq FROM events WHERE msg_id=?",
+        (final_msg_id,),
+    ).fetchone()["event_seq"]
+    assert app._last_printed_seq_by_thread[tid] == final_seq
