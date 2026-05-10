@@ -38,7 +38,7 @@ from .session import (
     cmd_bash_repl,
 )
 from .auth import cmd_login, cmd_logout, cmd_auth_status
-from .compaction import cmd_compact, cmd_compact_with_summary
+from .compaction import cmd_compact, cmd_compact_with_summary, cmd_context, cmd_set_auto_compact_threshold
 from .utility import (
     cmd_toggle_auto_approval,
     cmd_cost,
@@ -129,6 +129,8 @@ __all__ = [
     # Compaction commands
     "cmd_compact",
     "cmd_compact_with_summary",
+    "cmd_context",
+    "cmd_set_auto_compact_threshold",
     # Dispatcher
     "dispatch_command",
 ]
@@ -186,6 +188,10 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_compact(thread_id, command_arg)
         elif command_name == "compactWithSummary":
             return await cmd_compact_with_summary(thread_id)
+        elif command_name == "context":
+            return await cmd_context(thread_id)
+        elif command_name == "setAutoCompactThreshold":
+            return await cmd_set_auto_compact_threshold(thread_id, command_arg)
         elif command_name == "rename":
             return await cmd_rename(thread_id, command_arg)
         elif command_name == "cost":

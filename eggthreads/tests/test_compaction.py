@@ -233,6 +233,100 @@ def test_compact_with_summary_command_returns_confirmation_without_logger(tmp_pa
     assert _snapshot_messages(db, tid)[-1]["content"] == ts.COMPACTION_SUMMARY_REQUEST
 
 
+def test_set_auto_compact_threshold_command_appends_context_length_event(tmp_path):
+    db, tid = _new_thread(tmp_path)
+
+    registry = create_default_command_registry()
+    assert "setAutoCompactThreshold" in registry.names()
+
+    result = registry.execute(
+        "setAutoCompactThreshold",
+        CommandContext(db=db, current_thread=tid),
+        "12345",
+    )
+
+    assert result.clear_input is True
+    assert result.message and "12,345" in result.message
+    events = ts.list_thread_compaction_context_lengths(db, tid)
+    assert len(events) == 1
+    assert events[0]["threshold_tokens"] == 12345
+    assert events[0]["created_by"] == "user_command"
+    resolved = ts.resolve_auto_compact_threshold(db, tid, explicit_threshold_tokens=999, environ={})
+    assert resolved.enabled is True
+    assert resolved.threshold_tokens == 12345
+    assert resolved.source == "thread_event"
+
+
+def test_set_auto_compact_threshold_command_zero_disables_auto_compaction(tmp_path):
+    db, tid = _new_thread(tmp_path)
+
+    result = create_default_command_registry().execute(
+        "setAutoCompactThreshold",
+        CommandContext(db=db, current_thread=tid),
+        "0",
+    )
+
+    assert result.clear_input is True
+    assert result.message and "disabled" in result.message
+    events = ts.list_thread_compaction_context_lengths(db, tid)
+    assert events[-1]["threshold_tokens"] == 0
+    resolved = ts.resolve_auto_compact_threshold(db, tid, explicit_threshold_tokens=999, environ={})
+    assert resolved.enabled is False
+    assert resolved.threshold_tokens is None
+    assert resolved.source == "thread_event"
+
+
+def test_set_auto_compact_threshold_command_validates_integer(tmp_path):
+    db, tid = _new_thread(tmp_path)
+
+    missing = create_default_command_registry().execute(
+        "setAutoCompactThreshold",
+        CommandContext(db=db, current_thread=tid),
+        "",
+    )
+    invalid = create_default_command_registry().execute(
+        "setAutoCompactThreshold",
+        CommandContext(db=db, current_thread=tid),
+        "abc",
+    )
+
+    assert missing.clear_input is False
+    assert missing.message and "Usage" in missing.message
+    assert invalid.clear_input is False
+    assert invalid.message and "Invalid number" in invalid.message
+    assert ts.list_thread_compaction_context_lengths(db, tid) == []
+
+
+def test_context_command_reports_compaction_and_limits(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    start = ts.append_message(db, tid, "assistant", "summary")
+    ts.append_message(db, tid, "user", "after")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.set_context_limit(db, tid, 1000)
+    ts.set_thread_compaction_context_length(db, tid, 800, created_by="test")
+
+    monkeypatch.setattr(
+        "eggthreads.eggthreads.builtin_plugins.compaction.thread_token_stats",
+        lambda db_arg, tid_arg, llm=None: {"context_tokens": 400, "full_thread_tokens": 900},
+    )
+
+    result = create_default_command_registry().execute(
+        "context",
+        CommandContext(db=db, current_thread=tid),
+        "",
+    )
+
+    assert result.clear_input is True
+    assert result.message
+    assert "current_context_tokens: 400" in result.message
+    assert "full_thread_tokens:     900" in result.message
+    assert "context_limit:         1,000 (40.0% used)" in result.message
+    assert "auto_compact_threshold: 800 (50.0% used, source: thread_event)" in result.message
+    assert "compaction:             active" in result.message
+    assert start in result.message
+
+
 def test_snapshot_records_event_seq_for_provider_filtering(tmp_path):
     db, tid = _new_thread(tmp_path)
     first = ts.append_message(db, tid, "user", "old")

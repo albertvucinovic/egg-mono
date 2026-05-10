@@ -26,6 +26,8 @@ Commands:
   Thread management other:
     /parentThread, /listChildren, /threads, /thread <selector>
     /deleteThread <selector>, /newThread <name>, /duplicateThread <name>
+    /continue [msg_id], /context, /compact [msg_id|last_user|last_llm]
+    /compactWithSummary, /setAutoCompactThreshold <tokens>
     /schedulers
   Tool management:
     /toggleAutoApproval, /toolsOn, /toolsOff, /disableTool <name>, /enableTool <name>

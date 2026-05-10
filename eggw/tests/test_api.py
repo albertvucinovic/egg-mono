@@ -461,8 +461,10 @@ class TestCommands:
         assert data["success"] is True
         assert "Available commands" in data["message"]
         assert "/reload" in data["message"]
+        assert "/context" in data["message"]
         assert "/compact" in data["message"]
         assert "/compactWithSummary" in data["message"]
+        assert "/setAutoCompactThreshold" in data["message"]
 
     def test_compact_command_sets_provider_context_start(self, client):
         """eggw supports the shared /compact command."""
@@ -511,6 +513,89 @@ class TestCommands:
         assert request["role"] == "user"
         assert "compact_thread()" in request["content"]
         assert "start_message omitted" in request["content"]
+
+    def test_set_auto_compact_threshold_command_appends_context_length_event(self, client):
+        """eggw supports the shared auto-compaction threshold command."""
+        from eggthreads import list_thread_compaction_context_lengths, resolve_auto_compact_threshold
+
+        create_resp = client.post("/api/threads", json={"name": "Auto Compact Threshold"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/setAutoCompactThreshold 12345"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["threshold_tokens"] == 12345
+        events = list_thread_compaction_context_lengths(core_state.db, thread_id)
+        assert events[-1]["threshold_tokens"] == 12345
+        assert events[-1]["created_by"] == "user_command"
+        resolved = resolve_auto_compact_threshold(core_state.db, thread_id, explicit_threshold_tokens=999, environ={})
+        assert resolved.enabled is True
+        assert resolved.threshold_tokens == 12345
+        assert resolved.source == "thread_event"
+
+    def test_set_auto_compact_threshold_command_zero_disables_auto_compaction(self, client):
+        """Zero uses existing core semantics to disable auto-compaction."""
+        from eggthreads import list_thread_compaction_context_lengths, resolve_auto_compact_threshold
+
+        create_resp = client.post("/api/threads", json={"name": "Disable Auto Compact"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/setAutoCompactThreshold 0"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "disabled" in data["message"]
+        assert data["data"]["threshold_tokens"] == 0
+        events = list_thread_compaction_context_lengths(core_state.db, thread_id)
+        assert events[-1]["threshold_tokens"] == 0
+        resolved = resolve_auto_compact_threshold(core_state.db, thread_id, explicit_threshold_tokens=999, environ={})
+        assert resolved.enabled is False
+        assert resolved.threshold_tokens is None
+        assert resolved.source == "thread_event"
+
+    def test_context_command_reports_compaction_and_limits(self, client, monkeypatch):
+        """eggw /context reports current provider context and compaction status."""
+        from eggthreads import append_message, commit_thread_compaction, set_context_limit, set_thread_compaction_context_length
+
+        create_resp = client.post("/api/threads", json={"name": "Context Status"})
+        thread_id = create_resp.json()["id"]
+        append_message(core_state.db, thread_id, "user", "old")
+        start = append_message(core_state.db, thread_id, "assistant", "summary")
+        append_message(core_state.db, thread_id, "user", "after")
+        commit_thread_compaction(core_state.db, thread_id, start, created_by="test")
+        set_context_limit(core_state.db, thread_id, 1000)
+        set_thread_compaction_context_length(core_state.db, thread_id, 800, created_by="test")
+
+        monkeypatch.setattr(
+            "eggthreads.eggthreads.builtin_plugins.compaction.thread_token_stats",
+            lambda db_arg, tid_arg, llm=None: {"context_tokens": 400, "full_thread_tokens": 900},
+        )
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/context"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["context_tokens"] == 400
+        assert data["data"]["full_thread_tokens"] == 900
+        assert data["data"]["context_limit"] == 1000
+        assert data["data"]["auto_compact_threshold"] == 800
+        assert data["data"]["auto_compact_source"] == "thread_event"
+        assert data["data"]["compaction"]["compacted"] is True
+        assert start in data["message"]
+        assert "context_limit:         1,000 (40.0% used)" in data["message"]
 
     def test_reload_requires_eggw_wrapper(self, client, monkeypatch):
         """/reload reports a clear error when not launched by eggw.sh."""

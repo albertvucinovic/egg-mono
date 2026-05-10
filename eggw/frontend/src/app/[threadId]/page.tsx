@@ -329,6 +329,7 @@ export default function ThreadPage() {
               <p>/skills, /skill</p>
               <p>/newThread, /threads, /thread, /rename, /waitForThreads</p>
               <p>/parentThread, /listChildren, /deleteThread, /duplicateThread</p>
+              <p>/context, /compact, /compactWithSummary, /setAutoCompactThreshold</p>
               <p>/toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus, /toolInfo</p>
               <p>/disableTool, /enableTool, /toolsSecrets</p>
               <p>/toggleSandboxing, /setSandboxConfiguration, /getSandboxingConfig</p>

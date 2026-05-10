@@ -564,6 +564,21 @@ def test_display_input_commands_are_registered_handlers() -> None:
     assert registry.get("paste").handler is display_input.paste_command
     assert registry.get("enterMode").handler is display_input.enter_mode_command
 
+
+def test_compaction_commands_are_registered_handlers() -> None:
+    from eggthreads.builtin_plugins import compaction
+
+    registry = create_default_command_registry()
+
+    assert registry.get("compact").handler is compaction.compact_thread_command
+    assert registry.get("compactWithSummary").handler is compaction.compact_with_summary_command
+    assert registry.get("context").handler is compaction.context_command
+    assert registry.get("setAutoCompactThreshold").handler is compaction.set_auto_compact_threshold_command
+
+
+def test_display_input_commands_change_app_state() -> None:
+    registry = create_default_command_registry()
+
     logs: list[str] = []
     redrawn: list[str] = []
 

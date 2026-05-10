@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from ..plugins import PluginContext
 from ..tools import ToolContext, ToolRegistry
+from ..token_count import thread_token_stats
 
 
 def _context_db(ctx: ToolContext):
@@ -120,6 +121,111 @@ def compact_with_summary_command(context: Any, arg: str):
     return CommandResult(clear_input=True, start_schedulers=(current_thread,), message=result_message)
 
 
+def set_auto_compact_threshold_command(context: Any, arg: str):
+    from ..api import set_thread_compaction_context_length
+    from ..command_catalog import CommandResult
+
+    db = getattr(context, "db", None)
+    current_thread = getattr(context, "current_thread", None)
+    if db is None or not current_thread:
+        return CommandResult(clear_input=False, message="/setAutoCompactThreshold requires an active thread")
+
+    text = (arg or "").strip()
+    if not text:
+        return CommandResult(clear_input=False, message="Usage: /setAutoCompactThreshold <tokens> (0 disables auto-compaction)")
+    try:
+        threshold = int(text)
+    except ValueError:
+        return CommandResult(clear_input=False, message=f"Invalid number: {text}. Usage: /setAutoCompactThreshold <tokens>")
+
+    event_seq = set_thread_compaction_context_length(
+        db,
+        current_thread,
+        threshold,
+        created_by="user_command",
+    )
+    if threshold <= 0:
+        message = f"Auto-compaction disabled for thread {current_thread[-8:]} (event #{event_seq})."
+    else:
+        message = f"Auto-compaction threshold set to {threshold:,} tokens for thread {current_thread[-8:]} (event #{event_seq})."
+    return CommandResult(clear_input=True, message=message)
+
+
+def build_context_status(db: Any, thread_id: str, *, llm: Any = None) -> tuple[str, Dict[str, Any]]:
+    from ..api import get_context_limit, resolve_auto_compact_threshold, thread_compaction_status
+
+    def fmt_tok(value: Any) -> str:
+        try:
+            n = int(value)
+        except Exception:
+            return "n/a"
+        return f"{n:,}"
+
+    stats = thread_token_stats(db, thread_id, llm=llm)
+    context_tokens = int(stats.get("context_tokens") or 0)
+    full_thread_tokens = int(stats.get("full_thread_tokens") or context_tokens)
+    compaction = thread_compaction_status(db, thread_id)
+    context_limit = get_context_limit(db, thread_id)
+    auto_threshold = resolve_auto_compact_threshold(db, thread_id)
+
+    lines = [
+        f"Thread {thread_id[-8:]} context:",
+        f"  current_context_tokens: {fmt_tok(context_tokens)}",
+        f"  full_thread_tokens:     {fmt_tok(full_thread_tokens)}",
+    ]
+    if full_thread_tokens > context_tokens:
+        lines.append(f"  compacted_away_tokens: {fmt_tok(full_thread_tokens - context_tokens)}")
+    if context_limit:
+        pct = (context_tokens / context_limit * 100) if context_limit > 0 else 0
+        lines.append(f"  context_limit:         {fmt_tok(context_limit)} ({pct:.1f}% used)")
+    else:
+        lines.append("  context_limit:         unlimited")
+
+    lines.append("")
+    if auto_threshold.enabled and auto_threshold.threshold_tokens is not None:
+        pct = (context_tokens / auto_threshold.threshold_tokens * 100) if auto_threshold.threshold_tokens > 0 else 0
+        lines.append(f"  auto_compact_threshold: {fmt_tok(auto_threshold.threshold_tokens)} ({pct:.1f}% used, source: {auto_threshold.source})")
+    else:
+        lines.append(f"  auto_compact_threshold: disabled (source: {auto_threshold.source})")
+
+    if compaction.get("compacted"):
+        lines.extend([
+            "  compaction:             active",
+            f"  prompt_start_msg_id:    {compaction.get('current_prompt_start_msg_id') or 'unknown'}",
+            f"  prompt_start_event_seq: {compaction.get('current_prompt_start_event_seq') or 'unknown'}",
+            f"  compaction_event_seq:   {compaction.get('marker_event_seq') or 'unknown'}",
+        ])
+    else:
+        lines.append("  compaction:             inactive")
+    lines.append(f"  raw_compaction_markers: {compaction.get('raw_marker_count', 0)}")
+
+    return "\n".join(lines), {
+        "context_tokens": context_tokens,
+        "full_thread_tokens": full_thread_tokens,
+        "context_limit": context_limit,
+        "auto_compact_enabled": auto_threshold.enabled,
+        "auto_compact_threshold": auto_threshold.threshold_tokens,
+        "auto_compact_source": auto_threshold.source,
+        "compaction": compaction,
+    }
+
+
+def context_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+
+    db = getattr(context, "db", None)
+    current_thread = getattr(context, "current_thread", None)
+    if db is None or not current_thread:
+        return CommandResult(clear_input=False, message="/context requires an active thread")
+
+    text, _data = build_context_status(db, current_thread, llm=getattr(context, "llm_client", None))
+    printer = getattr(context, "console_print_block", None)
+    if callable(printer):
+        printer("Context", text, border_style="cyan")
+        return CommandResult(clear_input=True, message="Context status (see console).")
+    return CommandResult(clear_input=True, message=text)
+
+
 def register_compaction_tool(registry: ToolRegistry) -> None:
     registry.register(
         "compact_thread",
@@ -163,11 +269,29 @@ def register_compaction_commands(registry: Any) -> None:
     )
     registry.register(
         CommandSpec(
+            "context",
+            context_command,
+            category="threads",
+            usage="/context",
+            description="Show context, compaction, context limit, and auto-compaction status.",
+        )
+    )
+    registry.register(
+        CommandSpec(
             "compactWithSummary",
             compact_with_summary_command,
             category="threads",
             usage="/compactWithSummary",
             description="Ask the assistant to summarize, then call compact_thread without deleting UI history.",
+        )
+    )
+    registry.register(
+        CommandSpec(
+            "setAutoCompactThreshold",
+            set_auto_compact_threshold_command,
+            category="threads",
+            usage="/setAutoCompactThreshold <tokens>",
+            description="Set the thread auto-compaction token threshold; 0 disables auto-compaction.",
         )
     )
 
@@ -189,6 +313,9 @@ __all__ = [
     "compact_thread_command",
     "compact_thread_tool",
     "compact_with_summary_command",
+    "build_context_status",
+    "context_command",
     "register_compaction_commands",
     "register_compaction_tool",
+    "set_auto_compact_threshold_command",
 ]

@@ -432,8 +432,10 @@ Thread Management:
   /deleteThread [selector]       - Delete thread (and subtree)
   /duplicateThread [name] [msg_id] - Duplicate thread
   /continue [msg_id]             - Continue thread from point
+  /context                       - Show context and compaction status
   /compact [msg_id|last_user|last_llm] - Set provider context start
   /compactWithSummary            - Ask assistant to summarize, then compact
+  /setAutoCompactThreshold <tokens> - Set auto-compaction threshold (0 disables)
   /rename <name>                 - Rename current thread
 
 Model:
