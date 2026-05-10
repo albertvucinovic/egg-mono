@@ -120,7 +120,7 @@ if not finished:
 
 For long requested runs, repeat for the requested budget, e.g. up to 4 hours, but checkpoint after each worker result.
 
-If the worker is still running and healthy, keep waiting. If there are errors, high context, or no progress, intervene.
+If the worker is still running and healthy, keep waiting. If there are errors or no progress, intervene.
 
 ## Repairing failed worker threads
 
@@ -172,16 +172,13 @@ When a worker returns:
 
 ## Sending continuation to an existing worker
 
-Prefer continuing a reliable worker when it still has substantial context room. Do not spawn a fresh worker merely because a slice completed; switching workers can degrade performance by losing task-local knowledge.
-
-Current expected worker context capacity is about 260k tokens. As a rule of thumb, reuse a reliable worker below roughly 70-80% of that budget (about 180k-208k tokens), especially when the next slice builds directly on its previous work.
+Prefer continuing a reliable worker. Worker threads now have virtually infinite context for this workflow, so the manager should not worry about worker context budget when deciding whether to continue an existing worker. Do not spawn a fresh worker merely because a slice completed; switching workers can degrade performance by losing task-local knowledge.
 
 Reuse the same worker when:
 
-- its context is still reasonable;
 - the next slice builds directly on its knowledge;
-- it is not close to the context limit;
-- the previous result was reliable.
+- the previous result was reliable;
+- there is no other reason to isolate the next task.
 
 Continuation template:
 
@@ -195,10 +192,8 @@ If this becomes broader than expected, stop and explain.
 
 Spawn a fresh worker when:
 
-- the previous worker context is large or near the context limit;
 - the next task is a new phase;
 - the previous worker made many decisions and a clean slate is safer;
-- the worker reports context pressure;
 - the manager wants independent review.
 
 Fresh-worker context should include:
@@ -209,17 +204,9 @@ Fresh-worker context should include:
 - exact next slice;
 - non-goals.
 
-## Context pressure
+## Worker context
 
-If worker context approaches the effective limit, do not keep sending more work. Spawn a new worker with a concise handoff.
-
-Useful rule of thumb:
-
-```text
-If worker context is above ~70-80% of the expected limit, prefer a fresh worker for the next phase.
-```
-
-With the current expected worker context capacity around 260k tokens, that means prefer reuse below about 180k-208k tokens unless the next task is genuinely unrelated or the previous worker was unreliable. If exact context limit is unknown but the status shows very large context, prefer a fresh worker.
+Worker threads now have virtually infinite context for this workflow. Do not rotate workers or shorten manager guidance because of context-size concerns. Choose between continuing the same worker and spawning a fresh worker based on reliability, task boundaries, desired independent review, or the need for a clean slate—not token budget.
 
 ## Commit discipline
 
