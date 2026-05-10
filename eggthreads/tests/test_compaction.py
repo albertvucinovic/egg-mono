@@ -737,6 +737,21 @@ def test_compaction_summary_mode_waits_for_post_compaction_user_context(tmp_path
     assert assistant_only
 
 
+def test_compaction_summary_mode_can_request_again_after_post_compaction_turn(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    summary_msg = ts.append_message(db, tid, "assistant", "summary")
+    compacted = ts.commit_thread_compaction(db, tid, summary_msg, created_by="assistant_tool")
+    assert compacted.success is True
+
+    ts.append_message(db, tid, "user", "new question")
+    ts.append_message(db, tid, "assistant", "new answer")
+    result = ts.maybe_auto_compact_thread(db, tid, threshold_tokens=10, context_tokens=10, summary_mode=True)
+
+    assert result.triggered is True
+    assert len(ts.list_thread_compaction_summary_in_progress_events(db, tid)) == 1
+
+
 def test_auto_compact_threshold_thread_override_takes_precedence_and_continue_can_erase(tmp_path):
     db, tid = _new_thread(tmp_path)
     first = ts.append_message(db, tid, "user", "first")

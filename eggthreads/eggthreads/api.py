@@ -1504,9 +1504,7 @@ def _has_compaction_candidate_after_current_effective_start(db: ThreadsDB, threa
             last_llm_seq = event_seq
         elif role == 'user':
             last_non_request_user_seq = event_seq
-    if last_llm_seq is None:
-        return last_non_request_user_seq is not None
-    return last_non_request_user_seq is not None and last_non_request_user_seq > last_llm_seq
+    return last_non_request_user_seq is not None
 
 
 
