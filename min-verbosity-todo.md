@@ -34,11 +34,15 @@ Phases:
     - Elapsed running time intentionally omitted in Phase 1 because accurate per-run timing is not cheaply available in text formatting.
     - Focused formatting tests updated for no `Hidden details:` rows in min.
 
-- [ ] Phase 2 — Static panel renderables use run summaries
+- [x] Phase 2 — Static panel renderables use run summaries
   - Replace `Hidden Details` min panels with the new run-summary renderable in `PanelsMixin` static transcript builders.
   - Ensure user/assistant visible message renderables are unchanged.
   - Update static panel tests and lazy `TranscriptScrollbackSource` tests if affected.
   - Status notes:
+    - `PanelsMixin` min hidden state now stores a `MinHiddenActivitySummary` and renders the shared formatted summary body in an untitled yellow summary panel; `Hidden Details` title/text is no longer emitted.
+    - Static transcript builders record hidden reasoning, tool calls/streamed args, tool outputs/results, tool names, and best-effort hidden token totals into the shared summary model while leaving visible user/assistant renderables and max/medium behavior unchanged.
+    - Focused static panel tests now assert run-summary text/no `Hidden details:` output, including merged consecutive hidden activity before the next visible message.
+    - Lazy `TranscriptScrollbackSource` block rendering now uses the same summary renderable; exact aggregation across separately rendered lazy blocks/window boundaries remains limited in Phase 2 and is left for the full-screen in-place/source-refresh work rather than a broad lazy-source refactor.
 
 - [ ] Phase 3 — Full-screen in-place summary update
   - Ensure consecutive in-session hidden activity in full-screen updates one summary item instead of appending repeated summaries.

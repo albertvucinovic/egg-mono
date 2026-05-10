@@ -580,18 +580,82 @@ class TestConsolePrintMessage:
         assert any('User' in title and f'msg_id: {user1}' in title for title in titles)
         assert any('Assistant' in title and f'msg_id: {assistant}' in title for title in titles)
         assert any('User' in title and f'msg_id: {user2}' in title for title in titles)
-        assert any('Hidden Details' in title for title in titles)
+        assert not any('Hidden Details' in title for title in titles)
         assert 'first question' in joined_bodies
         assert 'assistant answer' in joined_bodies
         assert 'next question' in joined_bodies
         assert 'ordinary system prompt' not in joined_bodies
         assert 'private reasoning body' not in joined_bodies
         assert 'completed tool result body' not in joined_bodies
-        assert 'Hidden details: 1 reasoning block.' in joined_bodies
-        assert 'Hidden details: 1 tool call, 1 tool result.' in joined_bodies
-        assert f'msg_id: {assistant}' in joined_bodies
-        assert f'msg_id: {tool}' in joined_bodies
-        assert 'tool_call_id: call_full_1234567890' in joined_bodies
+        assert 'Hidden details:' not in joined_bodies
+        assert '1 reasoning block' in joined_bodies
+        assert 'Executed 1 tool, got 1 tool result' in joined_bodies
+        assert 'total tokens' in joined_bodies
+        assert 'Tools: bash' in joined_bodies
+        assert f'msg_id: {tool}' not in joined_bodies
+        assert 'tool_call_id: call_full_1234567890' not in joined_bodies
+
+    def test_display_verbosity_min_merges_consecutive_hidden_static_panels(self, egg_app, monkeypatch):
+        """Min static panels should merge a hidden run into one summary panel."""
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        append_message(egg_app.db, egg_app.current_thread, "user", "run both tools")
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "",
+            extra={
+                "reasoning": "private reasoning body",
+                "tool_calls": [
+                    {
+                        "id": "call_bash_1234567890",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"script":"echo hello"}'},
+                    },
+                    {
+                        "id": "call_python_1234567890",
+                        "type": "function",
+                        "function": {"name": "python_repl", "arguments": '{"code":"print(1)"}'},
+                    },
+                ],
+            },
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "bash result body",
+            extra={"name": "bash", "tool_call_id": "call_bash_1234567890"},
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "python result body",
+            extra={"name": "python_repl", "tool_call_id": "call_python_1234567890"},
+        )
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "done")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.print_static_view_current()
+
+        titles = self._collect_panel_titles(printed)
+        joined_bodies = "\n".join(self._collect_panel_bodies(printed))
+
+        assert not any('Hidden Details' in title for title in titles)
+        assert 'Hidden details:' not in joined_bodies
+        assert 'Executed 2 tools, got 2 tool results, 1 reasoning block' in joined_bodies
+        assert joined_bodies.count('Executed 2 tools, got 2 tool results, 1 reasoning block') == 1
+        assert 'Tools: bash, python_repl' in joined_bodies
+        assert 'private reasoning body' not in joined_bodies
+        assert 'bash result body' not in joined_bodies
+        assert 'python result body' not in joined_bodies
+        assert joined_bodies.index('Executed 2 tools, got 2 tool results, 1 reasoning block') < joined_bodies.index('done')
 
     def test_uses_markdown_for_markdown_content(self, egg_app, monkeypatch):
         """Should use Markdown rendering for markdown content."""
@@ -1063,6 +1127,52 @@ class TestTranscriptScrollbackSource:
         egg_app._display_verbosity = "medium"
         assert list(source.rows_from_bottom(80, 0, 2)) == ["cache-lazy-2", "cache-lazy-3"]
         assert rendered[-2:] == [("medium", "cache-lazy-3"), ("medium", "cache-lazy-2")]
+
+    def test_min_hidden_activity_block_uses_run_summary(self, egg_app, monkeypatch):
+        """Lazy min render blocks should use summary text, not Hidden Details panels."""
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        append_message(egg_app.db, egg_app.current_thread, "user", "before hidden run")
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "",
+            extra={
+                "reasoning": "private reasoning body",
+                "tool_calls": [{
+                    "id": "call_lazy_bash",
+                    "function": {"name": "bash", "arguments": {"cmd": "echo lazy"}},
+                }],
+            },
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "lazy tool result body",
+            extra={"name": "bash", "tool_call_id": "call_lazy_bash"},
+        )
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "after hidden run")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        monkeypatch.setattr(source, "_render_static_transcript_item_rows", self._fallback_rows)
+
+        rows = list(source.rows_from_bottom(100, bottom_offset=0, height=20))
+        text = "\n".join(rows)
+
+        assert "after hidden run" in text
+        assert "Executed 1 tool" in text
+        assert "got 1 tool result" in text
+        assert "1 reasoning block" in text
+        assert "Tools: bash" in text
+        assert "Hidden Details" not in text
+        assert "Hidden details:" not in text
+        assert "private reasoning body" not in text
+        assert "lazy tool result body" not in text
 
 
 class TestRedrawStaticView:

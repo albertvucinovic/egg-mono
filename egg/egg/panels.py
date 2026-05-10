@@ -17,6 +17,12 @@ from rich import box as rich_box
 from eggthreads import create_snapshot
 
 from .utils import snapshot_messages, looks_markdown
+from .min_run_summary import (
+    MinHiddenActivitySummary,
+    count_min_hidden_text_tokens,
+    format_min_hidden_activity_summary,
+    serialize_min_tool_call_tokens,
+)
 
 
 @dataclass(frozen=True)
@@ -886,8 +892,7 @@ class PanelsMixin:
 
     def _new_static_hidden_details_state(self) -> Dict[str, Any]:
         return {
-            'counts': {'reasoning': 0, 'tool_calls': 0, 'tool_results': 0},
-            'headers': [],
+            'summary': MinHiddenActivitySummary(),
         }
 
     def _reset_static_hidden_details(self) -> None:
@@ -904,38 +909,49 @@ class PanelsMixin:
             if not isinstance(target, dict):
                 self._reset_static_hidden_details()
                 target = self._static_hidden_details
-        counts = target.get('counts')
-        if not isinstance(counts, dict):
-            counts = {'reasoning': 0, 'tool_calls': 0, 'tool_results': 0}
-            target['counts'] = counts
-        for key in ('reasoning', 'tool_calls', 'tool_results'):
-            try:
-                counts[key] = int(counts.get(key) or 0)
-            except Exception:
-                counts[key] = 0
-        headers = target.get('headers')
-        if not isinstance(headers, list):
-            headers = []
-            target['headers'] = headers
+        summary = target.get('summary')
+        if not isinstance(summary, MinHiddenActivitySummary):
+            summary = MinHiddenActivitySummary()
+            target['summary'] = summary
         return target
 
     def _clear_static_hidden_details_state(self, state: Dict[str, Any]) -> None:
-        state['counts'] = {'reasoning': 0, 'tool_calls': 0, 'tool_results': 0}
-        state['headers'] = []
+        summary = state.get('summary')
+        if isinstance(summary, MinHiddenActivitySummary):
+            summary.clear()
+        else:
+            state['summary'] = MinHiddenActivitySummary()
+
+    def _static_min_summary_token_count(self, tokens: Any, fallback_text: Any = "") -> int:
+        try:
+            iv = int(tokens)
+        except Exception:
+            iv = 0
+        if iv > 0:
+            return iv
+        return count_min_hidden_text_tokens(fallback_text)
 
     def _record_static_hidden_detail_in_state(
         self,
         state: Dict[str, Any],
         kind: str,
         header: str,
+        *,
+        name: Any = None,
+        tokens: Any = 0,
+        tool_call_id: Optional[str] = None,
     ) -> None:
         target = self._ensure_static_hidden_details_state(state)
-        counts = target['counts']
-        if kind in counts:
-            counts[kind] = int(counts.get(kind) or 0) + 1
-        headers = target['headers']
-        if header:
-            headers.append(str(header))
+        summary = target.get('summary')
+        if not isinstance(summary, MinHiddenActivitySummary):
+            summary = MinHiddenActivitySummary()
+            target['summary'] = summary
+        if kind == 'reasoning':
+            summary.add_reasoning_block(tokens=tokens)
+        elif kind == 'tool_calls':
+            summary.add_tool_execution(name=name, tokens=tokens, tool_call_id=tool_call_id)
+        elif kind == 'tool_results':
+            summary.add_tool_result(name=name, tokens=tokens)
 
     def _record_static_hidden_detail(self, kind: str, header: str) -> None:
         self._record_static_hidden_detail_in_state(
@@ -954,28 +970,15 @@ class PanelsMixin:
         if not isinstance(state, dict):
             return None
         state = self._ensure_static_hidden_details_state(state)
-        counts = state.get('counts') if isinstance(state.get('counts'), dict) else {}
-        if not any(int(counts.get(key) or 0) for key in ('tool_calls', 'tool_results', 'reasoning')):
+        summary = state.get('summary')
+        if not isinstance(summary, MinHiddenActivitySummary) or not summary.has_activity():
             return None
-        parts: List[str] = []
-        for key, singular in (
-            ('tool_calls', 'tool call'),
-            ('tool_results', 'tool result'),
-            ('reasoning', 'reasoning block'),
-        ):
-            count = int(counts.get(key) or 0)
-            if count:
-                label = singular if count == 1 else f"{singular}s"
-                parts.append(f"{count} {label}")
-        summary = f"Hidden details: {', '.join(parts)}."
-        headers = state.get('headers') if isinstance(state.get('headers'), list) else []
-        body = summary
-        if headers:
-            body += "\n" + "\n".join(f"  {header}" for header in headers)
+        body = format_min_hidden_activity_summary(summary)
+        if not body:
+            return None
         try:
             renderable = Panel(
                 Text(body, no_wrap=False, overflow='fold', style='yellow'),
-                title='[bold yellow]Hidden Details[/bold yellow]',
                 border_style='yellow',
                 box=self._get_static_box(),
             )
@@ -1155,7 +1158,12 @@ class PanelsMixin:
                 elif verbosity == 'medium':
                     panel(Text('', no_wrap=False, overflow='fold', style='magenta'), reason_title, 'magenta')
                 else:
-                    self._record_static_hidden_detail_in_state(hidden_details, 'reasoning', full_title_for(reason_title))
+                    self._record_static_hidden_detail_in_state(
+                        hidden_details,
+                        'reasoning',
+                        full_title_for(reason_title),
+                        tokens=self._static_min_summary_token_count(pm_tokens["reasoning"], reas),
+                    )
             if content:
                 if verbosity == 'min':
                     append_hidden_details()
@@ -1167,6 +1175,7 @@ class PanelsMixin:
             tcs = m.get('tool_calls')
             if isinstance(tcs, list) and tcs:
                 lines = []
+                tool_call_infos = []
                 for tc in tcs:
                     f = (tc or {}).get('function') or {}
                     name = f.get('name') or (tc or {}).get('name') or 'function'
@@ -1178,10 +1187,11 @@ class PanelsMixin:
                             args_str = str(args)
                     else:
                         args_str = str(args or '')
+                    tc_id = str((tc or {}).get('id') or (tc or {}).get('tool_call_id') or '')
+                    tool_call_infos.append((name, args_str, tc_id))
                     if verbosity == 'max':
                         lines.append(f"{name}({args_str})")
                     else:
-                        tc_id = str((tc or {}).get('id') or (tc or {}).get('tool_call_id') or '')
                         tc_id_text = f" [tool_call_id: {tc_id}]" if tc_id else ""
                         preview = self._panel_one_line_preview(args_str)
                         suffix = f" {preview}" if preview else ""
@@ -1202,8 +1212,17 @@ class PanelsMixin:
                     tc_title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
                 tc_title = " | ".join(tc_title_parts)
                 if verbosity == 'min':
-                    for line in lines:
-                        self._record_static_hidden_detail_in_state(hidden_details, 'tool_calls', f"{tc_title} | {line}")
+                    fallback_text = serialize_min_tool_call_tokens(tcs)
+                    token_count = self._static_min_summary_token_count(pm_tokens["tool_calls"], fallback_text)
+                    for idx, (name, _args_str, tc_id) in enumerate(tool_call_infos):
+                        self._record_static_hidden_detail_in_state(
+                            hidden_details,
+                            'tool_calls',
+                            f"{tc_title} | {lines[idx] if idx < len(lines) else name}",
+                            name=name,
+                            tokens=token_count if idx == 0 else 0,
+                            tool_call_id=tc_id,
+                        )
                 else:
                     items.append(self._static_transcript_panel_renderable(
                         Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'),
@@ -1247,7 +1266,13 @@ class PanelsMixin:
                                 title_parts.append(f"[dim]{ts_str}[/dim]")
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
-                            self._record_static_hidden_detail_in_state(hidden_details, 'tool_results', " | ".join(title_parts))
+                            self._record_static_hidden_detail_in_state(
+                                hidden_details,
+                                'tool_results',
+                                " | ".join(title_parts),
+                                name=nm,
+                                tokens=count_min_hidden_text_tokens(txt),
+                            )
             tc_stream = m.get('tool_calls_stream') or {}
             if isinstance(tc_stream, dict) and tc_stream:
                 for nm, txt in tc_stream.items():
@@ -1285,7 +1310,14 @@ class PanelsMixin:
                                 title_parts.append(f"[dim]{ts_str}[/dim]")
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
-                            self._record_static_hidden_detail_in_state(hidden_details, 'tool_calls', " | ".join(title_parts))
+                            self._record_static_hidden_detail_in_state(
+                                hidden_details,
+                                'tool_calls',
+                                " | ".join(title_parts),
+                                name=nm,
+                                tokens=count_min_hidden_text_tokens(txt),
+                                tool_call_id=str(nm or ''),
+                            )
             return items
 
         if role == 'tool':
@@ -1312,7 +1344,13 @@ class PanelsMixin:
             elif verbosity == 'medium':
                 panel(Text('', no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             else:
-                self._record_static_hidden_detail_in_state(hidden_details, 'tool_results', full_title_for(title))
+                self._record_static_hidden_detail_in_state(
+                    hidden_details,
+                    'tool_results',
+                    full_title_for(title),
+                    name=name,
+                    tokens=self._static_min_summary_token_count(pm_tokens["content"], content),
+                )
             return items
 
         # Fallback generic
