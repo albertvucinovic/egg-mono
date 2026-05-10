@@ -42,7 +42,7 @@ Phases:
     - `PanelsMixin` min hidden state now stores a `MinHiddenActivitySummary` and renders the shared formatted summary body in an untitled yellow summary panel; `Hidden Details` title/text is no longer emitted.
     - Static transcript builders record hidden reasoning, tool calls/streamed args, tool outputs/results, tool names, and best-effort hidden token totals into the shared summary model while leaving visible user/assistant renderables and max/medium behavior unchanged.
     - Focused static panel tests now assert run-summary text/no `Hidden details:` output, including merged consecutive hidden activity before the next visible message.
-    - Lazy `TranscriptScrollbackSource` block rendering now uses the same summary renderable; exact aggregation across separately rendered lazy blocks/window boundaries remains limited in Phase 2 and is left for the full-screen in-place/source-refresh work rather than a broad lazy-source refactor.
+    - Lazy `TranscriptScrollbackSource` block rendering now uses the same summary renderable; consecutive hidden blocks are aggregated by sharing `hidden_details` state across the `_ensure_rows` loop (flushed at visible boundaries via `_is_min_block_visible` heuristic).  Cross-cache aggregation (across separate `_ensure_rows` invocations) remains a known limitation when the viewport is filled before all hidden blocks are processed.
 
 - [x] Phase 3 — Full-screen in-place summary update
   - Ensure consecutive in-session hidden activity in full-screen updates one summary item instead of appending repeated summaries.
@@ -53,6 +53,7 @@ Phases:
     - `PanelsMixin` tracks the rendered row count for the current full-screen min hidden-activity summary and refreshes that local row in place for consecutive hidden-only messages; visible user/assistant/error panels finalize the run and reset tracking.
     - Source replacement/redraw resets pending min summary state/tracking so locally replaced rows do not leak across a refreshed transcript source.
     - Added focused regressions for repeated in-session reasoning/tool-call/tool-result activity producing one local summary item with updated counts, plus renderer row-replacement coverage.
+    - Follow-up fix: `TranscriptScrollbackSource._ensure_rows` now shares `hidden_details` state across consecutive blocks so that lazy scrollback rows also aggregate consecutive hidden activity into one summary per run.  Added `_is_min_block_visible` helper to determine when a block is a visible boundary that should flush the pending hidden state.
 
 - [ ] Phase 4 — Min streaming simplification
   - In `min`, full-screen streaming should show only a small animated/type indicator (`llm`, `tool`, etc.) and no raw stream content/reasoning/tool output.
