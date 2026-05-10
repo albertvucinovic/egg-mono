@@ -21,8 +21,21 @@ class UserOriginApprovalPolicy:
         return ApprovalVerdict(APPROVAL_ABSTAIN, reason="Not a user-originated tool call", policy=self.name)
 
 
+@dataclass(frozen=True)
+class CompactThreadApprovalPolicy:
+    """Allow compaction tool calls without human approval."""
+
+    name: str = "compact_thread"
+
+    def evaluate(self, request: ApprovalRequest) -> ApprovalVerdict:
+        if request.tool_name == "compact_thread":
+            return ApprovalVerdict(APPROVAL_ALLOW, reason="compact_thread is safe to auto-approve", policy=self.name)
+        return ApprovalVerdict(APPROVAL_ABSTAIN, reason="Not compact_thread", policy=self.name)
+
+
 def register_approval_policies(registry: Any) -> None:
     registry.register(UserOriginApprovalPolicy())
+    registry.register(CompactThreadApprovalPolicy())
 
 
 @dataclass(frozen=True)
@@ -35,4 +48,4 @@ class ApprovalPoliciesPlugin:
             register_approval_policies(context.approval_policy_registry)
 
 
-__all__ = ["ApprovalPoliciesPlugin", "UserOriginApprovalPolicy", "register_approval_policies"]
+__all__ = ["ApprovalPoliciesPlugin", "CompactThreadApprovalPolicy", "UserOriginApprovalPolicy", "register_approval_policies"]

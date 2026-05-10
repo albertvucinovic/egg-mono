@@ -139,6 +139,29 @@ def test_compact_thread_tool_allows_current_tool_call_parent_as_default_start(tm
     assert payload["committed_from_msg_id"] == assistant
 
 
+def test_runner_auto_approves_compact_thread_tool_call(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "summarize please")
+    assistant = ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "Summary text before compacting.",
+        extra={"tool_calls": [{"id": "call-compact", "function": {"name": "compact_thread", "arguments": "{}"}}]},
+    )
+
+    runner = ThreadRunner(db, tid, llm=object(), tools=create_tool_registry())
+    assert asyncio.run(runner.run_once()) is True
+    assert asyncio.run(runner.run_once()) is True
+
+    state = ts.build_tool_call_states(db, tid)["call-compact"]
+    assert state.approval_decision == "granted"
+    assert state.published is True
+    events = _events(db, tid)
+    assert len(events) == 1
+    assert events[0][1]["start_msg_id"] == assistant
+
+
 def test_compact_thread_tool_schema_guides_non_spontaneous_use() -> None:
     registry = create_tool_registry()
     spec = registry._tools["compact_thread"]["spec"]["function"]

@@ -42,7 +42,24 @@ def test_approval_policy_registry_and_aggregation() -> None:
 def test_default_approval_policy_registry_has_user_origin_policy() -> None:
     registry = create_approval_policy_registry()
 
-    assert registry.names() == ["user_origin"]
+    assert registry.names() == ["user_origin", "compact_thread"]
+
+
+def test_default_approval_policy_allows_compact_thread() -> None:
+    registry = create_approval_policy_registry()
+
+    verdict = registry.get("compact_thread").evaluate(
+        ApprovalRequest(
+            db=None,
+            thread_id="tid",
+            tool_call_id="tcid",
+            tool_name="compact_thread",
+            origin="assistant",
+            parent_role="assistant",
+        )
+    )
+
+    assert verdict.decision == APPROVAL_ALLOW
 
 
 def test_runner_applies_user_origin_approval_policy_and_audits(tmp_path):
