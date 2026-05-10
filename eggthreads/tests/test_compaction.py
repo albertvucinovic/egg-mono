@@ -162,6 +162,22 @@ def test_runner_auto_approves_compact_thread_tool_call(tmp_path):
     assert events[0][1]["start_msg_id"] == assistant
 
 
+def test_compact_thread_tool_call_is_runnable_without_approval_event(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "summarize please")
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "Summary text before compacting.",
+        extra={"tool_calls": [{"id": "call-compact", "function": {"name": "compact_thread", "arguments": "{}"}}]},
+    )
+
+    state = ts.build_tool_call_states(db, tid)["call-compact"]
+    assert state.approval_decision == "granted"
+    assert ts.thread_state(db, tid) == "running"
+
+
 def test_compact_thread_tool_schema_guides_non_spontaneous_use() -> None:
     registry = create_tool_registry()
     spec = registry._tools["compact_thread"]["spec"]["function"]

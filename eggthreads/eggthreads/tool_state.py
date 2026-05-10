@@ -9,6 +9,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .db import ThreadsDB
 
 
+AUTO_APPROVED_TOOL_NAMES = {"compact_thread"}
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -335,6 +338,8 @@ def _reduce_loaded_thread_events(
 
     for tc in states.values():
         if tc.approval_decision is None and _has_global_approval(tc.parent_event_seq):
+            tc.approval_decision = "granted"
+        if tc.approval_decision is None and tc.name in AUTO_APPROVED_TOOL_NAMES:
             tc.approval_decision = "granted"
 
     last_llm_boundary_seq = _last_llm_boundary_from_records(records, skipped_msg_ids, msg_seq_by_id)
