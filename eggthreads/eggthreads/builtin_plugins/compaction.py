@@ -148,6 +148,9 @@ def set_auto_compact_threshold_command(context: Any, arg: str):
         message = f"Auto-compaction disabled for thread {current_thread[-8:]} (event #{event_seq})."
     else:
         message = f"Auto-compaction threshold set to {threshold:,} tokens for thread {current_thread[-8:]} (event #{event_seq})."
+    log = getattr(context, "log_system", None)
+    if callable(log):
+        log(message)
     return CommandResult(clear_input=True, message=message)
 
 
