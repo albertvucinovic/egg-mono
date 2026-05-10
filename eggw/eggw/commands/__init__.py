@@ -38,6 +38,7 @@ from .session import (
     cmd_bash_repl,
 )
 from .auth import cmd_login, cmd_logout, cmd_auth_status
+from .compaction import cmd_compact, cmd_compact_with_summary
 from .utility import (
     cmd_toggle_auto_approval,
     cmd_cost,
@@ -125,6 +126,9 @@ __all__ = [
     "cmd_login",
     "cmd_logout",
     "cmd_auth_status",
+    # Compaction commands
+    "cmd_compact",
+    "cmd_compact_with_summary",
     # Dispatcher
     "dispatch_command",
 ]
@@ -178,6 +182,10 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_duplicate_thread(thread_id, command_arg)
         elif command_name == "continue":
             return await cmd_continue(thread_id, command_arg)
+        elif command_name == "compact":
+            return await cmd_compact(thread_id, command_arg)
+        elif command_name == "compactWithSummary":
+            return await cmd_compact_with_summary(thread_id)
         elif command_name == "rename":
             return await cmd_rename(thread_id, command_arg)
         elif command_name == "cost":

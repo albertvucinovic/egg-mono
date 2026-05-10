@@ -373,9 +373,18 @@ async def get_autocomplete(
                                 "replace": len(arg_tok),
                             })
 
-            elif cmd == '/continue':
+            elif cmd in ('/continue', '/compact'):
                 # Message ID suggestions from current thread
                 # Show messages in reverse order (most recent first) so user can pick continue point
+
+                if cmd == '/compact':
+                    for selector in ('last_user', 'last_llm'):
+                        if not arg_tok or arg_tok.lower() in selector:
+                            suggestions.append({
+                                "display": selector,
+                                "insert": selector,
+                                "replace": len(arg_tok),
+                            })
 
                 # Handle named argument: extract value after msg_id=
                 search_term = arg_tok

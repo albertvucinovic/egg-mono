@@ -432,6 +432,8 @@ Thread Management:
   /deleteThread [selector]       - Delete thread (and subtree)
   /duplicateThread [name] [msg_id] - Duplicate thread
   /continue [msg_id]             - Continue thread from point
+  /compact [msg_id|last_user|last_llm] - Set provider context start
+  /compactWithSummary            - Ask assistant to summarize, then compact
   /rename <name>                 - Rename current thread
 
 Model:

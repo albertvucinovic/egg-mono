@@ -461,6 +461,56 @@ class TestCommands:
         assert data["success"] is True
         assert "Available commands" in data["message"]
         assert "/reload" in data["message"]
+        assert "/compact" in data["message"]
+        assert "/compactWithSummary" in data["message"]
+
+    def test_compact_command_sets_provider_context_start(self, client):
+        """eggw supports the shared /compact command."""
+        create_resp = client.post("/api/threads", json={"name": "Compact Command"})
+        thread_id = create_resp.json()["id"]
+
+        client.post(f"/api/threads/{thread_id}/messages", json={"content": "old"})
+        from eggthreads import append_message, filter_messages_for_compaction_provider_context, create_snapshot
+
+        start = append_message(core_state.db, thread_id, "assistant", "summary")
+        after = append_message(core_state.db, thread_id, "user", "after")
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": f"/compact {start}"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["start_msg_id"] == start
+        snapshot = create_snapshot(core_state.db, thread_id)
+        provider = filter_messages_for_compaction_provider_context(core_state.db, thread_id, snapshot["messages"])
+        assert [m["msg_id"] for m in provider if m.get("role") != "system"] == [start, after]
+
+    def test_compact_with_summary_command_queues_request(self, client, monkeypatch):
+        """eggw supports /compactWithSummary and starts the scheduler hook."""
+        started: list[str] = []
+        monkeypatch.setattr("eggw.commands.compaction.ensure_scheduler_for", lambda tid: started.append(tid))
+        create_resp = client.post("/api/threads", json={"name": "Compact Summary Command"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/compactWithSummary"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["request_msg_id"]
+        assert started == [thread_id]
+
+        messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        request = next(m for m in messages if m["id"] == data["data"]["request_msg_id"])
+        assert request["role"] == "user"
+        assert "compact_thread()" in request["content"]
+        assert "start_message omitted" in request["content"]
 
     def test_reload_requires_eggw_wrapper(self, client, monkeypatch):
         """/reload reports a clear error when not launched by eggw.sh."""
