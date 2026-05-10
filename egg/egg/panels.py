@@ -221,7 +221,7 @@ class TranscriptScrollbackSource:
         if role == 'assistant':
             return bool(content)
         if role == 'system':
-            return isinstance(content, str) and content.lower().startswith('llm error:')
+            return True
         # tool messages are hidden in min
         return False
 
@@ -1245,7 +1245,7 @@ class PanelsMixin:
                 panel(Text(content, no_wrap=False, overflow='fold', style='red'), title, 'red')
                 return items
             if verbosity == 'min':
-                return items
+                append_hidden_details()
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
             panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')

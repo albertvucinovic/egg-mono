@@ -584,7 +584,7 @@ class TestConsolePrintMessage:
         assert 'first question' in joined_bodies
         assert 'assistant answer' in joined_bodies
         assert 'next question' in joined_bodies
-        assert 'ordinary system prompt' not in joined_bodies
+        assert 'ordinary system prompt' in joined_bodies
         assert 'private reasoning body' not in joined_bodies
         assert 'completed tool result body' not in joined_bodies
         assert 'Hidden details:' not in joined_bodies

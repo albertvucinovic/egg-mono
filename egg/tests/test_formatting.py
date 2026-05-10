@@ -324,7 +324,7 @@ class TestFormatMessagesText:
         assert f"[User [msg_id: {user1}]]\nfirst question" in text
         assert f"[Assistant [msg_id: {assistant}]]\nassistant answer" in text
         assert f"[User [msg_id: {user2}]]\nnext question" in text
-        assert "ordinary system prompt" not in text
+        assert "ordinary system prompt" in text
         assert "private reasoning body" not in text
         assert "completed tool result body" not in text
         assert "Hidden details:" not in text

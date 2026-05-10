@@ -290,8 +290,8 @@ class FormattingMixin:
             return str(name or 'function'), args_str, tc_id
 
         def min_system_message_is_visible(content: str) -> bool:
-            lower = content.strip().lower()
-            return lower.startswith(('llm error:', 'error:', 'usage:', 'unknown command:', '/'))
+            # All system messages are visible in min verbosity.
+            return True
 
         emitted_marker_keys: Set[tuple[int, int]] = set()
         for m in msgs:
