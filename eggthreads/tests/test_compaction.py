@@ -54,6 +54,25 @@ def test_commit_compaction_resolves_default_and_last_user(tmp_path):
     assert user1
 
 
+def test_compaction_does_not_change_parent_child_rows(tmp_path):
+    db, parent = _new_thread(tmp_path)
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "old")
+    summary = ts.append_message(db, child, "assistant", "summary")
+    before = db.conn.execute(
+        "SELECT parent_id, child_id, waiting_until FROM children ORDER BY parent_id, child_id"
+    ).fetchall()
+
+    result = ts.commit_thread_compaction(db, child, summary, created_by="test")
+
+    after = db.conn.execute(
+        "SELECT parent_id, child_id, waiting_until FROM children ORDER BY parent_id, child_id"
+    ).fetchall()
+    assert result.success is True
+    assert [tuple(row) for row in after] == [tuple(row) for row in before]
+    assert ts.list_children_ids(db, parent) == [child]
+
+
 def test_compaction_rejects_hidden_and_tool_messages(tmp_path):
     db, tid = _new_thread(tmp_path)
     hidden = ts.append_message(db, tid, "user", "secret", extra={"no_api": True})
@@ -207,6 +226,31 @@ def test_provider_context_filter_starts_at_compaction_message(tmp_path):
     sanitized_like_runner = [m for m in filtered if not m.get("no_api")]
     assert [m["msg_id"] for m in sanitized_like_runner] == [system, start, after]
     assert old not in [m["msg_id"] for m in filtered]
+
+
+def test_compaction_provider_sanitizer_never_includes_no_api_messages(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    start = ts.append_message(db, tid, "assistant", "summary")
+    hidden = ts.append_message(db, tid, "user", "hidden after start", extra={"no_api": True})
+    visible = ts.append_message(db, tid, "user", "visible after start")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    snapshot = ts.create_snapshot(db, tid)
+
+    class DummyRunner(ThreadRunner):
+        def __init__(self) -> None:
+            self.db = db
+            self.thread_id = tid
+            self.llm = None
+
+        def _get_tool_call_id_normalization_strategy(self, model_key=None):
+            return None
+
+    compacted = ts.filter_messages_for_compaction_provider_context(db, tid, snapshot["messages"])
+    provider = DummyRunner()._sanitize_messages_for_api([m for m in compacted if not m.get("no_api")])
+
+    assert hidden in [m["msg_id"] for m in compacted]
+    assert hidden not in [m.get("msg_id") for m in provider]
+    assert visible in [m.get("msg_id") for m in provider]
 
 
 def test_runner_sanitize_keeps_compacted_provider_view(tmp_path):
@@ -838,6 +882,8 @@ def test_thread_token_stats_reports_provider_context_and_full_history(tmp_path):
     assert start in stats["provider_per_message"]
     assert old not in stats["provider_per_message"]
     assert old in stats["per_message"]
+    assert stats["context_tokens"] == ts.provider_context_token_stats(db, tid)["context_tokens"]
+    assert stats["full_thread_tokens"] == ts.total_token_stats(db, tid)["context_tokens"]
 
 
 def _ids(messages):
