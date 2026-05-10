@@ -112,6 +112,10 @@ Likely files:
 
 ### Phase 2 — Terminal inline/live transcript formatting
 
+Status: Implemented static transcript formatting in `FormattingMixin.format_messages_text(...)` for `max`, `medium`, and `min`. `max` preserves existing text output; `medium` collapses completed reasoning/tool-result bodies and shortens tool-call entries; `min` shows user/assistant bodies with hidden-detail summaries. Active streaming composition was left unchanged.
+
+Test notes: `pytest -q egg/tests/test_formatting.py::TestFormatMessagesText` (7 passed); `pytest -q egg/tests/test_formatting.py` (24 passed).
+
 Update `FormattingMixin.format_messages_text(...)`, which feeds the chat panel text, to respect the current display verbosity.
 
 This phase is for static/completed transcript text. Do not compact active streaming output here except for the explicit `min` status-only streaming rule.

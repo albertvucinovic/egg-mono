@@ -218,6 +218,18 @@ class FormattingMixin:
             markers.setdefault(start_seq, []).append(marker)
         return markers
 
+    def _display_verbosity_level(self) -> str:
+        """Return the current terminal display verbosity level."""
+        level = str(getattr(self, '_display_verbosity', 'max') or 'max').strip().lower()
+        return level if level in {'max', 'medium', 'min'} else 'max'
+
+    def _one_line_display_preview(self, text: Any, *, max_chars: int = 160) -> str:
+        """Return a compact one-line preview for collapsed display rows."""
+        preview = " ".join(str(text or '').split())
+        if max_chars > 3 and len(preview) > max_chars:
+            return preview[: max_chars - 3].rstrip() + "..."
+        return preview
+
     def format_messages_text(self, thread_id: str) -> str:
         """Format all messages in a thread for display."""
         msgs = snapshot_messages(self.db, thread_id)
@@ -225,6 +237,54 @@ class FormattingMixin:
         lines: List[str] = []
         if not msgs and not markers_by_start_seq:
             return "No messages yet."
+
+        verbosity = self._display_verbosity_level()
+        hidden_counts: Dict[str, int] = {"reasoning": 0, "tool_calls": 0, "tool_results": 0}
+        hidden_headers: List[str] = []
+
+        def add_hidden(kind: str, header: str) -> None:
+            if kind in hidden_counts:
+                hidden_counts[kind] += 1
+            if header:
+                hidden_headers.append(f"  {header}")
+
+        def flush_hidden() -> None:
+            if verbosity != 'min' or not any(hidden_counts.values()):
+                return
+            parts: List[str] = []
+            for key, singular in (
+                ("tool_calls", "tool call"),
+                ("tool_results", "tool result"),
+                ("reasoning", "reasoning block"),
+            ):
+                count = hidden_counts.get(key, 0)
+                if count:
+                    label = singular if count == 1 else f"{singular}s"
+                    parts.append(f"{count} {label}")
+            summary = f"Hidden details: {', '.join(parts)}."
+            if hidden_headers:
+                summary += "\n" + "\n".join(hidden_headers)
+            lines.append(summary)
+            for key in hidden_counts:
+                hidden_counts[key] = 0
+            hidden_headers.clear()
+
+        def tool_call_info(tc: Any) -> tuple[str, str, str]:
+            data = tc if isinstance(tc, dict) else {}
+            f = data.get('function') if isinstance(data.get('function'), dict) else {}
+            name = f.get('name') or data.get('name') or 'function'
+            args = f.get('arguments') if 'arguments' in f else data.get('arguments')
+            try:
+                args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args or '')
+            except Exception:
+                args_str = str(args or '')
+            tc_id = str(data.get('id') or data.get('tool_call_id') or '')
+            return str(name or 'function'), args_str, tc_id
+
+        def min_system_message_is_visible(content: str) -> bool:
+            lower = content.strip().lower()
+            return lower.startswith(('llm error:', 'error:', 'usage:', 'unknown command:', '/'))
+
         emitted_marker_keys: Set[tuple[int, int]] = set()
         for m in msgs:
             msg_id = str(m.get('msg_id') or '')
@@ -250,36 +310,75 @@ class FormattingMixin:
             if role == 'assistant':
                 reas = (m.get('reasoning') or m.get('reasoning_content') or '').strip()
                 if reas:
-                    lines.append(f"[Reasoning{tps_text}{msg_id_text}]\n{reas}")
+                    reason_header = f"[Reasoning{tps_text}{msg_id_text}]"
+                    if verbosity == 'max':
+                        lines.append(f"{reason_header}\n{reas}")
+                    elif verbosity == 'medium':
+                        lines.append(reason_header)
+                    else:
+                        add_hidden('reasoning', reason_header)
                 content = (m.get('content') or '').strip()
                 if content:
+                    if verbosity == 'min':
+                        flush_hidden()
                     lines.append(f"[Assistant{tps_text}{msg_id_text}]\n{content}")
                 # Final tool calls summary (if any)
                 tcs = m.get('tool_calls') or []
                 if isinstance(tcs, list) and tcs:
-                    for tc in tcs:
-                        f = (tc or {}).get('function') or {}
-                        name = f.get('name') or ''
-                        args = f.get('arguments')
-                        try:
-                            args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args or '')
-                        except Exception:
-                            args_str = str(args or '')
-                        lines.append(f"[ToolCall] {name} {args_str}")
+                    if verbosity == 'max':
+                        for tc in tcs:
+                            f = (tc or {}).get('function') or {}
+                            name = f.get('name') or ''
+                            args = f.get('arguments')
+                            try:
+                                args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args or '')
+                            except Exception:
+                                args_str = str(args or '')
+                            lines.append(f"[ToolCall] {name} {args_str}")
+                    elif verbosity == 'medium':
+                        tc_lines: List[str] = []
+                        for tc in tcs:
+                            name, args_str, tc_id = tool_call_info(tc)
+                            tc_id_text = f" [tool_call_id: {tc_id}]" if tc_id else ""
+                            preview = self._one_line_display_preview(args_str)
+                            suffix = f" {preview}" if preview else ""
+                            tc_lines.append(f"[ToolCall{tc_id_text}] {name}{suffix}")
+                        if tc_lines:
+                            lines.append(f"[Tool Calls{tps_text}{msg_id_text}]\n" + "\n".join(tc_lines))
+                    else:
+                        for tc in tcs:
+                            name, _args_str, tc_id = tool_call_info(tc)
+                            tc_id_text = f" [tool_call_id: {tc_id}]" if tc_id else ""
+                            add_hidden('tool_calls', f"[ToolCall{tc_id_text}] {name}{msg_id_text}")
                 # Streamed-only metadata (if snapshot captured)
                 tstream = m.get('tool_stream') or {}
                 if isinstance(tstream, dict):
                     for nm, txt in tstream.items():
                         if txt:
-                            lines.append(f"[Tool Output: {nm}]\n{txt}")
+                            header = f"[Tool Output: {nm}{tps_text}{msg_id_text}]" if verbosity != 'max' else f"[Tool Output: {nm}]"
+                            if verbosity == 'max':
+                                lines.append(f"{header}\n{txt}")
+                            elif verbosity == 'medium':
+                                lines.append(header)
+                            else:
+                                add_hidden('tool_results', header)
                 tc_stream = m.get('tool_calls_stream') or {}
                 if isinstance(tc_stream, dict):
                     for nm, txt in tc_stream.items():
                         if txt:
-                            lines.append(f"[Tool Call Args: {nm}]\n{txt}")
+                            header = f"[Tool Call Args: {nm}{tps_text}{msg_id_text}]" if verbosity != 'max' else f"[Tool Call Args: {nm}]"
+                            if verbosity == 'max':
+                                lines.append(f"{header}\n{txt}")
+                            elif verbosity == 'medium':
+                                preview = self._one_line_display_preview(txt)
+                                lines.append(f"{header} {preview}" if preview else header)
+                            else:
+                                add_hidden('tool_calls', header)
             elif role == 'user':
                 content = (m.get('content') or '').strip()
                 if content:
+                    if verbosity == 'min':
+                        flush_hidden()
                     lines.append(f"[User{msg_id_text}]\n{content}")
             elif role == 'tool':
                 # Distinguish between genuine assistant tool outputs and
@@ -287,15 +386,32 @@ class FormattingMixin:
                 # role="tool" with user_tool_call flag.
                 if m.get('user_tool_call'):
                     name = m.get('name') or 'user_command'
+                    lower_label = 'User Tool'
                 else:
                     name = m.get('name') or 'tool'
+                    lower_label = 'Tool'
                 content = (m.get('content') or '').strip()
                 if content:
-                    lines.append(f"[Tool: {name}{tps_text}{msg_id_text}]\n{content}")
+                    if verbosity == 'max':
+                        header = f"[Tool: {name}{tps_text}{msg_id_text}]"
+                        lines.append(f"{header}\n{content}")
+                    else:
+                        tool_call_id = str(m.get('tool_call_id') or '')
+                        tool_call_id_text = f" [tool_call_id: {tool_call_id}]" if tool_call_id else ""
+                        header = f"[{lower_label}: {name}{tps_text}{msg_id_text}{tool_call_id_text}]"
+                        if verbosity == 'medium':
+                            lines.append(header)
+                        else:
+                            add_hidden('tool_results', header)
             elif role == 'system':
                 content = (m.get('content') or '').strip()
                 if content:
+                    if verbosity == 'min' and not min_system_message_is_visible(content):
+                        continue
+                    if verbosity == 'min':
+                        flush_hidden()
                     lines.append(f"[System{msg_id_text}]\n{content}")
+        flush_hidden()
         return "\n\n".join(lines)
 
     def format_model_info(self, concrete_model_info, model_key=None):
@@ -344,6 +460,7 @@ class FormattingMixin:
             self._chat_cache = {
                 "thread_id": None,
                 "snapshot_seq": -1,
+                "display_verbosity": None,
                 "base_full": "",
                 "base_tail": "",
             }
@@ -354,9 +471,11 @@ class FormattingMixin:
             th = None
         snap_seq = getattr(th, "snapshot_last_event_seq", -1) if th else -1
 
+        display_verbosity = self._display_verbosity_level()
         if (
             self._chat_cache.get("thread_id") == self.current_thread
             and self._chat_cache.get("snapshot_seq") == snap_seq
+            and self._chat_cache.get("display_verbosity") == display_verbosity
         ):
             return
 
@@ -365,6 +484,7 @@ class FormattingMixin:
         self._chat_cache = {
             "thread_id": self.current_thread,
             "snapshot_seq": snap_seq,
+            "display_verbosity": display_verbosity,
             "base_full": base_full,
             "base_tail": base_tail,
         }

@@ -149,6 +149,172 @@ class TestFormatMessagesText:
         assert f"msg_id: {user}" in text
         assert f"msg_id: {assistant}" in text
 
+    def test_display_verbosity_default_max_preserves_reasoning_and_tool_output(self, isolated_db):
+        """Default max text should match the existing full-body transcript format."""
+        from eggthreads import append_message, create_root_thread, create_snapshot
+        from egg.formatting import FormattingMixin
+
+        tid = create_root_thread(isolated_db, name="VerbosityMax")
+        user = append_message(isolated_db, tid, "user", "run the tool")
+        assistant = append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "assistant answer",
+            extra={
+                "reasoning": "private reasoning body",
+                "tool_calls": [
+                    {
+                        "id": "call_full_1234567890",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"script":"echo hello"}'},
+                    }
+                ],
+                "tool_stream": {"bash": "streamed tool output body"},
+                "tool_calls_stream": {"call_full_1234567890": "streamed arg body"},
+            },
+        )
+        tool = append_message(
+            isolated_db,
+            tid,
+            "tool",
+            "completed tool result body",
+            extra={"name": "bash", "tool_call_id": "call_full_1234567890"},
+        )
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert text == (
+            f"[User [msg_id: {user}]]\nrun the tool\n\n"
+            f"[Reasoning [msg_id: {assistant}]]\nprivate reasoning body\n\n"
+            f"[Assistant [msg_id: {assistant}]]\nassistant answer\n\n"
+            "[ToolCall] bash {\"script\":\"echo hello\"}\n\n"
+            "[Tool Output: bash]\nstreamed tool output body\n\n"
+            "[Tool Call Args: call_full_1234567890]\nstreamed arg body\n\n"
+            f"[Tool: bash [msg_id: {tool}]]\ncompleted tool result body"
+        )
+
+    def test_display_verbosity_medium_hides_detail_bodies_but_keeps_headers_and_ids(self, isolated_db):
+        """Medium should collapse reasoning and tool results while preserving ids."""
+        from eggthreads import append_message, create_root_thread, create_snapshot
+        from egg.formatting import FormattingMixin
+
+        tid = create_root_thread(isolated_db, name="VerbosityMedium")
+        append_message(isolated_db, tid, "user", "run the tool")
+        assistant = append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "assistant answer",
+            extra={
+                "reasoning": "private reasoning body",
+                "tool_calls": [
+                    {
+                        "id": "call_full_1234567890",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": '{"script":"echo hello and then produce a much longer argument preview for truncation testing"}',
+                        },
+                    }
+                ],
+            },
+        )
+        tool = append_message(
+            isolated_db,
+            tid,
+            "tool",
+            "completed tool result body",
+            extra={"name": "bash", "tool_call_id": "call_full_1234567890"},
+        )
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._display_verbosity = "medium"
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert "assistant answer" in text
+        assert f"[Reasoning [msg_id: {assistant}]]" in text
+        assert "private reasoning body" not in text
+        assert f"[Tool Calls [msg_id: {assistant}]]" in text
+        assert "[ToolCall [tool_call_id: call_full_1234567890]] bash" in text
+        assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" in text
+        assert "completed tool result body" not in text
+
+    def test_display_verbosity_min_shows_conversation_and_hidden_detail_summary(self, isolated_db):
+        """Min should show user/assistant bodies and summarize hidden details between them."""
+        from eggthreads import append_message, create_root_thread, create_snapshot
+        from egg.formatting import FormattingMixin
+
+        tid = create_root_thread(isolated_db, name="VerbosityMin")
+        append_message(isolated_db, tid, "system", "ordinary system prompt")
+        user1 = append_message(isolated_db, tid, "user", "first question")
+        assistant = append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "assistant answer",
+            extra={
+                "reasoning": "private reasoning body",
+                "tool_calls": [
+                    {
+                        "id": "call_full_1234567890",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"script":"echo hello"}'},
+                    }
+                ],
+            },
+        )
+        tool = append_message(
+            isolated_db,
+            tid,
+            "tool",
+            "completed tool result body",
+            extra={"name": "bash", "tool_call_id": "call_full_1234567890"},
+        )
+        user2 = append_message(isolated_db, tid, "user", "next question")
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._display_verbosity = "min"
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert f"[User [msg_id: {user1}]]\nfirst question" in text
+        assert f"[Assistant [msg_id: {assistant}]]\nassistant answer" in text
+        assert f"[User [msg_id: {user2}]]\nnext question" in text
+        assert "ordinary system prompt" not in text
+        assert "private reasoning body" not in text
+        assert "completed tool result body" not in text
+        assert "Hidden details: 1 reasoning block." in text
+        assert "Hidden details: 1 tool call, 1 tool result." in text
+        assert f"[Reasoning [msg_id: {assistant}]]" in text
+        assert "[ToolCall [tool_call_id: call_full_1234567890]] bash" in text
+        assert f"[Tool: bash [msg_id: {tool}] [tool_call_id: call_full_1234567890]]" in text
+        assert text.index("Hidden details: 1 reasoning block.") < text.index("assistant answer")
+        assert text.index("Hidden details: 1 tool call, 1 tool result.") < text.index("next question")
 
     def test_shows_compaction_marker_without_hiding_history(self, isolated_db):
         """Chat transcript text should include a divider and keep old messages."""
