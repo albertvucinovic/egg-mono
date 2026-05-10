@@ -188,6 +188,9 @@ class EggDisplayApp(
         _mode = os.environ.get('EGG_DISPLAY_MODE', '').strip().lower()
         self._display_is_inline = _mode in ('inline', 'classic', 'head', 'legacy')
         self._pending_mode_change: bool = False
+        # UI-only transcript display verbosity. Rendering support is added
+        # in later phases; Phase 1 only tracks and updates this state.
+        self._display_verbosity: str = 'max'
 
         # Panels
         # Single-column layout (system, children, chat, input)

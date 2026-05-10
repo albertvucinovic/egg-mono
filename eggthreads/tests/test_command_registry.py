@@ -589,6 +589,7 @@ def test_display_input_commands_are_registered_handlers() -> None:
     assert registry.get("toggleBorders").handler is display_input.toggle_borders_command
     assert registry.get("redraw").handler is display_input.redraw_command
     assert registry.get("displayMode").handler is display_input.display_mode_command
+    assert registry.get("displayVerbosity").handler is display_input.display_verbosity_command
     assert registry.get("paste").handler is display_input.paste_command
     assert registry.get("enterMode").handler is display_input.enter_mode_command
 
@@ -620,6 +621,7 @@ def test_display_input_commands_change_app_state() -> None:
         _panel_visible = {"chat": True, "children": True, "system": True}
         _display_is_inline = False
         _pending_mode_change = False
+        _display_verbosity = "max"
         _borders_visible = False
         _original_box_styles = {"chat": "chat-box", "system": "system-box", "children": "children-box", "approval": "approval-box"}
         chat_output = Panel()
@@ -636,12 +638,14 @@ def test_display_input_commands_change_app_state() -> None:
 
     registry.execute("togglePanel", ctx, "chat")
     registry.execute("displayMode", ctx, "inline")
+    registry.execute("displayVerbosity", ctx, "min")
     registry.execute("redraw", ctx)
     registry.execute("enterMode", ctx, "newline")
 
     assert app._panel_visible["chat"] is False
     assert app._display_is_inline is True
     assert app._pending_mode_change is True
+    assert app._display_verbosity == "min"
     assert app.enter_sends is False
     assert "manual" in redrawn
 

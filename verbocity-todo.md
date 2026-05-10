@@ -92,6 +92,10 @@ Conversation-first display.
 
 ### Phase 1 — Shared semantics and state
 
+Status: Implemented terminal UI-only state and `/displayVerbosity <max|medium|min>` command. Default is `max`; no rendering, persistence, web UI, streaming, or expand-by-id behavior was changed.
+
+Test notes: `pytest -q egg/tests/test_commands_display.py::TestCmdDisplayVerbosity eggthreads/tests/test_command_registry.py::test_display_input_commands_are_registered_handlers eggthreads/tests/test_command_registry.py::test_display_input_commands_change_app_state` (6 passed); `pytest -q egg/tests/test_commands_display.py eggthreads/tests/test_command_registry.py` (44 passed).
+
 - Add a small display verbosity state to the terminal app:
   - Default: `max`.
   - Allowed values: `max`, `medium`, `min`.

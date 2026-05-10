@@ -166,3 +166,35 @@ class TestCmdToggleBorders:
 
         assert len(redrawn) == 1
         assert "borders" in redrawn[0].lower()
+
+
+class TestCmdDisplayVerbosity:
+    """Tests for /displayVerbosity."""
+
+    def test_default_display_verbosity_is_max(self, egg_app):
+        assert egg_app._display_verbosity == "max"
+
+    def test_no_argument_reports_current_level_and_usage(self, egg_app):
+        egg_app.handle_command("/displayVerbosity")
+
+        assert egg_app._display_verbosity == "max"
+        assert any(
+            "/displayVerbosity <max|medium|min>" in msg and "current: max" in msg
+            for msg in egg_app._system_log
+        )
+
+    def test_sets_display_verbosity(self, egg_app):
+        egg_app.handle_command("/displayVerbosity medium")
+
+        assert egg_app._display_verbosity == "medium"
+        assert any("Display verbosity set to medium." in msg for msg in egg_app._system_log)
+
+    def test_invalid_display_verbosity_reports_usage_without_changing_state(self, egg_app):
+        egg_app.handle_command("/displayVerbosity min")
+        egg_app.handle_command("/displayVerbosity compact")
+
+        assert egg_app._display_verbosity == "min"
+        assert any(
+            "/displayVerbosity <max|medium|min>" in msg and "current: min" in msg
+            for msg in egg_app._system_log
+        )

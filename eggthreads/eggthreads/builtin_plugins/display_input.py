@@ -96,6 +96,30 @@ def display_mode_command(context: Any, arg: str):
     return CommandResult(clear_input=True)
 
 
+def display_verbosity_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+
+    app = _app(context)
+    if app is None:
+        _log(context, "/displayVerbosity requires an app context")
+        return CommandResult(clear_input=False)
+    level = (arg or "").strip().lower()
+    allowed = {"max", "medium", "min"}
+    current = getattr(app, "_display_verbosity", "max")
+    if not level:
+        message = f"Usage: /displayVerbosity <max|medium|min>   (current: {current})"
+        _log(context, message)
+        return CommandResult(clear_input=False, message=message)
+    if level not in allowed:
+        message = f"Usage: /displayVerbosity <max|medium|min>   (current: {current})"
+        _log(context, message)
+        return CommandResult(clear_input=False, message=message)
+    app._display_verbosity = level
+    message = f"Display verbosity set to {level}."
+    _log(context, message)
+    return CommandResult(clear_input=True, message=message)
+
+
 def toggle_borders_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
 
@@ -190,6 +214,7 @@ def register_display_input_commands(registry: Any) -> None:
     registry.register(CommandSpec("toggleBorders", toggle_borders_command, category="display", usage="/toggleBorders", description="Toggle panel borders."))
     registry.register(CommandSpec("redraw", redraw_command, category="display", usage="/redraw", description="Redraw the static transcript."))
     registry.register(CommandSpec("displayMode", display_mode_command, category="display", usage="/displayMode <full-screen|inline>", description="Switch display mode.", complete=lambda ctx, arg: _complete_from(["full-screen", "inline"], arg)))
+    registry.register(CommandSpec("displayVerbosity", display_verbosity_command, category="display", usage="/displayVerbosity <max|medium|min>", description="Set transcript display verbosity.", complete=lambda ctx, arg: _complete_from(["max", "medium", "min"], arg)))
     registry.register(CommandSpec("paste", paste_command, category="input", usage="/paste", description="Paste clipboard content into the input panel."))
     registry.register(CommandSpec("enterMode", enter_mode_command, category="input", usage="/enterMode <send|newline>", description="Set Enter key behavior.", complete=lambda ctx, arg: _complete_from(["send", "newline"], arg)))
 
@@ -207,6 +232,7 @@ class DisplayInputPlugin:
 __all__ = [
     "DisplayInputPlugin",
     "display_mode_command",
+    "display_verbosity_command",
     "enter_mode_command",
     "paste_command",
     "redraw_command",
