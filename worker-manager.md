@@ -2,17 +2,7 @@
 
 Use this skill when a task should be implemented across one or more worker subthreads using a hierarchical TODO / handoff document, such as `compaction-todo.md` or `plugins-todo.md`.
 
-This is a local skill-style document, not an installed Egg skill. To use it in a future session, tell Egg:
-
-```text
-Please use ./worker-manager.md to manage workers for <task/todo-file>.
-```
-
-or:
-
-```text
-Read ./worker-manager.md and follow it while delegating this implementation.
-```
+This is the authoritative Worker Manager skill. In repository checkouts it may be present both at the repo root and under `eggthreads/eggthreads/skills/`; keep those copies synchronized when editing the skill text.
 
 ## Core idea
 
@@ -132,11 +122,38 @@ For long requested runs, repeat for the requested budget, e.g. up to 4 hours, bu
 
 If the worker is still running and healthy, keep waiting. If there are errors, high context, or no progress, intervene.
 
+## Repairing failed worker threads
+
+Before abandoning a worker that hit a transient runner/LLM failure, try to repair the existing child thread.
+
+Use this when:
+
+- `wait` returns no useful assistant message;
+- `get_child_status` shows recent LLM/runner/session errors;
+- the child is back in `waiting_user` after an infrastructure failure;
+- the worker likely did not get a chance to summarize, commit, or clean up.
+
+Repair pattern:
+
+```text
+get_child_status(worker)
+continue_subthread(worker)
+wait(worker, timeout_sec=300)
+```
+
+Guidelines:
+
+1. Inspect `get_child_status` first so you know whether the failure looks transient or implementation-related.
+2. Prefer one `continue_subthread(child_thread_id)` repair attempt before spawning a replacement worker.
+3. After the repaired worker returns, review its status exactly like any other worker result.
+4. If the same failure repeats, or if local `git status` shows messy partial edits, inspect the diff and decide whether to continue, revert, spawn a fresh repair worker, or ask the user.
+5. Do not use `continue_subthread` to paper over real test failures or design blockers; those need root-cause fixes or manager/user decisions.
+
 ## After each worker result
 
 When a worker returns:
 
-1. Read its final message.
+1. Read its final message. If it is missing/empty because of a runner failure, use the repair pattern above before treating the worker as done.
 2. Run locally if useful:
 
    ```bash
@@ -239,6 +256,8 @@ Before telling the user a phase is done:
 - Are any remaining open questions explicit?
 
 ## Handling failures
+
+If a worker hits a transient LLM/runner/session failure, inspect `get_child_status` and try `continue_subthread(child_thread_id)` once before discarding the worker.
 
 If a worker fails tests:
 
