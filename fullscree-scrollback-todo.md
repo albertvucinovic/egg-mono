@@ -71,12 +71,15 @@ Phases:
     - 2026-05-10: Added `TranscriptScrollbackSource` in `egg.panels`; it captures current snapshot messages plus compaction marker events as lightweight blocks, renders blocks lazily from newest to oldest via the Phase 2 static transcript builders, and caches rendered suffix rows per terminal width/display verbosity. `row_count()` stays unknown until a cache has rendered to the transcript top, so bottom viewport requests do not force full-history rendering.
     - 2026-05-10: Added focused source tests proving a bottom window renders only the needed tail blocks and reuses the width/verbosity cache while re-rendering on width or verbosity changes. Current min-verbosity hidden-detail summaries are local to lazily rendered blocks/windows; exact cross-window aggregation for older off-window hidden-only details would require broader ordering state and is deferred. Test runs: `python -m pytest egg/tests/test_panels.py::TestTranscriptScrollbackSource -q` (2 passed), `python -m pytest egg/tests/test_panels.py -q` (58 passed), `python -m pytest egg/tests/test_panels.py eggdisplay/tests/test_renderers_terminal_safety.py -q` (73 passed), `python -m pytest egg/tests -q` (390 passed).
 
-- [ ] Phase 4 — Full-screen wiring and redraw behavior
+- [x] Phase 4 — Full-screen wiring and redraw behavior
   - Install the source on full-screen renderers in `EggDisplayApp.run()` before initial paint/history display.
   - Stop eager full-history `print_static_view_current()` seeding in full-screen mode.
   - Update `redraw_static_view()` to refresh the source in full-screen mode and print full static history only in inline/non-renderer contexts.
   - Ensure thread switch/mode switch/display verbosity changes refresh source without duplication.
   - Status notes:
+    - 2026-05-10: Full-screen startup now installs a fresh `TranscriptScrollbackSource` on the renderer before entering the renderer context/initial paint and skips the pre-loop/full-screen `print_static_view_current()` history seeding path. Inline startup and mode-switch-to-inline still print full static history to native terminal scrollback.
+    - 2026-05-10: `redraw_static_view()` now refreshes/replaces the full-screen source, clears in-session appended rows to avoid source + `print_above` duplication, invalidates/repaints the visible window, and only prints full static history for inline/non-renderer contexts. Thread switch command callbacks use the same full-screen source refresh path; `/displayVerbosity` continues through redraw and mode switch into full-screen installs the source before paint.
+    - 2026-05-10: Added focused wiring tests for full-screen startup/mode-switch source installation before initial paint, redraw/thread-switch/display-verbosity source replacement without eager `console_print_message()` history printing, and inline redraw preserving full-history printing. Test runs: `python -m pytest egg/tests/test_commands_display.py egg/tests/test_commands_thread.py egg/tests/test_panels.py egg/tests/test_streaming_tui.py eggdisplay/tests/test_renderers_terminal_safety.py -q` (135 passed), `python -m pytest egg/tests -q` (397 passed), `python -m pytest eggdisplay/tests -q` (45 passed).
 
 - [ ] Phase 5 — Integration polish
   - Run focused eggdisplay and egg test suites.

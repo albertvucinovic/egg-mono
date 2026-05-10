@@ -326,6 +326,94 @@ class PanelsMixin:
         else:
             self.console.print(*args, **kwargs)
 
+    def _new_transcript_scrollback_source(self) -> TranscriptScrollbackSource:
+        """Create a fresh lazy transcript source for the current thread."""
+        return TranscriptScrollbackSource(self)
+
+    def _is_full_screen_scrollback_renderer(self, renderer: Any = None) -> bool:
+        """Return True when *renderer* is the active full-screen history surface."""
+        if renderer is None:
+            renderer = getattr(self, '_renderer', None)
+        return (
+            renderer is not None
+            and not bool(getattr(self, '_display_is_inline', False))
+            and hasattr(renderer, 'set_scrollback_source')
+        )
+
+    def _mark_static_transcript_printed(self, thread_id: Optional[str] = None) -> None:
+        """Record the latest transcript event already represented in static history."""
+        tid = thread_id or self.current_thread
+        try:
+            row = self.db.conn.execute(
+                "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type IN ('msg.create', 'thread.compaction')",
+                (tid,)
+            ).fetchone()
+            last = int(row[0]) if row and row[0] is not None else -1
+            self._last_printed_seq_by_thread[tid] = last
+        except Exception:
+            self._last_printed_seq_by_thread[tid] = self._last_printed_seq_by_thread.get(tid, -1)
+
+    def _install_transcript_scrollback_source(
+        self,
+        renderer: Any = None,
+        *,
+        reset_session_scrollback: bool = False,
+        repaint: bool = False,
+    ) -> bool:
+        """Install a fresh lazy transcript source on a full-screen renderer.
+
+        ``reset_session_scrollback`` drops rows appended with ``print_above`` so
+        replacing the source after redraw/thread/verbosity changes does not show
+        the same transcript rows twice (once from the source and once from the
+        renderer's in-session scrollback model).
+        """
+        if renderer is None:
+            renderer = getattr(self, '_renderer', None)
+        if not self._is_full_screen_scrollback_renderer(renderer):
+            return False
+
+        try:
+            source = self._new_transcript_scrollback_source()
+            if reset_session_scrollback:
+                if hasattr(renderer, 'scroll_to_bottom'):
+                    try:
+                        renderer.scroll_to_bottom()
+                    except Exception:
+                        pass
+                if hasattr(renderer, 'clear_scrollback'):
+                    try:
+                        renderer.clear_scrollback()
+                    except Exception:
+                        pass
+            if hasattr(renderer, 'invalidate'):
+                try:
+                    renderer.invalidate()
+                except Exception:
+                    pass
+            renderer.set_scrollback_source(source)
+            self._mark_static_transcript_printed()
+        except Exception:
+            return False
+
+        if repaint and hasattr(renderer, 'update'):
+            try:
+                renderer.update(self.render_group())
+            except Exception:
+                pass
+        return True
+
+    def print_current_thread(self, heading: Optional[str] = None) -> None:
+        """Refresh or print the selected thread after thread-switch commands."""
+        renderer = getattr(self, '_renderer', None)
+        if self._is_full_screen_scrollback_renderer(renderer):
+            self._install_transcript_scrollback_source(
+                renderer,
+                reset_session_scrollback=True,
+                repaint=True,
+            )
+            return
+        self.print_static_view_current(heading=heading)
+
     def _system_status_key(self) -> Any:
         """Cheap key for System panel sandbox/autoapproval title state."""
         cur = self.db.conn.execute(
@@ -1300,15 +1388,7 @@ class PanelsMixin:
             if verbosity == 'min':
                 self._flush_static_hidden_details()
         # Update last-printed seq to the latest rendered transcript event so we don't re-print.
-        try:
-            row = self.db.conn.execute(
-                "SELECT MAX(event_seq) FROM events WHERE thread_id=? AND type IN ('msg.create', 'thread.compaction')",
-                (tid,)
-            ).fetchone()
-            last = int(row[0]) if row and row[0] is not None else -1
-            self._last_printed_seq_by_thread[tid] = last
-        except Exception:
-            self._last_printed_seq_by_thread[tid] = self._last_printed_seq_by_thread.get(tid, -1)
+        self._mark_static_transcript_printed(tid)
 
     def print_banner(self) -> None:
         """Print the static console banner (above the live panels)."""
@@ -1323,16 +1403,19 @@ class PanelsMixin:
 
     def redraw_static_view(self, *, reason: str = '') -> None:
         """Clear terminal and reprint static transcript for current thread."""
-        # Redraw is uniform across modes: clear the renderer's scrollback
-        # model (full-screen only; inline uses the terminal's real
-        # archive which we preserve), then invalidate the diff baseline
-        # so the next paint redraws everything. Invalidate on the inline
-        # renderer also wipes the current viewport (leaving the archive
-        # intact), equivalent to HEAD's console.clear() + _prev_lines reset.
         renderer = getattr(self, '_renderer', None)
+        if self._is_full_screen_scrollback_renderer(renderer):
+            self._install_transcript_scrollback_source(
+                renderer,
+                reset_session_scrollback=True,
+                repaint=True,
+            )
+            return
+
+        # Inline/non-renderer redraw keeps using native terminal scrollback and
+        # full static transcript printing. Only the full-screen renderer swaps
+        # in a lazy source above.
         if renderer is not None:
-            if hasattr(renderer, 'clear_scrollback'):
-                renderer.clear_scrollback()
             if hasattr(renderer, 'invalidate'):
                 renderer.invalidate()
         else:

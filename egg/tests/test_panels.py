@@ -1,6 +1,8 @@
 """Tests for panels.py PanelsMixin."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 
@@ -711,6 +713,215 @@ class TestPrintStaticViewCurrent:
         egg_app.print_static_view_current()
 
         assert rendered[-6:] == [f"message {i}" for i in range(6)]
+
+
+class TestFullScreenScrollbackWiring:
+    """Tests for full-screen lazy transcript source wiring."""
+
+    class Renderer:
+        def __init__(self):
+            self.sources = []
+            self.clear_calls = 0
+            self.invalidate_calls = 0
+            self.update_calls = 0
+            self.bottom_calls = 0
+
+        def set_scrollback_source(self, source):
+            self.sources.append(source)
+
+        def clear_scrollback(self):
+            self.clear_calls += 1
+
+        def invalidate(self):
+            self.invalidate_calls += 1
+
+        def update(self, renderable):
+            self.update_calls += 1
+
+        def scroll_to_bottom(self):
+            self.bottom_calls += 1
+
+    def test_install_transcript_source_marks_history_without_printing_messages(self, egg_app, monkeypatch):
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        for i in range(4):
+            append_message(egg_app.db, egg_app.current_thread, "user", f"startup lazy {i}")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        renderer = self.Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+
+        printed = []
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: printed.append(m))
+
+        assert egg_app._install_transcript_scrollback_source(renderer) is True
+
+        assert len(renderer.sources) == 1
+        assert isinstance(renderer.sources[-1], TranscriptScrollbackSource)
+        assert printed == []
+        assert egg_app._last_printed_seq_by_thread[egg_app.current_thread] >= 0
+
+    def test_redraw_full_screen_replaces_source_and_does_not_print_history(self, egg_app, monkeypatch):
+        from eggthreads import append_message, create_snapshot
+
+        for i in range(3):
+            append_message(egg_app.db, egg_app.current_thread, "user", f"redraw lazy {i}")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        renderer = self.Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+
+        printed = []
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: printed.append(m))
+
+        egg_app.redraw_static_view(reason="manual")
+
+        # Reset clears rows appended with print_above, then installs a fresh
+        # source and repaints the live window without eager history printing.
+        assert len(renderer.sources) == 1
+        assert renderer.sources[0] is not None
+        assert renderer.clear_calls == 1
+        assert renderer.invalidate_calls >= 1
+        assert renderer.update_calls == 1
+        assert printed == []
+
+    def test_redraw_inline_still_prints_full_static_history(self, egg_app, monkeypatch):
+        from eggthreads import append_message, create_snapshot
+
+        for i in range(3):
+            append_message(egg_app.db, egg_app.current_thread, "user", f"inline redraw {i}")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        class InlineRenderer:
+            def invalidate(self):
+                pass
+
+            def print_above(self, *args, **kwargs):
+                pass
+
+        renderer = InlineRenderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = True
+
+        rendered = []
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: rendered.append(m.get("content")))
+        monkeypatch.setattr(egg_app, "print_banner", lambda: None)
+
+        egg_app.redraw_static_view(reason="manual")
+
+        assert rendered[-3:] == [f"inline redraw {i}" for i in range(3)]
+
+    def test_thread_switch_command_refreshes_source_without_printing_history(self, egg_app, monkeypatch):
+        from eggthreads import append_message, create_root_thread, create_snapshot
+
+        new_thread = create_root_thread(egg_app.db, name="target")
+        append_message(egg_app.db, new_thread, "user", "thread switch lazy")
+        create_snapshot(egg_app.db, new_thread)
+
+        renderer = self.Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        egg_app.current_thread = new_thread
+
+        printed = []
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: printed.append(m))
+
+        egg_app.print_current_thread(heading=f"Switched to thread: {new_thread}")
+
+        assert len(renderer.sources) == 1
+        assert renderer.sources[0] is not None
+        assert renderer.clear_calls == 1
+        assert renderer.update_calls == 1
+        assert printed == []
+
+    def test_display_verbosity_redraw_replaces_source(self, egg_app, monkeypatch):
+        renderer = self.Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+
+        printed = []
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: printed.append(m))
+
+        egg_app.handle_command("/displayVerbosity medium")
+
+        assert egg_app._display_verbosity == "medium"
+        assert len(renderer.sources) == 1
+        assert renderer.sources[0] is not None
+        assert renderer.clear_calls == 1
+        assert renderer.update_calls == 1
+        assert printed == []
+
+    def test_full_screen_run_installs_source_before_initial_paint_without_history_printing(self, egg_app, monkeypatch):
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "user", "run lazy history")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        events = []
+
+        class RunRenderer(self.Renderer):
+            def __enter__(self):
+                events.append("enter")
+                assert self.sources
+                assert isinstance(self.sources[-1], TranscriptScrollbackSource)
+                egg_app.running = False
+                return self
+
+            def __exit__(self, *exc):
+                events.append("exit")
+
+        async def no_watch():
+            return None
+
+        monkeypatch.setattr(egg_app, "start_watching_current", no_watch)
+        monkeypatch.setattr(egg_app.input_panel.editor, "_input_worker", lambda: None)
+        monkeypatch.setattr("threading.Thread", lambda *a, **kw: type("Thread", (), {"start": lambda self: None})())
+        monkeypatch.setattr("egg.app.DiffRenderer", lambda *a, **kw: RunRenderer())
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: events.append("message"))
+        egg_app._display_is_inline = False
+
+        asyncio.run(egg_app.run())
+
+        assert events == ["enter", "exit"]
+
+    def test_mode_switch_to_full_installs_source_without_eager_reprint(self, egg_app, monkeypatch):
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "user", "mode lazy history")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        events = []
+
+        class RunRenderer(self.Renderer):
+            def __enter__(self):
+                events.append("enter")
+                assert self.sources
+                assert isinstance(self.sources[-1], TranscriptScrollbackSource)
+                egg_app.running = False
+                return self
+
+            def __exit__(self, *exc):
+                events.append("exit")
+
+        async def no_watch():
+            return None
+
+        monkeypatch.setattr(egg_app, "start_watching_current", no_watch)
+        monkeypatch.setattr(egg_app.input_panel.editor, "_input_worker", lambda: None)
+        monkeypatch.setattr("threading.Thread", lambda *a, **kw: type("Thread", (), {"start": lambda self: None})())
+        monkeypatch.setattr("egg.app.DiffRenderer", lambda *a, **kw: RunRenderer())
+        monkeypatch.setattr(egg_app, "console_print_message", lambda m: events.append("message"))
+        egg_app._display_is_inline = False
+        egg_app._pending_mode_change = True
+
+        asyncio.run(egg_app.run())
+
+        assert events == ["enter", "exit"]
 
 
 class TestTranscriptScrollbackSource:

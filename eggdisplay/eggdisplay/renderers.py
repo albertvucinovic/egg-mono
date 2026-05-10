@@ -478,6 +478,8 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         """
         self._scrollback_source = source
         self._source_row_count_by_width.clear()
+        if source is not None:
+            self._scroll_offset = 0
         if self._prev_viewport or self._live_lines or self._scrollback or self._stream_buffer:
             self._paint(self._viewport_w or self._term_width())
 

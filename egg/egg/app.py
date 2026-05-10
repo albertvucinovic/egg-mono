@@ -467,7 +467,7 @@ class EggDisplayApp(
             system_prompt=self.system_prompt,
             get_current_model=self.current_model_for_thread,
             watch_current_thread=self.start_watching_current,
-            print_current_thread=self.print_static_view_current,
+            print_current_thread=self.print_current_thread,
             format_threads=self.format_tree,
             select_threads=self.select_threads_by_selector,
             append_message=append_message,
@@ -546,7 +546,8 @@ class EggDisplayApp(
 
         self.print_banner()
         # Print initial static view to console so history is visible above live panels
-        self.print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
+        if self._display_is_inline:
+            self.print_static_view_current(heading=f"Switched to thread: {self.current_thread}")
 
         # Start input worker thread (readchar -> queue)
         import threading
@@ -569,13 +570,15 @@ class EggDisplayApp(
                 self._renderer = DiffRenderer(
                     self.render_group(), console=self.console, mode=mode_name,
                 )
+                if not self._display_is_inline:
+                    self._install_transcript_scrollback_source(self._renderer)
                 with self._renderer as renderer:
-                    # In full-screen mode the alt-screen starts blank, so
-                    # populate the scrollback model with recent history.
-                    # In inline mode the pre-loop prints are already in
-                    # the terminal's real scrollback, but on a mode switch
-                    # we reprint anyway so behaviour is consistent.
-                    if not self._display_is_inline or self._pending_mode_change:
+                    # Inline mode uses the terminal's native scrollback, so on
+                    # mode switches into inline we print the full static
+                    # transcript. Full-screen history is provided by the lazy
+                    # TranscriptScrollbackSource installed before __enter__ so
+                    # the initial paint only renders the visible tail.
+                    if self._display_is_inline and self._pending_mode_change:
                         try:
                             self.print_static_view_current(heading=None)
                         except Exception:
