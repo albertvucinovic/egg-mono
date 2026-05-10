@@ -1201,6 +1201,88 @@ def _compaction_candidate_messages(db: ThreadsDB, thread_id: str) -> List[tuple[
     return rows
 
 
+def _tool_call_ids_from_payload(payload: Dict[str, Any]) -> List[str]:
+    ids: List[str] = []
+    tool_calls = payload.get('tool_calls')
+    if not isinstance(tool_calls, list):
+        return ids
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        tcid = tc.get('id') or tc.get('tool_call_id')
+        if not tcid and isinstance(tc.get('function'), dict):
+            tcid = tc['function'].get('id')
+        if isinstance(tcid, str) and tcid:
+            ids.append(tcid)
+    return ids
+
+
+def _compaction_protocol_rejection_reason(
+    selected: tuple[int, str, Dict[str, Any]],
+    candidates: List[tuple[int, str, Dict[str, Any]]],
+) -> Optional[str]:
+    """Return why a selected start would break provider tool-call protocol.
+
+    ``ThreadRunner._enforce_assistant_toolcall_protocol`` can safely drop old
+    malformed assistant/tool fragments from provider context, but compaction is
+    a durable user-visible boundary.  Reject starts that would select only part
+    of an otherwise well-formed assistant/tool result block; that would make the
+    selected start message itself disappear from the provider prompt after
+    sanitization, which is surprising and not a useful compaction boundary.
+    """
+
+    ordered = sorted(
+        (row for row in candidates if not row[2].get('no_api')),
+        key=lambda row: row[0],
+    )
+    try:
+        selected_index = ordered.index(selected)
+    except ValueError:
+        selected_index = -1
+
+    if selected_index >= 0 and selected[2].get('role') == 'tool':
+        preceding_assistant: Optional[tuple[int, str, Dict[str, Any]]] = None
+        preceding_tool_ids: set[str] = set()
+        selected_tcid = selected[2].get('tool_call_id')
+        if isinstance(selected_tcid, str) and selected_tcid:
+            preceding_tool_ids.add(selected_tcid)
+        j = selected_index - 1
+        while j >= 0:
+            row = ordered[j]
+            role = row[2].get('role')
+            if role == 'tool':
+                tcid = row[2].get('tool_call_id')
+                if isinstance(tcid, str) and tcid:
+                    preceding_tool_ids.add(tcid)
+                j -= 1
+                continue
+            if role == 'assistant' and _tool_call_ids_from_payload(row[2]):
+                preceding_assistant = row
+            break
+        if preceding_assistant is not None:
+            expected = set(_tool_call_ids_from_payload(preceding_assistant[2]))
+            if preceding_tool_ids and preceding_tool_ids.issubset(expected):
+                return "starts inside an assistant/tool result block"
+
+    selected_role = selected[2].get('role')
+    if selected_role == 'assistant':
+        expected_ids = _tool_call_ids_from_payload(selected[2])
+        if expected_ids:
+            remaining = set(expected_ids)
+            idx = selected_index + 1
+            while remaining:
+                row = ordered[idx] if 0 <= idx < len(ordered) else None
+                if row is None or row[2].get('role') != 'tool':
+                    return "assistant tool_calls are not followed by all required tool results"
+                tcid = row[2].get('tool_call_id')
+                if not isinstance(tcid, str) or tcid not in remaining:
+                    return "assistant tool_calls are followed by an unexpected tool result"
+                remaining.remove(tcid)
+                idx += 1
+
+    return None
+
+
 def resolve_compaction_start_message(db: ThreadsDB, thread_id: str, selector: Optional[str] = None) -> CompactionStartResolution:
     """Resolve a compaction start selector to a valid user/assistant message.
 
@@ -1261,6 +1343,16 @@ def resolve_compaction_start_message(db: ThreadsDB, thread_id: str, selector: Op
 
     event_seq, msg_id, payload = selected
     role = payload.get('role')
+    protocol_reason = _compaction_protocol_rejection_reason(selected, candidates)
+    if protocol_reason:
+        return CompactionStartResolution(
+            False,
+            normalized,
+            msg_id,
+            event_seq,
+            role if isinstance(role, str) else None,
+            f"Invalid compaction start: {protocol_reason}",
+        )
     return CompactionStartResolution(True, normalized, msg_id, event_seq, role if isinstance(role, str) else None, "ok")
 
 

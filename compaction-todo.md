@@ -747,11 +747,11 @@ Status notes:
 
 Goal: reduce edge-case risk after the core path works.
 
-- [ ] Review provider protocol edge cases.
+- [x] Review provider protocol edge cases.
   - Starting at assistant messages with tool calls.
   - Starting after/before tool result blocks.
   - Strict providers that dislike assistant-first transcripts.
-- [ ] Review interactions with message edits/deletes/skips.
+- [x] Review interactions with message edits/deletes/skips.
   - If the start message is later deleted/skipped, provider context should fall back safely or ignore that compaction event.
 - [ ] Review token accounting.
   - UI may show full historical tokens.
@@ -764,7 +764,12 @@ Goal: reduce edge-case risk after the core path works.
 - [ ] Commit.
 
 Status notes:
-- Not started.
+- 2026-05-10: Provider protocol hardening slice implemented. Inspected `ThreadRunner._sanitize_messages_for_api` / `_enforce_assistant_toolcall_protocol` and added compaction-time validation for unsafe provider tool-call boundaries: assistant `tool_calls` starts are accepted only when immediately followed by all matching visible tool results, and starts inside an assistant/tool result block are treated as unsafe for any future selector that might allow tool-role starts. Plain assistant summary compaction without tool calls remains allowed. Added cheap fallback tests confirming compaction markers are ignored if their start message is later deleted or skipped via `/continue`. No token/status/UI, diagnostics, source exploration, or broader hardening work was included.
+  - Changed files: `eggthreads/eggthreads/api.py`, `eggthreads/tests/test_compaction.py`, `compaction-todo.md`.
+  - Commit: this Provider protocol hardening slice change.
+  - Tests: `pytest -q eggthreads/tests/test_compaction.py` passed; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py` passed.
+  - Next: continue Phase 10 with a separate small invariant-test slice (parent/child rows unchanged, no_api never included because of compaction, and `/continue` invalidation invariants) or review token-accounting edge cases if needed.
+  - Caveats: strict-provider assistant-first policy remains an open design question; this slice only rejects tool-call protocol starts that the existing sanitizer would have to drop or could not preserve safely.
 
 ## Open design questions
 

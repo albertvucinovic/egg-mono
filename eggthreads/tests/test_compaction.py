@@ -234,6 +234,111 @@ def test_runner_sanitize_keeps_compacted_provider_view(tmp_path):
     assert old not in [m.get("msg_id") for m in compacted]
 
 
+def test_compaction_allows_assistant_summary_without_tool_calls(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    summary = ts.append_message(db, tid, "assistant", "plain summary with no tool calls")
+
+    result = ts.commit_thread_compaction(db, tid, summary, created_by="test")
+
+    assert result.success is True
+    assert result.start_msg_id == summary
+
+
+def test_compaction_rejects_assistant_tool_call_start_without_complete_results(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    assistant = ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "I will call tools",
+        extra={
+            "tool_calls": [
+                {"id": "tc-one", "function": {"name": "one", "arguments": "{}"}},
+                {"id": "tc-two", "function": {"name": "two", "arguments": "{}"}},
+            ]
+        },
+    )
+    ts.append_message(db, tid, "tool", "one result", extra={"tool_call_id": "tc-one"})
+
+    result = ts.commit_thread_compaction(db, tid, assistant, created_by="test")
+
+    assert result.success is False
+    assert "tool_calls" in result.message
+    assert _events(db, tid) == []
+
+
+def test_compaction_rejects_start_inside_tool_result_block(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old")
+    assistant = ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "I will call tools",
+        extra={
+            "tool_calls": [
+                {"id": "tc-one", "function": {"name": "one", "arguments": "{}"}},
+                {"id": "tc-two", "function": {"name": "two", "arguments": "{}"}},
+            ]
+        },
+    )
+    tool_one = ts.append_message(db, tid, "tool", "one result", extra={"tool_call_id": "tc-one"})
+    ts.append_message(db, tid, "tool", "two result", extra={"tool_call_id": "tc-two"})
+
+    assistant_result = ts.commit_thread_compaction(db, tid, assistant, created_by="test")
+    # Simulate a future/advanced selector that might otherwise allow tool-role
+    # starts; the protocol hardening helper should identify the real hazard as
+    # starting mid assistant/tool result block.
+    import eggthreads.api as api
+
+    candidates = api._compaction_candidate_messages(db, tid)
+    selected_tool = next(row for row in candidates if row[1] == tool_one)
+    protocol_reason = api._compaction_protocol_rejection_reason(selected_tool, candidates)
+
+    assert assistant_result.success is True
+    assert protocol_reason == "starts inside an assistant/tool result block"
+    assert len(_events(db, tid)) == 1
+
+
+def test_deleted_compaction_start_marker_is_ignored_for_provider_context(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    start = ts.append_message(db, tid, "assistant", "summary")
+    after = ts.append_message(db, tid, "user", "after")
+    compacted = ts.commit_thread_compaction(db, tid, start, created_by="test")
+    assert compacted.success is True
+
+    ts.delete_message(db, tid, start)
+
+    assert ts.latest_thread_compaction(db, tid) is not None
+    assert ts.latest_effective_thread_compaction(db, tid) is None
+    snapshot = ts.create_snapshot(db, tid)
+    filtered = ts.filter_messages_for_compaction_provider_context(db, tid, snapshot["messages"])
+    assert [m["msg_id"] for m in filtered] == [old, after]
+
+
+def test_skipped_compaction_start_marker_is_ignored_for_provider_context(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old")
+    start = ts.append_message(db, tid, "assistant", "summary")
+    after = ts.append_message(db, tid, "user", "after")
+    compacted = ts.commit_thread_compaction(db, tid, start, created_by="test")
+    assert compacted.success is True
+
+    result = ts.continue_thread(db, tid, old)
+
+    assert result.success is True
+    assert start in result.skipped_msg_ids
+    assert ts.latest_thread_compaction(db, tid) is not None
+    assert ts.latest_effective_thread_compaction(db, tid) is None
+    snapshot = ts.create_snapshot(db, tid)
+    filtered = ts.filter_messages_for_compaction_provider_context(db, tid, snapshot["messages"])
+    assert [m["msg_id"] for m in filtered] == [old]
+    assert after in result.skipped_msg_ids
+
+
 def test_continue_before_compaction_makes_control_event_ineffective(tmp_path):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old")
