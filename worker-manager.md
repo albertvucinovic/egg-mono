@@ -172,6 +172,10 @@ When a worker returns:
 
 ## Sending continuation to an existing worker
 
+Prefer continuing a reliable worker when it still has substantial context room. Do not spawn a fresh worker merely because a slice completed; switching workers can degrade performance by losing task-local knowledge.
+
+Current expected worker context capacity is about 260k tokens. As a rule of thumb, reuse a reliable worker below roughly 70-80% of that budget (about 180k-208k tokens), especially when the next slice builds directly on its previous work.
+
 Reuse the same worker when:
 
 - its context is still reasonable;
@@ -215,7 +219,7 @@ Useful rule of thumb:
 If worker context is above ~70-80% of the expected limit, prefer a fresh worker for the next phase.
 ```
 
-If exact context limit is unknown but the status shows very large context, prefer a fresh worker.
+With the current expected worker context capacity around 260k tokens, that means prefer reuse below about 180k-208k tokens unless the next task is genuinely unrelated or the previous worker was unreliable. If exact context limit is unknown but the status shows very large context, prefer a fresh worker.
 
 ## Commit discipline
 
