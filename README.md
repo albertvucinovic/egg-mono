@@ -1,180 +1,162 @@
 # egg-mono
 
-A modular AI conversation platform. Tree-structured threads, multi-provider LLM routing, sandboxed tool execution, and persistent REPL sessions — usable from a terminal TUI, a web UI, or as building blocks for headless agents.
+Egg is a modular AI conversation platform from Entropy Gradient. It combines
+SQLite-backed conversation threads, multi-provider LLM routing, tool execution,
+persistent REPL sessions, subagents, and terminal/web frontends.
+
+Use it as:
+
+- an interactive terminal assistant (`egg`);
+- a web UI (`eggw`);
+- a headless thread/subagent engine (`eggthreads` + `eggllm`);
+- a task runtime with caching/crash recovery (`eggflow`).
 
 ## Packages
 
 | Package | Description |
-|---------|-------------|
-| **eggthreads** | Core engine — SQLite-backed tree-structured conversation threads with async runners, sandboxing, persistent sessions, and tool execution |
-| **eggllm** | LLM router with OpenAI-compatible provider abstraction (OpenAI, Anthropic, Google, DeepSeek, Groq, and more) |
-| **eggflow** | Task-based execution engine with caching, crash recovery, and optional eggthreads integration |
-| **eggdisplay** | Rich-based TUI text editor and display panels |
-| **eggconfig** | Shared model configuration data |
-| **egg** | CLI chat interface (TUI) |
-| **eggw** | Web UI — FastAPI backend + Next.js frontend |
+| --- | --- |
+| `eggthreads` | Core thread engine: append-only event log, snapshots, async runners, subtree scheduler, tools, sandbox/session integration, compaction, and subagents. |
+| `eggllm` | Lightweight LLM router for OpenAI-compatible chat/responses providers, model aliases, provider catalogs, streaming, reasoning, and tool-call deltas. |
+| `egg` | Terminal chat/TUI frontend. |
+| `eggw` | FastAPI + React web frontend. |
+| `eggdisplay` | Rich-based inline panels and text editor used by the terminal UI. |
+| `eggflow` | Async task execution and caching framework, optionally integrated with `eggthreads`. |
+| `eggconfig` | Shared default model configuration data. |
 
 ## Architecture
 
-```
-         eggllm
-            │
-        eggthreads
-      ┌─────┼──────────┐
-     egg   eggw    your agent
+```text
+              eggconfig/models.json
+                      │
+                    eggllm
+                      │
+                  eggthreads
+          ┌───────────┼───────────┐
+         egg          eggw      headless agents
+          │
+     eggdisplay
+
+     eggflow can be used alongside eggthreads for cached tasks.
 ```
 
-`egg` also depends on `eggdisplay`; headless agents typically add `eggflow` for caching and crash recovery. The core libraries have no UI dependencies and can be composed into agents that run unattended — `egg` and `eggw` are just two frontends built on top of them.
+The core thread/event model lives in `eggthreads`. `egg` and `eggw` are clients
+of that engine; they do not own the conversation state.
 
-Recent builds also include an explicit RLM workflow: persistent Python/Bash REPL sessions, packaged skills, and subagent tools (`spawn_agent`, `wait`, `send_message_to_child`) that let long-running tasks keep state and delegate work without stuffing every intermediate result into chat context.
+## Current core concepts
+
+- **Stable threads**: one append-only event log per thread, with parent/child
+  relationships for delegation and subtree scheduling.
+- **Subagents**: model-visible tools can spawn child threads, wait on them, and
+  send follow-up guidance.
+- **Tools and commands**: model-visible tools, user commands, output approval,
+  sandboxing, and long-output stashing share the same event model.
+- **Persistent sessions**: Python/Bash REPL sessions can keep state across tool
+  calls. Python REPLs are hydrated with `thread_context`, message aliases, and
+  helper functions for exact transcript inspection.
+- **Compaction**: `thread.compaction` events set the future provider/API context
+  start without deleting UI/raw history. `/compact`, `/compactWithSummary`, and
+  automatic summary compaction all use the same start-pointer primitive.
+- **Token reporting**: `context_tokens` means the current provider/API context
+  after compaction; `full_thread_tokens` means the full visible/effective thread
+  history before compaction filtering.
 
 ## Install
 
 ```bash
 git clone https://github.com/albertvucinovic/egg-mono.git
 cd egg-mono
-python3 -m venv venv && source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 make install
 ```
 
-Set up API keys:
+For development dependencies:
 
 ```bash
-cp .env.example .env
-# Edit .env with your provider keys
+make install-dev
 ```
 
-### Use as a dependency
+Set API keys in your environment or `.env` file as expected by your
+`models.json` provider entries, for example:
 
-Individual packages can be installed directly from GitHub:
-
+```bash
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+export GOOGLE_API_KEY=...
 ```
-eggthreads @ git+https://github.com/albertvucinovic/egg-mono.git#subdirectory=eggthreads
-eggflow[eggthreads] @ git+https://github.com/albertvucinovic/egg-mono.git#subdirectory=eggflow
-```
 
-## Usage
+## Run
 
-**Terminal UI:**
+Terminal UI:
 
 ```bash
 ./egg/egg.sh
 ```
 
-**Web UI:**
+Web UI:
 
 ```bash
 ./eggw/eggw.sh
 ```
 
-**Persistent REPL sessions:**
+Headless use starts from `eggthreads` APIs. See `eggthreads/README.md` for a
+minimal subtree scheduler example.
 
-`egg` and `eggw` support per-thread Python/Bash REPL sessions. The REPL keeps variables and shell state across calls, and REPL code can use the small `eggtools` bridge to call Egg tools or coordinate subagents.
+## Useful terminal workflows
 
 ```text
-/sessionOn provider=docker
-/pythonRepl data = {"status": "kept in session"}
-/bashRepl pwd
-/sessionStatus
+/help                         # show commands
+/model                        # inspect/switch model
+/tools                        # inspect tool configuration
+/compact                      # set provider context start
+/compactWithSummary           # ask assistant to summarize, then compact
+/sessionOn provider=docker    # enable persistent REPL sessions
+/pythonRepl print(len(all_messages))
+/skill rlm                    # load RLM/persistent-REPL workflow notes
 ```
 
-Use `/skills` to list packaged skill documents and `/skill rlm` for the persistent-REPL/subagent workflow notes.
+Compaction does not delete history. Humans can still scroll the full transcript
+and copy full `msg_id` values for `/continue <msg_id>` or `/compact <msg_id>`.
 
-**Headless agent:**
+## Use as a dependency
 
-The core packages can drive LLM conversations programmatically — no UI needed. Spawn a thread tree, route to any provider, execute tools in sandboxes, and let `eggflow` handle caching and crash recovery. A minimal example:
+Packages can be installed directly from subdirectories:
 
-```python
-import asyncio
-from eggthreads import (
-    ThreadsDB, SubtreeScheduler, RunnerConfig, create_llm_client,
-    create_root_thread, create_child_thread, append_message,
-    create_snapshot, set_subtree_tools_enabled, wait_subtree_idle,
-)
-
-async def main():
-    db = ThreadsDB()
-    db.init_schema()
-
-    root = create_root_thread(db, name="batch")
-    for i in range(3):
-        child = create_child_thread(db, root, name=f"agent-{i}")
-        append_message(db, child, "system", "You are a helpful assistant.")
-        append_message(db, child, "user", f"Write a haiku about topic #{i}.")
-        create_snapshot(db, child)
-
-    set_subtree_tools_enabled(db, root, True)
-
-    llm = create_llm_client()
-    scheduler = SubtreeScheduler(db, root_thread_id=root, llm=llm,
-                                  config=RunnerConfig(max_concurrent_threads=3))
-    task = asyncio.create_task(scheduler.run_forever(poll_sec=0.05))
-    await wait_subtree_idle(db, root)
-    task.cancel()
-
-asyncio.run(main())
+```text
+eggthreads @ git+https://github.com/albertvucinovic/egg-mono.git#subdirectory=eggthreads
+eggllm @ git+https://github.com/albertvucinovic/egg-mono.git#subdirectory=eggllm
+eggflow[eggthreads] @ git+https://github.com/albertvucinovic/egg-mono.git#subdirectory=eggflow
 ```
 
-For a real-world example see [EvolveTropy](https://github.com/albertvucinovic/EvolveTropy), which uses `eggthreads` + `eggflow` to run dozens of sandboxed LLM agents in parallel with full crash recovery.
+## Sandboxing and sessions
 
-### Run from anywhere
+Tool execution can run unsandboxed or in a sandbox. Supported providers include:
 
-Add the following to your `~/.bashrc` (or `~/.zshrc`):
+| Provider | Notes |
+| --- | --- |
+| Docker | Default/recommended when available. Build the local image with `./eggthreads/docker/create-image.sh`. |
+| bubblewrap | Linux-only lightweight sandbox. |
+| srt | Anthropic sandbox runtime. |
+| off | Set `EGG_SANDBOX_MODE=off` to disable sandboxing. |
 
-```bash
-export EGG_MONO_HOME="$HOME/path/to/egg-mono"  # adjust to your clone location
-alias egg="$EGG_MONO_HOME/egg/egg.sh"
-alias eggw="$EGG_MONO_HOME/eggw/eggw.sh"
-```
-
-Then reload your shell (`source ~/.bashrc`) and run `egg` or `eggw` from any directory.
-
-## Requirements
-
-- **Python** >= 3.10
-- **Platform**: Linux (macOS and Windows are untested)
-
-### Sandboxing (optional)
-
-Tool execution can run in a sandbox. Three providers are supported — use whichever is available on your system:
-
-| Provider | Platforms | Install |
-|----------|-----------|---------|
-| **Docker** (default) | Linux, macOS, Windows | [docker.com](https://docs.docker.com/get-docker/) |
-| **bubblewrap** | Linux only | `apt install bubblewrap` |
-| **srt** (Anthropic sandbox runtime) | Linux, macOS | `npm install -g @anthropic-ai/sandbox-runtime` |
-
-If no provider is available, commands run unsandboxed. Sandboxing can be disabled entirely with `EGG_SANDBOX_MODE=off`.
-
-### Docker-backed services
-
-Egg uses Docker in three separate places. Set up only the pieces you need:
-
-| Use | Image/container | Setup |
-|-----|-----------------|-------|
-| Tool sandboxing | `egg-sandbox` image | Optional but recommended for Docker sandboxing: `./eggthreads/docker/create-image.sh` |
-| Persistent REPL sessions | `egg-rlm-session` thin wrapper image | Included in `create-image.sh`, or build just this image with `./eggthreads/docker/create-session-image.sh` |
-| Web search | `egg-searxng` + `egg-searxng-valkey` containers | Start with `/startSearxng` in `egg`, or run `docker compose up -d` in `eggthreads/eggthreads/web/searxng/` |
-
-Notes:
-
-- `create-image.sh` builds the shared `egg-sandbox` runtime and a thin
-  `egg-rlm-session` wrapper. The wrapper keeps the REPL/sessiond default command
-  while reusing the same filesystem/toolchain as sandboxed tool calls.
-- If `egg-sandbox` is missing, Docker sandboxing falls back to `python:3.12-slim`, but the local image includes extra tools/packages used by Egg.
-- `egg-sandbox` includes elan with Lean 4.29.1 plus common Egg development tools
-  (pytest, FastAPI/httpx, pyflakes, pdoc, tox, Node/npm, ripgrep, sqlite, etc.),
-  so Lean projects with a mounted `.lake` cache and egg-mono development both work
-  inside Docker sandboxed tool calls and Docker REPL sessions.
-- SearXNG uses public images from Docker Hub; there is no local image to build. Stop it with `/stopSearxng` or `docker compose down` in the SearXNG directory.
+Docker is also used for optional persistent REPL session containers and the
+self-hosted SearXNG search service. See `eggthreads/README.md` and
+`eggthreads/eggthreads/web/searxng/README.md`.
 
 ## Development
 
 ```bash
-make install-dev   # install with test dependencies
-make test          # run all tests
-make lint          # pyflakes
-make clean         # remove build artifacts
+make install-dev
+make test
+make lint
+```
+
+Focused test examples:
+
+```bash
+pytest -q eggthreads/tests/test_compaction.py
+pytest -q egg/tests
+cd eggw/frontend && npx tsc --noEmit --pretty false
 ```
 
 ## License

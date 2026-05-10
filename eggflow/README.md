@@ -1,18 +1,28 @@
 # eggflow
 
-A simple task execution framework with automatic caching.
+`eggflow` is a small async task execution framework with SQLite-backed caching.
+It lets you define tasks, compose them with `yield`, run independent subtasks in
+parallel, and reuse cached results across process restarts.
 
-## Core Concepts
+It is useful on its own and can also sit beside `eggthreads` for cached agent
+workflows.
 
-- **Task**: A unit of work that can be cached. Define by subclassing `Task` and implementing `run()`.
-- **FlowExecutor**: Runs tasks and manages caching via SQLite.
-- **yield**: Use `yield` inside `run()` to execute subtasks. Results are returned as values directly.
+## Core concepts
 
-## Quick Start
+- **Task**: a dataclass-like unit of work. Subclass `Task` and implement
+  `run()`.
+- **TaskStore**: SQLite cache storage.
+- **FlowExecutor**: executes tasks, resolves yielded subtasks, and stores
+  results.
+- **Result**: success/error wrapper with metadata.
+- **TaskError**: raised for failed subtasks unless you request wrapped results.
+
+## Quick start
 
 ```python
+import asyncio
 from dataclasses import dataclass
-from eggflow import Task, TaskStore, FlowExecutor
+from eggflow import FlowExecutor, Task, TaskStore
 
 @dataclass
 class Greet(Task):
@@ -21,30 +31,29 @@ class Greet(Task):
     async def run(self):
         return f"Hello, {self.name}!"
 
-# Run a task
-store = TaskStore("cache.db")
-executor = FlowExecutor(store)
-
 async def main():
+    store = TaskStore("cache.db")
+    executor = FlowExecutor(store)
     result = await executor.run(Greet("World"))
-    print(result)  # "Hello, World!"
+    print(result)
+
+asyncio.run(main())
 ```
 
-## Composing Tasks
+## Compose tasks with `yield`
 
-Use `yield` to compose tasks. Yielded tasks are cached automatically:
+Inside `run()`, yield another task to execute it. The yielded result is returned
+as the value directly. Workflows that use `yield` are normal generator methods
+(`def run`), while simple tasks can use `async def run`:
 
 ```python
 @dataclass
 class Pipeline(Task):
     def run(self):
-        # Each yield returns the value directly
-        data = yield FetchData(url="...")
+        data = yield FetchData(url="https://example.com/data.json")
         processed = yield ProcessData(data)
         return yield SaveResult(processed)
 ```
-
-## Parallel Execution
 
 Yield a list to run tasks in parallel:
 
@@ -52,17 +61,13 @@ Yield a list to run tasks in parallel:
 @dataclass
 class ParallelWork(Task):
     def run(self):
-        results = yield [
-            FetchData("url1"),
-            FetchData("url2"),
-            FetchData("url3"),
-        ]
-        return results  # List of values
+        results = yield [FetchData("a"), FetchData("b"), FetchData("c")]
+        return results
 ```
 
-## Error Handling
+## Handling failures
 
-By default, task failures raise `TaskError`:
+By default failed subtasks raise `TaskError`:
 
 ```python
 from eggflow import TaskError
@@ -71,15 +76,12 @@ from eggflow import TaskError
 class SafeFlow(Task):
     def run(self):
         try:
-            value = yield RiskyTask()
+            return yield RiskyTask()
         except TaskError as e:
             return f"Failed: {e.result.error}"
-        return value
 ```
 
-## Getting Result Objects
-
-Use `wrapped()` when you need the `Result` object (for error checking without exceptions, or accessing metadata):
+Use `wrapped()` to receive the `Result` object instead:
 
 ```python
 from eggflow import wrapped
@@ -87,78 +89,28 @@ from eggflow import wrapped
 @dataclass
 class RetryFlow(Task):
     def run(self):
-        for i in range(3):
-            result = yield wrapped(UnreliableTask(attempt=i))
+        for attempt in range(3):
+            result = yield wrapped(UnreliableTask(attempt=attempt))
             if result.is_success:
                 return result.value
-        return "All attempts failed"
+        return "all attempts failed"
 ```
 
-## Skipping Cache
+## Cache controls
 
-Use `nocache()` to skip caching for a specific execution:
+Skip cache for one execution:
 
 ```python
 from eggflow import nocache
 
 @dataclass
-class FreshData(Task):
+class FreshFlow(Task):
     def run(self):
-        cached_config = yield LoadConfig()
         fresh_data = yield nocache(FetchLiveData())
         return fresh_data
 ```
 
-## Wrapping Existing Functions
-
-Use `as_task()` to wrap existing functions or methods:
-
-```python
-from eggflow import as_task
-
-async def fetch_url(url: str, timeout: int = 30):
-    # existing function...
-    return data
-
-@dataclass
-class MyFlow(Task):
-    def run(self):
-        # Wrap function call as a cacheable task
-        data = yield as_task(fetch_url, "https://api.example.com")
-
-        # Specify which args affect cache key
-        data2 = yield as_task(fetch_url, url, timeout=60, cache_key=(url,))
-
-        return data
-```
-
-For methods, include relevant instance state in the cache key:
-
-```python
-class APIClient:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-
-    async def query(self, prompt: str):
-        return await self._call_api(prompt)
-
-client = APIClient("sk-...")
-
-@dataclass
-class QueryFlow(Task):
-    def run(self):
-        # Include api_key in cache_key so different clients cache separately
-        result = yield as_task(
-            client.query,
-            "Hello",
-            cache_key=(client.api_key, "Hello")
-        )
-        return result
-```
-
-## Uncacheable Tasks
-
-Set `cacheable = False` for tasks that should never be cached:
+Make a task permanently uncacheable:
 
 ```python
 from typing import ClassVar
@@ -168,39 +120,50 @@ class AlwaysFresh(Task):
     cacheable: ClassVar[bool] = False
 
     async def run(self):
-        return get_current_time()
+        return current_time()
 ```
 
-## Using execute() in Regular Functions
-
-Tasks can be executed from regular async functions using `.execute()`:
+## Wrap existing functions
 
 ```python
-async def helper_function():
-    # This will use the current executor's cache
-    result = await SomeTask("arg").execute()
-    return result
+from eggflow import as_task
+
+async def fetch_url(url: str, timeout: int = 30):
+    return "..."
 
 @dataclass
-class MainFlow(Task):
-    async def run(self):
-        # Tasks called via execute() inside here are still cached
-        return await helper_function()
+class MyFlow(Task):
+    def run(self):
+        data = yield as_task(fetch_url, "https://example.com", timeout=60)
+        keyed = yield as_task(fetch_url, "https://example.com", cache_key=("example",))
+        return data, keyed
 ```
 
-## API Reference
+For methods, include relevant instance state in `cache_key` if it affects the
+result.
 
-### Core Classes
+## Calling tasks from helpers
 
-- `Task` - Base class for tasks. Subclass and implement `run()`.
-- `Result` - Contains `value`, `error`, `metadata`, and `is_success` property.
-- `TaskStore` - SQLite-based cache storage.
-- `FlowExecutor` - Executes tasks with caching.
-- `TaskError` - Raised when a task fails (contains `.result`).
-- `FuncTask` - Task wrapping a function call.
+Tasks can execute through the current executor with `.execute()`:
 
-### Functions
+```python
+async def helper():
+    return await SomeTask("arg").execute()
+```
 
-- `as_task(func, *args, cache_key=None, **kwargs)` - Wrap a function/method as a Task.
-- `nocache(task)` - Skip caching for this execution.
-- `wrapped(task)` - Return `Result` object instead of value.
+## Optional eggthreads integration
+
+Install with:
+
+```bash
+pip install -e "./eggflow[eggthreads]"
+```
+
+Use this when a flow needs to launch or coordinate Egg threads while still
+benefiting from task caching/crash recovery.
+
+## Tests
+
+```bash
+pytest -q eggflow/tests
+```
