@@ -128,6 +128,57 @@ def test_compact_command_uses_core_helper(tmp_path):
     assert _events(db, tid)[0][1]["start_msg_id"] == user
 
 
+def test_compact_with_summary_command_appends_model_visible_request(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "hello")
+    seen: list[str] = []
+    started: list[str] = []
+
+    registry = create_default_command_registry()
+    assert "compactWithSummary" in registry.names()
+
+    result = registry.execute(
+        "compactWithSummary",
+        CommandContext(db=db, current_thread=tid, log_system=seen.append, start_scheduler=started.append),
+        "",
+    )
+
+    assert result.clear_input is True
+    assert result.start_schedulers == (tid,)
+    assert result.message is None
+    assert started == [tid]
+    assert seen and "Queued compaction summary request" in seen[-1]
+
+    messages = _snapshot_messages(db, tid)
+    request = messages[-1]
+    assert request["role"] == "user"
+    assert request["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    assert request["compaction_summary_request"] is True
+    assert request["created_by"] == "user_command"
+    assert "concise continuation summary" in request["content"]
+    assert "compact_thread()" in request["content"]
+    assert "start_message omitted" in request["content"]
+    assert _events(db, tid) == []
+
+
+def test_compact_with_summary_command_returns_confirmation_without_logger(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "hello")
+
+    registry = create_default_command_registry()
+    result = registry.execute(
+        "compactWithSummary",
+        CommandContext(db=db, current_thread=tid),
+        "",
+    )
+
+    assert result.clear_input is True
+    assert result.message is not None
+    assert "Queued compaction summary request" in result.message
+    assert result.start_schedulers == (tid,)
+    assert _snapshot_messages(db, tid)[-1]["content"] == ts.COMPACTION_SUMMARY_REQUEST
+
+
 def test_snapshot_records_event_seq_for_provider_filtering(tmp_path):
     db, tid = _new_thread(tmp_path)
     first = ts.append_message(db, tid, "user", "old")

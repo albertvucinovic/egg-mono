@@ -593,13 +593,13 @@ COMPACTION_EVENT_TYPE = 'thread.compaction'
 COMPACTION_CONTEXT_LENGTH_EVENT_TYPE = 'thread.compaction_context_length'
 COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE = 'thread.compaction_summary_in_progress'
 
-AUTO_COMPACTION_SUMMARY_REQUEST = (
-    "Automatic compaction request: the current provider context has reached "
-    "the configured token threshold. Write a concise continuation summary as "
+COMPACTION_SUMMARY_REQUEST = (
+    "Compaction summary request: write a concise continuation summary as "
     "normal assistant content, preserving the details needed to continue the "
     "current work, including any pending user request. After the summary, call "
     "compact_thread() with start_message omitted."
 )
+AUTO_COMPACTION_SUMMARY_REQUEST = COMPACTION_SUMMARY_REQUEST
 
 _FALSE_LIKE_ENV_VALUES = {'0', 'false', 'no', 'off'}
 
@@ -1340,6 +1340,24 @@ def append_auto_compaction_summary_request(
         request_msg_id,
         marker_seq,
         "Automatic summary compaction request appended.",
+    )
+
+
+def append_compaction_summary_request(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    created_by: str = 'user_command',
+    content: str = COMPACTION_SUMMARY_REQUEST,
+) -> str:
+    """Append a normal model-visible summary compaction request message."""
+
+    return append_message(
+        db,
+        thread_id,
+        'user',
+        content,
+        extra={'created_by': created_by, 'compaction_summary_request': True},
     )
 
 

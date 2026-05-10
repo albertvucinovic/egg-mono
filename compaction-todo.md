@@ -522,12 +522,12 @@ Goal: make auto-compaction usable in normal Egg runs, prefer summary-producing c
 
 ### Summary-producing manual compaction
 
-- [ ] Add `/compactWithSummary` user command.
+- [x] Add `/compactWithSummary` user command.
   - It should append a normal model-visible request asking the assistant to write a concise continuation summary and then call `compact_thread()` with omitted `start_message`.
   - The summary must be normal assistant content, not stored as magic compaction metadata.
   - It should behave like other user commands: clear visible feedback to the user, scheduler starts/continues as needed, no silent failure.
   - Reuse existing message/tool scheduling and `compact_thread`; do not implement a parallel summary storage path.
-- [ ] Add tests for `/compactWithSummary` command behavior.
+- [x] Add tests for `/compactWithSummary` command behavior.
   - Command appends a normal request message.
   - Request includes clear instructions to call `compact_thread()` after writing summary.
   - Command logs/returns user-visible confirmation.
@@ -564,6 +564,12 @@ Status notes:
   - Tests: `pytest -q eggthreads/tests/test_compaction.py` passed; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py` passed.
   - Next: implement the Manual summary command slice (`/compactWithSummary`) using the same summary-request text and normal scheduling/message machinery.
   - Caveats: `/compactWithSummary`, child status token reporting, diagnostics, and provider-protocol hardening were intentionally not implemented.
+- 2026-05-10: Manual summary command slice implemented. Added `/compactWithSummary`, reusing the shared summary request text/helper to append a normal model-visible user request that asks the assistant to write a concise continuation summary and then call `compact_thread()` with omitted `start_message`. The command rebuilds the snapshot, starts/returns the current-thread scheduler hook, and logs or returns a clear confirmation. It does not emit `thread.compaction` directly and does not use the automatic in-progress marker.
+  - Changed files: `eggthreads/eggthreads/api.py`, `eggthreads/eggthreads/__init__.py`, `eggthreads/eggthreads/builtin_plugins/compaction.py`, `eggthreads/tests/test_compaction.py`, `compaction-todo.md`.
+  - Commit: this Manual summary command slice change.
+  - Tests: `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_command_registry.py` passed; `python -m compileall -q eggthreads/eggthreads && pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_command_registry.py eggthreads/tests/test_plugin_tool_registry.py` passed.
+  - Next: implement the Token/status reporting slice (Phase 9 suggested slice 4), keeping `context_tokens` as current provider/API context and adding `full_thread_tokens` where needed.
+  - Caveats: child status token reporting, diagnostics, and provider-protocol hardening were intentionally not implemented.
 
 ## REPL thread context design
 

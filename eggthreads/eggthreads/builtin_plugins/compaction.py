@@ -68,6 +68,41 @@ def compact_thread_command(context: Any, arg: str):
     return CommandResult(clear_input=bool(result.success))
 
 
+def compact_with_summary_command(context: Any, arg: str):
+    from ..api import append_compaction_summary_request, create_snapshot
+    from ..command_catalog import CommandResult
+
+    db = getattr(context, "db", None)
+    current_thread = getattr(context, "current_thread", None)
+    if db is None or not current_thread:
+        return CommandResult(clear_input=False, message="/compactWithSummary requires an active thread")
+
+    try:
+        request_msg_id = append_compaction_summary_request(
+            db,
+            current_thread,
+            created_by="user_command",
+        )
+        create_snapshot(db, current_thread)
+    except Exception as e:
+        return CommandResult(clear_input=False, message=f"/compactWithSummary failed: {e}")
+
+    message = (
+        "Queued compaction summary request; the assistant will write a normal "
+        "summary and then call compact_thread()."
+    )
+    log = getattr(context, "log_system", None)
+    if callable(log):
+        log(message)
+        result_message = None
+    else:
+        result_message = message
+    start_scheduler = getattr(context, "start_scheduler", None)
+    if callable(start_scheduler):
+        start_scheduler(current_thread)
+    return CommandResult(clear_input=True, start_schedulers=(current_thread,), message=result_message)
+
+
 def register_compaction_tool(registry: ToolRegistry) -> None:
     registry.register(
         "compact_thread",
@@ -109,6 +144,15 @@ def register_compaction_commands(registry: Any) -> None:
             description="Set the provider/API context start for this thread without deleting UI history.",
         )
     )
+    registry.register(
+        CommandSpec(
+            "compactWithSummary",
+            compact_with_summary_command,
+            category="threads",
+            usage="/compactWithSummary",
+            description="Ask the assistant to summarize, then call compact_thread without deleting UI history.",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -127,6 +171,7 @@ __all__ = [
     "CompactionPlugin",
     "compact_thread_command",
     "compact_thread_tool",
+    "compact_with_summary_command",
     "register_compaction_commands",
     "register_compaction_tool",
 ]
