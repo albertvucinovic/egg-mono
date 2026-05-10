@@ -117,6 +117,11 @@ def display_verbosity_command(context: Any, arg: str):
     app._display_verbosity = level
     message = f"Display verbosity set to {level}."
     _log(context, message)
+    try:
+        app.redraw_static_view(reason="display verbosity changed")
+    except Exception as e:
+        _log(context, f"/displayVerbosity redraw error: {e}")
+        return CommandResult(clear_input=False, message=f"{message} Redraw failed: {e}")
     return CommandResult(clear_input=True, message=message)
 
 

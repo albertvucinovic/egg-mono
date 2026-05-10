@@ -189,6 +189,14 @@ class TestCmdDisplayVerbosity:
         assert egg_app._display_verbosity == "medium"
         assert any("Display verbosity set to medium." in msg for msg in egg_app._system_log)
 
+    def test_sets_display_verbosity_triggers_redraw(self, egg_app, monkeypatch):
+        redrawn = []
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: redrawn.append(reason))
+
+        egg_app.handle_command("/displayVerbosity medium")
+
+        assert redrawn == ["display verbosity changed"]
+
     def test_invalid_display_verbosity_reports_usage_without_changing_state(self, egg_app):
         egg_app.handle_command("/displayVerbosity min")
         egg_app.handle_command("/displayVerbosity compact")
