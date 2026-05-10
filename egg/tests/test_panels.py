@@ -648,11 +648,10 @@ class TestPrintStaticViewCurrent:
         titles = [str(getattr(arg, "title", "")) for args, _kw in printed for arg in args]
         assert any(f"msg_id: {msg_id}" in title for title in titles)
 
-    def test_full_screen_static_view_limits_initial_history(self, egg_app, monkeypatch):
+    def test_full_screen_static_view_renders_full_history(self, egg_app, monkeypatch):
         from eggthreads import append_message, create_snapshot
 
         egg_app._display_is_inline = False
-        egg_app._full_screen_static_message_limit = 3
         for i in range(6):
             append_message(egg_app.db, egg_app.current_thread, "user", f"message {i}")
         create_snapshot(egg_app.db, egg_app.current_thread)
@@ -663,13 +662,12 @@ class TestPrintStaticViewCurrent:
 
         egg_app.print_static_view_current()
 
-        assert rendered == ["message 3", "message 4", "message 5"]
+        assert rendered[-6:] == [f"message {i}" for i in range(6)]
 
     def test_inline_static_view_keeps_full_history(self, egg_app, monkeypatch):
         from eggthreads import append_message, create_snapshot
 
         egg_app._display_is_inline = True
-        egg_app._full_screen_static_message_limit = 3
         for i in range(6):
             append_message(egg_app.db, egg_app.current_thread, "user", f"message {i}")
         create_snapshot(egg_app.db, egg_app.current_thread)

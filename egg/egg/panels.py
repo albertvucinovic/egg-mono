@@ -897,19 +897,6 @@ class PanelsMixin:
             except Exception:
                 self._live_print(heading)
         msgs = snapshot_messages(self.db, tid)
-        if not getattr(self, '_display_is_inline', False):
-            try:
-                max_messages = int(getattr(self, '_full_screen_static_message_limit', 80))
-            except Exception:
-                max_messages = 80
-            if max_messages > 0 and len(msgs) > max_messages:
-                omitted = len(msgs) - max_messages
-                msgs = msgs[-max_messages:]
-                self._live_print(Panel(
-                    f"[dim]Showing last {max_messages} messages; {omitted} earlier messages remain in thread history.[/dim]",
-                    border_style='blue',
-                    box=self._get_static_box(),
-                ))
         markers_by_start_seq = self._compaction_markers_by_start_seq(tid)
         verbosity = self._panel_display_verbosity_level()
         if verbosity == 'min':
