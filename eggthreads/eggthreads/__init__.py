@@ -87,11 +87,14 @@ from .api import (
     # Continue thread API
     ContinueResult,
     COMPACTION_EVENT_TYPE,
+    COMPACTION_CONTEXT_LENGTH_EVENT_TYPE,
     AutoCompactionResult,
+    AutoCompactionThresholdResolution,
     CompactionCommitResult,
     CompactionStartResolution,
     commit_thread_compaction,
     build_repl_thread_context,
+    current_thread_model_context_window_tokens,
     current_effective_compaction_start_event_seq,
     continue_thread,
     filter_messages_for_compaction_provider_context,
@@ -100,9 +103,13 @@ from .api import (
     find_continue_point,
     latest_thread_compaction,
     latest_effective_thread_compaction,
+    latest_effective_thread_compaction_context_length,
+    list_thread_compaction_context_lengths,
     list_thread_compactions,
     maybe_auto_compact_thread,
     resolve_compaction_start_message,
+    resolve_auto_compact_threshold,
+    set_thread_compaction_context_length,
     is_thread_continuable,
     # Thread diagnosis
     ThreadDiagnosis,
@@ -270,10 +277,10 @@ __all__ = [
     'set_context_limit', 'get_context_limit',
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_child_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
-    'COMPACTION_EVENT_TYPE', 'AutoCompactionResult', 'CompactionCommitResult', 'CompactionStartResolution',
-    'build_repl_thread_context', 'commit_thread_compaction', 'current_effective_compaction_start_event_seq',
-    'latest_effective_thread_compaction', 'latest_thread_compaction', 'list_thread_compactions', 'resolve_compaction_start_message',
-    'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread',
+    'COMPACTION_EVENT_TYPE', 'COMPACTION_CONTEXT_LENGTH_EVENT_TYPE', 'AutoCompactionResult', 'AutoCompactionThresholdResolution', 'CompactionCommitResult', 'CompactionStartResolution',
+    'build_repl_thread_context', 'commit_thread_compaction', 'current_thread_model_context_window_tokens', 'current_effective_compaction_start_event_seq',
+    'latest_effective_thread_compaction', 'latest_thread_compaction', 'latest_effective_thread_compaction_context_length', 'list_thread_compaction_context_lengths', 'list_thread_compactions', 'resolve_compaction_start_message',
+    'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread', 'resolve_auto_compact_threshold', 'set_thread_compaction_context_length',
     # Thread diagnosis
     'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text',
     # Thread scheduling API

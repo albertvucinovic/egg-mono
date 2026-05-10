@@ -501,22 +501,22 @@ Goal: make auto-compaction usable in normal Egg runs, prefer summary-producing c
 
 ### Token threshold policy
 
-- [ ] Add thread-level compaction context length override event.
+- [x] Add thread-level compaction context length override event.
   - Suggested event type: `thread.compaction_context_length`.
   - Payload should include an integer token threshold and `created_by`/timestamp metadata.
   - The latest effective event for the current thread wins.
   - It must take priority above all other threshold sources.
   - Non-positive values should disable auto-compaction for that thread if this matches existing config style.
-- [ ] Add `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` as fallback auto-compaction threshold.
+- [x] Add `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` as fallback auto-compaction threshold.
   - Requested fallback/default value: `150000`.
   - Treat unset/empty as using the fallback/default.
   - Non-positive env value disables auto-compaction when no higher-priority source exists.
-- [ ] Derive a better default threshold from current model context metadata when available.
+- [x] Derive a better default threshold from current model context metadata when available.
   - `max_tokens` in `models.json` is the context-window length.
   - Follow where `max_tokens` is stored in the model registry / `concrete_model_info`; if it is not preserved, add preservation there.
   - Use roughly 80% of the model context window as the preferred model-derived threshold.
   - Fall back to `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` / `150000` when model metadata is missing.
-- [ ] Implement/test precedence.
+- [x] Implement/test precedence.
   - Required order: latest effective thread override event > explicit `RunnerConfig.auto_compact_threshold_tokens` > model-derived 80% context window > env fallback/default.
   - Add focused tests for thread override, explicit config, model-derived threshold, env fallback/default, and disabling with non-positive values.
 
@@ -552,6 +552,12 @@ Goal: make auto-compaction usable in normal Egg runs, prefer summary-producing c
 
 Status notes:
 - 2026-05-10: Design decisions recorded. Summary mode should be default via `EGG_COMPACT_SUMMARY` default true; direct mode remains env-selectable. Thread-level compaction context length override should be a latest-effective thread event and take priority over runner config, model-derived thresholds, and env/default thresholds. `/compactWithSummary` is required. Human diagnostic command is intentionally out of scope.
+- 2026-05-10: Threshold resolver slice implemented. Added `thread.compaction_context_length` helpers, latest-effective override lookup with `/continue` erasure semantics, auto-compaction threshold resolver precedence (thread event > runner config > 80% model `max_tokens` > `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` > 150000), and runner wiring so RA1 auto-compaction uses the resolver. Non-positive thread/config/env values disable at that source. Direct summary-mode work was intentionally not touched.
+  - Changed files: `eggthreads/eggthreads/api.py`, `eggthreads/eggthreads/__init__.py`, `eggthreads/eggthreads/runner.py`, `eggthreads/tests/test_compaction.py`, `compaction-todo.md`.
+  - Commit: this Threshold resolver slice change.
+  - Tests: `pytest -q eggthreads/tests/test_compaction.py` passed; `pytest -q eggthreads/tests/test_compaction.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit eggthreads/tests/test_token_count_public.py eggthreads/tests/test_continue_thread.py eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_plugin_tool_registry.py eggthreads/tests/test_command_registry.py` passed.
+  - Next: implement the Summary mode auto-compaction slice (`EGG_COMPACT_SUMMARY` default true plus `thread.compaction_summary_in_progress` duplicate-prevention helpers).
+  - Caveats: no summary mode, `/compactWithSummary`, diagnostics, child token reporting, or hardening changes were made.
 
 ## REPL thread context design
 

@@ -613,10 +613,10 @@ class RunnerConfig:
     # Global context limit: None = no limit, >0 = max tokens before LLM call is rejected
     # Per-thread settings (via thread.context_limit events) override this
     context_limit: Optional[int] = None
-    # First automatic compaction policy: when set, check effective provider
-    # context size at the RA1 turn boundary and compact to the latest assistant
-    # message before sending the next provider request.  Keep this below any
-    # hard context_limit so compaction can reduce context before hard rejection.
+    # First automatic compaction policy: when explicitly set, this overrides
+    # model/env/default threshold resolution.  Positive values enable
+    # auto-compaction at the RA1 turn boundary; zero/negative values disable
+    # it from runner config so lower-precedence sources are not used.
     auto_compact_threshold_tokens: Optional[int] = None
 
     @property
@@ -643,6 +643,8 @@ class ThreadRunner:
         self.purpose = purpose
         self.cfg = config or RunnerConfig()
         self.tools = tools or create_default_tools()
+        self.models_path = models_path or 'models.json'
+        self.all_models_path = all_models_path or 'all-models.json'
 
     def _evaluate_pending_approval_policies(self) -> None:
         """Let deterministic approval policies advise on TC1 tool calls."""
@@ -749,22 +751,30 @@ class ThreadRunner:
         # before opening an RA1 stream or calling the provider.  This keeps the
         # mutation at a turn boundary rather than inside an assistant/tool
         # cycle.
-        if ra.kind == 'RA1_llm' and self.cfg.auto_compact_threshold_tokens:
+        if ra.kind == 'RA1_llm':
             try:
-                from .api import create_snapshot, maybe_auto_compact_thread
+                from .api import create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
                 from .token_count import provider_context_token_stats
 
-                create_snapshot(self.db, self.thread_id)
-                stats = provider_context_token_stats(self.db, self.thread_id)
-                current_tokens = int(stats.get('context_tokens') or 0)
-                auto_result = maybe_auto_compact_thread(
+                threshold = resolve_auto_compact_threshold(
                     self.db,
                     self.thread_id,
-                    threshold_tokens=self.cfg.auto_compact_threshold_tokens,
-                    context_tokens=current_tokens,
+                    self.cfg.auto_compact_threshold_tokens,
+                    models_path=self.models_path,
+                    all_models_path=self.all_models_path,
                 )
-                if auto_result.triggered:
+                if threshold.enabled and threshold.threshold_tokens is not None:
                     create_snapshot(self.db, self.thread_id)
+                    stats = provider_context_token_stats(self.db, self.thread_id)
+                    current_tokens = int(stats.get('context_tokens') or 0)
+                    auto_result = maybe_auto_compact_thread(
+                        self.db,
+                        self.thread_id,
+                        threshold_tokens=threshold.threshold_tokens,
+                        context_tokens=current_tokens,
+                    )
+                    if auto_result.triggered:
+                        create_snapshot(self.db, self.thread_id)
             except Exception as e:
                 # Token accounting/auto-compaction is best-effort; do not block
                 # the existing RA1 path on advisory compaction.
@@ -2974,6 +2984,8 @@ class SubtreeScheduler:
         self.owner = owner or os.environ.get("USER") or "scheduler"
         self.cfg = config or RunnerConfig()
         self.tools = tools or create_default_tools()
+        self.models_path = models_path or 'models.json'
+        self.all_models_path = all_models_path or 'all-models.json'
         self._tasks: Set[asyncio.Task] = set()
 
     async def shutdown(self) -> None:
@@ -3066,6 +3078,8 @@ class SubtreeScheduler:
                     owner=self.owner,
                     purpose="assistant_stream",
                     config=self.cfg,
+                    models_path=self.models_path,
+                    all_models_path=self.all_models_path,
                     tools=self.tools,
                 )
                 try:

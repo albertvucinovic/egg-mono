@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from .db import ThreadsDB, ThreadRow
 from .snapshot import SnapshotBuilder
@@ -589,6 +590,9 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
 # --------- Compaction API -----------------------------------------------------
 
 COMPACTION_EVENT_TYPE = 'thread.compaction'
+COMPACTION_CONTEXT_LENGTH_EVENT_TYPE = 'thread.compaction_context_length'
+
+
 @dataclass
 class CompactionStartResolution:
     """Resolved provider-context start message for a compaction request."""
@@ -622,6 +626,16 @@ class AutoCompactionResult:
     context_tokens: int
     threshold_tokens: Optional[int]
     compaction: Optional[CompactionCommitResult]
+    message: str
+
+
+@dataclass
+class AutoCompactionThresholdResolution:
+    """Resolved auto-compaction token threshold and source."""
+
+    enabled: bool
+    threshold_tokens: Optional[int]
+    source: str
     message: str
 
 
@@ -677,6 +691,58 @@ def latest_thread_compaction(db: ThreadsDB, thread_id: str) -> Optional[Dict[str
     return compactions[-1] if compactions else None
 
 
+def set_thread_compaction_context_length(
+    db: ThreadsDB,
+    thread_id: str,
+    threshold_tokens: int,
+    *,
+    created_by: str = 'user',
+) -> int:
+    """Append a thread-level auto-compaction context threshold override.
+
+    The latest effective ``thread.compaction_context_length`` event wins when
+    resolving automatic compaction thresholds.  Positive values enable
+    auto-compaction at that provider-context token estimate; zero or negative
+    values disable auto-compaction for this thread until superseded by a later
+    effective override event.
+    """
+
+    threshold_int = int(threshold_tokens)
+    return int(db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_=COMPACTION_CONTEXT_LENGTH_EVENT_TYPE,
+        payload={
+            'threshold_tokens': threshold_int,
+            'created_by': created_by,
+            'created_at': _utcnow_iso(),
+        },
+    ))
+
+
+def list_thread_compaction_context_lengths(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
+    """Return raw ``thread.compaction_context_length`` events in event order."""
+
+    cur = db.conn.execute(
+        "SELECT event_seq, event_id, ts, payload_json FROM events WHERE thread_id=? AND type=? ORDER BY event_seq ASC",
+        (thread_id, COMPACTION_CONTEXT_LENGTH_EVENT_TYPE),
+    )
+    out: List[Dict[str, Any]] = []
+    for row in cur.fetchall():
+        try:
+            payload = json.loads(row['payload_json']) if isinstance(row['payload_json'], str) else (row['payload_json'] or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        item = dict(payload)
+        item['event_seq'] = int(row['event_seq'])
+        item['event_id'] = row['event_id']
+        item['ts'] = row['ts']
+        out.append(item)
+    return out
+
+
 def _continue_erased_event_ranges(db: ThreadsDB, thread_id: str) -> List[tuple[int, int]]:
     """Return raw event ranges made ineffective by later ``/continue`` calls.
 
@@ -711,6 +777,170 @@ def _continue_erased_event_ranges(db: ThreadsDB, thread_id: str) -> List[tuple[i
 
 def _event_erased_by_continue(event_seq: int, erased_ranges: List[tuple[int, int]]) -> bool:
     return any(start_seq < event_seq < continue_seq for start_seq, continue_seq in erased_ranges)
+
+
+def latest_effective_thread_compaction_context_length(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the latest context-length override still active in the effective view."""
+
+    erased_ranges = _continue_erased_event_ranges(db, thread_id)
+    for event in reversed(list_thread_compaction_context_lengths(db, thread_id)):
+        try:
+            event_seq = int(event.get('event_seq'))
+        except Exception:
+            continue
+        if _event_erased_by_continue(event_seq, erased_ranges):
+            continue
+        return event
+    return None
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _positive_int_or_none(value: Any) -> Optional[int]:
+    parsed = _int_or_none(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def _model_context_window_from_concrete_info(
+    concrete_model_info: Any,
+    *,
+    model_key: Optional[str] = None,
+) -> Optional[int]:
+    """Extract a positive context-window ``max_tokens`` from concrete model info."""
+
+    if not isinstance(concrete_model_info, Mapping):
+        return None
+
+    # Be tolerant of simplified concrete info shapes in tests or callers.
+    direct = _positive_int_or_none(concrete_model_info.get('max_tokens'))
+    if direct is not None:
+        return direct
+
+    providers = concrete_model_info.get('providers')
+    if not isinstance(providers, Mapping):
+        return None
+
+    def _model_maps() -> List[Mapping[str, Any]]:
+        out: List[Mapping[str, Any]] = []
+        for provider_cfg in providers.values():
+            if not isinstance(provider_cfg, Mapping):
+                continue
+            models = provider_cfg.get('models')
+            if isinstance(models, Mapping):
+                out.append(models)
+        return out
+
+    if model_key:
+        for models in _model_maps():
+            cfg = models.get(model_key)
+            if isinstance(cfg, Mapping):
+                value = _positive_int_or_none(cfg.get('max_tokens'))
+                if value is not None:
+                    return value
+
+    for models in _model_maps():
+        for cfg in models.values():
+            if not isinstance(cfg, Mapping):
+                continue
+            value = _positive_int_or_none(cfg.get('max_tokens'))
+            if value is not None:
+                return value
+    return None
+
+
+def current_thread_model_context_window_tokens(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    models_path: str = "models.json",
+    all_models_path: str | None = None,
+) -> Optional[int]:
+    """Return the current model context-window length from concrete model metadata."""
+
+    model_key = current_thread_model(db, thread_id)
+    concrete = current_thread_model_info(db, thread_id)
+    value = _model_context_window_from_concrete_info(concrete, model_key=model_key)
+    if value is not None:
+        return value
+    if model_key:
+        try:
+            concrete = _get_concrete_model_info(model_key, models_path, all_models_path=all_models_path)
+            return _model_context_window_from_concrete_info(concrete, model_key=model_key)
+        except Exception:
+            return None
+    return None
+
+
+def resolve_auto_compact_threshold(
+    db: ThreadsDB,
+    thread_id: str,
+    explicit_threshold_tokens: Optional[int] = None,
+    *,
+    models_path: str = "models.json",
+    all_models_path: str | None = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> AutoCompactionThresholdResolution:
+    """Resolve the effective automatic compaction threshold for a thread.
+
+    Precedence is:
+
+    1. latest effective ``thread.compaction_context_length`` event;
+    2. explicit ``RunnerConfig.auto_compact_threshold_tokens``;
+    3. 80% of the current model ``max_tokens`` context window;
+    4. ``EGG_AUTO_COMPACT_THRESHOLD_TOKENS``;
+    5. fallback default ``150000``.
+
+    Non-positive thread, explicit runner, or env values disable
+    auto-compaction at that source rather than falling through to lower
+    precedence sources.
+    """
+
+    override = latest_effective_thread_compaction_context_length(db, thread_id)
+    if override is not None:
+        threshold = _int_or_none(override.get('threshold_tokens'))
+        if threshold is None or threshold <= 0:
+            return AutoCompactionThresholdResolution(False, None, 'thread_event', 'Auto compaction disabled by thread override.')
+        return AutoCompactionThresholdResolution(True, threshold, 'thread_event', 'Auto compaction threshold set by thread override.')
+
+    if explicit_threshold_tokens is not None:
+        threshold = _int_or_none(explicit_threshold_tokens)
+        if threshold is None or threshold <= 0:
+            return AutoCompactionThresholdResolution(False, None, 'runner_config', 'Auto compaction disabled by runner config.')
+        return AutoCompactionThresholdResolution(True, threshold, 'runner_config', 'Auto compaction threshold set by runner config.')
+
+    model_max = current_thread_model_context_window_tokens(
+        db,
+        thread_id,
+        models_path=models_path,
+        all_models_path=all_models_path,
+    )
+    if model_max is not None:
+        threshold = max(1, int(model_max * 0.8))
+        return AutoCompactionThresholdResolution(True, threshold, 'model_max_tokens', 'Auto compaction threshold derived from current model max_tokens.')
+
+    env = os.environ if environ is None else environ
+    raw_env = env.get('EGG_AUTO_COMPACT_THRESHOLD_TOKENS') if env is not None else None
+    if raw_env is not None and str(raw_env).strip():
+        threshold = _int_or_none(raw_env)
+        if threshold is None:
+            threshold = 150000
+            return AutoCompactionThresholdResolution(True, threshold, 'default', 'Auto compaction threshold using fallback default.')
+        if threshold <= 0:
+            return AutoCompactionThresholdResolution(False, None, 'env', 'Auto compaction disabled by EGG_AUTO_COMPACT_THRESHOLD_TOKENS.')
+        return AutoCompactionThresholdResolution(True, threshold, 'env', 'Auto compaction threshold set by EGG_AUTO_COMPACT_THRESHOLD_TOKENS.')
+
+    return AutoCompactionThresholdResolution(True, 150000, 'default', 'Auto compaction threshold using fallback default.')
 
 
 def latest_effective_thread_compaction(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:

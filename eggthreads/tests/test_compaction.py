@@ -277,6 +277,71 @@ def test_maybe_auto_compact_does_not_emit_again_without_new_llm(tmp_path):
     assert len(_events(db, tid)) == 1
 
 
+def test_auto_compact_threshold_thread_override_takes_precedence_and_continue_can_erase(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    first = ts.append_message(db, tid, "user", "first")
+
+    event_seq = ts.set_thread_compaction_context_length(db, tid, 123, created_by="test")
+    resolved = ts.resolve_auto_compact_threshold(db, tid, explicit_threshold_tokens=456, environ={})
+
+    assert resolved.enabled is True
+    assert resolved.threshold_tokens == 123
+    assert resolved.source == "thread_event"
+    events = ts.list_thread_compaction_context_lengths(db, tid)
+    assert events[-1]["event_seq"] == event_seq
+    assert events[-1]["threshold_tokens"] == 123
+    assert events[-1]["created_by"] == "test"
+    assert "created_at" in events[-1]
+
+    ts.set_thread_compaction_context_length(db, tid, 0, created_by="test")
+    disabled = ts.resolve_auto_compact_threshold(db, tid, explicit_threshold_tokens=456, environ={})
+    assert disabled.enabled is False
+    assert disabled.threshold_tokens is None
+    assert disabled.source == "thread_event"
+
+    ts.continue_thread(db, tid, first)
+    resolved_after_continue = ts.resolve_auto_compact_threshold(db, tid, explicit_threshold_tokens=456, environ={})
+    assert resolved_after_continue.enabled is True
+    assert resolved_after_continue.threshold_tokens == 456
+    assert resolved_after_continue.source == "runner_config"
+
+
+def test_auto_compact_threshold_precedence_config_model_env_default_and_disable(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    concrete = {
+        "providers": {
+            "test": {
+                "models": {
+                    "ModelA": {
+                        "model_name": "model-a",
+                        "max_tokens": 1000,
+                    }
+                }
+            }
+        }
+    }
+    ts.set_thread_model(db, tid, "ModelA", concrete_model_info=concrete, reason="test")
+
+    explicit = ts.resolve_auto_compact_threshold(db, tid, explicit_threshold_tokens=222, environ={})
+    assert (explicit.enabled, explicit.threshold_tokens, explicit.source) == (True, 222, "runner_config")
+
+    explicit_disabled = ts.resolve_auto_compact_threshold(db, tid, explicit_threshold_tokens=0, environ={})
+    assert (explicit_disabled.enabled, explicit_disabled.threshold_tokens, explicit_disabled.source) == (False, None, "runner_config")
+
+    model = ts.resolve_auto_compact_threshold(db, tid, environ={"EGG_AUTO_COMPACT_THRESHOLD_TOKENS": "333"})
+    assert (model.enabled, model.threshold_tokens, model.source) == (True, 800, "model_max_tokens")
+
+    env_db, env_tid = _new_thread(tmp_path / "env")
+    env = ts.resolve_auto_compact_threshold(env_db, env_tid, environ={"EGG_AUTO_COMPACT_THRESHOLD_TOKENS": "333"})
+    assert (env.enabled, env.threshold_tokens, env.source) == (True, 333, "env")
+
+    env_disabled = ts.resolve_auto_compact_threshold(env_db, env_tid, environ={"EGG_AUTO_COMPACT_THRESHOLD_TOKENS": "0"})
+    assert (env_disabled.enabled, env_disabled.threshold_tokens, env_disabled.source) == (False, None, "env")
+
+    default = ts.resolve_auto_compact_threshold(env_db, env_tid, environ={})
+    assert (default.enabled, default.threshold_tokens, default.source) == (True, 150000, "default")
+
+
 def test_runner_auto_compacts_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old context")
@@ -309,6 +374,75 @@ def test_runner_auto_compacts_at_ra1_boundary_before_llm(tmp_path, monkeypatch):
     assert [m["content"] for m in seen_messages[0]] == ["previous answer", "next question"]
     provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, ts.create_snapshot(db, tid)["messages"])
     assert old not in [m.get("msg_id") for m in provider_view]
+
+
+def test_runner_auto_compacts_from_model_threshold_without_explicit_config(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old context")
+    assistant = ts.append_message(db, tid, "assistant", "previous answer")
+    ts.append_message(db, tid, "user", "next question")
+    ts.set_thread_model(
+        db,
+        tid,
+        "ModelA",
+        concrete_model_info={
+            "providers": {
+                "test": {
+                    "models": {
+                        "ModelA": {
+                            "model_name": "model-a",
+                            "max_tokens": 100,
+                        }
+                    }
+                }
+            }
+        },
+        reason="test",
+    )
+
+    class LLM:
+        current_model_key = "ModelA"
+
+        async def astream_chat(self, messages, **kwargs):
+            yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 80},
+    )
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig())
+    asyncio.run(runner.run_once())
+
+    events = _events(db, tid)
+    assert len(events) == 1
+    assert events[0][1]["start_msg_id"] == assistant
+
+
+def test_runner_thread_override_can_disable_auto_compaction(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old context")
+    ts.append_message(db, tid, "assistant", "previous answer")
+    ts.append_message(db, tid, "user", "next question")
+    ts.set_thread_compaction_context_length(db, tid, 0, created_by="test")
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: calls.append("token") or {"context_tokens": 100},
+    )
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=10))
+    asyncio.run(runner.run_once())
+
+    assert calls == []
+    assert _events(db, tid) == []
 
 
 def test_runner_does_not_auto_compact_during_tool_turn(tmp_path, monkeypatch):
