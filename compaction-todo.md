@@ -318,27 +318,6 @@ The future provider view starts at `1001`, not `1004`.
 
 Provider adapters may still need to sanitize/normalize the resulting messages to satisfy provider-specific protocol rules. Existing no-api, tool-call pairing, and strict-provider cleanup logic should remain authoritative.
 
-## Phase 0 — Baseline and current invariants
-
-Goal: document the existing behavior compaction will reuse.
-
-- [ ] Confirm current user-command behavior.
-  - Visible `$` command results can become model-visible context.
-  - Hidden `$$` command results are marked `no_api` and excluded from providers.
-  - User-command results use existing turn-preservation behavior.
-  - Suggested tests: `pytest -q eggthreads/tests/test_commands_tools.py eggthreads/tests/test_tool_message_format.py eggthreads/tests/test_snapshot_builder.py`.
-- [ ] Confirm manager/child message scheduling.
-  - Messages to a running child should not interleave into an active assistant/tool turn.
-  - If this is not currently guaranteed, record the gap before implementing compaction.
-- [ ] Identify provider-context construction path.
-  - Current likely owner: `ThreadRunner._run_ra1_llm` plus `_sanitize_messages_for_api`.
-- [ ] Identify `/continue` effective-view behavior.
-  - Determine whether non-message events after the continue point are currently ignored or still visible to context builders.
-- [ ] Commit baseline notes/test coverage updates.
-
-Status notes:
-- 2026-05-09: Rewritten plan around `thread.compaction` as provider-context start pointer. No implementation yet.
-
 ## Phase 1 — Core compaction event and resolver
 
 Goal: add the durable boundary event and selector resolution without changing provider context yet.
@@ -506,27 +485,45 @@ Status notes:
 
 ## Phase 7.5 — Auto-compaction configuration and summary mode
 
-Goal: make auto-compaction usable from normal Egg runs and add a summary-producing path, while preserving the simple start-pointer compaction primitive.
+Goal: make auto-compaction usable in normal Egg runs, prefer summary-producing compaction by default, and keep the direct start-pointer path easy to select.
+
+### Decisions for implementation
+
+- Summary mode is the default auto-compaction behavior.
+- `EGG_COMPACT_SUMMARY` controls the auto-compaction mode:
+  - unset/empty/default truthy => summary mode;
+  - false-like values (`0`, `false`, `no`, `off`) => direct mode.
+- Direct mode remains supported and easy to switch to, but should be a simple policy branch over the same core compaction primitive, not a parallel compaction implementation.
+- Add a `thread.compaction_summary_in_progress` control event to prevent repeated automatic summary requests.
+  - The pending marker should be considered effective only in the current effective thread view; `/continue` should be able to erase/retry it like other control events.
+  - A later effective `thread.compaction` event should satisfy/clear the pending summary request for duplicate-prevention purposes.
+- Do not add a human diagnostic command in this phase.
 
 ### Token threshold policy
 
-- [ ] Add `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` as a fallback auto-compaction threshold.
+- [ ] Add thread-level compaction context length override event.
+  - Suggested event type: `thread.compaction_context_length`.
+  - Payload should include an integer token threshold and `created_by`/timestamp metadata.
+  - The latest effective event for the current thread wins.
+  - It must take priority above all other threshold sources.
+  - Non-positive values should disable auto-compaction for that thread if this matches existing config style.
+- [ ] Add `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` as fallback auto-compaction threshold.
   - Requested fallback/default value: `150000`.
-  - Treat unset/empty as using the fallback, unless a later config layer explicitly disables auto-compaction.
-  - A non-positive value may disable auto-compaction if that matches existing config style; confirm during implementation.
-- [ ] Derive a better default threshold from model context metadata when available.
-  - Inspect model configuration from `models.json` / model registry for a max context/window token setting.
-  - Use roughly 80% of that model limit as the preferred threshold.
+  - Treat unset/empty as using the fallback/default.
+  - Non-positive env value disables auto-compaction when no higher-priority source exists.
+- [ ] Derive a better default threshold from current model context metadata when available.
+  - `max_tokens` in `models.json` is the context-window length.
+  - Follow where `max_tokens` is stored in the model registry / `concrete_model_info`; if it is not preserved, add preservation there.
+  - Use roughly 80% of the model context window as the preferred model-derived threshold.
   - Fall back to `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` / `150000` when model metadata is missing.
-  - Keep explicit `RunnerConfig.auto_compact_threshold_tokens` highest priority for tests/programmatic callers.
-- [ ] Document/test precedence.
-  - Suggested order: explicit runner config > model-derived 80% context window > env fallback/default.
-  - Add focused tests for env fallback, model-derived threshold if feasible, and explicit config override.
+- [ ] Implement/test precedence.
+  - Required order: latest effective thread override event > explicit `RunnerConfig.auto_compact_threshold_tokens` > model-derived 80% context window > env fallback/default.
+  - Add focused tests for thread override, explicit config, model-derived threshold, env fallback/default, and disabling with non-positive values.
 
 ### Summary-producing manual compaction
 
 - [ ] Add `/compactWithSummary` user command.
-  - It should enqueue a normal user-command-like request asking the assistant to write a concise continuation summary and then call `compact_thread()` with omitted `start_message`.
+  - It should append a normal model-visible request asking the assistant to write a concise continuation summary and then call `compact_thread()` with omitted `start_message`.
   - The summary must be normal assistant content, not stored as magic compaction metadata.
   - It should behave like other user commands: clear visible feedback to the user, scheduler starts/continues as needed, no silent failure.
   - Reuse existing message/tool scheduling and `compact_thread`; do not implement a parallel summary storage path.
@@ -538,21 +535,23 @@ Goal: make auto-compaction usable from normal Egg runs and add a summary-produci
 ### Summary-producing automatic compaction
 
 - [ ] Add auto-summary mode for threshold compaction.
-  - Instead of directly compacting to `last_llm`, append an automatic compaction request at a safe user-turn/RA1 boundary.
-  - The request asks the assistant to write a continuation summary as normal assistant content and then call `compact_thread()` with omitted `start_message`.
+  - In summary mode, threshold pressure at a safe RA1/user-turn boundary appends an automatic compaction request instead of directly compacting to `last_llm`.
+  - The request asks the assistant to write a concise continuation summary as normal assistant content and then call `compact_thread()` with omitted `start_message`.
   - The eventual `compact_thread` tool call emits the same `thread.compaction` start-pointer event.
-  - Avoid loops: do not repeatedly append auto-summary requests while one is already pending or while no newer useful context exists.
-- [ ] Decide the control surface for direct vs summary auto-compaction.
-  - Open question for next thread: should summary mode become the default, should direct `last_llm` remain as emergency fallback, and should there be a config/env switch?
-  - Until decided, implement with the smallest clear policy and document it in this TODO before coding.
+  - Append a `thread.compaction_summary_in_progress` event alongside the automatic request so threshold checks do not repeatedly append summary requests while one is pending.
+  - Avoid loops: if an effective pending summary-in-progress marker exists after the current effective compaction start, do not append another request.
+- [ ] Preserve direct mode.
+  - When `EGG_COMPACT_SUMMARY` is false-like, keep the existing direct compaction behavior to `last_llm`.
+  - Direct mode must still reuse `commit_thread_compaction` and all normal no-op validation.
 - [ ] Add focused tests.
-  - Threshold appends a summary request at safe boundary.
+  - Threshold in summary mode appends exactly one summary request and in-progress marker at a safe boundary.
   - Below threshold does not append.
-  - Existing pending summary request prevents duplicates.
-  - Assistant summary + `compact_thread()` produces normal compaction boundary.
+  - Existing pending summary marker prevents duplicates.
+  - Assistant summary + `compact_thread()` produces normal compaction boundary and allows future threshold checks to proceed only after new useful context.
+  - `EGG_COMPACT_SUMMARY=0` uses direct mode.
 
 Status notes:
-- Not started. Discuss auto-compaction policy further before broad implementation, especially default summary-vs-direct behavior and exact model context metadata keys.
+- 2026-05-10: Design decisions recorded. Summary mode should be default via `EGG_COMPACT_SUMMARY` default true; direct mode remains env-selectable. Thread-level compaction context length override should be a latest-effective thread event and take priority over runner config, model-derived thresholds, and env/default thresholds. `/compactWithSummary` is required. Human diagnostic command is intentionally out of scope.
 
 ## REPL thread context design
 
@@ -746,26 +745,47 @@ Status notes:
 
 Resolve these only when implementation pressure makes them concrete:
 
-- Should omitted selector be accepted for `/compact` as well as the tool? Current plan says yes.
 - Should explicit `<msg_id>` allow only user/assistant messages forever, or should advanced/debug mode allow system/tool messages with provider sanitization?
 - How should strict providers handle a compacted context that starts with an assistant/LLM message?
-- Should automatic compaction directly choose `last_llm`/`last_message`, or should it ask the assistant to write a summary and call the tool?
-- For auto-summary mode, should summary compaction become default whenever threshold is reached, or should direct `last_llm` compaction remain the default with summary mode opt-in?
-- What exact model config keys represent max context/window tokens across providers/models, and how should missing/ambiguous values fall back to `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` / 150000?
-- What is the cleanest way to make non-message control events ineffective after `/continue`?
 - How visible should compaction tool results be in the UI/provider context after the boundary?
 - Should any source exploration remain as a user command, or should hydrated REPL context be the only decompaction surface besides UI scrollback?
-- Should REPL hydration run for all threads or only compacted threads at first?
-- What exact UI rendering should mark compaction boundaries: red horizontal line, labeled divider, or frontend-specific styling?
 
-## Suggested first implementation slice
+Resolved decisions now captured in the phase plan:
 
-The smallest useful slice is:
+- Omitted selector is accepted for `/compact` as well as the tool.
+- Automatic compaction should use summary mode by default, controlled by `EGG_COMPACT_SUMMARY` default true; direct mode remains available when false-like.
+- Model `max_tokens` is the context-window length for model-derived threshold calculation.
+- Latest effective thread-level compaction context length event takes priority over runner, model, env, and default thresholds.
+- Non-message compaction control events should use the same effective-view/`/continue` semantics as `thread.compaction`.
+- REPL hydration now runs as the primary decompaction surface; UI compaction markers are already implemented.
 
-1. Add selector resolution and `thread.compaction(start_msg_id, start_event_seq)` event append helper.
-2. Add provider-context filtering from latest effective start pointer while leaving UI/raw history unchanged.
-3. Add `compact_thread(start_message?)` default tool using the helper.
-4. Add `/compact [selector]` command using the same helper.
-5. Add tests for `/continue` before a compaction event invalidating it for provider context.
+## Suggested next implementation slices
 
-Next implementation priority after the start-pointer boundary is to remove redundant source/status model tools, add consumer-friendly REPL context hydration, and draw UI compaction borders. Do not start with tree-like threads or source bundles.
+Use focused worker slices, in this order:
+
+1. **Threshold resolver slice**
+   - Add the thread-level compaction context length event helpers.
+   - Resolve threshold precedence: thread event > explicit runner config > 80% of model `max_tokens` > `EGG_AUTO_COMPACT_THRESHOLD_TOKENS` > 150000.
+   - Wire the runner to use the resolver instead of only `RunnerConfig.auto_compact_threshold_tokens`.
+   - Add focused tests.
+
+2. **Summary mode auto-compaction slice**
+   - Add `EGG_COMPACT_SUMMARY` default true.
+   - Add `thread.compaction_summary_in_progress` duplicate-prevention helpers.
+   - In summary mode, append one automatic summary request plus in-progress marker at the RA1 boundary instead of direct compaction.
+   - Preserve direct mode when `EGG_COMPACT_SUMMARY` is false-like.
+   - Add focused tests.
+
+3. **Manual summary command slice**
+   - Add `/compactWithSummary` using the same summary-request text and normal scheduling/message machinery.
+   - Add command tests.
+
+4. **Token/status reporting slice**
+   - Update status surfaces so `context_tokens` means current provider/API context after compaction and `full_thread_tokens` means full visible/effective history.
+   - Update `get_child_status` with `context_tokens`, `full_thread_tokens`, and nested compaction info.
+   - Do not add `/compactionStatus`.
+
+5. **Hardening slice**
+   - Review provider protocol edge cases, especially assistant/tool-call starts.
+   - Ensure deleted/skipped start messages cause provider context to fall back safely.
+   - Add cheap invariant tests.
