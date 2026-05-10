@@ -230,9 +230,9 @@ class FormattingMixin:
             return preview[: max_chars - 3].rstrip() + "..."
         return preview
 
-    def format_messages_text(self, thread_id: str) -> str:
-        """Format all messages in a thread for display."""
-        msgs = snapshot_messages(self.db, thread_id)
+    def format_messages_text(self, thread_id: str, messages: Optional[List[Dict[str, Any]]] = None) -> str:
+        """Format messages in a thread for display."""
+        msgs = messages if messages is not None else snapshot_messages(self.db, thread_id)
         markers_by_start_seq = self._compaction_markers_by_start_seq(thread_id)
         lines: List[str] = []
         if not msgs and not markers_by_start_seq:
