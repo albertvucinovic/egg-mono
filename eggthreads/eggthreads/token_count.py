@@ -1034,7 +1034,7 @@ def _cost_for_usage(usage: Dict[str, Any], *, model_key: str, llm: Any) -> Dict[
 
     We rely only on the public eggllm API:
       llm.current_model_cost_config(model_key) ->
-        {input_tokens, cached_input, output_tokens} in USD per 1K tokens.
+        {input_tokens, cached_input, output_tokens} in USD per 1M tokens.
     """
 
     if llm is None:
@@ -1064,10 +1064,10 @@ def _cost_for_usage(usage: Dict[str, Any], *, model_key: str, llm: Any) -> Dict[
     except Exception:
         pin = pcached = pout = 0.0
 
-    def _usd(tokens: int, price_per_1k: float) -> float:
-        if tokens <= 0 or price_per_1k <= 0.0:
+    def _usd(tokens: int, price_per_1M: float) -> float:
+        if tokens <= 0 or price_per_1M <= 0.0:
             return 0.0
-        return float(tokens) * (price_per_1k / 1000.0)
+        return float(tokens) * (price_per_1M / 1_000_000.0)
 
     try:
         cin_total = int(usage.get("total_input_tokens") or 0)
@@ -1303,8 +1303,8 @@ def provider_context_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, A
 def _example_cost_cfg_note() -> str:
     return (
         "Cost estimates require per-model cost config in models.json. "
-        "Add a 'cost' block (cents per 1K tokens) to the model entry, e.g. "
-        "{\"cost\": {\"input_tokens\": 0.25, \"cached_input\": 0.05, \"output_tokens\": 1.00}}."
+        "Add a 'cost' block (USD per 1M tokens) to the model entry, e.g. "
+        "{\"cost\": {\"input_tokens\": 2.50, \"cached_input\": 0.50, \"output_tokens\": 10.00}}."
     )
 
 

@@ -56,14 +56,17 @@ The desired pipeline is:
 
 ### Phase 3 – eggthreads token_count: denominator 1_000 → 1_000_000
 
-- [ ] `_cost_for_usage()` — change `_usd` from `tokens * (price / 1000)`
+- [x] `_cost_for_usage()` — change `_usd` from `tokens * (price / 1000)`
   to `tokens * (price / 1_000_000)`.
   - Rename internal `price_per_1k` → `price_per_1M`.
-- [ ] Update docstrings (“USD per 1K” → “USD per 1M”).
-- [ ] `_example_cost_cfg_note` — update example message.
-- [ ] Run eggthreads token-count tests:
+- [x] Update docstrings (“USD per 1K” → “USD per 1M”).
+- [x] `_example_cost_cfg_note` — update example message.
+- [x] Run eggthreads token-count tests:
   `python -m pytest eggthreads/tests/test_token_count_public.py -q`
-  - Status notes:
+  - Status notes: DONE. _usd helper renamed price_per_1k→price_per_1M,
+    denominator changed from 1000.0→1_000_000.0. Docstring updated
+    (USD per 1M tokens). _example_cost_cfg_note updated with $/1M
+    values (2.50/0.50/10.00). All 6 token_count_public tests pass.
 
 ### Phase 4 – tests and integration
 
