@@ -24,7 +24,7 @@ The desired pipeline is:
 
 ### Phase 1 – models.json cost values: cents/1K → $/1M
 
-- [ ] Convert every `cost` block in `eggconfig/eggconfig/data/models.json`.
+- [x] Convert every `cost` block in `eggconfig/eggconfig/data/models.json`.
   - Multiply each value by 10 to go from *cents/1K* to *$/1M*.
   - `input_tokens`, `cached_input`, `output_tokens`, `cache_prompt` (fix
     key to `cached_input` where still wrong).
@@ -32,6 +32,14 @@ The desired pipeline is:
     Anthropic, Google, DeepSeek, OpenRouter).
   - Update `eggllm/models.json.example` if it documents the cost format.
   - Status notes:
+    - DONE. All cost values multiplied by 10. Two `cache_prompt` keys in
+      cost blocks (moonshotai kimi-k2-thinking, kimi-k2.5) renamed to
+      `cached_input`. Five `cache_prompt: true` feature flags in
+      `parameters` blocks left untouched. Floating-point values rounded
+      to 10 decimal places to avoid artifacts. Zero values remain zero.
+      `models.json.example` has no cost blocks so no update needed.
+      Verified: 0.25 → 2.5 ($2.50/M). Tests: `python -m pytest egg/tests -q`
+      passes (407 passed).
 
 ### Phase 2 – eggllm client: remove cents→dollar conversion
 

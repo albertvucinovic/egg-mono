@@ -14,9 +14,9 @@
             "prompt_cache_retention": "24h"
           },
           "cost": {
-            "input_tokens": 0.175,
-            "cached_input": 0.0175,
-            "output_tokens": 1.4
+            "input_tokens": 1.75,
+            "cached_input": 0.175,
+            "output_tokens": 14
           }
         },
         "GPT 5.3 Codex xhigh": {
@@ -29,9 +29,9 @@
             "prompt_cache_retention": "24h"
           },
           "cost": {
-            "input_tokens": 0.175,
-            "cached_input": 0.0175,
-            "output_tokens": 3
+            "input_tokens": 1.75,
+            "cached_input": 0.175,
+            "output_tokens": 30
           }
         },
         "GPT 5.2 Codex high": {
@@ -44,9 +44,9 @@
             "prompt_cache_retention": "24h"
           },
           "cost": {
-            "input_tokens": 0.175,
-            "cached_input": 0.0175,
-            "output_tokens": 1.4
+            "input_tokens": 1.75,
+            "cached_input": 0.175,
+            "output_tokens": 14
           }
         },
         "GPT 5.2 high": {
@@ -57,9 +57,9 @@
             "prompt_cache_retention": "24h"
           },
           "cost": {
-            "input_tokens": 0.175,
-            "cached_input": 0.0175,
-            "output_tokens": 1.4
+            "input_tokens": 1.75,
+            "cached_input": 0.175,
+            "output_tokens": 14
           }
         },
         "GPT 5.2 xhigh": {
@@ -70,9 +70,9 @@
             "prompt_cache_retention": "24h"
           },
           "cost": {
-            "input_tokens": 0.175,
-            "cached_input": 0.0175,
-            "output_tokens": 3
+            "input_tokens": 1.75,
+            "cached_input": 0.175,
+            "output_tokens": 30
           }
         },
         "GPT 5.1 high": {
@@ -282,9 +282,9 @@
             "thinking_content_key": "extra_content"
           },
           "cost": {
-            "input_tokens": 0.05,
-            "output_tokens": 0.3,
-            "cached_input": 0.005
+            "input_tokens": 0.5,
+            "output_tokens": 3,
+            "cached_input": 0.05
           }
         },
         "Google Gemini 3 Pro Preview High": {
@@ -298,9 +298,9 @@
             "thinking_content_key": "extra_content"
           },
           "cost": {
-            "input_tokens": 0.2,
-            "output_tokens": 1.2,
-            "cached_input": 0.005
+            "input_tokens": 2,
+            "output_tokens": 12,
+            "cached_input": 0.05
           }
         },
         "Google Gemini 2.5 Flash": {
@@ -329,12 +329,12 @@
             "thinking_content_key": "thinking"
           },
           "cost": {
-            "input_tokens": 0.02,
-            "cached_input": 0.01,
-            "output_tokens": 0.06
+            "input_tokens": 0.2,
+            "cached_input": 0.1,
+            "output_tokens": 0.6
           }
         },
-        "GLM-4.7-flash":{
+        "GLM-4.7-flash": {
           "model_name": "../vllm/Models/other/GLM-4.7-Flash-UD-Q6_K_XL.gguf",
           "max_tokens": 200000,
           "options": {
@@ -345,9 +345,9 @@
             "clear_thinkining": false
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Qwen3-30B-Thinking": {
@@ -359,9 +359,9 @@
           "max_tokens": 250000,
           "parameters": {},
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Qwen3 30B Thinking 2507": {
@@ -392,9 +392,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Qwen3.6 35B A3B": {
@@ -405,9 +405,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Qwen3.5 27B": {
@@ -418,9 +418,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Qwen3.6 27B": {
@@ -431,9 +431,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Qwen3.5 122B": {
@@ -444,9 +444,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Nemotron Cascade 2 30b": {
@@ -457,9 +457,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         },
         "Gemma 4 31B": {
@@ -470,9 +470,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.01,
-            "cached_input": 0.005,
-            "output_tokens": 0.03
+            "input_tokens": 0.1,
+            "cached_input": 0.05,
+            "output_tokens": 0.3
           }
         }
       }
@@ -590,9 +590,9 @@
           "model_name": "deepseek-chat",
           "max_tokens": 128000,
           "cost": {
-            "input_tokens": 0.014,
-            "cached_input": 0.00028,
-            "output_tokens": 0.028
+            "input_tokens": 0.14,
+            "cached_input": 0.0028,
+            "output_tokens": 0.28
           }
         },
         "deepseek-reasoner": {
@@ -603,9 +603,9 @@
             "thinking_content_key": "reasoning_content"
           },
           "cost": {
-            "input_tokens": 0.014,
-            "cached_input": 0.00028,
-            "output_tokens": 0.028
+            "input_tokens": 0.14,
+            "cached_input": 0.0028,
+            "output_tokens": 0.28
           }
         },
         "deepseek-v4-pro high": {
@@ -622,9 +622,9 @@
             }
           },
           "cost": {
-            "input_tokens": 0.174,
-            "cached_input": 0.00145,
-            "output_tokens": 0.348
+            "input_tokens": 1.74,
+            "cached_input": 0.0145,
+            "output_tokens": 3.48
           }
         },
         "deepseek-v4-pro max": {
@@ -641,9 +641,9 @@
             }
           },
           "cost": {
-            "input_tokens": 0.174,
-            "cached_input": 0.00145,
-            "output_tokens": 0.348
+            "input_tokens": 1.74,
+            "cached_input": 0.0145,
+            "output_tokens": 3.48
           }
         },
         "deepseek-v4-flash high": {
@@ -660,9 +660,9 @@
             }
           },
           "cost": {
-            "input_tokens": 0.014,
-            "cached_input": 0.00028,
-            "output_tokens": 0.028
+            "input_tokens": 0.14,
+            "cached_input": 0.0028,
+            "output_tokens": 0.28
           }
         },
         "deepseek-v4-flash max": {
@@ -679,9 +679,9 @@
             }
           },
           "cost": {
-            "input_tokens": 0.014,
-            "cached_input": 0.00028,
-            "output_tokens": 0.028
+            "input_tokens": 0.14,
+            "cached_input": 0.0028,
+            "output_tokens": 0.28
           }
         }
       }
@@ -746,12 +746,12 @@
           "model_name": "kimi-k2-thinking",
           "max_tokens": 256000,
           "cost": {
-            "input_tokens": 0.06,
-            "output_tokens": 0.25,
-            "cache_prompt": 0.015
+            "input_tokens": 0.6,
+            "output_tokens": 2.5,
+            "cached_input": 0.15
           }
         },
-        "kimi-k2.5":{
+        "kimi-k2.5": {
           "model_name": "kimi-k2.5",
           "max_tokens": 256000,
           "options": {
@@ -764,9 +764,9 @@
             }
           },
           "cost": {
-            "input_tokens": 0.06,
-            "output_tokens": 0.3,
-            "cache_prompt": 0.01
+            "input_tokens": 0.6,
+            "output_tokens": 3,
+            "cached_input": 0.1
           }
         }
       }
@@ -829,7 +829,6 @@
             "thinking_content_key": "reasoning_content"
           }
         }
-
       }
     }
   },
