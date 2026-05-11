@@ -168,6 +168,34 @@ class TestToolTimeout:
         # Should mention the timeout duration
         assert "1" in result
 
+    def test_streaming_bash_timeout_returns_tool_result_after_trapped_sigterm(self, tmp_path, monkeypatch):
+        """Streaming bash should escalate after SIGTERM so traps cannot hang the runner."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+
+        import asyncio
+
+        class Stream:
+            def stream_delta(self, text):
+                return True
+
+        script = "trap 'echo trapped; sleep 5' TERM; echo started; sleep 30"
+
+        async def run():
+            return await tools.execute_async(
+                "bash",
+                {"script": script},
+                tool_timeout_sec=0.5,
+                preserve_tool_result=True,
+                stream=Stream(),
+            )
+
+        result = asyncio.run(asyncio.wait_for(run(), timeout=4))
+
+        assert getattr(result, "reason", None) == "timeout"
+        assert "TIMEOUT" in result.output
+        assert "started" in result.output
+
 
 class TestToolTimeoutInvalidInput:
     """Tests for handling invalid timeout values."""

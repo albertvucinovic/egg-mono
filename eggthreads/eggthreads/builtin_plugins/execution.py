@@ -183,10 +183,12 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     )
     timed_out = False
     interrupted = False
+    terminate_sent = False
+    kill_sent = False
     timeout = ctx.timeout_sec
     start = time.time()
 
-    def _kill_process_and_container() -> None:
+    def _kill_process_and_container(*, force: bool = False) -> None:
         if sandbox_container_name and sandbox_provider == "docker":
             try:
                 from ..sandbox import stop_docker_container
@@ -196,25 +198,36 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 pass
         try:
             pgid = _os.getpgid(proc.pid)
-            _os.killpg(pgid, _signal.SIGTERM)
+            _os.killpg(pgid, _signal.SIGKILL if force else _signal.SIGTERM)
         except Exception:
             try:
-                proc.terminate()
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
             except Exception:
                 pass
 
     async def _watcher() -> None:
-        nonlocal timed_out, interrupted
+        nonlocal timed_out, interrupted, terminate_sent, kill_sent
         while proc.returncode is None:
             await _asyncio.sleep(0.1)
             if timeout and (time.time() - start) >= timeout:
                 timed_out = True
-                _kill_process_and_container()
-                return
+                if not terminate_sent:
+                    terminate_sent = True
+                    _kill_process_and_container()
+                elif not kill_sent and (time.time() - start) >= timeout + 2.0:
+                    kill_sent = True
+                    _kill_process_and_container(force=True)
             if ctx.cancel_check and ctx.cancel_check():
                 interrupted = True
-                _kill_process_and_container()
-                return
+                if not terminate_sent:
+                    terminate_sent = True
+                    _kill_process_and_container()
+                elif not kill_sent:
+                    kill_sent = True
+                    _kill_process_and_container(force=True)
 
     stdout_buf: list[str] = []
     stderr_buf: list[str] = []
