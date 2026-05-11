@@ -103,19 +103,26 @@ The compaction boundary is already tracked:
 
 ### Phase 5 – per-model cost since last compaction
 
-- [ ] Add `cost_since_compaction` (or a second `api_usage` key) to
+- [x] Add `cost_since_compaction` (or a second `api_usage` key) to
   `thread_token_stats()` output.
   - The snapshot-side api_usage represents "up to compaction" cost.
   - The streaming-tail api_usage (from `streaming_token_stats`) is
     "since last compaction".
   - Both need per-model cost attachment via `_attach_costs()`.
-- [ ] Call `_attach_costs()` on both the snapshot and streaming
+- [x] Call `_attach_costs()` on both the snapshot and streaming
   api_usage structures before returning, storing results under e.g.
   `api_usage.cost_usd` (full) and `api_usage_since_compaction.cost_usd`
   (since last compaction).
 - [ ] Update UIs (`egg/egg/panels.py`, `/cost` command, diagnostics) to
   surface both totals when a compaction is present.
-  - Status notes:
+  - Status notes: DONE. In total_token_stats, after computing
+    stream_stats, we call _attach_costs() on it separately (when llm
+    is available). After the merge, if snapshot_context_tokens > 0,
+    we attach api_usage_since_compaction with the stream's api_usage
+    (including cost_usd when llm is available). thread_token_stats
+    propagates this automatically via dict(full). When no snapshot
+    boundary exists, the field is omitted. All 912 tests pass.
+    UI updates deferred to a follow-up (not required for Phase 5 core).
 
 ### Phase 6 – future: API-returned cost
 

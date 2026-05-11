@@ -1176,6 +1176,11 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
     If ``llm`` is provided (e.g. an ``eggllm.LLMClient`` instance), we also
     attach an approximate USD cost estimate under ``api_usage.cost_usd``.
 
+    When a snapshot/compaction boundary exists, the returned dict also
+    includes ``api_usage_since_compaction`` — a full ``api_usage``-shaped
+    object (with its own ``cost_usd`` when ``llm`` is available) covering
+    only the events *after* the most recent snapshot.
+
     The merged result is conceptually:
 
       total ~= snapshot_token_stats + streaming_token_stats
@@ -1221,9 +1226,26 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
                     snap_stats = _token_stats_for_messages(filtered_msgs)
 
     stream_stats = streaming_token_stats(db, thread_id)
+
+    # Compute cost for the streaming tail separately (since last compaction).
+    stream_with_cost: Optional[Dict[str, Any]] = None
+    if llm is not None:
+        try:
+            stream_with_cost = _attach_costs(stream_stats, llm=llm)
+        except Exception:
+            stream_with_cost = None
+
     total = _merge_token_stats_with_boundary(snap_stats, stream_stats, include_snapshot_boundary=True)
     if llm is not None:
         total = _attach_costs(total, llm=llm)
+
+    # Attach api_usage_since_compaction when a snapshot boundary exists.
+    if total.get("snapshot_context_tokens", 0) > 0:
+        if stream_with_cost is not None:
+            total["api_usage_since_compaction"] = stream_with_cost.get("api_usage", {})
+        else:
+            # Include raw usage stats even without cost config.
+            total["api_usage_since_compaction"] = stream_stats.get("api_usage", {})
     return total
 
 
@@ -1235,6 +1257,10 @@ def thread_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> D
     effective thread history before compaction filtering.  API usage and cost
     fields remain based on the full effective history so historical usage does
     not disappear after compaction.
+
+    When a snapshot/compaction boundary exists, ``api_usage_since_compaction``
+    (propagated from :func:`total_token_stats`) provides the token usage and
+    cost for events after the most recent snapshot only.
     """
 
     full = total_token_stats(db, thread_id, llm=llm)
