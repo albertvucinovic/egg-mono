@@ -72,7 +72,7 @@ class LLMClient:
         return resolved
     # -------- Cost helpers -------------------------------------------------
     def current_model_cost_config(self, model_key: Optional[str] = None) -> Dict[str, Any]:
-        """Return the per-1K-token cost configuration for a model.
+        """Return the per-1M-token cost configuration for a model.
 
         ``models.json`` may include an optional ``"cost"`` object per
         model entry::
@@ -84,9 +84,9 @@ class LLMClient:
                     "OpenAI GPT-4o": {
                       "model_name": "gpt-4o-mini",
                       "cost": {
-                        "input_tokens": 0.25,
-                        "cached_input": 0.05,
-                        "output_tokens": 1.00
+                        "input_tokens": 2.50,
+                        "cached_input": 0.50,
+                        "output_tokens": 10.00
                       }
                     }
                   }
@@ -94,9 +94,8 @@ class LLMClient:
               }
             }
 
-        Each value is interpreted as *cents per 1K tokens* in the
-        corresponding tier.  We convert these to dollars internally by
-        dividing by 100.
+        Each value is interpreted as *dollars per 1M tokens* ($/1M) in
+        the corresponding tier and returned unchanged.
         """
 
         key = model_key or self.current_model_key
@@ -108,17 +107,16 @@ class LLMClient:
         if not isinstance(cost, dict):
             cost = {}
 
-        def _cents_to_usd(v: Any) -> float:
+        def _raw_cost(v: Any) -> float:
             try:
-                cents = float(v)
+                return float(v)
             except Exception:
                 return 0.0
-            return cents / 100.0
 
         out = {
-            "input_tokens": _cents_to_usd(cost.get("input_tokens") or 0.0),
-            "cached_input": _cents_to_usd(cost.get("cached_input") or 0.0),
-            "output_tokens": _cents_to_usd(cost.get("output_tokens") or 0.0),
+            "input_tokens": _raw_cost(cost.get("input_tokens") or 0.0),
+            "cached_input": _raw_cost(cost.get("cached_input") or 0.0),
+            "output_tokens": _raw_cost(cost.get("output_tokens") or 0.0),
         }
         return out
 
@@ -134,7 +132,7 @@ class LLMClient:
               "cached_tokens": int,
             }
 
-        We apply the current model's cost config (per 1K tokens) and
+        We apply the current model's cost config (per 1M tokens) and
         return::
 
             {
@@ -162,10 +160,10 @@ class LLMClient:
         pcached = float(cost_cfg.get("cached_input") or 0.0)
         pout = float(cost_cfg.get("output_tokens") or 0.0)
 
-        def _usd(tokens: int, price_per_1k: float) -> float:
-            if tokens <= 0 or price_per_1k <= 0.0:
+        def _usd(tokens: int, price_per_1M: float) -> float:
+            if tokens <= 0 or price_per_1M <= 0.0:
                 return 0.0
-            return float(tokens/1000.) * price_per_1k
+            return float(tokens/1_000_000.) * price_per_1M
 
         # To avoid double-counting, we treat cached input tokens as a
         # separate, cheaper tier. The remaining "new" tokens are

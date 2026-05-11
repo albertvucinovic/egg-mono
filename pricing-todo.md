@@ -43,14 +43,16 @@ The desired pipeline is:
 
 ### Phase 2 – eggllm client: remove cents→dollar conversion
 
-- [ ] `current_model_cost_config()` — return the raw $/1M values; drop
+- [x] `current_model_cost_config()` — return the raw $/1M values; drop
   `_cents_to_usd` division.
-- [ ] `approximate_thread_cost()` — rename `_usd` helper and change
+- [x] `approximate_thread_cost()` — rename `_usd` helper and change
   denominator from 1000 → 1_000_000.
   - Rename internal variable `price_per_1k` → `price_per_1M`.
-- [ ] Update docstrings that mention “cents per 1K”.
-- [ ] Run eggllm-focused tests (if any).
-  - Status notes:
+- [x] Update docstrings that mention “cents per 1K”.
+- [x] Run eggllm-focused tests (if any).
+  - Status notes: DONE. Removed _cents_to_usd helper; now _raw_cost
+    returns $/1M values unchanged. _usd helper uses price_per_1M and
+    divides by 1_000_000. Docstrings updated. All 49 eggllm tests pass.
 
 ### Phase 3 – eggthreads token_count: denominator 1_000 → 1_000_000
 
