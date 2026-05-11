@@ -70,13 +70,22 @@ The desired pipeline is:
 
 ### Phase 4 – tests and integration
 
-- [ ] Update any test fixtures that embed cost values to the new $/M
+- [x] Update any test fixtures that embed cost values to the new $/M
   scale.
-- [ ] Run full test suites:
+- [x] Run full test suites:
   `python -m pytest eggllm/tests eggthreads/tests egg/tests -q`
-- [ ] Manual spot-check: `/cost` output matches expected real-world costs
+- [x] Manual spot-check: `/cost` output matches expected real-world costs
   for a known model+token-count.
   - Status notes:
+    - DONE. Updated 4 test fixture cost values in
+      eggthreads/tests/test_model_switch.py (lines 72, 187, 293) and
+      egg/tests/test_model_inheritance.py (line 40) from cents/1K to
+      $/1M (0.03→0.30, 0.06→0.60, 0.01→0.10, 0.02→0.20).
+    - Full test suite: 912 passed, 4 skipped in 18.67s.
+    - Manual check: deepseek-v4-flash high returns
+      {"input_tokens": 0.14, "cached_input": 0.0028, "output_tokens": 0.28}
+      (all $/1M). approximate_thread_cost for 1M input + 500K output →
+      {"input": 0.14, "cached": 0.0, "output": 0.14, "total": 0.28}.
 
 ## Full-thread vs since-last-compaction cost
 

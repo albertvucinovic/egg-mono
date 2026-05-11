@@ -69,7 +69,7 @@ def test_set_thread_model_with_concrete_info(eggthreads, tmp_path):
                     "GPT-4": {
                         "model_name": "gpt-4",
                         "max_tokens": 4096,
-                        "cost": {"input_tokens": 0.03, "output_tokens": 0.06}
+                        "cost": {"input_tokens": 0.30, "output_tokens": 0.60}
                     }
                 }
             }
@@ -184,7 +184,7 @@ def test_initial_model_creates_switch_event(eggthreads, tmp_path):
                     "TestModel": {
                         "model_name": "gpt-4",
                         "max_tokens": 4096,
-                        "cost": {"input_tokens": 0.03, "output_tokens": 0.06}
+                        "cost": {"input_tokens": 0.30, "output_tokens": 0.60}
                     }
                 }
             }
@@ -290,7 +290,7 @@ def test_models_from_events_without_models_json(eggthreads, tmp_path):
                     "CustomModel-v99": {
                         "model_name": "custom-model-v99",
                         "max_tokens": 100000,
-                        "cost": {"input_tokens": 0.01, "output_tokens": 0.02}
+                        "cost": {"input_tokens": 0.10, "output_tokens": 0.20}
                     }
                 }
             }

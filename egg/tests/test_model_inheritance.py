@@ -37,7 +37,7 @@ def test_child_thread_inherits_model(tmp_path, monkeypatch):
                     "GPT-4": {
                         "model_name": "gpt-4",
                         "max_tokens": 8192,
-                        "cost": {"input_tokens": 0.03, "output_tokens": 0.06}
+                        "cost": {"input_tokens": 0.30, "output_tokens": 0.60}
                     }
                 }
             }
