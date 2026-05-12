@@ -456,6 +456,33 @@ def test_create_root_thread_defaults_to_models_json_default(eggthreads, tmp_path
     assert 'DefaultGPT' in concrete['providers']['openai']['models']
 
 
+def test_create_root_thread_uses_starting_model_env_over_models_json_default(eggthreads, tmp_path, monkeypatch):
+    """EGG_STARTING_MODEL overrides models.json default_model for new root threads."""
+    from eggthreads import ThreadsDB, create_root_thread, current_thread_model
+
+    db_path = tmp_path / "threads.sqlite"
+    db = ThreadsDB(db_path)
+    db.init_schema()
+
+    models_json = tmp_path / "models.json"
+    models_json.write_text(json.dumps({
+        "default_model": "DefaultGPT",
+        "providers": {
+            "openai": {
+                "models": {
+                    "DefaultGPT": {"model_name": "gpt-4"},
+                    "EnvModel": {"model_name": "gpt-4.1"},
+                }
+            }
+        }
+    }))
+    monkeypatch.setenv("EGG_STARTING_MODEL", "EnvModel")
+
+    tid = create_root_thread(db, name="test", models_path=str(models_json))
+
+    assert current_thread_model(db, tid) == "EnvModel"
+
+
 def test_create_root_thread_without_models_json_has_no_model(eggthreads, tmp_path):
     """Test that create_root_thread without models.json and no initial_model_key has no model."""
     from eggthreads import ThreadsDB, create_root_thread, current_thread_model

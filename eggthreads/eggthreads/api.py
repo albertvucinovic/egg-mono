@@ -21,7 +21,9 @@ except ImportError:
 
 def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
     """Return the default_model key from models.json, or None if unavailable."""
-    import os.path
+    env_model = (os.environ.get("EGG_STARTING_MODEL") or "").strip()
+    if env_model:
+        return env_model
     if not os.path.exists(models_path):
         return None
     try:
