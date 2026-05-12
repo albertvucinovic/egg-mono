@@ -95,24 +95,27 @@ Report commit hash, tests, current git status, and next recommended task when do
 Expect to be reused for later slices, so preserve useful context in your final note.
 ```
 
-Recommended worker system prompt:
+Worker system prompt and tools:
 
-```text
-You are a careful long-lived coding worker for Egg. Follow the specified TODO/handoff file exactly. Keep changes small, run focused tests, update the TODO with status notes, and commit each meaningful chunk. Do not broaden scope. Use git commands, not grep -R or ls -R. Prefer root-cause fixes and reuse existing code. Report concise progress and next steps when waiting for manager guidance. You should expect to continue across phases, so retain and summarize useful task context.
-```
+- Do **not** pass a custom `system_prompt` for normal workers. Let the child inherit Egg's default/current system prompt so it keeps the same general capabilities and instructions as the manager. Put worker-specific guidance in `context_text`, not in `system_prompt`.
+- Do **not** narrow `allowed_tools` for normal workers. Leave `allowed_tools` omitted/empty so the worker inherits all available tools, including REPL and thread-history tools needed for compaction-aware work.
+- Leave thread-spawning tools available too unless the user explicitly asks to restrict delegation.
+- Use `disabled_tools` only for a concrete safety reason, and state that reason in manager notes.
+- Avoid sharing REPL/session unless the task explicitly requires shared state.
 
-Typical tool allowance:
+Typical spawn config for a normal worker:
 
 ```json
 {
-  "allowed_tools": ["bash", "python"],
+  "context_text": "<worker instructions>",
+  "label": "<short label>",
   "disabled_tools": [],
   "share_session": false,
   "share_repl": false
 }
 ```
 
-Avoid sharing REPL/session unless the task explicitly requires shared state.
+Do not include `system_prompt` or `allowed_tools` in the normal case.
 
 ## Wait loop
 
