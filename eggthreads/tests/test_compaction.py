@@ -969,6 +969,61 @@ def test_runner_auto_compacts_summary_mode_after_llm_turn_and_runs_summary_next(
     assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
 
 
+def test_runner_recovers_context_length_provider_error_by_queueing_summary_next(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old context")
+    previous = ts.append_message(db, tid, "assistant", "previous answer")
+    current = ts.append_message(db, tid, "user", "next question")
+    ts.create_snapshot(db, tid)
+    seen_messages: list[list[dict]] = []
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            seen_messages.append(messages)
+            if len(seen_messages) == 1:
+                raise RuntimeError("context_length_exceeded: maximum context length exceeded")
+            yield {"type": "done", "message": {"role": "assistant", "content": "summary"}}
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 1},
+    )
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=1000))
+    asyncio.run(runner.run_once())
+
+    compaction_events = _events(db, tid)
+    assert len(compaction_events) == 1
+    assert compaction_events[0][1]["created_by"] == "auto_compaction"
+    assert compaction_events[0][1]["selector"] == current
+    assert compaction_events[0][1]["start_msg_id"] == current
+
+    markers = ts.list_thread_compaction_summary_in_progress_events(db, tid)
+    assert len(markers) == 1
+    messages = _snapshot_messages(db, tid)
+    request = next(m for m in messages if m.get("auto_compaction_request"))
+    assert markers[0]["request_msg_id"] == request["msg_id"]
+    assert compaction_events[0][0] < request["event_seq"] < markers[0]["event_seq"]
+    assert request["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    assert request["event_seq"] > max(
+        seq for seq, type_, _msg_id, _payload in _typed_events(db, tid) if type_ == "stream.close"
+    )
+    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, messages)
+    assert old not in [m.get("msg_id") for m in provider_view]
+    assert previous not in [m.get("msg_id") for m in provider_view]
+    assert [m.get("msg_id") for m in provider_view] == [current, request["msg_id"]]
+    assert not any("LLM/runner error" in str(m.get("content", "")) for m in messages)
+    assert len(seen_messages) == 1
+
+    asyncio.run(runner.run_once())
+
+    assert len(seen_messages) == 2
+    assert seen_messages[1][-1]["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    assert all(m["content"] != "old context" for m in seen_messages[1])
+    assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
+
 def test_runner_auto_compacts_direct_mode_when_summary_env_false(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old context")

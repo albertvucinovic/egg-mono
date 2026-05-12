@@ -46,6 +46,25 @@ class ContextLimitExceeded(Exception):
     pass
 
 
+def _is_context_length_exceeded_error(exc: BaseException) -> bool:
+    """Return True when a provider error is recognizably context-window overflow."""
+
+    if isinstance(exc, ContextLimitExceeded):
+        return False
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return (
+        "context_length_exceeded" in text
+        or "context length" in text
+        or "context window" in text
+        or "maximum context" in text
+        or "prompt is too long" in text
+        or "too many tokens" in text
+        or ("input token count" in text and "exceed" in text)
+        or ("token" in text and "limit" in text and "exceed" in text)
+        or ("token" in text and "maximum" in text and "exceed" in text)
+    )
+
+
 def _now_plus(ttl_sec: int) -> str:
     return (_utcnow() + timedelta(seconds=ttl_sec)).strftime(ISO)
 
@@ -832,6 +851,7 @@ class ThreadRunner:
             context_limit = self.cfg.context_limit
 
         was_cancelled = False
+        context_length_error: Optional[str] = None
         try:
             if ra.kind == 'RA1_llm':
                 # Check context limit before making LLM call
@@ -875,33 +895,42 @@ class ThreadRunner:
             # LLM/runner error. Defer re-raising until after stream/lease cleanup.
             was_cancelled = True
         except Exception as e:
-            # Surface provider/config/network or tool errors into the thread
-            # and ensure RA1 boundaries advance even if the provider fails
-            # before any streaming deltas are emitted.
-            # Ensure we always have a meaningful error message
-            error_msg = str(e) if str(e) else f"{type(e).__name__}: (no message)"
-            try:
-                # Emit a synthetic stream.delta with a 'reason' field so
-                # _last_stream_close_seq() will treat this invoke_id as an
-                # LLM stream. This prevents the same user message from
-                # repeatedly triggering a failing RA1 turn.
-                _append_delta({'reason': f'LLM/runner error: {error_msg}', 'model_key': current_model})
-            except Exception:
-                pass
-            try:
-                err_payload = {'role': 'system', 'content': f'LLM/runner error: {error_msg}'}
-                if current_model:
-                    err_payload['model_key'] = current_model
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
-                    type_='msg.create',
-                    msg_id=os.urandom(10).hex(),
-                    payload=err_payload,
-                )
-                print(f"Runner error: {error_msg}")
-            except Exception:
-                pass
+            if ra.kind == 'RA1_llm' and _is_context_length_exceeded_error(e):
+                context_length_error = str(e) if str(e) else f"{type(e).__name__}: (no message)"
+                try:
+                    # Advance the failed RA1 boundary; the summary request is
+                    # appended after stream.close so it is the next RA1 turn.
+                    _append_delta({'reason': f'LLM/runner context length exceeded: {context_length_error}', 'model_key': current_model})
+                except Exception:
+                    pass
+            else:
+                # Surface provider/config/network or tool errors into the thread
+                # and ensure RA1 boundaries advance even if the provider fails
+                # before any streaming deltas are emitted.
+                # Ensure we always have a meaningful error message
+                error_msg = str(e) if str(e) else f"{type(e).__name__}: (no message)"
+                try:
+                    # Emit a synthetic stream.delta with a 'reason' field so
+                    # _last_stream_close_seq() will treat this invoke_id as an
+                    # LLM stream. This prevents the same user message from
+                    # repeatedly triggering a failing RA1 turn.
+                    _append_delta({'reason': f'LLM/runner error: {error_msg}', 'model_key': current_model})
+                except Exception:
+                    pass
+                try:
+                    err_payload = {'role': 'system', 'content': f'LLM/runner error: {error_msg}'}
+                    if current_model:
+                        err_payload['model_key'] = current_model
+                    self.db.append_event(
+                        event_id=os.urandom(10).hex(),
+                        thread_id=self.thread_id,
+                        type_='msg.create',
+                        msg_id=os.urandom(10).hex(),
+                        payload=err_payload,
+                    )
+                    print(f"Runner error: {error_msg}")
+                except Exception:
+                    pass
         finally:
             stop_flag = True
             try:
@@ -977,6 +1006,50 @@ class ThreadRunner:
         except Exception:
             pass
 
+        if context_length_error is not None:
+            try:
+                from .api import append_auto_compaction_summary_request, create_snapshot
+
+                create_snapshot(self.db, self.thread_id)
+                recovery_selector = str(ra.msg_id or "") or "last_message"
+                summary_result = append_auto_compaction_summary_request(
+                    self.db,
+                    self.thread_id,
+                    selector=recovery_selector,
+                )
+                if not summary_result.success and summary_result.compaction is not None:
+                    summary_result = append_auto_compaction_summary_request(
+                        self.db,
+                        self.thread_id,
+                        selector="last_llm",
+                    )
+                if summary_result.success:
+                    create_snapshot(self.db, self.thread_id)
+                    print(f"Runner recovered from context-length error: {summary_result.message}")
+                else:
+                    raise RuntimeError(summary_result.message)
+            except Exception as recovery_error:
+                try:
+                    err_payload = {'role': 'system', 'content': f'LLM/runner error: {recovery_error}'}
+                    if current_model:
+                        err_payload['model_key'] = current_model
+                    self.db.append_event(
+                        event_id=os.urandom(10).hex(),
+                        thread_id=self.thread_id,
+                        type_='msg.create',
+                        msg_id=os.urandom(10).hex(),
+                        payload=err_payload,
+                    )
+                    try:
+                        from .api import create_snapshot as _create_snapshot
+
+                        _create_snapshot(self.db, self.thread_id)
+                    except Exception:
+                        pass
+                    print(f"Runner error: {recovery_error}")
+                except Exception:
+                    pass
+
         has_pending_assistant_tool = False
         if ra.kind == 'RA1_llm' and not was_cancelled:
             try:
@@ -987,7 +1060,7 @@ class ThreadRunner:
             except Exception:
                 has_pending_assistant_tool = False
 
-        if ra.kind == 'RA1_llm' and not was_cancelled and not has_pending_assistant_tool:
+        if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None and not has_pending_assistant_tool:
             try:
                 from .api import auto_compact_summary_enabled, create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
                 from .token_count import provider_context_token_stats
