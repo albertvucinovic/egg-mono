@@ -594,10 +594,19 @@ COMPACTION_CONTEXT_LENGTH_EVENT_TYPE = 'thread.compaction_context_length'
 COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE = 'thread.compaction_summary_in_progress'
 
 COMPACTION_SUMMARY_REQUEST = (
-    "Compaction summary request: write a concise continuation summary as "
-    "normal assistant content, preserving the details needed to continue the "
-    "current work, including any pending user request. After the summary, call "
-    "compact_thread() with start_message omitted."
+    "Compaction continuation-summary request:\n\n"
+    "Compaction has already happened. You are now running in the newly "
+    "compacted provider context. Use the hydrated REPL/thread-history helpers "
+    "when needed to inspect omitted history, including `all_messages`, "
+    "`current_prompt_messages`, `older_messages_not_in_prompt`, "
+    "`messages_by_id`, `messages_by_role`, `search_thread(...)`, "
+    "`get_message(...)`, `print_message(...)`, and `reload_thread_context()`.\n\n"
+    "Write a concise continuation summary preserving: the pending user "
+    "request; important decisions and design constraints; files changed or "
+    "intended to change; commands/tests already run and their results; known "
+    "failures or unresolved risks; and exact next steps.\n\n"
+    "Do not continue the user task yet; only write the continuation summary as "
+    "normal assistant content."
 )
 AUTO_COMPACTION_SUMMARY_REQUEST = COMPACTION_SUMMARY_REQUEST
 
@@ -630,12 +639,13 @@ class CompactionCommitResult:
 
 @dataclass
 class CompactionSummaryRequestResult:
-    """Result of appending an automatic summary-producing compaction request."""
+    """Result of committing compaction and appending a summary request."""
 
     success: bool
     request_msg_id: Optional[str]
     marker_event_seq: Optional[int]
     message: str
+    compaction: Optional[CompactionCommitResult] = None
 
 
 @dataclass
@@ -775,8 +785,8 @@ def append_compaction_summary_in_progress(
 
     The marker is a control event, not provider-visible content.  It prevents
     repeated threshold checks from appending duplicate summary requests while
-    the assistant has not yet satisfied the request by emitting a later
-    effective ``thread.compaction`` event.
+    the assistant has not yet satisfied the post-compaction request by
+    emitting a later assistant response.
     """
 
     payload: Dict[str, Any] = {
@@ -1057,8 +1067,8 @@ def latest_effective_thread_compaction_summary_in_progress(db: ThreadsDB, thread
     """Return the latest pending automatic summary marker, if any.
 
     A marker is pending only when it is still present in the effective thread
-    view, appears after the current effective compaction start, and has not
-    been satisfied by a later effective ``thread.compaction`` event.
+    view, appears after the current effective compaction start, and its
+    request has not received a later effective assistant response.
     """
 
     erased_ranges = _continue_erased_event_ranges(db, thread_id)
@@ -1076,6 +1086,18 @@ def latest_effective_thread_compaction_summary_in_progress(db: ThreadsDB, thread
         except Exception:
             current_compaction_event_seq = -1
 
+    def _has_later_assistant_response(request_seq: int) -> bool:
+        for event_seq, _msg_id, payload in _compaction_candidate_messages(db, thread_id):
+            if event_seq <= request_seq:
+                continue
+            if _event_erased_by_continue(event_seq, erased_ranges):
+                continue
+            if payload.get('no_api'):
+                continue
+            if payload.get('role') == 'assistant':
+                return True
+        return False
+
     for marker in reversed(list_thread_compaction_summary_in_progress_events(db, thread_id)):
         try:
             marker_seq = int(marker.get('event_seq'))
@@ -1084,8 +1106,26 @@ def latest_effective_thread_compaction_summary_in_progress(db: ThreadsDB, thread
         if _event_erased_by_continue(marker_seq, erased_ranges):
             continue
         request_msg_id = marker.get('request_msg_id')
-        if isinstance(request_msg_id, str) and (request_msg_id in skipped or request_msg_id in deleted):
-            continue
+        request_seq: Optional[int] = None
+        if isinstance(request_msg_id, str):
+            if request_msg_id in skipped or request_msg_id in deleted:
+                continue
+            if request_msg_id:
+                request_seq = _get_event_seq_for_msg_id(db, thread_id, request_msg_id)
+                if request_seq is None:
+                    continue
+
+        # New post-compaction markers are appended after the compaction event
+        # and clear when their request gets an assistant response.  Keep the
+        # older marker/event-sequence checks for legacy pre-migration markers
+        # that did not carry a usable request_msg_id.
+        if request_seq is not None:
+            if request_seq < current_start_seq:
+                continue
+            if _has_later_assistant_response(int(request_seq)):
+                continue
+            return marker
+
         if marker_seq <= current_start_seq:
             continue
         if marker_seq <= current_compaction_event_seq:
@@ -1431,8 +1471,9 @@ def append_auto_compaction_summary_request(
     thread_id: str,
     *,
     content: str = AUTO_COMPACTION_SUMMARY_REQUEST,
+    selector: str = 'last_llm',
 ) -> CompactionSummaryRequestResult:
-    """Append one model-visible automatic summary request plus a pending marker."""
+    """Commit an automatic compaction boundary, then append its summary request."""
 
     if latest_effective_thread_compaction_summary_in_progress(db, thread_id) is not None:
         return CompactionSummaryRequestResult(
@@ -1440,6 +1481,21 @@ def append_auto_compaction_summary_request(
             None,
             None,
             "Automatic summary compaction request already pending.",
+        )
+
+    compaction = commit_thread_compaction(
+        db,
+        thread_id,
+        selector,
+        created_by='auto_compaction',
+    )
+    if not compaction.success:
+        return CompactionSummaryRequestResult(
+            False,
+            None,
+            None,
+            compaction.message,
+            compaction,
         )
 
     request_msg_id = append_message(
@@ -1460,6 +1516,7 @@ def append_auto_compaction_summary_request(
         request_msg_id,
         marker_seq,
         "Automatic summary compaction request appended.",
+        compaction,
     )
 
 
@@ -1469,8 +1526,18 @@ def append_compaction_summary_request(
     *,
     created_by: str = 'user_command',
     content: str = COMPACTION_SUMMARY_REQUEST,
+    selector: Optional[str] = None,
 ) -> str:
-    """Append a normal model-visible summary compaction request message."""
+    """Commit compaction, then append a normal model-visible summary request."""
+
+    compaction = commit_thread_compaction(
+        db,
+        thread_id,
+        selector,
+        created_by=created_by,
+    )
+    if not compaction.success:
+        raise ValueError(compaction.message)
 
     return append_message(
         db,
@@ -1753,11 +1820,11 @@ def maybe_auto_compact_thread(
 
     Callers invoke this at a user-turn/scheduler boundary, and it only acts
     when the effective provider-context token estimate is at or above
-    ``threshold_tokens``.  In summary mode it appends one normal model-visible
-    request asking the assistant to summarize and call ``compact_thread()``;
-    otherwise it uses the direct ``last_llm`` start-pointer policy.  Direct
-    mode still goes through the shared compaction helper and all normal
-    selector validation/no-op handling.
+    ``threshold_tokens``.  In summary mode it first commits the safe
+    compaction boundary, then appends one normal model-visible request asking
+    the assistant to summarize the freshly compacted thread.  Direct mode
+    still goes through the shared compaction helper and all normal selector
+    validation/no-op handling.
     """
 
     if summary_mode is None:
@@ -1795,13 +1862,13 @@ def maybe_auto_compact_thread(
                 None,
                 "No new provider-visible user or assistant message after current compaction start.",
             )
-        summary_result = append_auto_compaction_summary_request(db, thread_id)
+        summary_result = append_auto_compaction_summary_request(db, thread_id, selector=selector)
         return AutoCompactionResult(
             bool(summary_result.success),
             True,
             context_int,
             threshold_int,
-            None,
+            summary_result.compaction,
             summary_result.message,
         )
 

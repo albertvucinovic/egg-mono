@@ -106,8 +106,8 @@ def compact_with_summary_command(context: Any, arg: str):
         return CommandResult(clear_input=False, message=f"/compactWithSummary failed: {e}")
 
     message = (
-        "Queued compaction summary request; the assistant will write a normal "
-        "summary and then call compact_thread()."
+        "Compaction committed and summary request queued; the assistant will "
+        "write a continuation summary before other work."
     )
     log = getattr(context, "log_system", None)
     if callable(log):
@@ -288,7 +288,7 @@ def register_compaction_commands(registry: Any) -> None:
             compact_with_summary_command,
             category="threads",
             usage="/compactWithSummary",
-            description="Ask the assistant to summarize, then call compact_thread without deleting UI history.",
+            description="Commit compaction, then ask the assistant for a continuation summary without deleting UI history.",
         )
     )
     registry.register(
