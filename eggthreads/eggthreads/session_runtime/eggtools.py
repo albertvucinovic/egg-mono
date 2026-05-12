@@ -178,19 +178,4 @@ def python(script: str, **kwargs: Any) -> str:
     return tool("python", timeout_sec=timeout_sec, **kwargs)
 
 
-def session_status(**kwargs: Any) -> str:
-    timeout_sec = _pop_timeout_arg(kwargs)
-    return tool("session_status", timeout_sec=timeout_sec, **kwargs)
-
-
-def session_reset(**kwargs: Any) -> str:
-    timeout_sec = _pop_timeout_arg(kwargs)
-    return tool("session_reset", timeout_sec=timeout_sec, **kwargs)
-
-
-def session_stop(**kwargs: Any) -> str:
-    timeout_sec = _pop_timeout_arg(kwargs)
-    return tool("session_stop", timeout_sec=timeout_sec, **kwargs)
-
-
 _load_generated_wrappers()

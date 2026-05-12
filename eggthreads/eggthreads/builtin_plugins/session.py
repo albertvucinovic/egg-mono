@@ -95,13 +95,6 @@ def format_session_status(thread_id: str, db: Any = None) -> str:
     return "\n".join(lines)
 
 
-def execute_session_status_tool(args: Dict[str, Any]) -> str:
-    thread_id = (args.get("_thread_id") or "").strip()
-    if not thread_id:
-        return "Error: session_status requires thread context."
-    return format_session_status(thread_id)
-
-
 def resolve_session_targets(thread_id: str, language: str, db: Any = None) -> tuple[Any, list[str]]:
     import eggthreads as _eggthreads
 
@@ -120,36 +113,6 @@ def resolve_session_targets(thread_id: str, language: str, db: Any = None) -> tu
     else:
         targets = [thread_id]
     return db, targets
-
-
-def execute_session_reset_tool(args: Dict[str, Any]) -> str:
-    import eggthreads as _eggthreads
-
-    thread_id = (args.get("_thread_id") or "").strip()
-    if not thread_id:
-        return "Error: session_reset requires thread context."
-    language = str(args.get("language") or "").strip().lower()
-    db, targets = resolve_session_targets(thread_id, language)
-    lines = []
-    for target in targets:
-        sid = _eggthreads.reset_thread_session(db, target, reason="session_reset tool")
-        lines.append(f"Reset session for {target[-8:]}: {sid}")
-    return "\n".join(lines)
-
-
-def execute_session_stop_tool(args: Dict[str, Any]) -> str:
-    import eggthreads as _eggthreads
-
-    thread_id = (args.get("_thread_id") or "").strip()
-    if not thread_id:
-        return "Error: session_stop requires thread context."
-    language = str(args.get("language") or "").strip().lower()
-    db, targets = resolve_session_targets(thread_id, language)
-    lines = []
-    for target in targets:
-        st = _eggthreads.stop_thread_session(db, target, reason="session_stop tool")
-        lines.append(f"Stop session for {target[-8:]}: {st.status} ({st.session_id or '(none)'})")
-    return "\n".join(lines)
 
 
 def _command_log(context: Any, message: str) -> None:
@@ -432,37 +395,6 @@ def register_session_tools(registry: ToolRegistry) -> None:
         impl=execute_bash_repl_tool,
     )
 
-    registry.register(
-        name="session_status",
-        description="Show persistent REPL/session status for the current thread and runtime children.",
-        parameters_schema={"type": "object", "properties": {}},
-        impl=execute_session_status_tool,
-    )
-
-    registry.register(
-        name="session_reset",
-        description="Reset the current thread persistent REPL/session state. Optional language=python|bash|all targets runtime sessions.",
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "language": {"type": "string", "description": "Optional target runtime language: python, bash, or all."},
-            },
-        },
-        impl=execute_session_reset_tool,
-    )
-
-    registry.register(
-        name="session_stop",
-        description="Stop the current thread persistent REPL/session without disabling its config. Optional language=python|bash|all targets runtime sessions.",
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "language": {"type": "string", "description": "Optional target runtime language: python, bash, or all."},
-            },
-        },
-        impl=execute_session_stop_tool,
-    )
-
 
 @dataclass(frozen=True)
 class SessionPlugin:
@@ -481,9 +413,6 @@ __all__ = [
     "bash_repl_command",
     "execute_bash_repl_tool",
     "execute_python_repl_tool",
-    "execute_session_reset_tool",
-    "execute_session_status_tool",
-    "execute_session_stop_tool",
     "format_session_status",
     "python_repl_command",
     "register_session_commands",

@@ -58,9 +58,9 @@ def test_python_repl_tool_registered():
     assert "timeout_sec" in props
     assert "drive_runtime_tools" not in props
     names = set(specs)
-    assert "session_status" in names
-    assert "session_reset" in names
-    assert "session_stop" in names
+    assert "session_status" not in names
+    assert "session_reset" not in names
+    assert "session_stop" not in names
 
 
 def test_python_repl_tool_schema_mentions_hydrated_thread_context():

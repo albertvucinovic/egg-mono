@@ -1684,21 +1684,6 @@ def _make_eggtools_module(eval_token: str):
         args["script"] = script
         return repl_bridge.call_tool(eval_token, "python", args, timeout_sec=timeout_sec)
 
-    def session_status(**kwargs: Any) -> str:
-        args = dict(kwargs)
-        timeout_sec = _pop_timeout_arg(args)
-        return repl_bridge.call_tool(eval_token, "session_status", args, timeout_sec=timeout_sec)
-
-    def session_reset(**kwargs: Any) -> str:
-        args = dict(kwargs)
-        timeout_sec = _pop_timeout_arg(args)
-        return repl_bridge.call_tool(eval_token, "session_reset", args, timeout_sec=timeout_sec)
-
-    def session_stop(**kwargs: Any) -> str:
-        args = dict(kwargs)
-        timeout_sec = _pop_timeout_arg(args)
-        return repl_bridge.call_tool(eval_token, "session_stop", args, timeout_sec=timeout_sec)
-
     _install_generated_wrappers()
 
     mod.tool = tool
@@ -1712,9 +1697,6 @@ def _make_eggtools_module(eval_token: str):
     mod.skill = skill
     mod.bash = bash
     mod.python = python
-    mod.session_status = session_status
-    mod.session_reset = session_reset
-    mod.session_stop = session_stop
     return mod
 
 
