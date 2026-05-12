@@ -369,6 +369,42 @@ class TestBracketedPasteThroughAppInput:
 class TestHandleKeyDelegation:
     """Tests for key delegation to editor."""
 
+    def test_end_key_delegates_to_input_editor(self, egg_app):
+        """End should move the message-input cursor to the end of the line."""
+        editor = egg_app.input_panel.editor.editor
+        editor.set_text("hello world")
+        editor.cursor.row = 0
+        editor.cursor.col = 2
+
+        result = egg_app.handle_key('\x1b[F')
+
+        assert result is True
+        assert editor.cursor.col == len("hello world")
+
+    def test_end_key_does_not_scroll_transcript(self, egg_app):
+        """End belongs to the input editor even when a scrollback renderer exists."""
+
+        class Renderer:
+            def __init__(self):
+                self.scrolled_to_bottom = False
+
+            def scroll(self, _step):
+                pass
+
+            def scroll_to_bottom(self):
+                self.scrolled_to_bottom = True
+
+        renderer = Renderer()
+        egg_app._renderer = renderer
+        egg_app.input_panel.editor.editor.set_text("hello")
+        egg_app.input_panel.editor.editor.cursor.col = 0
+
+        result = egg_app.handle_key('\x1b[F')
+
+        assert result is True
+        assert renderer.scrolled_to_bottom is False
+        assert egg_app.input_panel.editor.editor.cursor.col == len("hello")
+
     def test_unknown_key_delegates_to_editor(self, egg_app, monkeypatch):
         """Unknown keys should be delegated to the editor."""
         delegated = []

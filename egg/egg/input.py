@@ -191,14 +191,13 @@ class InputMixin:
             enter_key = '\r'
 
         # In-app scrolling (since alt-screen disables native terminal
-        # scrollback). PageUp / PageDown / End address the renderer's
-        # scrollback model, sliding the history view above the live region.
+        # scrollback). PageUp / PageDown address the renderer's scrollback
+        # model, sliding the history view above the live region.
         # Mouse wheel events (SGR: "\x1b[<button;col;rowM|m") also map here.
         if isinstance(key, str):
             renderer = getattr(self, '_renderer', None)
             if renderer is not None and hasattr(renderer, 'scroll'):
                 # PageUp: \x1b[5~ (most terminals). PageDown: \x1b[6~.
-                # End: \x1b[F, \x1b[4~, or \x1bOF depending on terminal.
                 if key in ('\x1b[5~', '\x1b[5;2~'):
                     try:
                         import shutil as _shutil
@@ -215,10 +214,6 @@ class InputMixin:
                         step = 5
                     renderer.scroll(-step)
                     return True
-                if key in ('\x1b[F', '\x1b[4~', '\x1bOF') and hasattr(renderer, 'scroll_to_bottom'):
-                    renderer.scroll_to_bottom()
-                    return True
-
                 # SGR mouse events: "\x1b[<button;col;row" + ("M" = press, "m" = release).
                 # Wheel buttons: 64 = up, 65 = down (modifier bits may be set).
                 # Orphan tails (any prefix-strip level / split bodies)
