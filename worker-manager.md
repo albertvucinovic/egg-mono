@@ -1,29 +1,33 @@
 # Worker Manager Skill
 
-Use this skill when a task should be implemented across one or more worker subthreads using a hierarchical TODO / handoff document, such as `compaction-todo.md` or `plugins-todo.md`.
+Use this skill when a task should be implemented through a manager/worker split using a durable TODO / handoff document, such as `compaction-todo.md` or `plugins-todo.md`.
 
 This is the authoritative Worker Manager skill. In repository checkouts it may be present both at the repo root and under `eggthreads/eggthreads/skills/`; keep those copies synchronized when editing the skill text.
 
 ## Core idea
 
-The manager stays responsible for direction, scope, and synthesis. Workers do focused implementation chunks.
+The manager stays responsible for direction, scope, review, and user-facing synthesis. The worker does focused implementation slices.
+
+Worker threads are treated as **infinite** for this workflow: they have auto-compaction plus summarization and can keep useful project context across phases. Therefore, the manager should normally create **one primary worker thread for the task** and keep sending it the next slice.
 
 A good worker loop is:
 
 ```text
 manager reads TODO + repo state
-manager spawns worker with one clear slice
+manager spawns one primary worker with the first clear slice
 worker edits/tests/commits/updates TODO
 manager waits in bounded increments
 manager reviews result/status
-manager either sends next slice, spawns fresh worker, or stops for user discussion
+manager sends the next slice to the same worker, or stops for user discussion
 ```
+
+Do not rotate workers because a phase completed. Do not rotate workers because the task is long. Do not rotate workers because of context-size concerns. The worker's accumulated context is an asset.
 
 Do not use workers as a substitute for product/design decisions. If a TODO item contains an unresolved design choice, the worker may analyze options, but the manager should decide or ask the user.
 
 ## Manager pre-flight
 
-Before spawning workers:
+Before spawning the primary worker:
 
 1. Read the relevant TODO/handoff file.
 2. Run:
@@ -37,12 +41,14 @@ Before spawning workers:
 4. Check whether there is uncommitted tracked work.
    - If yes, inspect it before spawning a worker.
    - Do not let a worker accidentally build on unknown dirty state.
-5. Decide the smallest useful worker slice.
+5. Decide the smallest useful first worker slice.
 6. Note any hard constraints from the user.
+
+After the primary worker exists, prefer sending continuations to that same worker over spawning another one.
 
 ## Worker scope rules
 
-Give each worker one coherent implementation slice, not an entire multi-phase plan unless the user explicitly wants broad autonomous execution.
+Give the worker one coherent implementation slice at a time, not an entire multi-phase plan unless the user explicitly wants broad autonomous execution.
 
 Good worker scopes:
 
@@ -69,27 +75,30 @@ Finish compaction.
 Refactor context, UI, commands, tests, and auto-compaction as needed.
 ```
 
-## Spawn template
+The worker receives one slice at a time, but it should remain the same thread across slices so it can reuse its prior context.
+
+## Spawn template for the primary worker
 
 Use `spawn_agent_auto` for coding workers when tool auto-approval is appropriate.
 
 Suggested template:
 
 ```text
-Continue <project/task> implementation. Read ./<todo-file> first.
+Continue <project/task> implementation as the primary long-lived worker. Read ./<todo-file> first.
 Run git status --short before editing.
 Current relevant commits: <commit list or latest hash>.
-Your task: <one small slice>.
+Your task now: <one small slice>.
 Follow ./<todo-file> exactly: small meaningful commits, focused tests, update the TODO status/test notes before commit.
 Do not broaden scope: <explicit non-goals>.
 If this requires a broad refactor or unresolved design decision, stop and report options instead of implementing.
 Report commit hash, tests, current git status, and next recommended task when done.
+Expect to be reused for later slices, so preserve useful context in your final note.
 ```
 
 Recommended worker system prompt:
 
 ```text
-You are a careful coding worker for Egg. Follow the specified TODO/handoff file exactly. Keep changes small, run focused tests, update the TODO with status notes, and commit each meaningful chunk. Do not broaden scope. Use git commands, not grep -R or ls -R. Prefer root-cause fixes and reuse existing code. Report concise progress and next steps when waiting for manager guidance.
+You are a careful long-lived coding worker for Egg. Follow the specified TODO/handoff file exactly. Keep changes small, run focused tests, update the TODO with status notes, and commit each meaningful chunk. Do not broaden scope. Use git commands, not grep -R or ls -R. Prefer root-cause fixes and reuse existing code. Report concise progress and next steps when waiting for manager guidance. You should expect to continue across phases, so retain and summarize useful task context.
 ```
 
 Typical tool allowance:
@@ -120,11 +129,11 @@ if not finished:
 
 For long requested runs, repeat for the requested budget, e.g. up to 4 hours, but checkpoint after each worker result.
 
-If the worker is still running and healthy, keep waiting. If there are errors or no progress, intervene.
+If the worker is still running and healthy, keep waiting. If there are errors or no progress, intervene in that same worker when possible.
 
-## Repairing failed worker threads
+## Repairing the primary worker
 
-Before abandoning a worker that hit a transient runner/LLM failure, try to repair the existing child thread.
+Before abandoning a worker that hit a transient runner/LLM/session failure, repair the existing child thread.
 
 Use this when:
 
@@ -144,14 +153,14 @@ wait(worker, timeout_sec=300)
 Guidelines:
 
 1. Inspect `get_child_status` first so you know whether the failure looks transient or implementation-related.
-2. Prefer one `continue_subthread(child_thread_id)` repair attempt before spawning a replacement worker.
+2. Prefer repairing or continuing the existing worker before creating any replacement.
 3. After the repaired worker returns, review its status exactly like any other worker result.
-4. If the same failure repeats, or if local `git status` shows messy partial edits, inspect the diff and decide whether to continue, revert, spawn a fresh repair worker, or ask the user.
+4. If the same infrastructure failure repeats, try one more targeted continuation with explicit guidance if that is safe.
 5. Do not use `continue_subthread` to paper over real test failures or design blockers; those need root-cause fixes or manager/user decisions.
 
 ## After each worker result
 
-When a worker returns:
+When the worker returns:
 
 1. Read its final message. If it is missing/empty because of a runner failure, use the repair pattern above before treating the worker as done.
 2. Run locally if useful:
@@ -166,47 +175,62 @@ When a worker returns:
 5. Inspect the TODO status note if the task was important or risky.
 6. Decide the next step:
    - send continuation to the same worker;
-   - spawn a fresh worker;
    - do a small manager fix;
-   - stop and ask the user.
+   - stop and ask the user;
+   - only exceptionally spawn a replacement or review worker.
 
-## Sending continuation to an existing worker
+## Sending continuation to the same worker
 
-Prefer continuing a reliable worker. Worker threads now have virtually infinite context for this workflow, so the manager should not worry about worker context budget when deciding whether to continue an existing worker. Do not spawn a fresh worker merely because a slice completed; switching workers can degrade performance by losing task-local knowledge.
+This is the normal path. Prefer continuing the primary worker almost always.
 
 Reuse the same worker when:
 
-- the next slice builds directly on its knowledge;
+- the next slice is another phase of the same TODO/task;
+- the next slice builds directly or indirectly on previous implementation knowledge;
 - the previous result was reliable;
-- there is no other reason to isolate the next task.
+- the worker has useful local understanding of tests, files, constraints, or prior decisions;
+- there is no concrete safety reason to isolate the next task.
 
 Continuation template:
 
 ```text
 Great. Continue with the next unchecked item in ./<todo-file>: <item>.
-Keep it to one small commit. Update the TODO, run focused tests, commit, and report commit hash/tests/next task.
+Keep it to one small commit. Reuse your prior context. Update the TODO, run focused tests, commit, and report commit hash/tests/next task.
 If this becomes broader than expected, stop and explain.
 ```
 
-## Spawning a fresh worker
+If the next slice is a new phase, still send it to the same worker by default:
 
-Spawn a fresh worker when:
+```text
+Continue to Phase <N>. Before editing, briefly re-read the relevant TODO section and your previous status note. Then implement only <specific item>. Keep one coherent commit and report tests/status.
+```
 
+## Spawning another worker is exceptional
+
+Do **not** spawn a fresh worker merely because:
+
+- the previous slice finished;
 - the next task is a new phase;
-- the previous worker made many decisions and a clean slate is safer;
-- the manager wants independent review.
+- the worker thread is long;
+- the worker context might be large;
+- the manager wants tidy separation between phases.
 
-Fresh-worker context should include:
+Spawn a second/replacement worker only when there is a concrete reason, such as:
 
-- TODO file path;
-- latest relevant commits;
-- what was just completed;
-- exact next slice;
-- non-goals.
+- the primary worker is unrecoverably stuck after repair attempts;
+- the primary worker repeatedly ignores scope or makes unreliable changes;
+- the working tree is messy and the manager wants a separate repair attempt with explicit instructions;
+- the user explicitly asks for independent review or parallel work;
+- a risky change needs an independent reviewer, not a continuation implementer;
+- two truly independent tasks must run in parallel and the user accepts the coordination cost.
+
+When spawning an exceptional worker, say why it is exceptional and provide enough context from the primary worker's commits/status. Do not let the new worker build on unknown partial state.
 
 ## Worker context
 
-Worker threads now have virtually infinite context for this workflow. Do not rotate workers or shorten manager guidance because of context-size concerns. Choose between continuing the same worker and spawning a fresh worker based on reliability, task boundaries, desired independent review, or the need for a clean slate—not token budget.
+Worker threads are infinite for this workflow. Do not rotate workers or shorten guidance because of token budget. The long-lived worker's accumulated context should improve implementation quality across phases.
+
+The manager should still keep guidance concise and explicit, but not because the worker might run out of context. Concision is for clarity.
 
 ## Commit discipline
 
@@ -220,7 +244,7 @@ A meaningful chunk has:
 - no unrelated cleanup;
 - no tracked dirty files after commit.
 
-Managers should ask workers to commit before returning. If a worker returns uncommitted changes, either send it back to finish/commit or inspect and commit manually.
+Managers should ask the worker to commit before returning. If the worker returns uncommitted changes, either send it back to finish/commit or inspect and commit manually.
 
 ## TODO/handoff discipline
 
@@ -235,6 +259,8 @@ Status notes:
 
 For design changes, update the plan before implementation when possible.
 
+Because the worker is long-lived, its status notes should be useful for both the manager and its own future continuations.
+
 ## Manager review checklist
 
 Before telling the user a phase is done:
@@ -248,39 +274,40 @@ Before telling the user a phase is done:
 
 ## Handling failures
 
-If a worker hits a transient LLM/runner/session failure, inspect `get_child_status` and try `continue_subthread(child_thread_id)` once before discarding the worker.
+If the primary worker hits a transient LLM/runner/session failure, inspect `get_child_status` and try `continue_subthread(child_thread_id)` before discarding it.
 
-If a worker fails tests:
+If the worker fails tests:
 
-1. Ask it to fix the root cause if the failure is in scope.
+1. Ask the same worker to fix the root cause if the failure is in scope.
 2. If the fix expands scope, stop and ask the user.
-3. If the worker is confused or unreliable, spawn a fresh worker with the failing test and relevant diff.
+3. If the worker is confused or unreliable after targeted guidance, then consider an exceptional replacement or review worker.
 
-If a worker leaves a messy partial edit:
+If the worker leaves a messy partial edit:
 
 - inspect `git diff`;
-- decide whether to continue, revert, or ask the user;
+- decide whether to continue the same worker, revert, repair manually, or ask the user;
 - do not spawn another worker on top of unknown partial state unless the new worker is explicitly told to repair it.
 
 ## Long-running manager loop
 
 When the user asks for a long loop, e.g. “wait in 300s increments for at least 4h or until done”:
 
-1. Spawn one worker for the next slice.
+1. Spawn one primary worker for the next slice.
 2. Wait 300s.
 3. If unfinished, inspect child status.
 4. Continue waiting while healthy.
-5. When finished, send a continuation for the next slice or spawn a fresh worker.
+5. When finished, send the next slice to the same worker.
 6. Stop early only if:
    - implementation is complete;
    - user/design decision is required;
    - tests fail in a way that needs manager/user input;
-   - the current worker is unreliable and a fresh worker/manager intervention is needed.
+   - the current worker is unreliable enough to justify an exceptional replacement.
 
 Keep a compact manager-side ledger of:
 
 ```text
-worker id -> task, commits, tests, next recommendation
+primary worker id -> current task, commits, tests, next recommendation, any repair attempts
+exceptional worker ids -> why they were needed, result
 ```
 
 ## Final response to user
@@ -291,6 +318,7 @@ When reporting back, include:
 - phases/items completed;
 - tests run;
 - remaining tasks/open questions;
-- whether tracked working tree is clean.
+- whether tracked working tree is clean;
+- if more than one worker was used, why that exception was necessary.
 
 Keep it concise unless the user asks for detailed logs.
