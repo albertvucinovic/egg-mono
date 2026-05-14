@@ -527,15 +527,16 @@ class TestCommands:
         assert [m["msg_id"] for m in provider if m.get("role") != "system"] == [start, after]
 
     def test_compact_with_summary_command_queues_request(self, client, monkeypatch):
-        """eggw supports /compactWithSummary and starts the scheduler hook."""
+        """eggw /compactWithSummary commits a boundary, then queues summary."""
         started: list[str] = []
         monkeypatch.setattr("eggw.commands.compaction.ensure_scheduler_for", lambda tid: started.append(tid))
         create_resp = client.post("/api/threads", json={"name": "Compact Summary Command"})
         thread_id = create_resp.json()["id"]
-        client.post(
+        user_resp = client.post(
             f"/api/threads/{thread_id}/messages",
             json={"content": "Please summarize the context."},
         )
+        user_msg_id = user_resp.json()["message_id"]
 
         response = client.post(
             f"/api/threads/{thread_id}/command",
@@ -548,11 +549,22 @@ class TestCommands:
         assert data["data"]["request_msg_id"]
         assert started == [thread_id]
 
+        rows = core_state.db.conn.execute(
+            "SELECT event_seq, type, msg_id, payload_json FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+        compaction = next(row for row in rows if row["type"] == "thread.compaction")
+        request_event = next(row for row in rows if row["msg_id"] == data["data"]["request_msg_id"])
+        compaction_payload = json.loads(compaction["payload_json"])
+        assert compaction["event_seq"] < request_event["event_seq"]
+        assert compaction_payload["start_msg_id"] == user_msg_id
+
         messages = client.get(f"/api/threads/{thread_id}/messages").json()
         request = next(m for m in messages if m["id"] == data["data"]["request_msg_id"])
         assert request["role"] == "user"
         assert "Compaction continuation-summary request" in request["content"]
         assert "Do not continue the user task yet" in request["content"]
+        assert "compact_thread()" not in request["content"]
 
     def test_set_auto_compact_threshold_command_appends_context_length_event(self, client):
         """eggw supports the shared auto-compaction threshold command."""

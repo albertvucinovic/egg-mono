@@ -60,8 +60,8 @@ async def cmd_compact_with_summary(thread_id: str) -> CommandResponse:
     return CommandResponse(
         success=True,
         message=(
-            "Queued compaction summary request; the assistant will write a "
-            "normal summary and then call compact_thread()."
+            "Compaction committed and summary request queued; the assistant "
+            "will write a continuation summary."
         ),
         data={"request_msg_id": request_msg_id},
     )
