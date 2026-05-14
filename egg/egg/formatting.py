@@ -28,6 +28,18 @@ from .min_run_summary import (
 class FormattingMixin:
     """Mixin providing display/formatting methods for EggDisplayApp."""
 
+    def _snapshot_last_event_seq(self, thread_id: str) -> int:
+        """Return the thread snapshot watermark without loading snapshot JSON."""
+        try:
+            cur = self.db.conn.execute(
+                "SELECT snapshot_last_event_seq FROM threads WHERE thread_id=?",
+                (thread_id,),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else -1
+        except Exception:
+            return -1
+
     def format_thread_line(self, tid: str) -> str:
         """Format a single thread line for display."""
         from rich.markup import escape as rich_escape
@@ -490,11 +502,7 @@ class FormattingMixin:
                 "base_tail": "",
             }
 
-        try:
-            th = self.db.get_thread(self.current_thread)
-        except Exception:
-            th = None
-        snap_seq = getattr(th, "snapshot_last_event_seq", -1) if th else -1
+        snap_seq = self._snapshot_last_event_seq(self.current_thread)
 
         display_verbosity = self._display_verbosity_level()
         if (
@@ -533,8 +541,7 @@ class FormattingMixin:
         except Exception:
             active_invoke = ""
         try:
-            th = self.db.get_thread(self.current_thread)
-            snapshot_seq = int(getattr(th, 'snapshot_last_event_seq', -1) or -1) if th else -1
+            snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
             if active_invoke:
                 max_event_seq = int(self.db.max_event_seq(self.current_thread))
             else:

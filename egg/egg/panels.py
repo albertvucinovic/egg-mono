@@ -925,11 +925,7 @@ class PanelsMixin:
         if live_tps:
             return live_tps
 
-        try:
-            th = self.db.get_thread(self.current_thread)
-            snapshot_seq = int(getattr(th, 'snapshot_last_event_seq', -1) or -1) if th else -1
-        except Exception:
-            snapshot_seq = -1
+        snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
         cache = getattr(self, '_chat_header_tps_cache', None)
         cache_key = (self.current_thread, snapshot_seq)
         if isinstance(cache, dict) and cache.get('key') == cache_key:
