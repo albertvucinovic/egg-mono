@@ -602,7 +602,16 @@ class FullScreenDiffRenderer(_DiffRendererBase):
             return
         self._stream_buffer += ansi
         self._append_stream_rows(ansi, self._viewport_w or self._term_width())
-        self._paint(self._viewport_w or self._term_width())
+        # When the user is scrolled up, stream growth is intentionally hidden
+        # below the current viewport.  Repainting every token still forces a
+        # full viewport compose against the lazy transcript source, which makes
+        # in-app history scrolling feel sticky during long streams.  Defer the
+        # paint until the user scrolls again, snaps to bottom, the live region
+        # updates, or the stream ends; _compose_visible_viewport() will then
+        # compensate _scroll_offset for all accumulated stream-row growth and
+        # preserve the same visible history slice.
+        if self._scroll_offset <= 0:
+            self._paint(self._viewport_w or self._term_width())
 
     def stream_end(self) -> None:
         """Discard the stream buffer and repaint.

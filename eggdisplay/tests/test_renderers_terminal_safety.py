@@ -164,6 +164,37 @@ def test_fullscreen_scroll_position_stays_stable_when_stream_changes() -> None:
     assert r._prev_viewport == before
 
 
+def test_fullscreen_stream_append_defers_repaint_while_scrolled_up() -> None:
+    class CountingRenderer(TinyTerminalRenderer):
+        def __init__(self):
+            super().__init__(width=8, height=4)
+            self.paint_calls = 0
+
+        def _paint(self, width: int) -> None:
+            self.paint_calls += 1
+            super()._paint(width)
+
+    r = CountingRenderer()
+    r._scrollback = [f"h{i}" for i in range(6)]
+    r._live_lines = ["LIVE"]
+    r._paint(8)
+    r.scroll(1)
+    r.stream_begin()
+    before = list(r._prev_viewport)
+    calls_before_append = r.paint_calls
+
+    r.stream_append("streaming draft")
+
+    assert r.paint_calls == calls_before_append
+    assert r._prev_viewport == before
+    assert "streaming draft" in r._stream_buffer
+
+    r.scroll_to_bottom()
+
+    assert r.paint_calls > calls_before_append
+    assert any("streaming" in row or "draft" in row for row in r._prev_viewport)
+
+
 def test_fullscreen_can_scroll_during_stream_without_prior_paint() -> None:
     """Scroll should clamp against current stream rows, not stale paint state."""
     r = TinyTerminalRenderer(width=8, height=4)
