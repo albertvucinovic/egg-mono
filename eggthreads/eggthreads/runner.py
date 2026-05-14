@@ -2943,15 +2943,24 @@ def _thread_id_batches(thread_ids: List[str], batch_size: int = 900):
 
 
 def _max_event_seqs_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, int]:
-    """Return max event sequence per thread with one batched scan."""
+    """Return max event sequence per thread with batched index seeks."""
     out = {tid: -1 for tid in thread_ids}
     for batch in _thread_id_batches(thread_ids):
         if not batch:
             continue
-        placeholders = ",".join("?" for _ in batch)
+        values = ",".join("(?)" for _ in batch)
         try:
             cur = db.conn.execute(
-                f"SELECT thread_id, MAX(event_seq) FROM events WHERE thread_id IN ({placeholders}) GROUP BY thread_id",
+                f"""
+                WITH wanted(thread_id) AS (VALUES {values})
+                SELECT w.thread_id,
+                       (
+                           SELECT MAX(e.event_seq)
+                           FROM events AS e INDEXED BY events_thread_seq
+                           WHERE e.thread_id = w.thread_id
+                       )
+                FROM wanted AS w
+                """,
                 tuple(batch),
             )
             for row in cur.fetchall():
