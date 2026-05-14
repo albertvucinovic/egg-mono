@@ -30,9 +30,9 @@ A meaningful step is any completed unit such as:
 
 ## Current work cursor
 
-- Status: Phase 4.3 input-latency guard added: when the user is typing, children tree refresh is deferred so background tool lease heartbeats cannot block input echo; children status keys ignore lease extension churn.
-- Last updated: after Phase 4.3 typing-vs-children-tree refresh guard and children status-key refinement.
-- Recommended next action: manually verify key echo latency while a background `python_repl` runs in a child/descendant thread; if lag remains, profile the main TUI loop during typing.
+- Status: Phase 4.5 completed: Children panel status-key recomputation is now watcher/dirty driven with a 1s fallback, and relevant event checks are thread/subtree scoped instead of a per-tick global event-log scan.
+- Last updated: after Phase 4.5 Children panel event-driven/cache refresh.
+- Recommended next action: restart/upgrade long-running Egg TUI instances so they pick up the fix, then re-check idle CPU on large `.egg/threads.sqlite` databases.
 
 ## Progress log
 
@@ -60,6 +60,7 @@ A meaningful step is any completed unit such as:
 - Phase 4.4 viewport slicing cleanup completed: `_paint()` no longer builds `non_live = list(self._scrollback) + stream_rows` before slicing. It now computes the visible non-live window across scrollback and stream rows by index and only copies the visible slices needed for the viewport. Tests run: `python -m pytest eggdisplay/tests egg/tests/test_streaming_tui.py -q` (45 passed).
 - Phase 4.3 input-latency guard completed: `update_panels()` now detects dirty input before children-panel refresh and defers children tree reformatting while the user is typing if there is already cached tree content. This targets a visible ~3s key-echo delay observed when a background `python_repl`/tool lease in the active tree makes the children status key change while the current thread itself is idle. The next idle tick refreshes the tree, preserving status freshness without putting tree scans on the input echo path. Added regression coverage. Tests run: `python -m pytest egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (69 passed).
 - Children status key heartbeat refinement completed: children-panel status keys now track active open stream identity (`thread_id:invoke_id:purpose`) rather than max `lease_until`, so normal lease extensions do not force tree reformatting. Added regression for unchanged key after heartbeat extension. Tests run: `python -m pytest eggthreads/tests/test_events_and_open_streams.py::test_open_streams_lease_heartbeat_and_release egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (71 passed).
+- Phase 4.5 Children panel event-driven/cache refresh completed: `update_panels()` no longer runs `_compute_children_panel_status_key()` on every idle 0.1s tick. The current-thread watcher marks the Children panel dirty on relevant events, explicit/local invalidation is supported via `_mark_children_panel_dirty()`, and a 1s fallback refresh catches cross-process/descendant/topology changes. Remaining DB event checks are scoped per subtree thread using the existing `(thread_id, type)` index instead of a global event-type scan. Added tests for no repeated idle status-key recomputation and dirty invalidation before fallback. Tests run: `python -m pytest egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (105 passed).
 - Phase 1.4 completed: fixed `eggw/eggw/routes/stats.py` missing `datetime` import/time helper so live LLM TPS is no longer silently swallowed; added `eggw/tests/test_api.py::TestTokenStats::test_get_stats_includes_live_llm_tps`. Tests run: `python -m pytest eggw/tests/test_api.py::TestTokenStats -q` (2 passed).
 - Phase 1.2 completed: converted eager per-event `SnapshotBuilder` info logging to guarded lazy debug logging in `eggthreads/eggthreads/snapshot.py`. Tests run: `python -m pytest eggthreads/tests/test_snapshot_builder.py eggthreads/tests/test_continue_thread.py -q` (14 passed).
 - Phase 1.1 completed: added a shared 50ms sleep to Docker Python REPL eval polling and removed duplicate Bash Docker REPL sleeps in `eggthreads/eggthreads/session.py`. Tests run: `python -m pytest eggthreads/tests/test_python_repl_tool.py eggthreads/tests/test_bash_repl_tool.py -q` (12 passed) and `python -m pytest eggthreads/tests/test_session_config.py -q -k 'not docker_session_status_skeleton_when_available'` (17 passed, 1 deselected). Full `test_session_config.py` hit an environment issue because `/workspace/.egg` is read-only in this runtime, not because of this change.
@@ -339,6 +340,27 @@ A meaningful step is any completed unit such as:
   - `python -m pytest eggdisplay/tests egg/tests/test_streaming_tui.py -q` (45 passed).
 - [x] Update this plan after the inspection and incremental stream wrapping.
 
+### 4.5 TUI Children panel event-driven/cache refresh
+
+Problem found after inspecting live high-CPU Egg processes: idle TUIs were repeatedly running a Children panel status-key query every ~0.1s. On a large `.egg/threads.sqlite` with ~2.5M events, the query scans a broad `events` index because it filters by event `type` globally rather than by `(thread_id, type)`, costing around 0.13s per call and explaining 50–80% idle CPU in several Egg instances.
+
+Design direction:
+
+- [x] Prefer an event-watcher/cache-driven solution over per-tick DB polling.
+  - The existing current-thread `EventWatcher` marks Children panel state dirty when relevant events arrive.
+  - Added `_mark_children_panel_dirty()` for explicit/local invalidation.
+- [x] Allow Children panel refresh latency up to about 1s.
+  - Fallback refresh is capped by `CHILDREN_PANEL_FALLBACK_REFRESH_SEC = 1.0` instead of running every UI loop tick.
+- [x] Avoid a global event-log scan for the Children panel on every UI loop iteration.
+  - Relevant event version checks are scoped to subtree thread ids and use `events_thread_type` (`thread_id`, `type`) rather than scanning all event types globally.
+  - No new broad index was added.
+- [x] Preserve immediate input echo and streaming renderer responsiveness.
+  - Existing input-active guard remains, and dirty Children refresh is deferred while input is dirty if cached content exists.
+- [x] Add focused tests proving idle `update_panels()` does not repeatedly call the expensive Children status-key query, while relevant watched events/explicit invalidation still refresh the tree.
+- [x] Update this plan with files changed, tests run, and expected CPU effect.
+  - Files touched: `egg/egg/panels.py`, `egg/egg/streaming.py`, `egg/tests/test_panels.py`, `cpu-usage-reduce-plan.md`.
+  - Tests run: `python -m pytest egg/tests/test_panels.py egg/tests/test_formatting.py egg/tests/test_streaming_tui.py -q` (105 passed).
+
 ## Phase 5 — Optional Go sidecars only after profiling
 
 Do not start this phase until Phases 1–4 are measured and CPU remains a real problem.
@@ -398,7 +420,7 @@ Record results here as work proceeds.
 - After Phase 1 results: quick wins completed and focused tests pass; CPU not formally measured yet.
 - After Phase 2 results: Phase 2.2 reducer migration has trace-based SQL/query-count tests for the cached RA/thread-state path and `build_tool_call_states()` now reuses the reducer; Phase 2.3 batched scheduler max-event/open-lease/scheduling-setting queries and recursive subtree collection. No real CPU benchmark yet.
 - After Phase 3 results: Phase 3.1 append-only snapshot path avoids full `SnapshotBuilder` rebuild for pure `msg.create` tails; Phase 3.2 token-stat extension avoids re-tokenizing old snapshot messages in that path and live LLM TPS repeats avoid delta payload rescans while unchanged. No real CPU benchmark yet.
-- After Phase 4 results: `/messages` no longer forces full snapshot rebuild for append-only tails; frontend thread settings no longer poll every second; visible system panel no longer starts a second live `/stats` polling loop; TUI children tree formatting, System panel sandbox/autoapproval helper scans, completed-message header TPS snapshot parsing, and idle token-stat rescans on unrelated config events no longer run on idle ticks. Shared SSE fanout attempted then reverted due TestClient hang; needs safer design. Phase 4.4 inspection found that differential terminal rendering is already substantially implemented: line/row diffs, panel render caches, stream-as-transient-buffer, stream row cache for unchanged buffers, and 50ms stream append coalescing. Incremental stream wrapping is now implemented; synthetic long-stream benchmark improved from `44.370s` for 1M chars / timeout before 2M chars to `0.459s` for 1M chars and `0.955s` for 2M chars with 8k-char flushes in a 100x30 test renderer. `_paint()` also now slices visible scrollback/stream rows by index instead of building a full combined non-live list. No real CPU benchmark yet.
+- After Phase 4 results: `/messages` no longer forces full snapshot rebuild for append-only tails; frontend thread settings no longer poll every second; visible system panel no longer starts a second live `/stats` polling loop; TUI children tree formatting, System panel sandbox/autoapproval helper scans, completed-message header TPS snapshot parsing, and idle token-stat rescans on unrelated config events no longer run on idle ticks. Shared SSE fanout attempted then reverted due TestClient hang; needs safer design. Phase 4.4 inspection found that differential terminal rendering is already substantially implemented: line/row diffs, panel render caches, stream-as-transient-buffer, stream row cache for unchanged buffers, and 50ms stream append coalescing. Incremental stream wrapping is now implemented; synthetic long-stream benchmark improved from `44.370s` for 1M chars / timeout before 2M chars to `0.459s` for 1M chars and `0.955s` for 2M chars with 8k-char flushes in a 100x30 test renderer. `_paint()` also now slices visible scrollback/stream rows by index instead of building a full combined non-live list. No real CPU benchmark yet. Phase 4.5 removes the per-0.1s Children panel global event-log status scan; remaining fallback event checks are per-subtree-thread and at most once per second. No post-fix real CPU benchmark yet; restart existing Egg TUI processes before measuring.
 
 ## Known risks / open questions
 
@@ -410,4 +432,5 @@ Record results here as work proceeds.
 - Web and TUI can run against the same DB from different processes, so in-process notifications are not enough by themselves.
 - Phase 4.4 should not be treated as unimplemented: broad differential rendering already exists, incremental stream wrapping removes full `_stream_buffer` reparsing on each flushed append, and `_paint()` no longer builds a full combined non-live list before slicing. Further rendering changes should target measured hot spots only.
 - Adding indexes can improve reads but slow stream-heavy writes; measure before and after.
+- Phase 4.5 still has a 1s fallback that probes subtree threads; if a thread has a very large descendant tree and idle CPU remains high, consider a small materialized per-thread/type event-version cache or watcher-fed subtree invalidation before adding broad SQLite indexes.
 - Go sidecars may add IPC latency and deployment complexity; only introduce them after Python-side fixes are insufficient.

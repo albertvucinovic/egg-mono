@@ -66,6 +66,40 @@ class TestUpdatePanels:
 
         assert calls["count"] == 1
 
+    def test_idle_update_panels_does_not_recompute_children_status_key(self, egg_app, monkeypatch):
+        """Idle panel ticks should not repeat the expensive Children DB key."""
+        calls = {"count": 0}
+
+        def fake_status_key():
+            calls["count"] += 1
+            return (egg_app.current_thread, "children-key", calls["count"])
+
+        monkeypatch.setattr(egg_app, "_compute_children_panel_status_key", fake_status_key)
+
+        egg_app.update_panels()
+        egg_app.update_panels()
+
+        assert calls["count"] == 1
+
+    def test_children_dirty_invalidation_refreshes_tree_before_fallback(self, egg_app, monkeypatch):
+        """A watcher/explicit dirty mark should refresh before the 1s fallback."""
+        calls = {"count": 0}
+
+        def fake_format_tree(thread_id):
+            calls["count"] += 1
+            return f"tree {calls['count']} for {thread_id[-8:]}"
+
+        monkeypatch.setattr(egg_app, "format_tree", fake_format_tree)
+        monkeypatch.setattr(egg_app, "_compute_children_panel_status_key", lambda: ("stable-key",))
+
+        egg_app.update_panels()
+        egg_app._children_panel_next_status_check_at = 9999999999.0
+
+        egg_app._mark_children_panel_dirty()
+        egg_app.update_panels()
+
+        assert calls["count"] == 2
+
     def test_typing_does_not_reformat_children_tree(self, egg_app, monkeypatch):
         """Input echo should not wait on expensive children tree refreshes."""
         calls = {"count": 0}

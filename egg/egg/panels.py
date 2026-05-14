@@ -25,6 +25,19 @@ from .min_run_summary import (
 )
 
 
+CHILDREN_PANEL_FALLBACK_REFRESH_SEC = 1.0
+CHILDREN_PANEL_RELEVANT_EVENT_TYPES = (
+    'msg.create',
+    'msg.edit',
+    'msg.delete',
+    'model.switch',
+    'stream.open',
+    'stream.close',
+    'tool_call.approval',
+    'tool_call.output_approval',
+)
+
+
 @dataclass(frozen=True)
 class _StaticTranscriptRenderable:
     """Renderable plus plain fallback for static transcript printing."""
@@ -505,45 +518,117 @@ class PanelsMixin:
 
     def _compute_children_panel_status_key(self) -> Any:
         """Cheap key for Children panel tree/status state."""
+        subtree_ids = self._children_panel_subtree_ids()
         cur = self.db.conn.execute(
-            "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM children"
+            """
+            WITH RECURSIVE subtree(thread_id) AS (
+                SELECT ?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN subtree s ON c.parent_id = s.thread_id
+            )
+            SELECT COUNT(*), COALESCE(MAX(c.rowid), 0)
+            FROM children c
+            JOIN subtree s ON c.parent_id = s.thread_id
+            """,
+            (self.current_thread,),
         )
         child_count, child_max_rowid = cur.fetchone()
-        cur = self.db.conn.execute(
-            "SELECT COUNT(*), COALESCE(MAX(event_seq), 0) FROM events WHERE type IN (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                'msg.create',
-                'msg.edit',
-                'msg.delete',
-                'model.switch',
-                'stream.open',
-                'stream.close',
-                'tool_call.approval',
-                'tool_call.output_approval',
-            ),
-        )
-        relevant_event_count, relevant_event_max_seq = cur.fetchone()
+        event_version = self._children_panel_event_version(subtree_ids)
         cur = self.db.conn.execute(
             """
+            WITH RECURSIVE subtree(thread_id) AS (
+                SELECT ?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN subtree s ON c.parent_id = s.thread_id
+            )
             SELECT COUNT(*), COALESCE(GROUP_CONCAT(open_key, '|'), '')
             FROM (
-                SELECT thread_id || ':' || invoke_id || ':' || COALESCE(purpose, '') AS open_key
-                FROM open_streams
-                WHERE lease_until > datetime('now')
-                ORDER BY thread_id, invoke_id
+                SELECT o.thread_id || ':' || o.invoke_id || ':' || COALESCE(o.purpose, '') AS open_key
+                FROM open_streams o
+                JOIN subtree s ON o.thread_id = s.thread_id
+                WHERE o.lease_until > datetime('now')
+                ORDER BY o.thread_id, o.invoke_id
             )
-            """
+            """,
+            (self.current_thread,),
         )
         open_count, open_key = cur.fetchone()
         return (
             self.current_thread,
             int(child_count or 0),
             int(child_max_rowid or 0),
-            int(relevant_event_count or 0),
-            int(relevant_event_max_seq or 0),
+            int(event_version or 0),
             int(open_count or 0),
             str(open_key or ''),
         )
+
+    def _children_panel_subtree_ids(self) -> Tuple[str, ...]:
+        """Return current thread plus descendants for Children panel caching."""
+        cur = self.db.conn.execute(
+            """
+            WITH RECURSIVE subtree(thread_id) AS (
+                SELECT ?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN subtree s ON c.parent_id = s.thread_id
+            )
+            SELECT thread_id FROM subtree ORDER BY thread_id
+            """,
+            (self.current_thread,),
+        )
+        return tuple(str(row[0]) for row in cur.fetchall() if row[0])
+
+    def _children_panel_event_version(self, subtree_ids: Sequence[str]) -> int:
+        """Increment a local version when new relevant subtree events appear."""
+        seen = getattr(self, '_children_panel_seen_event_seq_by_thread', None)
+        if not isinstance(seen, dict):
+            seen = {}
+        version = int(getattr(self, '_children_panel_event_version_value', 0) or 0)
+
+        subtree_set = set(subtree_ids)
+        for tid in list(seen.keys()):
+            if tid not in subtree_set:
+                seen.pop(tid, None)
+
+        placeholders = ', '.join('?' for _ in CHILDREN_PANEL_RELEVANT_EVENT_TYPES)
+        for tid in subtree_ids:
+            try:
+                cur = self.db.conn.execute(
+                    f"""
+                    SELECT COALESCE(MAX(event_seq), -1)
+                    FROM events INDEXED BY events_thread_type
+                    WHERE thread_id=? AND type IN ({placeholders})
+                    """,
+                    (tid, *CHILDREN_PANEL_RELEVANT_EVENT_TYPES),
+                )
+                row = cur.fetchone()
+                relevant_max = int(row[0]) if row and row[0] is not None else -1
+            except Exception:
+                relevant_max = -1
+            last_seen = seen.get(tid)
+            if last_seen is None:
+                seen[tid] = relevant_max
+                continue
+            try:
+                last_seen_int = int(last_seen)
+            except Exception:
+                last_seen_int = -1
+            if relevant_max > last_seen_int:
+                version += 1
+                seen[tid] = relevant_max
+
+        self._children_panel_seen_event_seq_by_thread = seen
+        self._children_panel_event_version_value = version
+        return version
+
+    def _mark_children_panel_dirty(self) -> None:
+        """Request a Children panel tree refresh on the next safe panel tick."""
+        self._children_panel_dirty = True
 
     def _get_static_box(self) -> Any:
         """Get the box style to use for static console panels.
@@ -713,12 +798,19 @@ class PanelsMixin:
         # (sandbox, auto-approval) lives in the title border, body is empty.
         self.system_output.set_content("")
 
-        # Children panel: refresh only when the thread topology/status key
-        # changes. This keeps idle ticks from rescanning all threads while
-        # still updating immediately for child creation and stream/status
-        # changes that affect the rendered tree.
+        # Children panel: refresh on watcher/explicit invalidation, and keep a
+        # slow fallback check for cross-process or descendant changes. This
+        # avoids running the status-key DB probes on every idle UI tick.
         try:
             cached_children_key = getattr(self, '_children_panel_cached_status_key', None)
+            cached_children_thread = None
+            if isinstance(cached_children_key, tuple) and cached_children_key:
+                cached_children_thread = cached_children_key[0]
+            children_dirty = (
+                bool(getattr(self, '_children_panel_dirty', False))
+                or cached_children_key is None
+                or cached_children_thread != self.current_thread
+            )
             if input_active and cached_children_key is not None:
                 # Prefer input echo over refreshing the tree while the user is
                 # typing. Background tool leases can make this key change every
@@ -726,14 +818,21 @@ class PanelsMixin:
                 # multi-second input lag. The next idle tick refreshes it.
                 pass
             else:
-                status_key = self._compute_children_panel_status_key()
-                if cached_children_key != status_key:
+                now = time.time()
+                next_check = float(getattr(self, '_children_panel_next_status_check_at', 0.0) or 0.0)
+                if children_dirty or now >= next_check:
+                    status_key = self._compute_children_panel_status_key()
+                    self._children_panel_next_status_check_at = now + CHILDREN_PANEL_FALLBACK_REFRESH_SEC
+                else:
+                    status_key = cached_children_key
+                if children_dirty or cached_children_key != status_key:
                     try:
                         subtree_text = self.format_tree(self.current_thread)
                     except Exception:
                         subtree_text = "(error rendering children tree)"
                     self.children_output.set_content(subtree_text)
                     self._children_panel_cached_status_key = status_key
+                self._children_panel_dirty = False
         except Exception:
             pass
 

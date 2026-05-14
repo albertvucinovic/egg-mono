@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 
 from eggthreads import create_snapshot, EventWatcher, ThreadsDB
 
+from .panels import CHILDREN_PANEL_RELEVANT_EVENT_TYPES
+
 
 # Per-source style for streaming content. Used by both the live delta
 # dispatcher (``ingest_event_for_live``) and the replay path
@@ -102,6 +104,10 @@ class StreamingMixin:
         self._watch_task = asyncio.create_task(self.watch_thread(self.current_thread))
 
     async def watch_thread(self, thread_id: str):
+        try:
+            self._mark_children_panel_dirty()
+        except Exception:
+            pass
         # Start from last snapshot event
         try:
             th = self.db.get_thread(thread_id)
@@ -168,12 +174,16 @@ class StreamingMixin:
         async for batch in ew.aiter():
             saw_non_stream_msg = False
             saw_compaction_marker = False
+            saw_children_status_event = False
             for idx, e in enumerate(batch):
                 try:
-                    if e["type"] in ("msg.create", "msg.edit", "msg.delete"):
+                    event_type = e["type"]
+                    if event_type in ("msg.create", "msg.edit", "msg.delete"):
                         saw_non_stream_msg = True
-                    elif e["type"] == "thread.compaction":
+                    elif event_type == "thread.compaction":
                         saw_compaction_marker = True
+                    if event_type in CHILDREN_PANEL_RELEVANT_EVENT_TYPES:
+                        saw_children_status_event = True
                 except Exception:
                     pass
                 await self.ingest_event_for_live(e, thread_id)
@@ -183,6 +193,12 @@ class StreamingMixin:
                 try:
                     if idx and idx % 100 == 0:
                         await asyncio.sleep(0)
+                except Exception:
+                    pass
+
+            if saw_children_status_event:
+                try:
+                    self._mark_children_panel_dirty()
                 except Exception:
                     pass
 
