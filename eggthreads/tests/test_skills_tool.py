@@ -8,7 +8,7 @@ def test_skill_registry_loads_description_from_markdown() -> None:
     assert "rlm" in skills
     assert "persistent REPL variables" in skills["rlm"].description
     assert "worker-manager" in skills
-    assert "worker subthreads" in skills["worker-manager"].description
+    assert skills["worker-manager"].description
 
 
 def test_skill_tool_lists_and_loads_documents() -> None:

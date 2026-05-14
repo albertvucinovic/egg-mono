@@ -1,6 +1,6 @@
 # Worker Manager Skill
 
-Use this skill when a task should be implemented through a manager/worker split using worker subthreads and a durable TODO / handoff document, such as `compaction-todo.md` or `plugins-todo.md`.
+Use this skill when a task should be implemented through a manager/worker split using a durable TODO / handoff document, such as `compaction-todo.md` or `plugins-todo.md`.
 
 This is the authoritative Worker Manager skill. In repository checkouts it may be present both at the repo root and under `eggthreads/eggthreads/skills/`; keep those copies synchronized when editing the skill text.
 
