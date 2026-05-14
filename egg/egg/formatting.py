@@ -558,15 +558,17 @@ class FormattingMixin:
         cache = getattr(self, '_token_stats_cache', None)
         cache_key = (self.current_thread, snapshot_seq, max_event_seq, active_invoke)
         if isinstance(cache, dict) and cache.get('key') == cache_key:
-            # Avoid repeatedly scanning stream deltas while the event log is
-            # unchanged.  Idle stats can be reused for longer; active streams
-            # get a short refresh window so live headers remain responsive.
-            ttl = 0.5 if active_invoke else 2.0
+            # Idle stats are keyed by the snapshot watermark, so they remain
+            # valid until the thread's snapshot changes. Active streams still
+            # use a short TTL because their key only tracks the latest event
+            # sequence, and live headers should stay responsive.
+            ttl = 0.5 if active_invoke else None
             try:
-                if (now - float(cache.get('at') or 0.0)) < ttl:
+                if ttl is None or (now - float(cache.get('at') or 0.0)) < ttl:
                     return cache.get('value', (None, {}))
             except Exception:
-                pass
+                if ttl is None:
+                    return cache.get('value', (None, {}))
 
         ctx_tokens: Optional[int] = None
         api_usage: Dict[str, Any] = {}

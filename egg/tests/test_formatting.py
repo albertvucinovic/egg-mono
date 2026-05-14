@@ -500,8 +500,8 @@ class TestCurrentTokenStats:
 
 
 
-    def test_caches_unchanged_token_stats_briefly(self, egg_app, monkeypatch):
-        """Repeated panel ticks should not rescan token stats when events are unchanged."""
+    def test_caches_unchanged_idle_token_stats_until_snapshot_changes(self, egg_app, monkeypatch):
+        """Repeated idle panel ticks should not rescan token stats by TTL."""
         calls = {"count": 0}
 
         def fake_thread_token_stats(db, thread_id, llm=None):
@@ -510,10 +510,29 @@ class TestCurrentTokenStats:
 
         monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 3)
+        ticks = iter([100.0, 10000.0])
+        monkeypatch.setattr("egg.formatting.time.monotonic", lambda: next(ticks))
 
         assert egg_app.current_token_stats()[0] == 7
         assert egg_app.current_token_stats()[0] == 7
         assert calls["count"] == 1
+
+    def test_idle_token_stats_rescans_when_snapshot_changes(self, egg_app, monkeypatch):
+        """Snapshot watermark changes should invalidate idle token stats."""
+        calls = {"count": 0}
+        snapshot_seq = {"value": 1}
+
+        def fake_thread_token_stats(db, thread_id, llm=None):
+            calls["count"] += 1
+            return {"context_tokens": calls["count"], "api_usage": {"total_input_tokens": 1}}
+
+        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr(egg_app, "_snapshot_last_event_seq", lambda tid: snapshot_seq["value"])
+
+        assert egg_app.current_token_stats()[0] == 1
+        snapshot_seq["value"] = 2
+        assert egg_app.current_token_stats()[0] == 2
+        assert calls["count"] == 2
 
     def test_idle_token_stats_cache_ignores_unrelated_event_seq_changes(self, egg_app, monkeypatch):
         """Idle token stats should not rescan for config-only event changes."""
