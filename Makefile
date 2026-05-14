@@ -24,6 +24,7 @@ test: install-dev
 	pytest eggdisplay/tests -q
 	pytest eggflow/tests -q
 	pytest egg/tests -q
+	pytest eggw/tests -q
 
 lint:
 	pyflakes eggllm/eggllm eggthreads/eggthreads
