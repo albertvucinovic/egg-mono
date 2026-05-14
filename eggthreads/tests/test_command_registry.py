@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -194,10 +195,69 @@ def test_core_lifecycle_commands_are_registered_handlers(tmp_path, monkeypatch) 
 
     state_file = tmp_path / "reload-state"
     monkeypatch.setenv("EGG_RELOAD_STATE_FILE", str(state_file))
-    result = registry.execute("reload", CommandContext(app=app, current_thread=app.current_thread, log_system=lambda message: None))
+    result = registry.execute("reload", CommandContext(app=app, db=None, current_thread=app.current_thread, log_system=lambda message: None))
     assert result.exit_app is True
     assert app._reload_requested is True
     assert state_file.read_text(encoding="utf-8").strip() == app.current_thread
+
+
+def test_reload_skips_when_current_thread_streaming(tmp_path, monkeypatch) -> None:
+    from eggthreads import ThreadsDB
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = db.create_thread("thread-streaming", name="root")
+    lease_until = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
+    assert db.try_open_stream(tid, "invoke-current", lease_until, owner="test", purpose="tool")
+
+    class App:
+        running = True
+        _reload_requested = False
+        _reload_via_shell = False
+        current_thread = tid
+
+    state_file = tmp_path / "reload-state"
+    logs: list[str] = []
+    monkeypatch.setenv("EGG_RELOAD_STATE_FILE", str(state_file))
+
+    result = create_default_command_registry().execute(
+        "reload",
+        CommandContext(app=App(), db=db, current_thread=tid, log_system=logs.append),
+    )
+
+    assert result.exit_app is False
+    assert App._reload_requested is False
+    assert not state_file.exists()
+    assert "streaming" in result.message
+
+
+def test_reload_skips_when_subthread_streaming(tmp_path, monkeypatch) -> None:
+    from eggthreads import ThreadsDB
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    root = db.create_thread("thread-root", name="root")
+    child = db.create_thread("thread-child", name="child", parent_id=root)
+    lease_until = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")
+    assert db.try_open_stream(child, "invoke-child", lease_until, owner="test", purpose="assistant_stream")
+
+    class App:
+        running = True
+        _reload_requested = False
+        _reload_via_shell = False
+        current_thread = root
+
+    state_file = tmp_path / "reload-state"
+    monkeypatch.setenv("EGG_RELOAD_STATE_FILE", str(state_file))
+
+    result = create_default_command_registry().execute(
+        "reload",
+        CommandContext(app=App(), db=db, current_thread=root, log_system=lambda message: None),
+    )
+
+    assert result.exit_app is False
+    assert App._reload_requested is False
+    assert not state_file.exists()
 
 
 def test_model_auth_commands_are_registered_handlers() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping
 
@@ -248,6 +249,11 @@ def _core_reload_handler(context: CommandContext, arg: str) -> CommandResult:
             context.log_system("/reload failed: no current thread.")
         return CommandResult(clear_input=False)
 
+    if _subtree_has_active_stream(context.db, thread_id):
+        if context.log_system is not None:
+            context.log_system("/reload skipped: current thread or a subthread is streaming.")
+        return CommandResult(clear_input=False, message="/reload skipped: current thread or a subthread is streaming.")
+
     os.environ["EGG_RELOAD_THREAD_ID"] = thread_id
     if context.app is not None:
         context.app._reload_via_shell = False
@@ -267,6 +273,34 @@ def _core_reload_handler(context: CommandContext, arg: str) -> CommandResult:
         context.app._reload_requested = True
         context.app.running = False
     return CommandResult(clear_input=False, exit_app=True)
+
+
+def _subtree_has_active_stream(db: Any, thread_id: str) -> bool:
+    """Return True if the thread or any descendant has an active stream."""
+    if db is None or not thread_id:
+        return False
+    try:
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        cur = db.conn.execute(
+            """
+            WITH RECURSIVE subtree(thread_id) AS (
+                SELECT ?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN subtree s ON c.parent_id = s.thread_id
+            )
+            SELECT 1
+            FROM open_streams o
+            JOIN subtree s ON o.thread_id = s.thread_id
+            WHERE o.lease_until > ?
+            LIMIT 1
+            """,
+            (thread_id, now_iso),
+        )
+        return cur.fetchone() is not None
+    except Exception:
+        return False
 
 
 def create_default_command_registry() -> CommandRegistry:

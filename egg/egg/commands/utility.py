@@ -83,6 +83,7 @@ class UtilityCommandsMixin:
         _core_reload_handler(
             CommandContext(
                 current_thread=getattr(self, 'current_thread', ''),
+                db=getattr(self, 'db', None),
                 log_system=self.log_system,
                 app=self,
             ),
