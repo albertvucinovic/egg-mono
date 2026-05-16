@@ -86,8 +86,8 @@ def test_answer_user_tool_call_publishes_hidden_keep_turn_result(tmp_path):
     assert note["content"] == "Interim note visible to user."
     tool_msg = _tool_message(db, tid, "call-answer-note")
     assert tool_msg is not None
-    assert tool_msg["no_api"] is True
-    assert tool_msg["keep_user_turn"] is True
+    assert tool_msg.get("no_api") is not True
+    assert tool_msg.get("keep_user_turn") is not True
 
 
 def test_model_can_answer_user_with_tool_then_continue_to_final_message(tmp_path):
@@ -136,15 +136,15 @@ def test_model_can_answer_user_with_tool_then_continue_to_final_message(tmp_path
     assert any(msg.get("answer_user_preserve_turn") and msg.get("content") == "Interim answer." for msg in messages)
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == "Final answer."
-    assert _tool_message(db, tid, "call-answer-note")["no_api"] is True
+    tool_msg = _tool_message(db, tid, "call-answer-note")
+    assert tool_msg is not None
+    assert tool_msg.get("no_api") is not True
+    assert tool_msg.get("keep_user_turn") is not True
     assert len(llm.calls) == 2
     assert all(not msg.get("answer_user_preserve_turn") for msg in llm.calls[1])
-    assert all(msg.get("tool_call_id") != "call-answer-note" for msg in llm.calls[1])
-    assert not any(
-        tc.get("function", {}).get("name") == "answer_user_while_preserving_llm_turn"
-        for msg in llm.calls[1]
-        for tc in (msg.get("tool_calls") or [])
-    )
+    assistant_tool_call = next(msg for msg in llm.calls[1] if msg.get("role") == "assistant" and msg.get("tool_calls"))
+    assert assistant_tool_call["tool_calls"][0]["function"]["name"] == "answer_user_while_preserving_llm_turn"
+    assert any(msg.get("role") == "tool" and msg.get("tool_call_id") == "call-answer-note" for msg in llm.calls[1])
 
 
 def test_btw_command_appends_request_and_starts_scheduler(tmp_path):
