@@ -327,9 +327,10 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [DiagnosticsPlugin()])
 
-    from .builtin_plugins import CompactionPlugin, DisplayInputPlugin, SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
+    from .builtin_plugins import AnswerUserPlugin, CompactionPlugin, DisplayInputPlugin, SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ThreadUiPlugin()])
+    register_plugins(CommandPluginContext(command_registry=registry), [AnswerUserPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [CompactionPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SubagentsPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [SessionPlugin()])

@@ -1179,6 +1179,8 @@ def filter_messages_for_compaction_provider_context(
     created before the selected start message.
     """
 
+    messages = [m for m in messages if not (isinstance(m, dict) and m.get('answer_user_preserve_turn'))]
+
     start_seq = current_effective_compaction_start_event_seq(db, thread_id)
     if start_seq is None:
         return list(messages)
@@ -1363,7 +1365,7 @@ def resolve_compaction_start_message(
         role = payload.get('role')
         if event_seq <= min_event_seq:
             return False
-        if payload.get('no_api'):
+        if payload.get('no_api') or payload.get('answer_user_preserve_turn'):
             return False
         return role in ('user', 'assistant')
 
@@ -1554,7 +1556,7 @@ def _has_compaction_candidate_after_current_effective_start(db: ThreadsDB, threa
     start_seq = current_effective_compaction_start_event_seq(db, thread_id)
     if start_seq is None:
         for _event_seq, _msg_id, payload in _compaction_candidate_messages(db, thread_id):
-            if payload.get('no_api') or payload.get('auto_compaction_request'):
+            if payload.get('no_api') or payload.get('auto_compaction_request') or payload.get('answer_user_preserve_turn'):
                 continue
             if payload.get('role') in ('user', 'assistant'):
                 return True
@@ -1566,7 +1568,7 @@ def _has_compaction_candidate_after_current_effective_start(db: ThreadsDB, threa
     for event_seq, _msg_id, payload in _compaction_candidate_messages(db, thread_id):
         if event_seq <= min_event_seq:
             continue
-        if payload.get('no_api') or payload.get('auto_compaction_request'):
+        if payload.get('no_api') or payload.get('auto_compaction_request') or payload.get('answer_user_preserve_turn'):
             continue
         role = payload.get('role')
         if role == 'assistant':
@@ -2128,7 +2130,7 @@ def find_continue_point(db: ThreadsDB, thread_id: str) -> Optional[str]:
         keep_user_turn = payload.get('keep_user_turn')
 
         # Skip no_api messages (they don't participate in RA1)
-        if no_api:
+        if no_api or payload.get('answer_user_preserve_turn'):
             continue
 
         # Check if this message has unpublished tool calls - skip it

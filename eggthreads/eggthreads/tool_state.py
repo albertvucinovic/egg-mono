@@ -9,7 +9,22 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .db import ThreadsDB
 
 
-AUTO_APPROVED_TOOL_NAMES = {"compact_thread"}
+ANSWER_USER_PRESERVE_TURN_TOOL_NAME = "answer_user_while_preserving_llm_turn"
+AUTO_APPROVED_TOOL_NAMES = {"compact_thread", ANSWER_USER_PRESERVE_TURN_TOOL_NAME}
+
+
+def _is_answer_user_preserve_turn_tool_result(payload: Dict[str, Any], states: Dict[str, "ToolCallState"]) -> bool:
+    """Return True for the hidden tool result that continues an interim answer call."""
+
+    if payload.get("role") != "tool":
+        return False
+    if not payload.get("no_api") or not payload.get("keep_user_turn"):
+        return False
+    tcid = payload.get("tool_call_id")
+    if not isinstance(tcid, str) or not tcid:
+        return False
+    tc = states.get(tcid)
+    return bool(tc and tc.parent_role == "assistant" and tc.name == ANSWER_USER_PRESERVE_TURN_TOOL_NAME and tc.published)
 
 
 def _utcnow_iso() -> str:
@@ -423,7 +438,7 @@ def _last_llm_boundary_from_records(
         elif ev_type == "msg.create":
             msg_id = ev.get("msg_id")
             skipped = msg_id and str(msg_id) in skipped_msg_ids
-            if payload.get("role") == "assistant" and not bool(payload.get("no_api")) and not skipped:
+            if payload.get("role") == "assistant" and not bool(payload.get("no_api")) and not bool(payload.get("answer_user_preserve_turn")) and not skipped:
                 last_assistant_seq = ev_seq
 
     if last_close == -1 and last_assistant_seq != -1:
@@ -483,6 +498,15 @@ def _next_runner_actionable_from_reduction(
         keep_user_turn = bool(payload.get("keep_user_turn"))
         no_api = bool(payload.get("no_api"))
         tool_calls = payload.get("tool_calls") or []
+
+        if _is_answer_user_preserve_turn_tool_result(payload, states):
+            return RunnerActionable(
+                kind="RA1_llm",
+                thread_id=thread_id,
+                triggering_event_seq=ev_seq,
+                msg_id=msg_id,
+                tool_calls=None,
+            )
 
         if role == "user" and not tool_calls and not keep_user_turn and not no_api:
             return RunnerActionable(
@@ -696,7 +720,7 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
             msg_id = ev.get("msg_id")
             # Skip messages that have been marked as skipped_on_continue
             skipped = msg_id and msg_id in skipped_msg_ids
-            if role == "assistant" and not no_api and not skipped:
+            if role == "assistant" and not no_api and not bool(payload.get("answer_user_preserve_turn")) and not skipped:
                 try:
                     last_assistant_seq = int(ev.get("event_seq"))
                 except Exception:
@@ -839,6 +863,15 @@ def discover_runner_actionable(db: ThreadsDB, thread_id: str) -> Optional[Runner
         keep_user_turn = bool(payload.get("keep_user_turn"))
         no_api = bool(payload.get("no_api"))
         tool_calls = payload.get("tool_calls") or []
+
+        if _is_answer_user_preserve_turn_tool_result(payload, all_states):
+            return RunnerActionable(
+                kind="RA1_llm",
+                thread_id=thread_id,
+                triggering_event_seq=ev_seq,
+                msg_id=msg_id,
+                tool_calls=None,
+            )
 
         # RA1: LLM call
         # - user messages without tool_calls and without keep_user_turn

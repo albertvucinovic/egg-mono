@@ -330,6 +330,13 @@ class FormattingMixin:
             except Exception:
                 tps_text = ""
             if role == 'assistant':
+                if m.get('answer_user_preserve_turn'):
+                    content = (m.get('content') or '').strip()
+                    if content:
+                        if verbosity == 'min':
+                            flush_hidden()
+                        lines.append(f"[Assistant Note{tps_text}{msg_id_text}]\n{content}")
+                    continue
                 reas = (m.get('reasoning') or m.get('reasoning_content') or '').strip()
                 if reas:
                     reason_header = f"[Reasoning{tps_text}{msg_id_text}]"

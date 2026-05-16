@@ -232,6 +232,8 @@ class TranscriptScrollbackSource:
         if role == 'user':
             return True
         if role == 'assistant':
+            if m.get('answer_user_preserve_turn'):
+                return bool(content)
             return bool(content)
         if role == 'system':
             return True
@@ -1361,6 +1363,21 @@ class PanelsMixin:
             return items
 
         if role == 'assistant':
+            if m.get('answer_user_preserve_turn'):
+                if verbosity == 'min':
+                    append_hidden_details()
+                title = '[bold bright_magenta]Assistant Note[/bold bright_magenta]'
+                if model_key:
+                    title += f" [dim](model: {model_key})[/dim]"
+                if pm_tokens["content"]:
+                    tok_text = self._fmt_header_metric(pm_tokens['content'], 'tok')
+                    if tok_text:
+                        title += f" [dim]({tok_text})[/dim]"
+                if msg_tps:
+                    title += f" [dim]({msg_tps})[/dim]"
+                panel(Text(content, no_wrap=False, overflow='fold', style='bright_magenta'), title, 'bright_magenta')
+                return items
+
             title = '[bold cyan]Assistant[/bold cyan]'
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"

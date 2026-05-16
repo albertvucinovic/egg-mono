@@ -561,7 +561,7 @@ def _token_stats_for_messages(
             continue
         role = str(m.get("role") or "")
         no_api = bool(m.get("no_api"))
-        if role != "assistant" or no_api:
+        if role != "assistant" or no_api or bool(m.get("answer_user_preserve_turn")):
             continue
 
         approx_call_count += 1

@@ -23,14 +23,14 @@ class UserOriginApprovalPolicy:
 
 @dataclass(frozen=True)
 class CompactThreadApprovalPolicy:
-    """Allow compaction tool calls without human approval."""
+    """Allow safe communication/control tool calls without human approval."""
 
     name: str = "compact_thread"
 
     def evaluate(self, request: ApprovalRequest) -> ApprovalVerdict:
-        if request.tool_name == "compact_thread":
-            return ApprovalVerdict(APPROVAL_ALLOW, reason="compact_thread is safe to auto-approve", policy=self.name)
-        return ApprovalVerdict(APPROVAL_ABSTAIN, reason="Not compact_thread", policy=self.name)
+        if request.tool_name in {"compact_thread", "answer_user_while_preserving_llm_turn"}:
+            return ApprovalVerdict(APPROVAL_ALLOW, reason=f"{request.tool_name} is safe to auto-approve", policy=self.name)
+        return ApprovalVerdict(APPROVAL_ABSTAIN, reason="Not an auto-approved control tool", policy=self.name)
 
 
 def register_approval_policies(registry: Any) -> None:

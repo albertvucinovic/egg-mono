@@ -402,6 +402,36 @@ class TestFormatMessagesText:
         assert "python result body" not in text
         assert text.index("Executed 2 tools, got 2 tool results, 1 reasoning block") < text.index("done")
 
+    @pytest.mark.parametrize("verbosity", ["max", "medium", "min"])
+    def test_answer_user_preserve_turn_note_visible_at_all_verbosities(self, isolated_db, verbosity):
+        """Interim assistant notes remain full visible conversation, not hidden detail."""
+        from eggthreads import append_message, create_root_thread, create_snapshot
+        from egg.formatting import FormattingMixin
+
+        tid = create_root_thread(isolated_db, name="AnswerNoteFormatting")
+        note = append_message(
+            isolated_db,
+            tid,
+            "assistant",
+            "Interim note body",
+            extra={"answer_user_preserve_turn": True},
+        )
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+                self._display_verbosity = verbosity
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert f"[Assistant Note [msg_id: {note}]]\nInterim note body" in text
+        assert "Hidden details" not in text
+
     def test_shows_compaction_marker_without_hiding_history(self, isolated_db):
         """Chat transcript text should include a divider and keep old messages."""
         from eggthreads import append_message, commit_thread_compaction, create_root_thread, create_snapshot

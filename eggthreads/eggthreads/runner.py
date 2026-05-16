@@ -28,6 +28,9 @@ from .tool_call_id import normalize_tool_call_id
 from .terminal_safety import sanitize_terminal_text
 
 
+ANSWER_USER_PRESERVE_TURN_TOOL_NAME = "answer_user_while_preserving_llm_turn"
+
+
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
 ISO = "%Y-%m-%d %H:%M:%S"
 
@@ -44,6 +47,30 @@ def _utcnow_iso() -> str:
 class ContextLimitExceeded(Exception):
     """Raised when a thread's context exceeds the configured limit."""
     pass
+
+
+def _tool_call_name(tc: Any) -> str:
+    """Return the function/tool name from an OpenAI-style tool_call dict."""
+
+    if not isinstance(tc, dict):
+        return ""
+    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+    name = fn.get("name") or tc.get("name") or ""
+    return str(name) if name is not None else ""
+
+
+def _provider_tool_calls(tool_calls: Any) -> list[Any]:
+    """Return tool calls that should remain in provider/API context.
+
+    The interim-answer tool publishes a local-only assistant note and a
+    ``no_api`` tool result. Dropping that call from the provider view prevents
+    an assistant(tool_calls) turn whose required tool response is intentionally
+    hidden from blocking later LLM calls.
+    """
+
+    if not isinstance(tool_calls, list):
+        return []
+    return [tc for tc in tool_calls if _tool_call_name(tc) != ANSWER_USER_PRESERVE_TURN_TOOL_NAME]
 
 
 def _is_context_length_exceeded_error(exc: BaseException) -> bool:
@@ -1116,11 +1143,21 @@ class ThreadRunner:
                 payload = {}
             role = payload.get('role')
             keep_user_turn = bool(payload.get('keep_user_turn'))
+            no_api = bool(payload.get('no_api'))
             tool_calls = payload.get('tool_calls') or []
+            if role == 'tool' and keep_user_turn and no_api:
+                try:
+                    tcid = payload.get('tool_call_id')
+                    state = build_tool_call_states(self.db, self.thread_id).get(tcid)
+                except Exception:
+                    state = None
+                if state is not None and state.parent_role == 'assistant' and state.name == ANSWER_USER_PRESERVE_TURN_TOOL_NAME:
+                    trigger = (ev, payload)
+                    break
             if role == 'user' and not tool_calls and not keep_user_turn:
                 trigger = (ev, payload)
                 break
-            if role == 'tool' and not keep_user_turn and not bool(payload.get('no_api')):
+            if role == 'tool' and not keep_user_turn and not no_api:
                 trigger = (ev, payload)
                 break
         if not trigger:
@@ -1297,6 +1334,8 @@ class ThreadRunner:
                 for idx, m in enumerate(msgs):
                     if m.get('no_api'):
                         continue
+                    if m.get('answer_user_preserve_turn'):
+                        continue
                     r = m.get('role')
                     content = m.get('content', '')
                     # Compute optional thinking text according to policy
@@ -1307,7 +1346,9 @@ class ThreadRunner:
                     # no explicit key was configured.
                     out_thinking_key = thinking_key or 'reasoning_content'
 
-                    if r == 'assistant' and m.get('tool_calls'):
+                    provider_tcs = _provider_tool_calls(m.get('tool_calls'))
+
+                    if r == 'assistant' and provider_tcs:
                         # Assistant messages with tool_calls may also
                         # carry thinking. We forward tool_calls plus any
                         # allowed thinking under the configured key.
@@ -1316,7 +1357,7 @@ class ThreadRunner:
                         msg_out: Dict[str, Any] = {
                             'role': 'assistant',
                             'content': content,
-                            'tool_calls': m.get('tool_calls'),
+                            'tool_calls': provider_tcs,
                         }
                         if thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
@@ -1850,7 +1891,16 @@ class ThreadRunner:
             if not isinstance(m, dict):
                 continue
             m2 = dict(m)
+            if m2.get("answer_user_preserve_turn"):
+                continue
             role = m2.get("role")
+
+            if role == "assistant" and isinstance(m2.get("tool_calls"), list):
+                filtered_tool_calls = _provider_tool_calls(m2.get("tool_calls"))
+                if filtered_tool_calls:
+                    m2["tool_calls"] = filtered_tool_calls
+                else:
+                    m2.pop("tool_calls", None)
 
             # RA3: user-command tool outputs -> plain user messages
             if role == "tool" and m2.get("user_tool_call") and not m2.get("no_api"):
@@ -1918,6 +1968,7 @@ class ThreadRunner:
                         # Eggthreads-local control flags
                         "no_api",
                         "keep_user_turn",
+                        "answer_user_preserve_turn",
                     }
                     extra_keys = [k for k in m2.keys() if k not in ignore]
                     if not extra_keys:
@@ -2532,7 +2583,11 @@ class ThreadRunner:
                 #    (hidden "$$" commands). Visible "$" commands only hide
                 #    the output when the decision is "omit".
                 parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
-                no_api_flag = bool(ra.kind == 'RA3_tools_user' and (decision == 'omit' or parent_no_api))
+                preserve_turn_answer_tool = bool(ra.kind == 'RA2_tools_assistant' and tc.name == ANSWER_USER_PRESERVE_TURN_TOOL_NAME)
+                no_api_flag = bool(
+                    (ra.kind == 'RA3_tools_user' and (decision == 'omit' or parent_no_api))
+                    or preserve_turn_answer_tool
+                )
 
                 msg = {
                     'role': 'tool',
@@ -2544,7 +2599,7 @@ class ThreadRunner:
                 # after publishing the tool result. The model should not
                 # be invoked automatically; instead, the result becomes
                 # part of the context for the *next* user message.
-                if ra.kind == 'RA3_tools_user':
+                if ra.kind == 'RA3_tools_user' or preserve_turn_answer_tool:
                     msg['keep_user_turn'] = True
                 if no_api_flag:
                     msg['no_api'] = True

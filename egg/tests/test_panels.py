@@ -572,6 +572,26 @@ class TestConsolePrintMessage:
         assert 'call_full_1234567890' in joined_bodies
         assert 'echo hello' in joined_bodies
 
+    @pytest.mark.parametrize("verbosity", ["max", "medium", "min"])
+    def test_answer_user_preserve_turn_note_visible_at_all_verbosities(self, egg_app, monkeypatch, verbosity):
+        """Assistant notes should render as distinct full-body panels even in min."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+        egg_app._display_verbosity = verbosity
+
+        egg_app.console_print_message({
+            'role': 'assistant',
+            'content': 'Interim note body',
+            'answer_user_preserve_turn': True,
+            'msg_id': 'msg_answer_note',
+        })
+
+        titles = self._collect_panel_titles(printed)
+        joined_bodies = "\n".join(self._collect_panel_bodies(printed))
+        assert any('Assistant Note' in title and 'msg_id: msg_answer_note' in title for title in titles)
+        assert 'Interim note body' in joined_bodies
+        assert not any('Assistant]' in title for title in titles)
+
     def test_display_verbosity_min_prints_conversation_and_hidden_summary(self, egg_app, monkeypatch):
         """Min static view should summarize hidden details between visible messages."""
         from eggthreads import append_message, create_snapshot
