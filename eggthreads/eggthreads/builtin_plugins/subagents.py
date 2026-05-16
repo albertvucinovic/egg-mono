@@ -661,6 +661,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
             "Inspect child or descendant thread status without waiting. Returns JSON with each child's "
             "coarse state, current provider context_tokens, full_thread_tokens, concise compaction info, "
             "optional context limit percentage, open invoke, "
+            "active assistant_notes from the current unfinished assistant workflow, "
             "last event metadata, and recent LLM/runner/session/tool errors. Omit child_thread_ids to inspect "
             "all direct children of the calling thread."
         ),

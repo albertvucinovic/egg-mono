@@ -101,6 +101,46 @@ def test_get_child_status_tool_uses_current_thread_context(tmp_path, monkeypatch
     assert payload["children"][0]["compaction"] == {"compacted": False, "raw_marker_count": 0}
 
 
+def test_get_child_status_reports_active_assistant_notes(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    note = ts.append_message(
+        db,
+        child,
+        "assistant",
+        "still working on it",
+        extra={"answer_user_preserve_turn": True, "model_key": "test-model", "tool_call_id": "call-note"},
+    )
+    ts.create_snapshot(db, child)
+
+    payload = ts.get_child_thread_status(db, parent, child).to_dict()
+
+    assert payload["assistant_notes"] == [
+        {
+            "event_seq": payload["assistant_notes"][0]["event_seq"],
+            "ts": payload["assistant_notes"][0]["ts"],
+            "msg_id": note,
+            "content": "still working on it",
+            "model_key": "test-model",
+            "tool_call_id": "call-note",
+        }
+    ]
+
+
+def test_get_child_status_clears_assistant_notes_after_final_assistant(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "assistant", "still working", extra={"answer_user_preserve_turn": True})
+    ts.append_message(db, child, "assistant", "final answer")
+    ts.create_snapshot(db, child)
+
+    payload = ts.get_child_thread_status(db, parent, child).to_dict()
+
+    assert payload["assistant_notes"] == []
+
+
 def test_get_child_status_tool_defaults_to_direct_children(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB()

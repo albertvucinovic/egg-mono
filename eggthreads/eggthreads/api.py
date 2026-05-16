@@ -3494,6 +3494,7 @@ class ChildThreadStatus:
     context_limit_percent: Optional[float] = None
     error_count: int = 0
     recent_errors: Optional[List[Dict[str, Any]]] = None
+    assistant_notes: Optional[List[Dict[str, Any]]] = None
     last_event_seq: int = -1
     last_event_ts: Optional[str] = None
     open_invoke_id: Optional[str] = None
@@ -3512,6 +3513,7 @@ class ChildThreadStatus:
             "context_limit_percent": self.context_limit_percent,
             "error_count": int(self.error_count),
             "recent_errors": list(self.recent_errors or []),
+            "assistant_notes": list(self.assistant_notes or []),
             "last_event_seq": int(self.last_event_seq),
             "last_event_ts": self.last_event_ts,
             "open_invoke_id": self.open_invoke_id,
@@ -3640,6 +3642,69 @@ def _recent_thread_errors(db: ThreadsDB, thread_id: str, *, max_errors: int) -> 
     return errors, count
 
 
+def _active_assistant_notes(db: ThreadsDB, thread_id: str, *, limit: int = 5) -> List[Dict[str, Any]]:
+    """Return assistant-note messages in the current unfinished assistant workflow."""
+
+    try:
+        limit = max(0, min(int(limit), 20))
+    except Exception:
+        limit = 5
+    if limit <= 0:
+        return []
+
+    try:
+        skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    except Exception:
+        skipped, deleted = set(), set()
+
+    try:
+        cur = db.conn.execute(
+            "SELECT event_seq, ts, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+
+    notes: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            msg_id = str(row["msg_id"] or "")
+            event_seq = int(row["event_seq"])
+            ts = row["ts"]
+        except Exception:
+            continue
+        if msg_id and (msg_id in skipped or msg_id in deleted):
+            continue
+        payload = _event_payload_from_row(row)
+        if payload.get("role") != "assistant":
+            continue
+        if payload.get("answer_user_preserve_turn"):
+            item: Dict[str, Any] = {
+                "event_seq": event_seq,
+                "ts": ts,
+                "msg_id": msg_id,
+                "content": _truncate_status_text(payload.get("content"), limit=2000),
+            }
+            model_key = payload.get("model_key")
+            if isinstance(model_key, str) and model_key:
+                item["model_key"] = model_key
+            tool_call_id = payload.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                item["tool_call_id"] = tool_call_id
+            notes.append(item)
+            continue
+
+        # A normal assistant message without tool calls is the completed
+        # response boundary for the current workflow; older interim notes are
+        # no longer active status updates after that point.
+        tool_calls = payload.get("tool_calls") or []
+        if not tool_calls:
+            notes.clear()
+
+    return notes[-limit:]
+
+
 def _last_event_meta(db: ThreadsDB, thread_id: str) -> tuple[int, Optional[str]]:
     try:
         row = db.conn.execute(
@@ -3730,6 +3795,7 @@ def get_child_thread_status(
         context_limit_percent = round((float(context_tokens) / float(context_limit)) * 100.0, 2)
 
     recent_errors, error_count = _recent_thread_errors(db, child, max_errors=max_errors)
+    assistant_notes = _active_assistant_notes(db, child)
     last_event_seq, last_event_ts = _last_event_meta(db, child)
     open_invoke_id = current_open_invoke(db, child)
 
@@ -3745,6 +3811,7 @@ def get_child_thread_status(
         context_limit_percent=context_limit_percent,
         error_count=error_count,
         recent_errors=recent_errors,
+        assistant_notes=assistant_notes,
         last_event_seq=last_event_seq,
         last_event_ts=last_event_ts,
         open_invoke_id=open_invoke_id,
