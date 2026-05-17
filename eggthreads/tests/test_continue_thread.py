@@ -17,6 +17,7 @@ from eggthreads import (
     ThreadsDB,
     create_root_thread,
     append_message,
+    create_snapshot,
     diagnose_thread,
     continue_thread,
     is_thread_continuable,
@@ -218,6 +219,59 @@ class TestSkippedMessages:
 
 class TestDiagnoseAndContinue:
     """Integration tests for diagnose_thread + continue_thread flow."""
+
+    def test_diagnose_ignores_assistant_notes_for_consecutive_assistant_check(self, tmp_path):
+        """Assistant notes are provider-hidden and can appear between tool calls."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        append_message(db, tid, "user", "Keep me updated while working")
+        tool_call_id = "call-answer-note"
+        append_message(
+            db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "answer_user_while_preserving_llm_turn",
+                            "arguments": '{"message":"Still working"}',
+                        },
+                    }
+                ]
+            },
+        )
+        note_1 = append_message(
+            db,
+            tid,
+            "assistant",
+            "Still working",
+            extra={"answer_user_preserve_turn": True, "tool_call_id": tool_call_id},
+        )
+        note_2 = append_message(
+            db,
+            tid,
+            "assistant",
+            "Still working more",
+            extra={"answer_user_preserve_turn": True, "tool_call_id": tool_call_id},
+        )
+        append_message(db, tid, "tool", "Interim answer shown to user.", extra={"tool_call_id": tool_call_id})
+
+        diagnosis = diagnose_thread(db, tid)
+        assert diagnosis.is_healthy is True
+        assert "consecutive_assistants" not in diagnosis.details
+
+        result = continue_thread(db, tid)
+        assert result.success is True
+        assert result.skipped_msg_ids == []
+
+        messages = create_snapshot(db, tid)["messages"]
+        assert any(msg.get("msg_id") == note_1 for msg in messages)
+        assert any(msg.get("msg_id") == note_2 for msg in messages)
 
     def test_diagnose_detects_unclosed_stream(self, tmp_path):
         """diagnose_thread should detect unclosed streams."""

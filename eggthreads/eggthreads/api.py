@@ -1974,6 +1974,12 @@ def diagnose_thread(db: ThreadsDB, thread_id: str) -> ThreadDiagnosis:
             payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
         except Exception:
             payload = {}
+        # Assistant notes are local/user-visible status updates emitted by the
+        # answer-user tool. They are filtered out of provider/API context, so
+        # they must not participate in protocol checks such as consecutive
+        # assistant-message detection.
+        if isinstance(payload, dict) and payload.get('answer_user_preserve_turn'):
+            continue
         messages.append((msg_id, payload, ev_seq))
 
     # Check for consecutive assistant messages
