@@ -269,6 +269,18 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     stderr_task = _asyncio.create_task(_reader(proc.stderr, False))
     try:
         await proc.wait()
+        while True:
+            done, _pending = await _asyncio.wait(
+                {stdout_task, stderr_task},
+                timeout=0.25,
+                return_when=_asyncio.ALL_COMPLETED,
+            )
+            if len(done) == 2:
+                break
+            if timed_out or interrupted:
+                for task in (stdout_task, stderr_task):
+                    task.cancel()
+                break
         await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
     finally:
         watcher.cancel()

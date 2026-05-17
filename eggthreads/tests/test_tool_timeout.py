@@ -196,6 +196,30 @@ class TestToolTimeout:
         assert "TIMEOUT" in result.output
         assert "started" in result.output
 
+    def test_streaming_bash_timeout_does_not_wait_forever_on_open_stdout_pipe(self, tmp_path, monkeypatch):
+        """Timeout should finish even if a detached descendant keeps stdout open."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+
+        import asyncio
+
+        script = "setsid sh -c 'sleep 30 >&1' & echo parent done; sleep 30"
+
+        async def run():
+            return await tools.execute_async(
+                "bash",
+                {"script": script},
+                tool_timeout_sec=0.5,
+                preserve_tool_result=True,
+            )
+
+        result = asyncio.run(asyncio.wait_for(run(), timeout=4))
+
+        assert getattr(result, "reason", None) == "timeout"
+        assert "TIMEOUT" in result.output
+        assert "parent done" in result.output
+
+
 
 class TestToolTimeoutInvalidInput:
     """Tests for handling invalid timeout values."""
