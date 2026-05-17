@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from rich.console import Console, Group
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
@@ -495,7 +496,7 @@ class PanelsMixin:
         self.print_static_view_current(heading=heading)
 
     def _system_status_key(self) -> Any:
-        """Cheap key for System panel sandbox/autoapproval title state."""
+        """Cheap key for System panel model/sandbox/autoapproval title state."""
         cur = self.db.conn.execute(
             """
             WITH RECURSIVE ancestors(thread_id) AS (
@@ -512,8 +513,14 @@ class PanelsMixin:
             (self.current_thread, 'sandbox.config', 'tool_call.approval'),
         )
         cfg_event_count, cfg_event_max_seq = cur.fetchone()
+        model_key = ''
+        try:
+            model_key = self.current_model_for_thread(self.current_thread) or ''
+        except Exception:
+            model_key = ''
         return (
             self.current_thread,
+            model_key,
             int(cfg_event_count or 0),
             int(cfg_event_max_seq or 0),
         )
@@ -738,9 +745,16 @@ class PanelsMixin:
 
         cache = getattr(self, '_system_status_cache', None)
         if system_status_key is not None and isinstance(cache, dict) and cache.get('key') == system_status_key:
+            model_part = str(cache.get('model_part') or "[cyan]Model[default][/cyan]")
             sandbox_part = str(cache.get('sandbox_part') or "[red]Sandboxing[OFF][/red]")
             auto_part = str(cache.get('auto_part') or "[green]Autoapproval[Off][/green]")
         else:
+            try:
+                model_name = self.current_model_for_thread(self.current_thread) or 'default'
+            except Exception:
+                model_name = 'default'
+            model_part = f"[cyan]Model[{rich_escape(str(model_name))}][/cyan]"
+
             # Update System panel title to reflect sandbox status so the
             # user always has a prominent, persistent indicator.
             try:
@@ -777,6 +791,7 @@ class PanelsMixin:
             if system_status_key is not None:
                 self._system_status_cache = {
                     'key': system_status_key,
+                    'model_part': model_part,
                     'sandbox_part': sandbox_part,
                     'auto_part': auto_part,
                 }
@@ -789,7 +804,7 @@ class PanelsMixin:
             no_api = False
         no_api_part = "[red]ReadOnly\\[NO_API_CALLS][/red]" if no_api else ""
         stream_part = self._current_stream_header_part()
-        title = f"System  {sandbox_part}  {auto_part}"
+        title = f"System  {model_part}  {sandbox_part}  {auto_part}"
         if no_api_part:
             title = f"{title}  {no_api_part}"
         if stream_part:

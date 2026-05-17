@@ -30,13 +30,24 @@ class TestUpdatePanels:
         assert egg_app.system_output.content == ""
 
     def test_system_output_title_shows_status(self, egg_app):
-        """System panel title carries sandbox and auto-approval status."""
+        """System panel title carries model, sandbox, and auto-approval status."""
         egg_app.update_panels()
 
         title = egg_app.system_output.title
         assert title.startswith("System")
+        assert "Model[" in title
         assert "Sandboxing" in title
         assert "Autoapproval" in title
+
+    def test_system_output_title_shows_current_model(self, egg_app):
+        """System panel title includes the effective model for the current thread."""
+        from eggthreads import set_thread_model
+
+        set_thread_model(egg_app.db, egg_app.current_thread, "test-model", reason="test")
+
+        egg_app.update_panels()
+
+        assert "Model[test-model]" in egg_app.system_output.title
 
     def test_updates_children_output(self, egg_app, monkeypatch):
         """Should update children_output with tree view."""
