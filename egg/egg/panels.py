@@ -687,43 +687,6 @@ class PanelsMixin:
                     tok_text = fmt_tok(int(ctx_tokens))
                     if tok_text:
                         title_parts.append(f"ctx {tok_text}")
-                cost_str = ""
-                if have_api:
-                    ti = api_usage.get("total_input_tokens")
-                    to = api_usage.get("total_output_tokens")
-                    cc = api_usage.get("approx_call_count")
-                    cached_in = api_usage.get("cached_input_tokens")
-                    segs: List[str] = []
-                    if isinstance(ti, int):
-                        tok_text = fmt_tok(ti)
-                        if tok_text:
-                            segs.append(f"in {tok_text}")
-                    if isinstance(to, int):
-                        tok_text = fmt_tok(to)
-                        if tok_text:
-                            segs.append(f"out {tok_text}")
-                    if isinstance(cached_in, int) and cached_in > 0:
-                        tok_text = fmt_tok(cached_in)
-                        if tok_text:
-                            segs.append(f"cached {tok_text}")
-                    if isinstance(cc, int):
-                        calls_text = self._fmt_header_metric(cc, 'calls')
-                        if calls_text:
-                            segs.append(calls_text)
-                    if segs:
-                        title_parts.append(" ".join(segs))
-
-                    # Approximate cost (computed by eggthreads.thread_token_stats).
-                    try:
-                        cu = api_usage.get('cost_usd') if isinstance(api_usage.get('cost_usd'), dict) else {}
-                        total_cost = float(cu.get('total') or 0.0)
-                        if total_cost > 0:
-                            cost_str = self._fmt_header_metric(total_cost, 'cost')
-                    except Exception:
-                        cost_str = ""
-
-                if cost_str:
-                    title_parts.append(cost_str)
 
                 tps_str = ""
                 try:
