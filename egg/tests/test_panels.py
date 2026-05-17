@@ -35,10 +35,10 @@ class TestUpdatePanels:
         egg_app.update_panels()
 
         title = egg_app.system_output.title
-        assert title.startswith("System")
         assert "Model\\[" in title
         assert "Sandboxing" in title
         assert "Autoapproval" in title
+        assert not title.startswith("System")
 
     def test_full_screen_moves_chat_metrics_to_system_title(self, egg_app, monkeypatch):
         """Full-screen mode shows chat ctx/TPS in System and omits Chat panel."""
@@ -57,6 +57,12 @@ class TestUpdatePanels:
         assert "ctx 1.23k" in egg_app.system_output.title
         assert "8.0 tps" in egg_app.system_output.title
         assert egg_app.system_output.title.count("8.0 tps") == 1
+        title = egg_app.system_output.title
+        assert title.index("Model") < title.index("ctx 1.23k")
+        assert title.index("ctx 1.23k") < title.index("8.0 tps")
+        assert title.index("8.0 tps") < title.index("Sandboxing")
+        assert title.index("Sandboxing") < title.index("Autoapproval")
+        assert title.index("Autoapproval") < title.index("Streaming")
         assert "Chat Messages" not in [getattr(item, "title", "") for item in group._renderables]
 
     def test_inline_keeps_chat_metrics_in_chat_title(self, egg_app, monkeypatch):
