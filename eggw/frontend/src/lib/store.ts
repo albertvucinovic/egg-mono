@@ -25,6 +25,7 @@ export interface Message {
   timestamp?: string;  // ISO datetime string
   tokens?: number;     // Per-message token count
   tps?: number;
+  answer_user_preserve_turn?: boolean;
 }
 
 export interface ToolCall {

@@ -414,7 +414,16 @@ class TestFormatMessagesText:
             tid,
             "assistant",
             "Interim note body",
-            extra={"answer_user_preserve_turn": True},
+            extra={
+                "answer_user_preserve_turn": True,
+                "tool_calls": [
+                    {
+                        "id": "call_note",
+                        "type": "function",
+                        "function": {"name": "answer_user_while_preserving_llm_turn", "arguments": '{"message":"Interim note body"}'},
+                    }
+                ],
+            },
         )
         create_snapshot(isolated_db, tid)
 
@@ -430,6 +439,14 @@ class TestFormatMessagesText:
         text = TestApp().format_messages_text(tid)
 
         assert f"[Assistant Note [msg_id: {note}]]\nInterim note body" in text
+        if verbosity == "max":
+            assert "[ToolCall] answer_user_while_preserving_llm_turn" in text
+        elif verbosity == "medium":
+            assert "[Tool Calls" in text
+            assert "answer_user_while_preserving_llm_turn" in text
+        else:
+            assert "Executed 1 tool" in text
+            assert "answer_user_while_preserving_llm_turn" in text
         assert "Hidden details" not in text
 
     def test_shows_compaction_marker_without_hiding_history(self, isolated_db):

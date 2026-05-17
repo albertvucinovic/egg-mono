@@ -330,15 +330,9 @@ class FormattingMixin:
             except Exception:
                 tps_text = ""
             if role == 'assistant':
-                if m.get('answer_user_preserve_turn'):
-                    content = (m.get('content') or '').strip()
-                    if content:
-                        if verbosity == 'min':
-                            flush_hidden()
-                        lines.append(f"[Assistant Note{tps_text}{msg_id_text}]\n{content}")
-                    continue
+                is_assistant_note = bool(m.get('answer_user_preserve_turn'))
                 reas = (m.get('reasoning') or m.get('reasoning_content') or '').strip()
-                if reas:
+                if reas and not is_assistant_note:
                     reason_header = f"[Reasoning{tps_text}{msg_id_text}]"
                     if verbosity == 'max':
                         lines.append(f"{reason_header}\n{reas}")
@@ -350,7 +344,8 @@ class FormattingMixin:
                 if content:
                     if verbosity == 'min':
                         flush_hidden()
-                    lines.append(f"[Assistant{tps_text}{msg_id_text}]\n{content}")
+                    header = "Assistant Note" if is_assistant_note else "Assistant"
+                    lines.append(f"[{header}{tps_text}{msg_id_text}]\n{content}")
                 # Final tool calls summary (if any)
                 tcs = m.get('tool_calls') or []
                 if isinstance(tcs, list) and tcs:

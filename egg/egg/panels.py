@@ -1378,22 +1378,8 @@ class PanelsMixin:
             return items
 
         if role == 'assistant':
-            if m.get('answer_user_preserve_turn'):
-                if verbosity == 'min':
-                    append_hidden_details()
-                title = '[bold bright_magenta]Assistant Note[/bold bright_magenta]'
-                if model_key:
-                    title += f" [dim](model: {model_key})[/dim]"
-                if pm_tokens["content"]:
-                    tok_text = self._fmt_header_metric(pm_tokens['content'], 'tok')
-                    if tok_text:
-                        title += f" [dim]({tok_text})[/dim]"
-                if msg_tps:
-                    title += f" [dim]({msg_tps})[/dim]"
-                panel(Text(content, no_wrap=False, overflow='fold', style='bright_magenta'), title, 'bright_magenta')
-                return items
-
-            title = '[bold cyan]Assistant[/bold cyan]'
+            is_assistant_note = bool(m.get('answer_user_preserve_turn'))
+            title = '[bold bright_magenta]Assistant Note[/bold bright_magenta]' if is_assistant_note else '[bold cyan]Assistant[/bold cyan]'
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
             if pm_tokens["content"]:
@@ -1404,7 +1390,7 @@ class PanelsMixin:
                 title += f" [dim]({msg_tps})[/dim]"
             # Prefer to show reasoning first if present
             reas = m.get('reasoning') or m.get('reasoning_content')
-            if isinstance(reas, str) and reas.strip():
+            if not is_assistant_note and isinstance(reas, str) and reas.strip():
                 reason_title = '[bold magenta]Reasoning[/bold magenta]'
                 if model_key:
                     reason_title += f" [dim](model: {model_key})[/dim]"
@@ -1428,7 +1414,9 @@ class PanelsMixin:
             if content:
                 if verbosity == 'min':
                     append_hidden_details()
-                if looks_markdown(content):
+                if is_assistant_note:
+                    panel(Markdown(content), title, 'bright_magenta')
+                elif looks_markdown(content):
                     panel(Markdown(content), title, 'cyan')
                 else:
                     panel(Text(content, no_wrap=False, overflow='fold', style='white'), title, 'cyan')

@@ -5,6 +5,7 @@ import asyncio
 import json
 
 import pytest
+from rich.console import Console
 
 
 class TestUpdatePanels:
@@ -543,6 +544,12 @@ class TestConsolePrintMessage:
                     bodies.append(str(getattr(renderable, "plain", renderable)))
         return bodies
 
+    @staticmethod
+    def _render_panel_text(panel):
+        console = Console(record=True, width=120)
+        console.print(panel)
+        return console.export_text(styles=False)
+
 
     def test_display_verbosity_default_max_keeps_detail_bodies(self, egg_app, monkeypatch):
         """Default max panels should keep reasoning and tool-result bodies."""
@@ -608,15 +615,30 @@ class TestConsolePrintMessage:
 
         egg_app.console_print_message({
             'role': 'assistant',
-            'content': 'Interim note body',
+            'content': '**Interim** note body',
             'answer_user_preserve_turn': True,
             'msg_id': 'msg_answer_note',
+            'tool_calls': [{
+                'id': 'call_note',
+                'function': {'name': 'answer_user_while_preserving_llm_turn', 'arguments': '{"message":"Interim note body"}'},
+            }],
         })
 
         titles = self._collect_panel_titles(printed)
         joined_bodies = "\n".join(self._collect_panel_bodies(printed))
         assert any('Assistant Note' in title and 'msg_id: msg_answer_note' in title for title in titles)
-        assert 'Interim note body' in joined_bodies
+        note_panel = next(arg for args, _kwargs in printed for arg in args if 'Assistant Note' in str(getattr(arg, 'title', '')))
+        note_text = self._render_panel_text(note_panel)
+        assert 'Interim note body' in note_text
+        assert '**Interim** note body' not in note_text
+        if verbosity == 'min':
+            egg_app._flush_static_hidden_details()
+            joined_bodies = "\n".join(self._collect_panel_bodies(printed))
+            assert 'Executed 1 tool' in joined_bodies
+            assert 'answer_user_while_preserving_llm_turn' in joined_bodies
+        else:
+            assert any('Tool Calls' in title and 'msg_id: msg_answer_note' in title for title in titles)
+            assert 'answer_user_while_preserving_llm_turn' in joined_bodies
         assert not any('Assistant]' in title for title in titles)
 
     def test_display_verbosity_min_prints_conversation_and_hidden_summary(self, egg_app, monkeypatch):

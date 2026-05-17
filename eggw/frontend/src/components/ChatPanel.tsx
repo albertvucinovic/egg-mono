@@ -214,6 +214,7 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
   const roleStyles: Record<string, React.CSSProperties> = {
     user: { background: "var(--user-msg-bg)", borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--foreground))" },
     assistant: { background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" },
+    assistant_note: { background: "var(--assistant-msg-bg)", borderColor: "#d946ef", color: "#f0abfc" },
     system: { background: "var(--system-msg-bg)", borderColor: "var(--system-msg-border)", color: "var(--system-msg-text, var(--foreground))" },
     tool: { background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" },
   };
@@ -221,9 +222,12 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
   const roleLabels: Record<string, string> = {
     user: "User",
     assistant: "Assistant",
+    assistant_note: "Assistant Note",
     system: "Command",
     tool: "Tool Result",
   };
+
+  const displayRole = message.answer_user_preserve_turn && message.role === "assistant" ? "assistant_note" : message.role;
 
   // Check if this is a shell command (starts with $ or $$)
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
@@ -252,12 +256,12 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
   return (
     <div
       className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
-      style={isShellCommand ? shellStyle : (roleStyles[message.role] || shellStyle)}
+      style={isShellCommand ? shellStyle : (roleStyles[displayRole] || shellStyle)}
     >
       {/* Header */}
       <div className="flex items-center gap-2 mb-2 text-xs flex-wrap" style={{ color: "var(--muted)" }}>
-        <span className="font-medium" style={roleStyles[message.role] ? { color: roleStyles[message.role].color } : { color: "var(--foreground)" }}>
-          {isShellCommand ? "Shell" : roleLabels[message.role] || message.role}
+        <span className="font-medium" style={roleStyles[displayRole] ? { color: roleStyles[displayRole].color } : { color: "var(--foreground)" }}>
+          {isShellCommand ? "Shell" : roleLabels[displayRole] || displayRole}
         </span>
         {message.model_key && (
           <span style={{ color: "var(--muted)" }}>({message.model_key})</span>

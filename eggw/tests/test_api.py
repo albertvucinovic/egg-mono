@@ -235,6 +235,30 @@ class TestMessageOperations:
         assert [m.get("id") for m in data].index(old) < data.index(marker) < [m.get("id") for m in data].index(start)
         assert after
 
+    def test_get_messages_marks_answer_user_preserve_turn_notes(self, client):
+        """Web transcript API exposes assistant-note metadata for frontend styling."""
+        from eggthreads import append_message, create_snapshot
+
+        create_resp = client.post("/api/threads", json={"name": "Assistant Note UI"})
+        thread_id = create_resp.json()["id"]
+
+        note = append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "**Interim** note",
+            extra={"answer_user_preserve_turn": True},
+        )
+        create_snapshot(core_state.db, thread_id)
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        data = response.json()
+        message = next(m for m in data if m["id"] == note)
+        assert message["role"] == "assistant"
+        assert message["answer_user_preserve_turn"] is True
+
 
 class TestEventStreaming:
     """Test SSE event shaping for streaming UI clients."""
