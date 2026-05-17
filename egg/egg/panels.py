@@ -745,7 +745,7 @@ class PanelsMixin:
 
         cache = getattr(self, '_system_status_cache', None)
         if system_status_key is not None and isinstance(cache, dict) and cache.get('key') == system_status_key:
-            model_part = str(cache.get('model_part') or "[cyan]Model: default[/cyan]")
+            model_part = str(cache.get('model_part') or r"[cyan]Model\[default][/cyan]")
             sandbox_part = str(cache.get('sandbox_part') or "[red]Sandboxing[OFF][/red]")
             auto_part = str(cache.get('auto_part') or "[green]Autoapproval[Off][/green]")
         else:
@@ -753,7 +753,7 @@ class PanelsMixin:
                 model_name = self.current_model_for_thread(self.current_thread) or 'default'
             except Exception:
                 model_name = 'default'
-            model_part = f"[cyan]Model: {rich_escape(str(model_name))}[/cyan]"
+            model_part = f"[cyan]Model\\[{rich_escape(str(model_name))}][/cyan]"
 
             # Update System panel title to reflect sandbox status so the
             # user always has a prominent, persistent indicator.

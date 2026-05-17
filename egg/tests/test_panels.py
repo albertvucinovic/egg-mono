@@ -35,7 +35,7 @@ class TestUpdatePanels:
 
         title = egg_app.system_output.title
         assert title.startswith("System")
-        assert "Model:" in title
+        assert "Model\\[" in title
         assert "Sandboxing" in title
         assert "Autoapproval" in title
 
@@ -47,7 +47,7 @@ class TestUpdatePanels:
 
         egg_app.update_panels()
 
-        assert "Model: test-model" in egg_app.system_output.title
+        assert "Model\\[test-model]" in egg_app.system_output.title
 
     def test_system_output_title_renders_model_name_with_colon_and_spaces(self, egg_app):
         """Model names containing colon/spaces should render as text, not markup tags."""
@@ -63,7 +63,7 @@ class TestUpdatePanels:
         console.print(egg_app.system_output.render())
         rendered = console.export_text(styles=False)
 
-        assert model_name in rendered
+        assert f"Model[{model_name}]" in rendered
 
     def test_updates_children_output(self, egg_app, monkeypatch):
         """Should update children_output with tree view."""
