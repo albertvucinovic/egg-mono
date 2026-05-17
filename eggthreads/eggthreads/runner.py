@@ -2374,6 +2374,43 @@ class ThreadRunner:
                         full_result = tool_result
                         finish_reason = 'success'
                         already_streamed = False
+                except asyncio.CancelledError:
+                    full_result = (
+                        "--- INTERRUPTED ---\n"
+                        "Tool execution was interrupted because the runner task was cancelled."
+                    )
+                    try:
+                        self.db.append_event(
+                            event_id=os.urandom(10).hex(),
+                            thread_id=self.thread_id,
+                            type_='tool_call.finished',
+                            msg_id=None,
+                            invoke_id=invoke_id,
+                            payload={
+                                'tool_call_id': tc.tool_call_id,
+                                'reason': 'interrupted',
+                                'output': full_result,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self.db.append_event(
+                            event_id=os.urandom(10).hex(),
+                            thread_id=self.thread_id,
+                            type_='tool_call.output_approval',
+                            msg_id=None,
+                            invoke_id=None,
+                            payload={
+                                'tool_call_id': tc.tool_call_id,
+                                'decision': 'whole',
+                                'reason': 'Runner task cancelled',
+                                'preview': full_result,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    raise
                 except Exception as e:
                     full_result = f"ERROR: {e}"
                     finish_reason = 'error'

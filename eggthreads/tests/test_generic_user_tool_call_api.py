@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import eggthreads as ts
@@ -146,6 +147,93 @@ def test_wait_tool_reports_missing_thread_without_waiting(tmp_path, monkeypatch)
     out = ts.create_default_tools().execute("wait", {"thread_ids": [missing]}, timeout_sec=30)
 
     assert "not found; not waiting" in out
+
+
+def test_cancelled_wait_tool_call_records_interrupted_result(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
+    ts.append_message(db, child, "user", "still working")
+    ts.create_snapshot(db, child)
+
+    tcid = "tc-wait-cancelled"
+    ts.append_message(
+        db,
+        root,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tcid,
+                    "type": "function",
+                    "function": {
+                        "name": "wait",
+                        "arguments": json.dumps({"thread_ids": [child], "timeout_sec": 60}),
+                    },
+                }
+            ]
+        },
+    )
+    db.append_event("approve", root, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+
+    async def run_and_cancel():
+        runner = ts.ThreadRunner(db, root, llm=object(), config=ts.RunnerConfig())
+        task = asyncio.create_task(runner.run_once())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+
+    asyncio.run(run_and_cancel())
+
+    states = ts.build_tool_call_states(db, root)
+    assert states[tcid].state == "TC5"
+    assert states[tcid].finished_reason == "interrupted"
+    assert states[tcid].output_decision == "whole"
+
+    asyncio.run(ts.ThreadRunner(db, root, llm=object(), config=ts.RunnerConfig()).run_once())
+
+    states = ts.build_tool_call_states(db, root)
+    assert states[tcid].state == "TC6"
+
+
+def test_closed_tool_stream_without_finished_result_is_recoverable(tmp_path):
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    tcid = "tc-closed-without-finished"
+    invoke_id = "invoke-closed"
+
+    ts.append_message(
+        db,
+        root,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tcid,
+                    "type": "function",
+                    "function": {"name": "wait", "arguments": json.dumps({"thread_ids": [root], "timeout_sec": 60})},
+                }
+            ]
+        },
+    )
+    db.append_event("approve", root, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+    db.append_event("stream-open", root, "stream.open", {"stream_kind": "tool"}, msg_id="stream-msg", invoke_id=invoke_id)
+    db.append_event("started", root, "tool_call.execution_started", {"tool_call_id": tcid}, invoke_id=invoke_id)
+    db.append_event("stream-close", root, "stream.close", {}, invoke_id=invoke_id)
+
+    states = ts.build_tool_call_states(db, root)
+    assert states[tcid].state == "TC5"
+    assert states[tcid].finished_reason == "interrupted"
+
+    asyncio.run(ts.ThreadRunner(db, root, llm=object(), config=ts.RunnerConfig()).run_once())
+
+    states = ts.build_tool_call_states(db, root)
+    assert states[tcid].state == "TC6"
 
 
 def test_wait_for_threads_does_not_finish_when_llm_turn_is_actionable(tmp_path):

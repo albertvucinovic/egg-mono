@@ -121,6 +121,14 @@ class ThreadsDB:
                         owner: Optional[str] = None, purpose: Optional[str] = None) -> bool:
         # First, try to takeover an expired lease (most common case after crash recovery)
         cur = self.conn.execute(
+            "SELECT invoke_id, purpose FROM open_streams WHERE thread_id=? AND lease_until<=datetime('now')",
+            (thread_id,),
+        )
+        expired_row = cur.fetchone()
+        old_invoke_id = expired_row[0] if expired_row else None
+        old_purpose = expired_row[1] if expired_row else None
+
+        cur = self.conn.execute(
             """
             UPDATE open_streams
                SET invoke_id=?, lease_until=?, owner=?, purpose=?, heartbeat_at=datetime('now')
@@ -129,6 +137,17 @@ class ThreadsDB:
             (invoke_id, lease_until_iso, owner, purpose, thread_id)
         )
         if cur.rowcount == 1:
+            self.append_event(
+                event_id=f"lease-takeover-{invoke_id}",
+                thread_id=thread_id,
+                type_="control.interrupt",
+                payload={
+                    "reason": "expired_lease_takeover",
+                    "old_invoke_id": old_invoke_id,
+                    "new_invoke_id": invoke_id,
+                    "purpose": old_purpose or purpose,
+                },
+            )
             return True
 
         # No expired lease to takeover, check if there's an active lease

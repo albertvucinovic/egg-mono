@@ -472,6 +472,17 @@ class TestLeaseTakeover:
         assert row["invoke_id"] == "new-invoke"
         assert row["owner"] == "new-process"
 
+        interrupt = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='control.interrupt' ORDER BY event_seq DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert interrupt is not None
+        payload = json.loads(interrupt[0])
+        assert payload["reason"] == "expired_lease_takeover"
+        assert payload["old_invoke_id"] == "old-invoke"
+        assert payload["new_invoke_id"] == "new-invoke"
+        assert payload["purpose"] == "llm"
+
     def test_try_open_stream_fails_on_active_lease(self, tmp_path):
         """try_open_stream should fail if there's an active lease."""
         db, _ = _make_temp_db(tmp_path)

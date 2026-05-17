@@ -51,6 +51,7 @@ class ToolCallState:
     # encode preview/truncation/paths that the runner can later use when
     # publishing the final tool message.
     last_output_approval_payload: Optional[Dict[str, Any]] = None
+    owner_invoke_id: Optional[str] = None
 
     @property
     def state(self) -> str:
@@ -284,6 +285,9 @@ def _reduce_loaded_thread_events(
                 tc = states[tcid]
                 if ev_seq > tc.parent_event_seq:
                     tc.execution_started = True
+                    inv = ev.get("invoke_id")
+                    if isinstance(inv, str) and inv:
+                        tc.owner_invoke_id = inv
         elif ev_type == "tool_call.summary":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
@@ -327,6 +331,14 @@ def _reduce_loaded_thread_events(
     if global_auto_approval and current_global_start is not None:
         global_intervals.append((current_global_start, None))
 
+    closed_invokes: set[str] = set()
+    for ev, _payload_obj, _ev_seq in records:
+        if ev.get("type") != "stream.close":
+            continue
+        inv = ev.get("invoke_id")
+        if isinstance(inv, str) and inv:
+            closed_invokes.add(inv)
+
     def _has_global_approval(ev_seq: int) -> bool:
         for start, end in global_intervals:
             if ev_seq < start:
@@ -337,6 +349,19 @@ def _reduce_loaded_thread_events(
         return False
 
     for tc in states.values():
+        if tc.execution_started and tc.finished_reason is None and tc.owner_invoke_id in closed_invokes:
+            tc.finished_reason = "interrupted"
+            tc.finished_output = (
+                "--- INTERRUPTED ---\n"
+                "Tool execution stream closed before the tool reported a result."
+            )
+            tc.output_decision = "whole"
+            tc.last_output_approval_payload = {
+                "tool_call_id": tc.tool_call_id,
+                "decision": "whole",
+                "reason": "Tool execution stream closed before the tool reported a result.",
+                "preview": tc.finished_output,
+            }
         if tc.approval_decision is None and _has_global_approval(tc.parent_event_seq):
             tc.approval_decision = "granted"
         if tc.approval_decision is None and tc.name in AUTO_APPROVED_TOOL_NAMES:
