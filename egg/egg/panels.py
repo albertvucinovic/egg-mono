@@ -668,8 +668,9 @@ class PanelsMixin:
         else:
             self.chat_output.set_content("")
 
+        ctx_tokens: Optional[int] = None
         try:
-            ctx_tokens, api_usage = self.current_token_stats()
+            ctx_tokens, _api_usage = self.current_token_stats()
 
             def fmt_tok(v: int) -> str:
                 return self._fmt_compact_count(v)
@@ -678,8 +679,7 @@ class PanelsMixin:
             # existing title so that we do not clear previously
             # computed information while a new turn is streaming.
             have_ctx = isinstance(ctx_tokens, int)
-            have_api = isinstance(api_usage, dict) and bool(api_usage)
-            if not (have_ctx or have_api):
+            if not have_ctx:
                 pass  # leave title unchanged
             else:
                 title_parts: List[str] = ["Chat Messages"]
@@ -699,6 +699,22 @@ class PanelsMixin:
         except Exception:
             # Leave existing title unchanged on any error.
             pass
+
+        metric_parts: List[str] = []
+        if not getattr(self, "_display_is_inline", False):
+            try:
+                if isinstance(ctx_tokens, int):
+                    tok_text = self._fmt_compact_count(int(ctx_tokens))
+                    if tok_text:
+                        metric_parts.append(f"ctx {tok_text}")
+            except Exception:
+                pass
+            try:
+                tps_str = self.current_chat_header_tps()
+            except Exception:
+                tps_str = ""
+            if tps_str:
+                metric_parts.append(tps_str)
 
         system_status_key = None
         try:
@@ -766,10 +782,12 @@ class PanelsMixin:
         except Exception:
             no_api = False
         no_api_part = "[red]ReadOnly\\[NO_API_CALLS][/red]" if no_api else ""
-        stream_part = self._current_stream_header_part()
+        stream_part = self._current_stream_header_part(include_tps=getattr(self, "_display_is_inline", False))
         title = f"System  {model_part}  {sandbox_part}  {auto_part}"
         if no_api_part:
             title = f"{title}  {no_api_part}"
+        if metric_parts:
+            title = f"{title}  {'  '.join(metric_parts)}"
         if stream_part:
             title = f"{title}  {stream_part}"
         self.system_output.title = title
@@ -838,7 +856,7 @@ class PanelsMixin:
             # Empty content makes the panel effectively invisible
             self.approval_panel.set_content("")
 
-    def _current_stream_header_part(self) -> str:
+    def _current_stream_header_part(self, *, include_tps: bool = True) -> str:
         """Return a compact live-streaming suffix for the System title.
 
         Empty when nothing is streaming. For LLM streams, appends live
@@ -852,9 +870,10 @@ class PanelsMixin:
         kind = ls.get('stream_kind') or 'stream'
         if kind == 'llm':
             tps_str = ""
-            tps = self._live_llm_tps_cached(str(invoke))
-            if isinstance(tps, (int, float)) and tps > 0:
-                tps_str = self._fmt_header_metric(tps, 'tps')
+            if include_tps:
+                tps = self._live_llm_tps_cached(str(invoke))
+                if isinstance(tps, (int, float)) and tps > 0:
+                    tps_str = self._fmt_header_metric(tps, 'tps')
             inner = f"llm {tps_str}" if tps_str else "llm"
         elif kind == 'tool':
             tool_name = ""
@@ -939,7 +958,7 @@ class PanelsMixin:
         #   (separator line)
         #   System
         #   Children
-        #   Chat Messages
+        #   Chat Messages (inline mode only)
         #   (optional) Approval
         #   Input
         from rich.rule import Rule
@@ -948,7 +967,7 @@ class PanelsMixin:
             children.append(self.system_output.render())
         if self._panel_visible.get('children', True):
             children.append(self.children_output.render())
-        if self._panel_visible.get('chat', True):
+        if self._display_is_inline and self._panel_visible.get('chat', True):
             children.append(self.chat_output.render())
 
         pending = getattr(self, '_pending_prompt', {}) or {}

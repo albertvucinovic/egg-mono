@@ -40,6 +40,38 @@ class TestUpdatePanels:
         assert "Sandboxing" in title
         assert "Autoapproval" in title
 
+    def test_full_screen_moves_chat_metrics_to_system_title(self, egg_app, monkeypatch):
+        """Full-screen mode shows chat ctx/TPS in System and omits Chat panel."""
+        egg_app._display_is_inline = False
+        egg_app._live_state = {"active_invoke": "invoke-live", "stream_kind": "llm"}
+        monkeypatch.setattr(
+            egg_app,
+            "current_token_stats",
+            lambda: (1234, {"total_input_tokens": 99}),
+        )
+        monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda: "8.0 tps")
+
+        egg_app.update_panels()
+        group = egg_app.render_group()
+
+        assert "ctx 1.23k" in egg_app.system_output.title
+        assert "8.0 tps" in egg_app.system_output.title
+        assert egg_app.system_output.title.count("8.0 tps") == 1
+        assert "Chat Messages" not in [getattr(item, "title", "") for item in group._renderables]
+
+    def test_inline_keeps_chat_metrics_in_chat_title(self, egg_app, monkeypatch):
+        """Inline mode keeps ctx/TPS on the Chat Messages panel."""
+        egg_app._display_is_inline = True
+        monkeypatch.setattr(egg_app, "current_token_stats", lambda: (42, {}))
+        monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda: "8.0 tps")
+
+        egg_app.update_panels()
+
+        assert "ctx 42" in egg_app.chat_output.title
+        assert "8.0 tps" in egg_app.chat_output.title
+        assert "ctx 42" not in egg_app.system_output.title
+        assert "8.0 tps" not in egg_app.system_output.title
+
     def test_system_output_title_shows_current_model(self, egg_app):
         """System panel title includes the effective model for the current thread."""
         from eggthreads import set_thread_model
