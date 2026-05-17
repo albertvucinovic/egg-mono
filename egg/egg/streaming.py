@@ -430,10 +430,32 @@ class StreamingMixin:
             # semantics simple and render immediately.
             self._flush_stream_render_buffer_now()
 
-    def _flush_stream_render_buffer_now(self) -> None:
+    def _flush_stream_render_buffer_now(self, *, force: bool = False) -> None:
         buf = list(getattr(self, '_stream_render_buffer', []) or [])
         if not buf:
             return
+        if not force:
+            try:
+                q = getattr(getattr(self.input_panel, 'editor', None), 'input_queue', None)
+                input_pending = q is not None and hasattr(q, 'empty') and not q.empty()
+            except Exception:
+                input_pending = False
+            try:
+                input_dirty = (
+                    getattr(self.input_panel, '_cached_render', None) is not None
+                    and bool(self.input_panel.is_dirty())
+                )
+            except Exception:
+                input_dirty = False
+            buffer_is_bounded = int(getattr(self, '_stream_render_buffer_chars', 0) or 0) < STREAM_RENDER_MAX_BUFFER_CHARS
+            if (input_pending or input_dirty) and buffer_is_bounded:
+                try:
+                    asyncio.get_running_loop()
+                except Exception:
+                    pass
+                else:
+                    self._schedule_stream_render_flush()
+                    return
         self._stream_render_buffer = []
         self._stream_render_buffer_chars = 0
         try:
@@ -498,7 +520,7 @@ class StreamingMixin:
         if renderer is None or not hasattr(renderer, 'stream_end'):
             return
         try:
-            self._flush_stream_render_buffer_now()
+            self._flush_stream_render_buffer_now(force=True)
             renderer.stream_end()
             self._clear_stream_render_buffer()
         except Exception:
@@ -537,4 +559,4 @@ class StreamingMixin:
             t = (ls.get('tc_text') or {}).get(k, '')
             if isinstance(t, str) and t:
                 self._stream_append_on_renderer(t, style=STREAM_STYLE_TOOL_CALL_ARGS)
-        self._flush_stream_render_buffer_now()
+        self._flush_stream_render_buffer_now(force=True)

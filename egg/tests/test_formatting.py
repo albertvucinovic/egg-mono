@@ -603,6 +603,29 @@ class TestCurrentTokenStats:
 
         assert calls["count"] == 1
 
+    def test_active_token_stats_ttl_avoids_event_seq_probe(self, egg_app, monkeypatch):
+        """Typing redraws during streams should reuse stats before hitting DB."""
+        calls = {"stats": 0, "max_seq": 0}
+        egg_app._live_state = {"active_invoke": "invoke-live"}
+
+        def fake_thread_token_stats(db, thread_id, llm=None):
+            calls["stats"] += 1
+            return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
+
+        def fake_max_event_seq(tid):
+            calls["max_seq"] += 1
+            return calls["max_seq"]
+
+        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr(egg_app.db, "max_event_seq", fake_max_event_seq)
+        ticks = iter([100.0, 100.1])
+        monkeypatch.setattr("egg.formatting.time.monotonic", lambda: next(ticks))
+
+        assert egg_app.current_token_stats()[0] == 7
+        assert egg_app.current_token_stats()[0] == 7
+
+        assert calls == {"stats": 1, "max_seq": 1}
+
 class TestTruncateForChatPanel:
     """Tests for truncate_for_chat_panel()."""
 

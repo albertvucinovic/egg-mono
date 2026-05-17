@@ -542,8 +542,20 @@ class FormattingMixin:
                 active_invoke = str(ls.get('active_invoke') or '')
         except Exception:
             active_invoke = ""
+        cache = getattr(self, '_token_stats_cache', None)
         try:
             snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
+        except Exception:
+            snapshot_seq = -1
+        if active_invoke and isinstance(cache, dict):
+            active_key = (self.current_thread, snapshot_seq, active_invoke)
+            if cache.get('active_key') == active_key:
+                try:
+                    if (now - float(cache.get('at') or 0.0)) < 0.5:
+                        return cache.get('value', (None, {}))
+                except Exception:
+                    pass
+        try:
             if active_invoke:
                 max_event_seq = int(self.db.max_event_seq(self.current_thread))
             else:
@@ -554,10 +566,8 @@ class FormattingMixin:
                 # force token-stat rescans every tick.
                 max_event_seq = snapshot_seq
         except Exception:
-            snapshot_seq = -1
             max_event_seq = -1
 
-        cache = getattr(self, '_token_stats_cache', None)
         cache_key = (self.current_thread, snapshot_seq, max_event_seq, active_invoke)
         if isinstance(cache, dict) and cache.get('key') == cache_key:
             # Idle stats are keyed by the snapshot watermark, so they remain
@@ -593,6 +603,7 @@ class FormattingMixin:
             api_usage = {}
         self._token_stats_cache = {
             'key': cache_key,
+            'active_key': (self.current_thread, snapshot_seq, active_invoke) if active_invoke else None,
             'at': now,
             'value': (ctx_tokens, api_usage),
         }

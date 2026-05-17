@@ -273,6 +273,56 @@ def test_stream_appends_are_coalesced_for_renderer(tmp_path, monkeypatch):
     assert all(str(i) in calls[0] for i in range(10))
 
 
+def test_stream_flush_defers_renderer_while_input_is_dirty(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    calls = []
+
+    class Renderer:
+        def stream_append(self, payload):
+            calls.append(payload)
+
+    app._renderer = Renderer()
+    app._stream_render_buffer = [("tool output", None)]
+    app._stream_render_buffer_chars = len("tool output")
+    app.input_panel.render()
+    app.input_panel.editor.editor.insert_text("x")
+
+    async def scenario():
+        app._flush_stream_render_buffer_now()
+        assert calls == []
+        assert app._stream_render_buffer
+        app.input_panel.render()
+        app._flush_stream_render_buffer_now()
+
+    asyncio.run(scenario())
+
+    assert calls == ["tool output"]
+    assert app._stream_render_buffer == []
+
+
+def test_forced_stream_flush_ignores_dirty_input(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    calls = []
+
+    class Renderer:
+        def stream_append(self, payload):
+            calls.append(payload)
+
+    app._renderer = Renderer()
+    app._stream_render_buffer = [("final chunk", None)]
+    app._stream_render_buffer_chars = len("final chunk")
+    app.input_panel.render()
+    app.input_panel.editor.editor.insert_text("x")
+
+    async def scenario():
+        app._flush_stream_render_buffer_now(force=True)
+
+    asyncio.run(scenario())
+
+    assert calls == ["final chunk"]
+    assert app._stream_render_buffer == []
+
+
 def test_stream_close_then_final_message_prints_once_after_stream_end(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     tid = app.current_thread
