@@ -2511,6 +2511,46 @@ def delete_message(db: ThreadsDB, thread_id: str, msg_id: str) -> None:
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.delete', payload={"reason": "user"}, msg_id=msg_id)
 
 
+_SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES = {
+    'stream.open',
+    'stream.delta',
+    'stream.close',
+    'tool_call.approval',
+    'tool_call.execution_started',
+    'tool_call.summary',
+    'tool_call.finished',
+    'tool_call.output_approval',
+    'control.interrupt',
+    'thread.compaction',
+    'thread.compaction_context_length',
+    'thread.compaction_summary_in_progress',
+    'model.switch',
+    'runtime.config',
+    'sandbox.config',
+    'thread.scheduling',
+}
+
+
+def _snapshot_message_from_create_event(ev) -> Dict[str, Any]:
+    try:
+        payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+    except Exception:
+        payload = {}
+    msg = dict(payload) if isinstance(payload, dict) else {}
+    msg["msg_id"] = ev["msg_id"]
+    msg["role"] = msg.get("role")
+    ts_val = ev["ts"]
+    if ts_val is not None:
+        msg["ts"] = ts_val
+    event_seq_val = ev["event_seq"]
+    if event_seq_val is not None:
+        try:
+            msg["event_seq"] = int(event_seq_val)
+        except Exception:
+            msg["event_seq"] = event_seq_val
+    return msg
+
+
 def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
     """Rebuild and persist the thread snapshot from events.
 
@@ -2537,35 +2577,28 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
                 (thread_id, int(th.snapshot_last_event_seq)),
             )
             tail = cur.fetchall()
-            if tail and all(row["type"] == "msg.create" for row in tail):
+            if not tail:
+                return snap
+            if tail and all(
+                row["type"] == "msg.create" or row["type"] in _SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES
+                for row in tail
+            ):
                 messages = list(messages)
                 tail_messages = []
                 for ev in tail:
-                    try:
-                        payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
-                    except Exception:
-                        payload = {}
-                    msg = dict(payload) if isinstance(payload, dict) else {}
-                    msg["msg_id"] = ev["msg_id"]
-                    msg["role"] = msg.get("role")
-                    ts_val = ev["ts"]
-                    if ts_val is not None:
-                        msg["ts"] = ts_val
-                    event_seq_val = ev["event_seq"]
-                    if event_seq_val is not None:
-                        try:
-                            msg["event_seq"] = int(event_seq_val)
-                        except Exception:
-                            msg["event_seq"] = event_seq_val
+                    if ev["type"] != "msg.create":
+                        continue
+                    msg = _snapshot_message_from_create_event(ev)
                     messages.append(msg)
                     tail_messages.append(msg)
                 snap["messages"] = messages
-                try:
-                    from .token_count import extend_snapshot_token_stats  # type: ignore
+                if tail_messages:
+                    try:
+                        from .token_count import extend_snapshot_token_stats  # type: ignore
 
-                    snap["token_stats"] = extend_snapshot_token_stats(snap, tail_messages)
-                except Exception:
-                    pass
+                        snap["token_stats"] = extend_snapshot_token_stats(snap, tail_messages)
+                    except Exception:
+                        pass
                 last_seq = tail[-1]["event_seq"]
                 db.conn.execute("UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?",
                                 (json.dumps(snap), last_seq, thread_id))

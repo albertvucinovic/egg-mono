@@ -960,19 +960,9 @@ class ThreadRunner:
 
         # Rebuild snapshot and short_recap for readability
         try:
-            cur = self.db.conn.execute(
-                'SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC',
-                (self.thread_id,),
-            )
-            evs = cur.fetchall()
-            from .snapshot import SnapshotBuilder
+            from .api import create_snapshot
 
-            snap = SnapshotBuilder().build(evs)
-            last_seq = evs[-1]['event_seq'] if evs else -1
-            self.db.conn.execute(
-                'UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?',
-                (json.dumps(snap), last_seq, self.thread_id),
-            )
+            snap = create_snapshot(self.db, self.thread_id)
             # Extract <short_recap>...</short_recap> from last assistant message
             try:
                 def _extract_short(text: str) -> Optional[str]:
