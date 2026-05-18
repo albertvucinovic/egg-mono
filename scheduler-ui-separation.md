@@ -101,6 +101,40 @@ Only if asyncio/cooperative fixes are not enough.
 - [ ] Use SQLite/open_stream leases as IPC/state, but keep lifecycle tied to TUI.
 - [ ] Ask before implementing this phase.
 
+## Phase 6 — Architectural incremental thread-data gateway
+
+Goal: make incremental computation the default architecture for hot thread-data access, not an optimization each caller may remember or forget.
+
+Design direction:
+
+- Keep SQLite `events` as the durable source of truth.
+- Introduce a single `ThreadView` / `ThreadDerivedState` gateway for latency-sensitive thread facts.
+- The gateway owns:
+  - current `event_seq` frontier;
+  - process-local incremental cache;
+  - `apply_event(state, event)` change propagation;
+  - full-rebuild fallback for hard/reset events;
+  - copy/snapshot boundaries so callers cannot mutate cache-owned state.
+- Hot modules (`runner`, `tool_state`, `token_count`, TUI panels/formatting/approval) should ask the gateway for derived facts instead of scanning `events` directly.
+
+Candidate gateway queries:
+
+- `last_llm_boundary(thread_id)`
+- `next_runner_actionable(thread_id)`
+- `tool_call_state(thread_id, tool_call_id)`
+- `tool_call_has_output_decision(thread_id, tool_call_id)`
+- `coarse_thread_state(thread_id)`
+- `snapshot_watermark(thread_id)`
+- `token_summary(thread_id, freshness_policy=...)`
+
+Enforcement strategy:
+
+- [ ] Move existing reducer cache behind a named gateway module/API so new code has a clear default path.
+- [ ] Add tests that compare gateway results to forced full replay for representative histories.
+- [ ] Add a lightweight test/lint that flags new direct `SELECT * FROM events` scans in latency-sensitive modules unless explicitly whitelisted.
+- [ ] Gradually migrate existing hot callers from direct event scans/JSON parsing to gateway queries.
+- [ ] Keep direct SQL allowed for narrow indexed lookups and write paths, but not for full-history derived-state reconstruction outside the gateway.
+
 ## Validation plan
 
 - [x] Focused unit/regression tests for touched modules.
@@ -120,3 +154,5 @@ Only if asyncio/cooperative fixes are not enough.
 - 2026-05-18: Phase 4 UI/token throttling slice completed: `update_panels()` now computes `current_chat_header_tps()` once per panel update and reuses it for chat/system metrics. `current_token_stats()` now reuses stale stats for the current thread/snapshot during any active LLM/tool stream and refreshes again when the stream ends or the thread/snapshot changes. Tests passed: `pytest -q egg/tests/test_formatting.py::TestCurrentTokenStats egg/tests/test_panels.py::TestUpdatePanels`; `pytest -q egg/tests/test_streaming_tui.py egg/tests/test_panels.py egg/tests/test_formatting.py`; `git diff --check`.
 - 2026-05-18: Final hot-path cleanup: removed `tool_message_tps_for_call()` from `_run_ra_tools()` result publication, so publishing denied/final tool messages no longer scans/counts by `tool_call_id` on the runner hot path. Tool message TPS display still works when existing/imported messages already contain `tps`, but new runner-published tool messages no longer add it. Tests passed: `pytest -q eggthreads/tests/test_user_command_api.py::test_runner_publishes_user_tool_result_without_tps_hot_scan eggthreads/tests/test_bash_registry_path.py eggthreads/tests/test_tool_timeout.py eggthreads/tests/test_tool_message_format.py egg/tests/test_streaming_tui.py egg/tests/test_formatting.py`; `pytest -q eggthreads/tests/test_user_command_api.py eggthreads/tests/test_generic_user_tool_call_api.py eggthreads/tests/test_tools_config_allowlist.py eggthreads/tests/test_scheduler_slots.py::test_interrupted_tool_publication_uses_preview_not_full_output`; `pytest -q egg/tests/test_panels.py`; `git diff --check`.
 - 2026-05-18: Final UI cleanup: `update_panels()` now reads `snapshot_last_event_seq` once and passes it into chat cache, token stats, and header TPS helpers. Those helpers keep optional `snapshot_seq` parameters so external callers preserve existing behavior. Tests passed: `pytest -q egg/tests/test_panels.py::TestUpdatePanels`; `pytest -q egg/tests/test_formatting.py::TestCurrentTokenStats egg/tests/test_formatting.py::TestComposeChatPanelText egg/tests/test_panels.py egg/tests/test_streaming_tui.py`; `git diff --check`.
+- 2026-05-19: Post-reload py-spy on polymarket showed a remaining per-tool-call boundary lag in `_run_ra_tools -> _emit_auto_output_approval -> build_tool_call_states -> _reduce_thread_events`. `_emit_auto_output_approval()` now checks for an existing output decision with a focused indexed SQL query instead of rebuilding tool state on every tool completion.
+- 2026-05-19: Added Phase 6 architectural direction: force incremental computation through a `ThreadView` / `ThreadDerivedState` gateway for hot thread facts, with SQLite events remaining the source of truth and direct full-history scans disallowed in latency-sensitive modules except through the gateway.

@@ -281,10 +281,18 @@ def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_outpu
     LLM can retrieve the full content on demand.
     """
     try:
-        from .tool_state import build_tool_call_states
-        states_now = build_tool_call_states(db, thread_id)
-        existing = states_now.get(str(tool_call_id))
-        has_decision = bool(getattr(existing, "output_decision", None))
+        cur = db.conn.execute(
+            """
+            SELECT 1
+              FROM events
+             WHERE thread_id=?
+               AND type='tool_call.output_approval'
+               AND json_extract(payload_json, '$.tool_call_id')=?
+             LIMIT 1
+            """,
+            (thread_id, str(tool_call_id)),
+        )
+        has_decision = cur.fetchone() is not None
     except Exception:
         has_decision = False
     if has_decision:

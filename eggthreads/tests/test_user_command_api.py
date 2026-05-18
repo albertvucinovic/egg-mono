@@ -298,5 +298,32 @@ def test_runner_publishes_user_tool_result_without_tps_hot_scan(tmp_path, monkey
     assert "tps" not in payload
 
 
+def test_runner_auto_output_approval_does_not_rebuild_tool_state(tmp_path, monkeypatch):
+    """Auto output approval should not replay tool state on each tool completion."""
+    import asyncio
+
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+    tool_call_id = execute_bash_command_hidden(db, thread_id, "echo hot path")
+
+    def fail_build_tool_call_states(*args, **kwargs):
+        raise AssertionError("tool state should not be rebuilt while auto-approving output")
+
+    monkeypatch.setattr("eggthreads.tool_state.build_tool_call_states", fail_build_tool_call_states)
+
+    runner = ts.ThreadRunner(db, thread_id, llm=object())
+    assert asyncio.run(runner.run_once()) is True
+
+    cur = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.output_approval' ORDER BY event_seq DESC LIMIT 1",
+        (thread_id,),
+    )
+    row = cur.fetchone()
+    assert row is not None
+    payload = json.loads(row[0])
+    assert payload["tool_call_id"] == tool_call_id
+    assert payload["decision"] == "whole"
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
