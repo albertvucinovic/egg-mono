@@ -858,6 +858,7 @@ class ThreadRunner:
 
         was_cancelled = False
         context_length_error: Optional[str] = None
+        ra1_emitted_assistant_tool_calls = False
         try:
             if ra.kind == 'RA1_llm':
                 # Check context limit before making LLM call
@@ -887,7 +888,7 @@ class ThreadRunner:
                         print(f"Warning: context limit check failed: {e}")
 
                 # ---------------- RA1: LLM call ----------------
-                await self._run_ra1_llm(invoke_id, current_model)
+                ra1_emitted_assistant_tool_calls = await self._run_ra1_llm(invoke_id, current_model)
 
             elif ra.kind in ('RA2_tools_assistant', 'RA3_tools_user'):
                 # ---------------- RA2/RA3: tool calls ----------------
@@ -1048,13 +1049,7 @@ class ThreadRunner:
 
         has_pending_assistant_tool = False
         if ra.kind == 'RA1_llm' and not was_cancelled:
-            try:
-                has_pending_assistant_tool = any(
-                    tc.parent_role == 'assistant' and not tc.published
-                    for tc in build_tool_call_states(self.db, self.thread_id).values()
-                )
-            except Exception:
-                has_pending_assistant_tool = False
+            has_pending_assistant_tool = bool(ra1_emitted_assistant_tool_calls)
 
         if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None and not has_pending_assistant_tool:
             try:
@@ -1096,9 +1091,12 @@ class ThreadRunner:
             raise asyncio.CancelledError
         return True
 
-    async def _run_ra1_llm(self, invoke_id: str, current_model: Optional[str]) -> None:
+    async def _run_ra1_llm(self, invoke_id: str, current_model: Optional[str]) -> bool:
         """Handle RA1: perform a single LLM call, streaming deltas,
         and append the final assistant message with optional tool_calls.
+
+        Returns True when the persisted assistant message declared tool_calls
+        that should be handled by a follow-up RA2 turn.
         """
         from .tool_state import _last_stream_close_seq, _iter_messages_after
 
@@ -1120,7 +1118,7 @@ class ThreadRunner:
                 trigger = (ev, payload)
                 break
         if not trigger:
-            return
+            return False
 
         ev, payload = trigger
         role = payload.get('role')
@@ -1455,7 +1453,7 @@ class ThreadRunner:
         transport_error_after_output: Optional[BaseException] = None
 
         def _persist_assistant_message(final: Dict[str, Any]) -> bool:
-            """Persist a completed assistant turn and return whether it did.
+            """Persist a completed assistant turn and return whether it has tools.
 
             Eggllm's documented streaming contract ends with a ``done`` event,
             but a few tests/mocks and some compatibility adapters emit the
@@ -1552,7 +1550,8 @@ class ThreadRunner:
                 msg_id=os.urandom(10).hex(),
                 payload=assistant_msg,
             )
-            return True
+            persisted_tool_calls = assistant_msg.get('tool_calls')
+            return bool(isinstance(persisted_tool_calls, list) and persisted_tool_calls)
 
         try:
             async for raw in self.llm.astream_chat(base_messages, tools=tools_spec_to_use, tool_choice=tool_choice, timeout=api_timeout_int):
@@ -1665,8 +1664,7 @@ class ThreadRunner:
                         final = evt.get('message') if et == 'done' else evt
                         if not isinstance(final, dict):
                             final = {}
-                        _persist_assistant_message(final)
-                        return
+                        return _persist_assistant_message(final)
                 if interrupted:
                     break
         except Exception as e:
@@ -1741,6 +1739,10 @@ class ThreadRunner:
                 msg_id=os.urandom(10).hex(),
                 payload=partial_msg,
             )
+            partial_tool_calls_value = partial_msg.get('tool_calls')
+            return bool(isinstance(partial_tool_calls_value, list) and partial_tool_calls_value)
+
+        return False
 
 
     def _get_tool_call_id_normalization_strategy(self, model_key: Optional[str]) -> Optional[str]:

@@ -1204,6 +1204,33 @@ def test_runner_does_not_auto_compact_after_llm_with_pending_assistant_tool(tmp_
     assert _events(db, tid) == []
 
 
+def test_runner_auto_compact_pending_tool_check_does_not_rebuild_tool_state(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "plain answer")
+    ts.create_snapshot(db, tid)
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 100},
+    )
+
+    def fail_build_tool_call_states(*args, **kwargs):
+        raise AssertionError("post-RA1 auto-compaction path should not reduce full tool state")
+
+    monkeypatch.setattr("eggthreads.runner.build_tool_call_states", fail_build_tool_call_states)
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    assert len(_events(db, tid)) == 1
+
+
 def test_provider_context_token_stats_uses_effective_compaction_not_raw_history(tmp_path):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old " * 200)
