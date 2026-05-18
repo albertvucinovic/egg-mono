@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -97,6 +97,10 @@ class _ThreadEventReduction:
     tool_call_states: Dict[str, ToolCallState]
     next_runner_actionable: Optional[RunnerActionable]
     coarse_thread_state_without_lease: str
+    _messages_after_records: List[Tuple[Dict[str, Any], Dict[str, Any], int]] = field(default_factory=list)
+    _llm_invokes: set[str] = field(default_factory=set)
+    _last_llm_stream_boundary_seq: int = -1
+    _last_assistant_seq: int = -1
 
 
 def _payload(ev: Dict[str, Any]) -> Dict[str, Any]:
@@ -118,6 +122,154 @@ def _event_seq_value(ev: Dict[str, Any]) -> int:
 _REDUCER_CACHE: Dict[Tuple[str, str, int], _ThreadEventReduction] = {}
 
 
+def _store_reducer_cache(db_path: str, thread_id: str, reduction: _ThreadEventReduction) -> None:
+    cache_key = (db_path, thread_id, reduction.max_event_seq)
+    _REDUCER_CACHE[cache_key] = reduction
+
+    for key in list(_REDUCER_CACHE.keys()):
+        if key[0] == db_path and key[1] == thread_id and key != cache_key:
+            del _REDUCER_CACHE[key]
+
+
+def _latest_cached_reduction_before(
+    db_path: str,
+    thread_id: str,
+    max_seq: int,
+) -> Optional[_ThreadEventReduction]:
+    latest: Optional[_ThreadEventReduction] = None
+    for key, reduction in _REDUCER_CACHE.items():
+        if key[0] != db_path or key[1] != thread_id or key[2] >= max_seq:
+            continue
+        if latest is None or reduction.max_event_seq > latest.max_event_seq:
+            latest = reduction
+    return latest
+
+
+def _is_incremental_no_tool_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    ev_type = ev.get("type")
+    if ev_type == "msg.create":
+        # The initial slice deliberately avoids incremental tool-state
+        # maintenance. A plain tool result still participates in RA1
+        # detection, but a tool message with tool_call_id mutates tool
+        # publication state and belongs on the full-rebuild path.
+        if payload.get("tool_call_id") is not None:
+            return False
+        tool_calls = payload.get("tool_calls") or []
+        return not (isinstance(tool_calls, list) and tool_calls)
+    if ev_type in {"stream.open", "stream.delta", "stream.close"}:
+        return True
+    if ev_type == "control.interrupt":
+        # Continue rewrites the effective LLM boundary relative to an older
+        # message and can skip previous messages/tool events.  Keep that on
+        # the full-rebuild path for now.
+        return payload.get("purpose") != "continue"
+    return False
+
+
+def _try_reduce_thread_events_incrementally(
+    db: ThreadsDB,
+    thread_id: str,
+    previous: _ThreadEventReduction,
+    max_seq: int,
+) -> Optional[_ThreadEventReduction]:
+    """Apply a small safe incremental reducer slice for no-tool histories.
+
+    This handles the hot RA1/LLM bookkeeping path (plain messages and stream
+    boundaries) without replaying/parsing the full event log.  Histories with
+    tool-call state, msg edits/deletes, continue interrupts, or other events
+    stay on the full reducer until their incremental semantics are explicit.
+    """
+
+    if previous.tool_call_states:
+        return None
+
+    cur = db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? AND event_seq>? AND event_seq<=? ORDER BY event_seq ASC",
+        (thread_id, previous.max_event_seq, max_seq),
+    )
+    events = [dict(row) for row in cur.fetchall()]
+    if not events:
+        return previous
+
+    records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
+    if any(not _is_incremental_no_tool_event(ev, payload) for ev, payload, _ev_seq in records):
+        return None
+
+    skipped_msg_ids = set(previous.skipped_msg_ids)
+    llm_invokes = set(previous._llm_invokes)
+    last_llm_stream_boundary_seq = previous._last_llm_stream_boundary_seq
+    last_assistant_seq = previous._last_assistant_seq
+    messages_after_records = list(previous._messages_after_records)
+    new_message_records: List[Tuple[Dict[str, Any], Dict[str, Any], int]] = []
+
+    for ev, payload, ev_seq in records:
+        ev_type = ev.get("type")
+        inv = ev.get("invoke_id")
+        if ev_type == "stream.open":
+            if payload.get("stream_kind") == "llm" and isinstance(inv, str) and inv:
+                llm_invokes.add(inv)
+        elif ev_type == "stream.delta":
+            if (
+                "text" in payload
+                or "reason" in payload
+                or "reasoning_summary" in payload
+                or "tool_call" in payload
+            ):
+                if isinstance(inv, str) and inv:
+                    llm_invokes.add(inv)
+        elif ev_type == "stream.close":
+            if isinstance(inv, str) and inv in llm_invokes:
+                last_llm_stream_boundary_seq = ev_seq
+        elif ev_type == "control.interrupt":
+            old_inv = payload.get("old_invoke_id")
+            purpose = payload.get("purpose")
+            if purpose == "llm" or (isinstance(old_inv, str) and old_inv in llm_invokes):
+                last_llm_stream_boundary_seq = ev_seq
+        elif ev_type == "msg.create":
+            msg_id = ev.get("msg_id")
+            skipped = msg_id and str(msg_id) in skipped_msg_ids
+            if skipped:
+                continue
+            if payload.get("role") == "assistant" and not bool(payload.get("no_api")):
+                last_assistant_seq = ev_seq
+            new_message_records.append((ev, payload, ev_seq))
+
+    last_llm_boundary_seq = (
+        last_llm_stream_boundary_seq
+        if last_llm_stream_boundary_seq != -1
+        else last_assistant_seq
+    )
+    messages_after_records = [
+        record for record in messages_after_records
+        if record[2] > last_llm_boundary_seq
+    ]
+    messages_after_records.extend(
+        record for record in new_message_records
+        if record[2] > last_llm_boundary_seq
+    )
+    messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
+    next_runner_actionable = _next_runner_actionable_from_reduction(
+        thread_id,
+        {},
+        messages_after_records,
+    )
+
+    return _ThreadEventReduction(
+        thread_id=thread_id,
+        max_event_seq=max_seq,
+        skipped_msg_ids=skipped_msg_ids,
+        last_llm_boundary_seq=last_llm_boundary_seq,
+        messages_after_boundary=messages_after_boundary,
+        tool_call_states={},
+        next_runner_actionable=next_runner_actionable,
+        coarse_thread_state_without_lease="running" if next_runner_actionable is not None else "waiting_user",
+        _messages_after_records=messages_after_records,
+        _llm_invokes=llm_invokes,
+        _last_llm_stream_boundary_seq=last_llm_stream_boundary_seq,
+        _last_assistant_seq=last_assistant_seq,
+    )
+
+
 def _reduce_thread_events(db: ThreadsDB, thread_id: str) -> _ThreadEventReduction:
     """Reduce a thread's event log once into the hot state views.
 
@@ -137,6 +289,13 @@ def _reduce_thread_events(db: ThreadsDB, thread_id: str) -> _ThreadEventReductio
     if cached is not None:
         return cached
 
+    previous = _latest_cached_reduction_before(db_path, thread_id, max_seq)
+    if previous is not None:
+        reduction = _try_reduce_thread_events_incrementally(db, thread_id, previous, max_seq)
+        if reduction is not None:
+            _store_reducer_cache(db_path, thread_id, reduction)
+            return reduction
+
     events: List[Dict[str, Any]] = []
     if max_seq >= 0:
         cur = db.conn.execute(
@@ -146,11 +305,7 @@ def _reduce_thread_events(db: ThreadsDB, thread_id: str) -> _ThreadEventReductio
         events = [dict(row) for row in cur.fetchall()]
 
     reduction = _reduce_loaded_thread_events(thread_id, max_seq, events)
-    _REDUCER_CACHE[cache_key] = reduction
-
-    for key in list(_REDUCER_CACHE.keys()):
-        if key[0] == db_path and key[1] == thread_id and key != cache_key:
-            del _REDUCER_CACHE[key]
+    _store_reducer_cache(db_path, thread_id, reduction)
 
     return reduction
 
@@ -367,7 +522,12 @@ def _reduce_loaded_thread_events(
         if tc.approval_decision is None and tc.name in AUTO_APPROVED_TOOL_NAMES:
             tc.approval_decision = "granted"
 
-    last_llm_boundary_seq = _last_llm_boundary_from_records(records, skipped_msg_ids, msg_seq_by_id)
+    (
+        last_llm_boundary_seq,
+        llm_invokes,
+        last_llm_stream_boundary_seq,
+        last_assistant_seq,
+    ) = _llm_boundary_details_from_records(records, skipped_msg_ids, msg_seq_by_id)
     messages_after_records = [
         (ev, payload, ev_seq)
         for ev, payload, ev_seq in records
@@ -399,17 +559,22 @@ def _reduce_loaded_thread_events(
         tool_call_states=states,
         next_runner_actionable=next_runner_actionable,
         coarse_thread_state_without_lease=coarse_state,
+        _messages_after_records=messages_after_records,
+        _llm_invokes=llm_invokes,
+        _last_llm_stream_boundary_seq=last_llm_stream_boundary_seq,
+        _last_assistant_seq=last_assistant_seq,
     )
 
 
-def _last_llm_boundary_from_records(
+def _llm_boundary_details_from_records(
     records: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
     skipped_msg_ids: set[str],
     msg_seq_by_id: Dict[str, int],
-) -> int:
+) -> Tuple[int, set[str], int, int]:
     last_close = -1
     llm_invokes: set[str] = set()
     last_assistant_seq = -1
+    last_llm_stream_boundary_seq = -1
 
     for ev, payload, ev_seq in records:
         ev_type = ev.get("type")
@@ -428,11 +593,13 @@ def _last_llm_boundary_from_records(
                     llm_invokes.add(inv)
         elif ev_type == "stream.close" and isinstance(inv, str) and inv in llm_invokes:
             last_close = ev_seq
+            last_llm_stream_boundary_seq = ev_seq
         elif ev_type == "control.interrupt":
             old_inv = payload.get("old_invoke_id")
             purpose = payload.get("purpose")
             if purpose == "llm":
                 last_close = ev_seq
+                last_llm_stream_boundary_seq = ev_seq
                 continue
             if purpose == "continue":
                 continue_from_msg_id = payload.get("continue_from_msg_id")
@@ -445,6 +612,7 @@ def _last_llm_boundary_from_records(
                 continue
             if isinstance(old_inv, str) and old_inv in llm_invokes:
                 last_close = ev_seq
+                last_llm_stream_boundary_seq = ev_seq
         elif ev_type == "msg.create":
             msg_id = ev.get("msg_id")
             skipped = msg_id and str(msg_id) in skipped_msg_ids
@@ -453,6 +621,19 @@ def _last_llm_boundary_from_records(
 
     if last_close == -1 and last_assistant_seq != -1:
         last_close = last_assistant_seq
+    return last_close, llm_invokes, last_llm_stream_boundary_seq, last_assistant_seq
+
+
+def _last_llm_boundary_from_records(
+    records: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
+    skipped_msg_ids: set[str],
+    msg_seq_by_id: Dict[str, int],
+) -> int:
+    last_close, _llm_invokes, _last_llm_stream_boundary_seq, _last_assistant_seq = _llm_boundary_details_from_records(
+        records,
+        skipped_msg_ids,
+        msg_seq_by_id,
+    )
     return last_close
 
 
