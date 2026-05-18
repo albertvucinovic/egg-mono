@@ -22,6 +22,7 @@ from .min_run_summary import (
     MinHiddenActivitySummary,
     count_min_hidden_text_tokens,
     format_min_hidden_activity_summary,
+    snapshot_per_message_token_stats,
     serialize_min_tool_call_tokens,
 )
 
@@ -1242,21 +1243,28 @@ class PanelsMixin:
         pm_tokens: Dict[str, int] = {"content": 0, "reasoning": 0, "tool_calls": 0, "total": 0}
         try:
             if msg_id:
-                th = self.db.get_thread(self.current_thread)
-                snap_raw = getattr(th, 'snapshot_json', None) if th else None
-                if isinstance(snap_raw, str) and snap_raw:
-                    snap = json.loads(snap_raw)
-                    ts = snap.get('token_stats') or {}
-                    if isinstance(ts, dict):
-                        pm = ts.get('per_message') or {}
-                        if isinstance(pm, dict) and msg_id in pm:
-                            info = pm[msg_id] or {}
-                            pm_tokens["content"] = int(info.get('content_tokens') or 0)
-                            pm_tokens["reasoning"] = int(info.get('reasoning_tokens') or 0)
-                            pm_tokens["tool_calls"] = int(info.get('tool_calls_tokens') or 0)
-                            pm_tokens["total"] = int(info.get('total_tokens') or (
-                                pm_tokens["content"] + pm_tokens["reasoning"] + pm_tokens["tool_calls"]
-                            ))
+                # Full-screen min scrollback renders blocks lazily as the user
+                # scrolls. Loading/parsing the full snapshot JSON for every
+                # block is O(history) per wheel/input repaint on large threads;
+                # cache the per-message token map once per snapshot watermark.
+                snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
+                cache_key = (self.current_thread, snapshot_seq)
+                cache = getattr(self, '_static_transcript_token_counts_cache', None)
+                if not isinstance(cache, dict) or cache.get('key') != cache_key:
+                    cache = {
+                        'key': cache_key,
+                        'per_message': snapshot_per_message_token_stats(self.db, self.current_thread),
+                    }
+                    self._static_transcript_token_counts_cache = cache
+                pm = cache.get('per_message') or {}
+                if isinstance(pm, dict) and str(msg_id) in pm:
+                    info = pm[str(msg_id)] or {}
+                    pm_tokens["content"] = int(info.get('content_tokens') or 0)
+                    pm_tokens["reasoning"] = int(info.get('reasoning_tokens') or 0)
+                    pm_tokens["tool_calls"] = int(info.get('tool_calls_tokens') or 0)
+                    pm_tokens["total"] = int(info.get('total_tokens') or (
+                        pm_tokens["content"] + pm_tokens["reasoning"] + pm_tokens["tool_calls"]
+                    ))
         except Exception:
             pm_tokens = {"content": 0, "reasoning": 0, "tool_calls": 0, "total": 0}
         return pm_tokens

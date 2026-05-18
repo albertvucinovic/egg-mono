@@ -1514,6 +1514,31 @@ class TestTranscriptScrollbackSource:
         summary_rows = [r for r in rows if "Executed" in r or "got" in r]
         assert len(summary_rows) == 1, f"Expected 1 aggregated summary row, got {len(summary_rows)}: {summary_rows}"
 
+    def test_min_lazy_render_loads_snapshot_token_stats_once(self, egg_app, monkeypatch):
+        """Min scrollback rendering should not parse large snapshot JSON per block."""
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        for i in range(5):
+            append_message(egg_app.db, egg_app.current_thread, "user", f"visible-{i}")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        calls = {"count": 0}
+        original = egg_app.db.get_thread
+
+        def counted_get_thread(thread_id):
+            calls["count"] += 1
+            return original(thread_id)
+
+        monkeypatch.setattr(egg_app.db, "get_thread", counted_get_thread)
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        rows = list(source.rows_from_bottom(100, bottom_offset=0, height=20))
+
+        assert "visible-4" in "\n".join(rows)
+        assert calls["count"] <= 2
+
 
 class TestRedrawStaticView:
     """Tests for redraw_static_view()."""

@@ -547,6 +547,27 @@ class FormattingMixin:
             snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
         except Exception:
             snapshot_seq = -1
+        if active_invoke:
+            # Tool streams can emit many events while the provider context is
+            # unchanged: the active tool output is only a live UI preview, not
+            # a message that will be sent to the model until the tool finishes.
+            # On very large threads, recomputing thread_token_stats() here
+            # reparses/recounts huge snapshots and makes typing/scrolling lag.
+            # Reuse the latest stats for this snapshot while the active stream
+            # is a tool stream.
+            try:
+                stream_kind = str((getattr(self, '_live_state', {}) or {}).get('stream_kind') or '')
+            except Exception:
+                stream_kind = ''
+            if stream_kind == 'tool' and isinstance(cache, dict):
+                key = cache.get('key')
+                if (
+                    isinstance(key, tuple)
+                    and len(key) >= 2
+                    and key[0] == self.current_thread
+                    and key[1] == snapshot_seq
+                ):
+                    return cache.get('value', (None, {}))
         if active_invoke and isinstance(cache, dict):
             active_key = (self.current_thread, snapshot_seq, active_invoke)
             if cache.get('active_key') == active_key:
