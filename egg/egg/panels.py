@@ -659,24 +659,29 @@ class PanelsMixin:
         except Exception:
             input_active = False
 
+        try:
+            snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
+        except Exception:
+            snapshot_seq = -1
+
         # In inline mode the Chat Messages panel body mirrors the
         # conversation + streaming (HEAD behaviour). In full-screen
         # mode the same content lives in the DiffRenderer's static
         # window above the live region so the panel body stays empty
         # (title-only metrics bar).
         if getattr(self, "_display_is_inline", False):
-            self.chat_output.set_content(self.compose_chat_panel_text())
+            self.chat_output.set_content(self.compose_chat_panel_text(snapshot_seq=snapshot_seq))
         else:
             self.chat_output.set_content("")
 
         try:
-            chat_header_tps = self.current_chat_header_tps()
+            chat_header_tps = self.current_chat_header_tps(snapshot_seq=snapshot_seq)
         except Exception:
             chat_header_tps = ""
 
         ctx_tokens: Optional[int] = None
         try:
-            ctx_tokens, _api_usage = self.current_token_stats()
+            ctx_tokens, _api_usage = self.current_token_stats(snapshot_seq=snapshot_seq)
 
             def fmt_tok(v: int) -> str:
                 return self._fmt_compact_count(v)
@@ -917,13 +922,14 @@ class PanelsMixin:
             return ""
         return self._fmt_header_metric(tps, 'tps')
 
-    def current_chat_header_tps(self) -> str:
+    def current_chat_header_tps(self, snapshot_seq: Optional[int] = None) -> str:
         """Return header TPS, preserving the last relevant message TPS."""
         live_tps = self.current_stream_tps()
         if live_tps:
             return live_tps
 
-        snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
+        if snapshot_seq is None:
+            snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
         cache = getattr(self, '_chat_header_tps_cache', None)
         cache_key = (self.current_thread, snapshot_seq)
         if isinstance(cache, dict) and cache.get('key') == cache_key:

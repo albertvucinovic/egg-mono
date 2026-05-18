@@ -486,7 +486,7 @@ class FormattingMixin:
         )
         return "\n".join([notice] + tail)
 
-    def rebuild_chat_cache_for_current(self) -> None:
+    def rebuild_chat_cache_for_current(self, snapshot_seq: Optional[int] = None) -> None:
         """Ensure the cached base chat text for the current thread is fresh.
 
         We key the cache by (thread_id, snapshot_last_event_seq) so that we
@@ -504,7 +504,7 @@ class FormattingMixin:
                 "base_tail": "",
             }
 
-        snap_seq = self._snapshot_last_event_seq(self.current_thread)
+        snap_seq = snapshot_seq if snapshot_seq is not None else self._snapshot_last_event_seq(self.current_thread)
 
         display_verbosity = self._display_verbosity_level()
         if (
@@ -524,7 +524,7 @@ class FormattingMixin:
             "base_tail": base_tail,
         }
 
-    def current_token_stats(self) -> tuple[Optional[int], Dict[str, Any]]:
+    def current_token_stats(self, snapshot_seq: Optional[int] = None) -> tuple[Optional[int], Dict[str, Any]]:
         """Return (provider context_tokens, api_usage) for the current thread.
 
         Uses eggthreads' thread_token_stats so that context_tokens reflects
@@ -543,10 +543,11 @@ class FormattingMixin:
         except Exception:
             active_invoke = ""
         cache = getattr(self, '_token_stats_cache', None)
-        try:
-            snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
-        except Exception:
-            snapshot_seq = -1
+        if snapshot_seq is None:
+            try:
+                snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
+            except Exception:
+                snapshot_seq = -1
         if active_invoke and isinstance(cache, dict):
             # During any active stream (LLM or tool), prefer stale token stats
             # for the current thread/snapshot.  Token counts are advisory in
@@ -616,7 +617,7 @@ class FormattingMixin:
         }
         return ctx_tokens, api_usage
 
-    def compose_chat_panel_text(self) -> str:
+    def compose_chat_panel_text(self, snapshot_seq: Optional[int] = None) -> str:
         """Compose the text for the Chat Messages panel.
 
         Snapshots are maintained in various places so we avoid rebuilding here
@@ -624,11 +625,11 @@ class FormattingMixin:
         up to date while eliminating a large amount of idle CPU work.
         """
         # Ensure cache is up to date for the current thread / snapshot.
-        self.rebuild_chat_cache_for_current()
+        self.rebuild_chat_cache_for_current(snapshot_seq=snapshot_seq)
         base = self._chat_cache.get("base_tail", "No messages yet.")
 
         # Load approximate token statistics for the header.
-        ctx_tokens, api_usage = self.current_token_stats()
+        ctx_tokens, api_usage = self.current_token_stats(snapshot_seq=snapshot_seq)
         ls = self._live_state
         parts: List[str] = [base]
         if ls.get('active_invoke'):

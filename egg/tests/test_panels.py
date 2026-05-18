@@ -47,9 +47,9 @@ class TestUpdatePanels:
         monkeypatch.setattr(
             egg_app,
             "current_token_stats",
-            lambda: (1234, {"total_input_tokens": 99}),
+            lambda **kwargs: (1234, {"total_input_tokens": 99}),
         )
-        monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda: "8.0 tps")
+        monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda **kwargs: "8.0 tps")
 
         egg_app.update_panels()
         group = egg_app.render_group()
@@ -68,8 +68,8 @@ class TestUpdatePanels:
     def test_inline_keeps_chat_metrics_in_chat_title(self, egg_app, monkeypatch):
         """Inline mode keeps ctx/TPS on the Chat Messages panel."""
         egg_app._display_is_inline = True
-        monkeypatch.setattr(egg_app, "current_token_stats", lambda: (42, {}))
-        monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda: "8.0 tps")
+        monkeypatch.setattr(egg_app, "current_token_stats", lambda **kwargs: (42, {}))
+        monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda **kwargs: "8.0 tps")
 
         egg_app.update_panels()
 
@@ -81,10 +81,10 @@ class TestUpdatePanels:
     def test_update_panels_reads_chat_header_tps_once(self, egg_app, monkeypatch):
         """Panel update should reuse one chat header TPS computation."""
         egg_app._display_is_inline = False
-        monkeypatch.setattr(egg_app, "current_token_stats", lambda: (42, {}))
+        monkeypatch.setattr(egg_app, "current_token_stats", lambda **kwargs: (42, {}))
         calls = {"count": 0}
 
-        def fake_tps():
+        def fake_tps(**kwargs):
             calls["count"] += 1
             return "8.0 tps"
 
@@ -94,6 +94,34 @@ class TestUpdatePanels:
 
         assert calls["count"] == 1
         assert egg_app.system_output.title.count("8.0 tps") == 1
+
+    def test_update_panels_reuses_snapshot_watermark_for_chat_metrics(self, egg_app, monkeypatch):
+        """Panel update should read snapshot_last_event_seq once for metrics."""
+        egg_app._display_is_inline = False
+        calls = {"snapshot": 0}
+
+        def fake_snapshot_seq(thread_id):
+            calls["snapshot"] += 1
+            return 12
+
+        monkeypatch.setattr(egg_app, "_snapshot_last_event_seq", fake_snapshot_seq)
+        seen = {"token": [], "tps": []}
+
+        def fake_token_stats(**kwargs):
+            seen["token"].append(kwargs.get("snapshot_seq"))
+            return 42, {}
+
+        def fake_tps(**kwargs):
+            seen["tps"].append(kwargs.get("snapshot_seq"))
+            return "8.0 tps"
+
+        monkeypatch.setattr(egg_app, "current_token_stats", fake_token_stats)
+        monkeypatch.setattr(egg_app, "current_chat_header_tps", fake_tps)
+
+        egg_app.update_panels()
+
+        assert calls["snapshot"] == 1
+        assert seen == {"token": [12], "tps": [12]}
 
     def test_system_output_title_shows_current_model(self, egg_app):
         """System panel title includes the effective model for the current thread."""
