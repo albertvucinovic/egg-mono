@@ -106,6 +106,27 @@ def _assert_incremental_matches_full_rebuild(db, tid: str) -> None:
     assert (str(db.path), tid, db.max_event_seq(tid)) in _REDUCER_CACHE
 
 
+def _append_published_user_tool_call(db, tid: str) -> None:
+    db.append_event(
+        "msg-user-tool",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "content": "cmd",
+            "tool_calls": [
+                {"id": "tc_hist", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user-tool",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_hist", "decision": "granted"})
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tc_hist"})
+    _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tc_hist", "reason": "success", "output": "ok"})
+    _append_event(db, tid, "tool_call.output_approval", {"tool_call_id": "tc_hist", "decision": "whole", "preview": "ok"})
+    _append_event(db, tid, "msg.create", {"role": "tool", "tool_call_id": "tc_hist", "content": "ok"}, msg_id="m-tool")
+
+
 def _assert_reducer_matches_public_state(db, tid: str) -> None:
     from eggthreads.tool_state import (
         _iter_messages_after,
@@ -645,6 +666,79 @@ def test_reducer_cache_incrementally_applies_plain_messages_and_llm_boundaries(t
     assert after_second_user.next_runner_actionable.kind == "RA1_llm"
     assert after_second_user.next_runner_actionable.msg_id == "m-user-2"
     _assert_incremental_matches_full_rebuild(db, tid)
+
+
+def test_reducer_cache_incrementally_applies_safe_tail_after_historical_tool_states(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-with-tools"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    _append_published_user_tool_call(db, tid)
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states["tc_hist"].state == "TC6"
+    assert before.next_runner_actionable is not None
+    assert before.next_runner_actionable.kind == "RA1_llm"
+
+    full_rebuild_calls = 0
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal full_rebuild_calls
+        full_rebuild_calls += 1
+        return _reduce_loaded_thread_events(thread_id, max_event_seq, events)
+
+    inv = "inv-after-tools"
+    db.append_event("s-open-after-tools", tid, "stream.open", {"stream_kind": "llm"}, msg_id="m-asst", invoke_id=inv)
+    db.append_event("s-delta-after-tools", tid, "stream.delta", {"text": "done"}, invoke_id=inv, chunk_seq=0)
+    db.append_event("s-close-after-tools", tid, "stream.close", {}, invoke_id=inv)
+
+    with monkeypatch.context() as m:
+        m.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+        after_stream = _reduce_thread_events(db, tid)
+    assert full_rebuild_calls == 0
+    assert after_stream.tool_call_states["tc_hist"].state == "TC6"
+    assert after_stream.next_runner_actionable is None
+    _assert_incremental_matches_full_rebuild(db, tid)
+
+    db.append_event("msg-user-after-tools", tid, "msg.create", {"role": "user", "content": "next"}, msg_id="m-user-after-tools")
+    with monkeypatch.context() as m:
+        m.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+        after_user = _reduce_thread_events(db, tid)
+    assert full_rebuild_calls == 0
+    assert after_user.tool_call_states["tc_hist"].state == "TC6"
+    assert after_user.next_runner_actionable is not None
+    assert after_user.next_runner_actionable.kind == "RA1_llm"
+    assert after_user.next_runner_actionable.msg_id == "m-user-after-tools"
+    _assert_incremental_matches_full_rebuild(db, tid)
+
+
+def test_last_stream_close_seq_reuses_reducer_cache(tmp_path):
+    from eggthreads.tool_state import _last_stream_close_seq, _last_stream_close_seq_uncached, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-boundary-cache"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    inv = "inv-boundary"
+    db.append_event("s-open", tid, "stream.open", {"stream_kind": "llm"}, msg_id="m-asst", invoke_id=inv)
+    db.append_event("s-close", tid, "stream.close", {}, invoke_id=inv)
+
+    assert _reduce_thread_events(db, tid).last_llm_boundary_seq == _last_stream_close_seq_uncached(db, tid)
+
+    expected = _last_stream_close_seq_uncached(db, tid)
+
+    statements = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        assert _last_stream_close_seq(db, tid) == expected
+    finally:
+        db.conn.set_trace_callback(None)
+
+    event_queries = [stmt for stmt in statements if " FROM events" in stmt]
+    assert event_queries == [
+        f"SELECT MAX(event_seq) FROM events WHERE thread_id='{tid}'",
+    ]
 
 
 def test_reducer_cache_hard_events_fall_back_to_full_rebuild(tmp_path, monkeypatch):

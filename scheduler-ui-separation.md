@@ -62,14 +62,14 @@ Initial derived state target:
 
 Implementation strategy:
 
-- [x] Add an initial incremental `_reduce_thread_events()` slice that starts from the previous reduced state and applies only new plain message / stream / LLM-interrupt events after `processed_event_seq`.
+- [x] Add an incremental `_reduce_thread_events()` slice that starts from the previous reduced state and applies only new plain message / stream / LLM-interrupt events after `processed_event_seq`, including safe tails on histories with existing tool states.
 - [ ] Expand the incremental path to tool-call-state events once those semantics are explicit enough to patch safely.
 - [x] Keep a safe full-rebuild fallback for rare hard/reset events while the incremental reducer is young:
   - `msg.edit`
   - `msg.delete`
   - `control.interrupt` with `purpose=continue`
   - other events whose semantics are easier to rebuild than patch initially
-- [x] Incrementally maintain the LLM boundary currently recomputed by `_last_stream_close_seq()` for the initial no-tool reducer slice.
+- [x] Incrementally maintain the LLM boundary currently recomputed by `_last_stream_close_seq()` for safe reducer tails, and route `_last_stream_close_seq()` through the cached reducer boundary.
 - [x] Ensure callers that need public/mutable `ToolCallState` objects still receive copies, not cache-owned objects.
 - [x] Preserve correctness for assistant tool calls, user tool calls, interrupted tool streams, skipped messages, global tool approval, and auto-approved tools through full-rebuild fallback plus regression coverage.
 - [x] Add focused tests comparing incremental results to a forced full rebuild over representative histories.
@@ -78,7 +78,7 @@ Implementation strategy:
 
 Goal: reduce synchronous full-history work during a single TUI-owned runner turn.
 
-- [ ] Route `_last_stream_close_seq()` through the incremental derived-state boundary so RA1 trigger discovery does not scan/parse the full event log on large stream-heavy threads.
+- [x] Route `_last_stream_close_seq()` through the incremental derived-state boundary so RA1 trigger discovery does not scan/parse the full event log on large stream-heavy threads.
 - [ ] Avoid `build_tool_call_states()` after RA1 when the just-completed turn obviously has no pending assistant tool calls, or use a cheaper check.
 - [ ] Preserve correctness for assistant tool-call turns, interrupted streams, continue interrupts, and skipped messages.
 - [ ] Add focused tests for any optimized boundary/tool-state logic.
@@ -115,3 +115,4 @@ Only if asyncio/cooperative fixes are not enough.
 - 2026-05-18: Phase 1 implemented cooperatively inside `SubtreeScheduler.run_forever`: added private scheduler fairness checkpoints after bulk scheduler bookkeeping and through sticky/discovery/scheduling loops. This keeps runner lifecycle TUI-owned and does not add a daemon/process. Added regression coverage that a UI-like asyncio task runs before a large runnable-discovery pass completes. Focused tests passed: `pytest -q eggthreads/tests/test_scheduler_slots.py`; `pytest -q eggthreads/tests/test_headless_subtree_scheduler.py`; `git diff --check`.
 - 2026-05-18: Added incremental computation/change-propagation phase. Egg's event log should be treated as an append-only input stream, with reducer/tool/boundary/token views maintained incrementally from `event_seq` frontiers instead of full-history replay on TUI hot paths.
 - 2026-05-18: Phase 2 initial slice implemented in `eggthreads/eggthreads/tool_state.py`: `_reduce_thread_events()` can now reuse the previous per-thread reduction and apply only new plain message / stream / LLM-interrupt events, maintaining `messages_after_boundary`, `next_runner_actionable`, coarse state, and LLM boundary state without a full replay. Hard/reset or tool-state-mutating events still fall back to the existing full reducer. Focused tests compare incremental results against forced full rebuilds and assert hard-event fallback. Tests passed: `pytest -q eggthreads/tests/test_tool_state_runner_actionable.py eggthreads/tests/test_scheduler_slots.py eggthreads/tests/test_headless_subtree_scheduler.py eggthreads/tests/test_continue_thread.py egg/tests/test_ctrlc_pending_stream_boundary.py`; `git diff --check`.
+- 2026-05-18: Phase 2 safe-tail slice expanded for historical tool-call threads: safe stream/plain-message tails now preserve existing tool states and recompute actionability/coarse state against the updated boundary records. Tails that would mutate tool state, including active tool stream closes, still fall back to full rebuild. `_last_stream_close_seq()` now returns the cached reducer boundary, with the original full-scan implementation retained privately for equivalence tests.

@@ -166,22 +166,42 @@ def _is_incremental_no_tool_event(ev: Dict[str, Any], payload: Dict[str, Any]) -
     return False
 
 
+def _has_incremental_safe_tail(records: List[Tuple[Dict[str, Any], Dict[str, Any], int]]) -> bool:
+    """Return True when all events can be tail-applied without tool-state mutation."""
+
+    return all(_is_incremental_no_tool_event(ev, payload) for ev, payload, _ev_seq in records)
+
+
+def _tail_preserves_tool_states(
+    records: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
+    tool_call_states: Dict[str, ToolCallState],
+) -> bool:
+    active_tool_invokes = {
+        tc.owner_invoke_id for tc in tool_call_states.values()
+        if tc.execution_started and tc.finished_reason is None and tc.owner_invoke_id
+    }
+    if not active_tool_invokes:
+        return True
+    return not any(
+        ev.get("type") == "stream.close" and ev.get("invoke_id") in active_tool_invokes
+        for ev, _payload_obj, _ev_seq in records
+    )
+
+
 def _try_reduce_thread_events_incrementally(
     db: ThreadsDB,
     thread_id: str,
     previous: _ThreadEventReduction,
     max_seq: int,
 ) -> Optional[_ThreadEventReduction]:
-    """Apply a small safe incremental reducer slice for no-tool histories.
+    """Apply a small safe incremental reducer slice for safe tail events.
 
     This handles the hot RA1/LLM bookkeeping path (plain messages and stream
-    boundaries) without replaying/parsing the full event log.  Histories with
-    tool-call state, msg edits/deletes, continue interrupts, or other events
-    stay on the full reducer until their incremental semantics are explicit.
+    boundaries) without replaying/parsing the full event log. Existing tool
+    states can be preserved unchanged; new tool-state mutations, msg edits,
+    continue interrupts, or other hard events stay on the full reducer until
+    their incremental semantics are explicit.
     """
-
-    if previous.tool_call_states:
-        return None
 
     cur = db.conn.execute(
         "SELECT * FROM events WHERE thread_id=? AND event_seq>? AND event_seq<=? ORDER BY event_seq ASC",
@@ -192,7 +212,7 @@ def _try_reduce_thread_events_incrementally(
         return previous
 
     records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
-    if any(not _is_incremental_no_tool_event(ev, payload) for ev, payload, _ev_seq in records):
+    if not _has_incremental_safe_tail(records) or not _tail_preserves_tool_states(records, previous.tool_call_states):
         return None
 
     skipped_msg_ids = set(previous.skipped_msg_ids)
@@ -248,11 +268,20 @@ def _try_reduce_thread_events_incrementally(
         if record[2] > last_llm_boundary_seq
     )
     messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
+    tool_call_states = dict(previous.tool_call_states)
     next_runner_actionable = _next_runner_actionable_from_reduction(
         thread_id,
-        {},
+        tool_call_states,
         messages_after_records,
     )
+    if next_runner_actionable is not None:
+        coarse_state = "running"
+    elif any(tc.state == "TC1" for tc in tool_call_states.values()):
+        coarse_state = "waiting_tool_approval"
+    elif any(tc.state == "TC4" for tc in tool_call_states.values()):
+        coarse_state = "waiting_output_approval"
+    else:
+        coarse_state = "waiting_user"
 
     return _ThreadEventReduction(
         thread_id=thread_id,
@@ -260,9 +289,9 @@ def _try_reduce_thread_events_incrementally(
         skipped_msg_ids=skipped_msg_ids,
         last_llm_boundary_seq=last_llm_boundary_seq,
         messages_after_boundary=messages_after_boundary,
-        tool_call_states={},
+        tool_call_states=tool_call_states,
         next_runner_actionable=next_runner_actionable,
-        coarse_thread_state_without_lease="running" if next_runner_actionable is not None else "waiting_user",
+        coarse_thread_state_without_lease=coarse_state,
         _messages_after_records=messages_after_records,
         _llm_invokes=llm_invokes,
         _last_llm_stream_boundary_seq=last_llm_stream_boundary_seq,
@@ -769,6 +798,12 @@ def _last_stream_close_seq(db: ThreadsDB, thread_id: str) -> int:
     Note: This function also respects the skipped_on_continue flag when
     finding the last assistant message as a fallback boundary.
     """
+    return _reduce_thread_events(db, thread_id).last_llm_boundary_seq
+
+
+def _last_stream_close_seq_uncached(db: ThreadsDB, thread_id: str) -> int:
+    """Original full-scan implementation kept for focused equivalence tests."""
+
     last_close = -1
     llm_invokes: set[str] = set()
     # Fallback for threads that have assistant messages but no
