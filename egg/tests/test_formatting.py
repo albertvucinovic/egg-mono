@@ -624,7 +624,31 @@ class TestCurrentTokenStats:
         assert egg_app.current_token_stats()[0] == 7
         assert egg_app.current_token_stats()[0] == 7
 
-        assert calls == {"stats": 1, "max_seq": 1}
+        assert calls == {"stats": 1, "max_seq": 0}
+
+    def test_active_llm_stream_token_stats_reuses_stale_cache_until_stream_ends(self, egg_app, monkeypatch):
+        """LLM streaming should prefer stale header token stats over rescans."""
+        calls = {"stats": 0, "max_seq": 0}
+        egg_app._live_state = {"active_invoke": "invoke-llm", "stream_kind": "llm"}
+
+        def fake_thread_token_stats(db, thread_id, llm=None):
+            calls["stats"] += 1
+            return {"context_tokens": calls["stats"], "api_usage": {"total_input_tokens": 1}}
+
+        def fake_max_event_seq(tid):
+            calls["max_seq"] += 1
+            return 100 + calls["max_seq"]
+
+        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr(egg_app.db, "max_event_seq", fake_max_event_seq)
+
+        assert egg_app.current_token_stats()[0] == 1
+        assert egg_app.current_token_stats()[0] == 1
+        assert calls == {"stats": 1, "max_seq": 0}
+
+        egg_app._live_state = {"active_invoke": None, "stream_kind": None}
+        assert egg_app.current_token_stats()[0] == 2
+        assert calls == {"stats": 2, "max_seq": 0}
 
     def test_tool_stream_token_stats_reuse_snapshot_cache_without_rescan(self, egg_app, monkeypatch):
         """Tool streaming should not rescan huge snapshots just to refresh ctx."""
@@ -645,7 +669,7 @@ class TestCurrentTokenStats:
         assert egg_app.current_token_stats()[0] == 7
         assert egg_app.current_token_stats()[0] == 7
 
-        assert calls == {"stats": 1, "max_seq": 1}
+        assert calls == {"stats": 1, "max_seq": 0}
 
 class TestTruncateForChatPanel:
     """Tests for truncate_for_chat_panel()."""

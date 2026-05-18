@@ -78,6 +78,23 @@ class TestUpdatePanels:
         assert "ctx 42" not in egg_app.system_output.title
         assert "8.0 tps" not in egg_app.system_output.title
 
+    def test_update_panels_reads_chat_header_tps_once(self, egg_app, monkeypatch):
+        """Panel update should reuse one chat header TPS computation."""
+        egg_app._display_is_inline = False
+        monkeypatch.setattr(egg_app, "current_token_stats", lambda: (42, {}))
+        calls = {"count": 0}
+
+        def fake_tps():
+            calls["count"] += 1
+            return "8.0 tps"
+
+        monkeypatch.setattr(egg_app, "current_chat_header_tps", fake_tps)
+
+        egg_app.update_panels()
+
+        assert calls["count"] == 1
+        assert egg_app.system_output.title.count("8.0 tps") == 1
+
     def test_system_output_title_shows_current_model(self, egg_app):
         """System panel title includes the effective model for the current thread."""
         from eggthreads import set_thread_model

@@ -547,38 +547,24 @@ class FormattingMixin:
             snapshot_seq = self._snapshot_last_event_seq(self.current_thread)
         except Exception:
             snapshot_seq = -1
-        if active_invoke:
-            # Tool streams can emit many events while the provider context is
-            # unchanged: the active tool output is only a live UI preview, not
-            # a message that will be sent to the model until the tool finishes.
-            # On very large threads, recomputing thread_token_stats() here
-            # reparses/recounts huge snapshots and makes typing/scrolling lag.
-            # Reuse the latest stats for this snapshot while the active stream
-            # is a tool stream.
-            try:
-                stream_kind = str((getattr(self, '_live_state', {}) or {}).get('stream_kind') or '')
-            except Exception:
-                stream_kind = ''
-            if stream_kind == 'tool' and isinstance(cache, dict):
-                key = cache.get('key')
-                if (
-                    isinstance(key, tuple)
-                    and len(key) >= 2
-                    and key[0] == self.current_thread
-                    and key[1] == snapshot_seq
-                ):
-                    return cache.get('value', (None, {}))
         if active_invoke and isinstance(cache, dict):
-            active_key = (self.current_thread, snapshot_seq, active_invoke)
-            if cache.get('active_key') == active_key:
-                try:
-                    if (now - float(cache.get('at') or 0.0)) < 0.5:
-                        return cache.get('value', (None, {}))
-                except Exception:
-                    pass
+            # During any active stream (LLM or tool), prefer stale token stats
+            # for the current thread/snapshot.  Token counts are advisory in
+            # the header, and rescanning large histories while the user is
+            # typing/scrolling causes visible TUI lag.  The cache refreshes
+            # when the snapshot/current thread changes or when the stream ends
+            # and the idle cache key is used again.
+            key = cache.get('key')
+            if (
+                isinstance(key, tuple)
+                and len(key) >= 2
+                and key[0] == self.current_thread
+                and key[1] == snapshot_seq
+            ):
+                return cache.get('value', (None, {}))
         try:
             if active_invoke:
-                max_event_seq = int(self.db.max_event_seq(self.current_thread))
+                max_event_seq = snapshot_seq
             else:
                 # When idle, ``thread_token_stats()`` is driven by the cached
                 # snapshot plus rare post-snapshot message/control events. Use

@@ -669,6 +669,11 @@ class PanelsMixin:
         else:
             self.chat_output.set_content("")
 
+        try:
+            chat_header_tps = self.current_chat_header_tps()
+        except Exception:
+            chat_header_tps = ""
+
         ctx_tokens: Optional[int] = None
         try:
             ctx_tokens, _api_usage = self.current_token_stats()
@@ -689,13 +694,8 @@ class PanelsMixin:
                     if tok_text:
                         title_parts.append(f"ctx {tok_text}")
 
-                tps_str = ""
-                try:
-                    tps_str = self.current_chat_header_tps()
-                except Exception:
-                    tps_str = ""
-                if tps_str:
-                    title_parts.append(tps_str)
+                if chat_header_tps:
+                    title_parts.append(chat_header_tps)
                 self.chat_output.title = "  |  ".join(title_parts)
         except Exception:
             # Leave existing title unchanged on any error.
@@ -710,12 +710,8 @@ class PanelsMixin:
                         metric_parts.append(f"ctx {tok_text}")
             except Exception:
                 pass
-            try:
-                tps_str = self.current_chat_header_tps()
-            except Exception:
-                tps_str = ""
-            if tps_str:
-                metric_parts.append(tps_str)
+            if chat_header_tps:
+                metric_parts.append(chat_header_tps)
 
         system_status_key = None
         try:
