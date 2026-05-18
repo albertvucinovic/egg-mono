@@ -219,6 +219,40 @@ class TestToolTimeout:
         assert "TIMEOUT" in result.output
         assert "parent done" in result.output
 
+    def test_streaming_bash_coalesces_tiny_live_chunks(self, tmp_path, monkeypatch):
+        """Fast line-by-line output should not emit one live delta per line."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+
+        import asyncio
+
+        class Stream:
+            def __init__(self):
+                self.chunks = []
+
+            def stream_delta(self, text):
+                self.chunks.append(text)
+                return True
+
+        stream = Stream()
+        script = "for i in $(seq 1 200); do echo line-$i; done"
+
+        async def run():
+            return await tools.execute_async(
+                "bash",
+                {"script": script},
+                preserve_tool_result=True,
+                stream=stream,
+            )
+
+        result = asyncio.run(asyncio.wait_for(run(), timeout=4))
+
+        assert getattr(result, "reason", None) == "success"
+        streamed = "".join(stream.chunks)
+        assert "line-1" in streamed
+        assert "line-200" in streamed
+        assert len(stream.chunks) < 50
+
 
 
 class TestToolTimeoutInvalidInput:

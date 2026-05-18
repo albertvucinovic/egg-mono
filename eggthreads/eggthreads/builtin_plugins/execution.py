@@ -231,6 +231,38 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
 
     stdout_buf: list[str] = []
     stderr_buf: list[str] = []
+    stream_buf: list[str] = []
+    stream_buf_chars = 0
+    stream_last_flush = 0.0
+    stream_lock = _asyncio.Lock()
+
+    async def _flush_stream(*, force: bool = False) -> bool:
+        nonlocal stream_buf, stream_buf_chars, stream_last_flush, interrupted
+        if ctx.stream is None:
+            return True
+        async with stream_lock:
+            if not stream_buf:
+                return True
+            if not force and stream_buf_chars < 4096 and (time.monotonic() - stream_last_flush) < 0.05:
+                return True
+            text = "".join(stream_buf)
+            stream_buf = []
+            stream_buf_chars = 0
+            stream_last_flush = time.monotonic()
+        if not ctx.stream.stream_delta(text):
+            interrupted = True
+            _kill_process_and_container()
+            return False
+        return True
+
+    async def _queue_stream(text: str) -> bool:
+        nonlocal stream_buf_chars
+        if ctx.stream is None or not text:
+            return True
+        async with stream_lock:
+            stream_buf.append(text)
+            stream_buf_chars += len(text)
+        return await _flush_stream()
 
     async def _reader(stream, is_stdout: bool) -> None:
         nonlocal interrupted
@@ -250,17 +282,13 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 else:
                     stderr_buf.append(prefix)
                 header_emitted = True
-                if ctx.stream is not None and not ctx.stream.stream_delta(prefix):
-                    interrupted = True
-                    _kill_process_and_container()
+                if not await _queue_stream(prefix):
                     break
             if is_stdout:
                 stdout_buf.append(text)
             else:
                 stderr_buf.append(text)
-            if ctx.stream is not None and not ctx.stream.stream_delta(text):
-                interrupted = True
-                _kill_process_and_container()
+            if not await _queue_stream(text):
                 break
             await _asyncio.sleep(0)
 
@@ -282,6 +310,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                     task.cancel()
                 break
         await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        await _flush_stream(force=True)
     finally:
         watcher.cancel()
         try:
