@@ -86,6 +86,12 @@ class _SchedulerThreadSettings:
     threshold: Any = None
 
 
+# SubtreeScheduler runs inside the TUI-owned asyncio loop.  Keep its
+# synchronous bookkeeping cooperative without adding a public tuning knob.
+_SCHEDULER_FAIRNESS_CHECKS_PER_YIELD = 16
+_SCHEDULER_FAIRNESS_TIME_SLICE_SEC = 0.01
+
+
 # Thresholds above which a tool output is considered "long" and should
 # be stashed to disk with a preview sent to the LLM instead of the full
 # content. Matches the existing "prompt the user" thresholds so
@@ -3192,6 +3198,30 @@ class SubtreeScheduler:
         last_run_end: Dict[str, float] = {}  # thread_id -> monotonic time when last run ended
         reserved_slots: Set[str] = set()     # threads with reserved slots (recently ran, within threshold)
 
+        scheduler_work_since_yield = 0
+        last_scheduler_yield_at = time.monotonic()
+
+        async def checkpoint_scheduler_fairness(*, force: bool = False) -> None:
+            """Yield so scheduler bookkeeping cannot monopolize the TUI loop."""
+
+            nonlocal scheduler_work_since_yield, last_scheduler_yield_at
+            scheduler_work_since_yield += 1
+            now = time.monotonic()
+            if (
+                not force
+                and scheduler_work_since_yield < _SCHEDULER_FAIRNESS_CHECKS_PER_YIELD
+                and (now - last_scheduler_yield_at) < _SCHEDULER_FAIRNESS_TIME_SLICE_SEC
+            ):
+                return
+
+            scheduler_work_since_yield = 0
+            last_scheduler_yield_at = now
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                await self.shutdown()
+                raise
+
         async def drive(tid: str, resource_class: str):
             try:
                 runner = ThreadRunner(
@@ -3219,9 +3249,13 @@ class SubtreeScheduler:
 
         while True:
             all_threads = self._collect_subtree(self.root)
+            await checkpoint_scheduler_fairness(force=True)
             max_event_seqs = _max_event_seqs_bulk(self.db, all_threads)
+            await checkpoint_scheduler_fairness(force=True)
             active_open_threads = _active_open_threads_bulk(self.db, all_threads)
+            await checkpoint_scheduler_fairness(force=True)
             scheduling_settings = _thread_scheduling_bulk(self.db, all_threads)
+            await checkpoint_scheduler_fairness(force=True)
 
             # Update idle tracking and expire reservations (sticky scheduling)
             if self.cfg.sticky_scheduling:
@@ -3232,16 +3266,19 @@ class SubtreeScheduler:
                     if tid in running_threads:
                         # Running threads are not idle - clear any idle timer
                         last_run_end.pop(tid, None)
+                        await checkpoint_scheduler_fairness()
                         continue
 
                     if not _is_thread_idle(self.db, tid):
                         # Thread is waiting for API/tool approval - not idle, clear timer
                         last_run_end.pop(tid, None)
+                        await checkpoint_scheduler_fairness()
                         continue
 
                     # Thread is truly idle - start or continue idle timer
                     if tid not in last_run_end:
                         last_run_end[tid] = now  # Start idle timer
+                    await checkpoint_scheduler_fairness()
 
                 # Expire reservations for threads idle too long
                 expired: Set[str] = set()
@@ -3253,6 +3290,7 @@ class SubtreeScheduler:
                     threshold = settings.threshold if settings.threshold is not None else self.cfg.sticky_idle_threshold_sec
                     if (now - last_run_end[tid]) > threshold:
                         expired.add(tid)
+                    await checkpoint_scheduler_fairness()
                 reserved_slots -= expired
                 for tid in expired:
                     last_run_end.pop(tid, None)
@@ -3285,6 +3323,7 @@ class SubtreeScheduler:
 
             for tid in all_threads:
                 if tid in running_threads:
+                    await checkpoint_scheduler_fairness()
                     continue
 
                 # Quick cheap check: skip threads whose event log has
@@ -3297,6 +3336,7 @@ class SubtreeScheduler:
                 except Exception:
                     max_seq = -1
                 if max_seq == last_checked_seq.get(tid, -1):
+                    await checkpoint_scheduler_fairness()
                     continue
                 checked_seqs[tid] = max_seq
 
@@ -3307,6 +3347,7 @@ class SubtreeScheduler:
                 # NOTE: We do NOT update watermark here - when lease expires,
                 # we want to re-check the thread.
                 if tid in active_open_threads:
+                    await checkpoint_scheduler_fairness()
                     continue
 
                 ra = discover_runner_actionable_cached(self.db, tid)
@@ -3316,6 +3357,7 @@ class SubtreeScheduler:
                     # Thread is NOT runnable - mark as checked so we skip it
                     # until its events change
                     last_checked_seq[tid] = checked_seqs[tid]
+                await checkpoint_scheduler_fairness()
 
             # Second pass: schedule runnable threads.  Only RA1/LLM work
             # consumes available_llm_slots; RA2/RA3 tool work is scheduled
@@ -3323,8 +3365,10 @@ class SubtreeScheduler:
             # (candidates are already in priority order from all_threads)
             for tid, _ra, resource_class in runnable_candidates:
                 if resource_class == "llm" and available_llm_slots <= 0:
+                    await checkpoint_scheduler_fairness()
                     continue
                 if resource_class == "tool" and available_tool_slots is not None and available_tool_slots <= 0:
+                    await checkpoint_scheduler_fairness()
                     continue
 
                 # Check if we can schedule this thread (sticky scheduling)
@@ -3334,6 +3378,7 @@ class SubtreeScheduler:
                     used_slots = running_llm + len(active_reserved)
 
                     if not is_reserved and used_slots >= self.cfg.effective_max_concurrent_llm_threads:
+                        await checkpoint_scheduler_fairness()
                         continue  # No LLM slots for non-reserved threads
 
                     reserved_slots.add(tid)
@@ -3347,6 +3392,7 @@ class SubtreeScheduler:
                     available_llm_slots -= 1
                 elif available_tool_slots is not None:
                     available_tool_slots -= 1
+                await checkpoint_scheduler_fairness()
 
             try:
                 await asyncio.sleep(poll_sec)

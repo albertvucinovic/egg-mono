@@ -1651,6 +1651,62 @@ def test_scheduler_cancellation_awaits_running_drive_tasks(tmp_path):
     asyncio.run(run_test())
 
 
+def test_scheduler_runnable_discovery_yields_cooperatively(tmp_path, monkeypatch):
+    """Large runnable-discovery passes should not monopolize the event loop."""
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    children = [ts.create_child_thread(db, root, name=f"child-{idx}") for idx in range(40)]
+
+    # Give every child a changed event log so the scheduler must run the
+    # expensive actionable-discovery branch instead of watermark-skipping it.
+    for child in children:
+        _make_thread_not_runnable(db, child)
+
+    discovery_count = 0
+    discovery_count_at_ui_tick = 0
+    first_discovery_seen = asyncio.Event()
+    ui_tick_seen_during_discovery = asyncio.Event()
+
+    async def ui_tick_probe():
+        nonlocal discovery_count_at_ui_tick
+        await first_discovery_seen.wait()
+        if discovery_count < len(children):
+            discovery_count_at_ui_tick = discovery_count
+            ui_tick_seen_during_discovery.set()
+
+    def mock_discover(_db, tid):
+        nonlocal discovery_count
+        if tid in children:
+            discovery_count += 1
+            first_discovery_seen.set()
+        return None
+
+    async def run_test():
+        scheduler = SubtreeScheduler(db, root, llm=MagicMock(), config=RunnerConfig())
+        monkeypatch.setattr('eggthreads.runner.discover_runner_actionable_cached', mock_discover)
+
+        probe_task = asyncio.create_task(ui_tick_probe())
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=3600))
+
+        try:
+            await asyncio.wait_for(ui_tick_seen_during_discovery.wait(), timeout=1)
+            await asyncio.wait_for(first_discovery_seen.wait(), timeout=1)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            if not probe_task.done():
+                probe_task.cancel()
+            await asyncio.gather(probe_task, return_exceptions=True)
+
+        assert 0 < discovery_count_at_ui_tick < len(children)
+
+    asyncio.run(run_test())
+
+
 def test_runner_cancellation_does_not_emit_runner_error(tmp_path):
     """ThreadRunner cancellation is cleanup, not an LLM/runner error message."""
 
