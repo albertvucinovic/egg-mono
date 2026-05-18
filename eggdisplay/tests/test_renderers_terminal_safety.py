@@ -290,6 +290,54 @@ def test_fullscreen_virtual_source_initial_paint_requests_visible_tail_only() ->
     assert source.row_count_calls == []
 
 
+def test_fullscreen_live_update_reuses_clean_lazy_history_slice() -> None:
+    """Typing/status redraws should not refetch lazy transcript rows."""
+    class CountingRenderer(TinyTerminalRenderer):
+        def __init__(self):
+            super().__init__(width=20, height=5)
+            self.visible_paints = 0
+
+        def _paint_visible(self, width: int, visible: list[str]) -> None:
+            self.visible_paints += 1
+            super()._paint_visible(width, visible)
+
+        def _paint(self, width: int) -> None:
+            visible = self._compose_visible_viewport(width)
+            self._mark_history_source_clean_for_current_view(width)
+            self._paint_visible(width, visible)
+
+    r = CountingRenderer()
+    source = RecordingScrollbackSource([f"s{i}" for i in range(100)], total=None)
+    r.set_scrollback_source(source)
+    r._live_lines = ["LIVE"]
+
+    r._paint(20)
+    assert source.requests == [(20, 0, 4)]
+    source.requests.clear()
+
+    r.update(Text("LIVE changed"))
+
+    assert source.requests == []
+    assert r.visible_paints == 2
+    assert "LIVE changed" in r._prev_viewport[-1]
+
+
+def test_fullscreen_live_update_recomposes_when_live_height_changes() -> None:
+    """Changed panel height needs a fresh history slice, not reused rows."""
+    r = TinyTerminalRenderer(width=20, height=5)
+    source = RecordingScrollbackSource([f"s{i}" for i in range(100)], total=None)
+    r.set_scrollback_source(source)
+    r._live_lines = ["LIVE"]
+
+    r._paint(20)
+    source.requests.clear()
+
+    r.update(Text("LIVE one\nLIVE two"))
+
+    assert source.requests == [(20, 0, 3)]
+    assert r._prev_viewport[-2:] == ["LIVE one", "LIVE two"]
+
+
 def test_fullscreen_virtual_source_composes_before_scrollback_stream_and_live() -> None:
     r = TinyTerminalRenderer(width=20, height=6)
     source = RecordingScrollbackSource(["s0", "s1", "s2"], total=3)

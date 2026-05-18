@@ -425,6 +425,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         # just the visible viewport while scrolling.
         self._scrollback_source: Optional[FullScreenScrollbackSource] = scrollback_source
         self._source_row_count_by_width: dict[int, int] = {}
+        self._history_source_clean_paint_key: Optional[tuple[int, int, int, int, int]] = None
 
     # -- context manager ----------------------------------------------------
 
@@ -457,6 +458,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         self._scrollback = []
         self._scrollback_source = None
         self._source_row_count_by_width.clear()
+        self._history_source_clean_paint_key = None
         self._live_lines = []
         self._prev_viewport = []
 
@@ -465,6 +467,22 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     def update(self, renderable) -> None:
         """Re-render the live region; repaint the viewport with minimal diff."""
         lines, width = self._render_to_lines(renderable)
+        vh = self._term_height()
+        live_h = min(len(lines), vh)
+        if (
+            self._history_source_slice_is_clean_for_current_view(width)
+            and self._viewport_h == vh
+            and self._viewport_w == int(width or 0)
+            and live_h == min(len(self._live_lines), vh)
+            and self._scroll_offset == 0
+        ):
+            non_live_h = max(0, vh - live_h)
+            visible = list(self._prev_viewport[:non_live_h]) + lines[:live_h]
+            if len(visible) < vh:
+                visible = [""] * (vh - len(visible)) + visible
+            self._live_lines = lines
+            self._paint_visible(width, visible[:vh])
+            return
         self._live_lines = lines
         self._paint(width)
 
@@ -478,6 +496,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         """
         self._scrollback_source = source
         self._source_row_count_by_width.clear()
+        self._history_source_clean_paint_key = None
         if source is not None:
             self._scroll_offset = 0
         if self._prev_viewport or self._live_lines or self._scrollback or self._stream_buffer:
@@ -552,6 +571,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     def invalidate(self) -> None:
         """Force the next paint to write every row (used after external clears)."""
         self._prev_viewport = []
+        self._history_source_clean_paint_key = None
 
     # -- in-app scrolling ---------------------------------------------------
 
@@ -773,6 +793,35 @@ class FullScreenDiffRenderer(_DiffRendererBase):
             if cached is None or inferred_count < cached:
                 self._source_row_count_by_width[width] = inferred_count
         return rows
+
+    def _mark_history_source_clean_for_current_view(self, width: int) -> None:
+        """Remember that the current viewport's history-source slice is clean."""
+        try:
+            self._history_source_clean_paint_key = (
+                int(width or 0),
+                int(self._term_height()),
+                int(self._scroll_offset),
+                len(self._scrollback),
+                len(self._stream_rows(width) if self._stream_buffer else []),
+            )
+        except Exception:
+            self._history_source_clean_paint_key = None
+
+    def _history_source_slice_is_clean_for_current_view(self, width: int) -> bool:
+        """Return True when live-only repaint can reuse the existing history rows."""
+        if self._scrollback_source is None or not self._prev_viewport:
+            return False
+        try:
+            key = (
+                int(width or 0),
+                int(self._term_height()),
+                int(self._scroll_offset),
+                len(self._scrollback),
+                len(self._stream_rows(width) if self._stream_buffer else []),
+            )
+        except Exception:
+            return False
+        return self._history_source_clean_paint_key == key
 
     def _local_non_live_len(self, stream_rows: Sequence[str]) -> int:
         return len(self._scrollback) + len(stream_rows)
@@ -1014,8 +1063,20 @@ class FullScreenDiffRenderer(_DiffRendererBase):
     def _paint(self, width: int) -> None:
         """Compute the visible viewport and emit row-level diff to stdout."""
         width = int(width or self._term_width() or 80)
-        vh = self._term_height()
         visible = self._compose_visible_viewport(width)
+        self._mark_history_source_clean_for_current_view(width)
+
+        self._paint_visible(width, visible)
+
+    def _paint_visible(self, width: int, visible: List[str]) -> None:
+        """Emit row-level diff for an already composed viewport."""
+        width = int(width or self._term_width() or 80)
+        vh = self._term_height()
+        visible = list(visible)
+        if len(visible) < vh:
+            visible = [""] * (vh - len(visible)) + visible
+        elif len(visible) > vh:
+            visible = visible[:vh]
 
         size_changed = (
             not self._prev_viewport

@@ -273,6 +273,121 @@ def test_stream_appends_are_coalesced_for_renderer(tmp_path, monkeypatch):
     assert all(str(i) in calls[0] for i in range(10))
 
 
+def test_stream_delta_only_batch_does_not_recompute_pending_prompt(tmp_path, monkeypatch):
+    """Tool stream chunks should not rescan approval state for every batch."""
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    start_after = app.db.max_event_seq(tid)
+    for i in range(25):
+        app.db.append_event(
+            event_id=_uid(),
+            thread_id=tid,
+            type_="stream.delta",
+            payload={"tool": {"name": "bash", "suppressed": True}},
+            invoke_id=invoke_id,
+            chunk_seq=i,
+        )
+    batch = list(app.db.events_since(tid, start_after))
+
+    import egg.streaming as streaming_mod
+
+    class _OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _OneBatchWatcher)
+
+    calls = {"count": 0}
+
+    def counted_compute_pending_prompt():
+        calls["count"] += 1
+
+    monkeypatch.setattr(app, "compute_pending_prompt", counted_compute_pending_prompt)
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert calls["count"] == 0
+
+
+def test_approval_event_batch_recomputes_pending_prompt(tmp_path, monkeypatch):
+    """Approval-related events still refresh the approval prompt."""
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+
+    start_after = app.db.max_event_seq(tid)
+    app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="tool_call.approval",
+        payload={"tool_call_id": "tc1", "decision": "granted"},
+    )
+    batch = list(app.db.events_since(tid, start_after))
+
+    import egg.streaming as streaming_mod
+
+    class _OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _OneBatchWatcher)
+
+    calls = {"count": 0}
+
+    monkeypatch.setattr(app, "compute_pending_prompt", lambda: calls.__setitem__("count", calls["count"] + 1))
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert calls["count"] == 1
+
+
+def test_watch_thread_yields_between_small_stream_batches(tmp_path, monkeypatch):
+    """Continuous one-row stream batches should not monopolize the UI loop."""
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+    batches = [
+        [{
+            "type": "stream.delta",
+            "invoke_id": invoke_id,
+            "payload_json": json.dumps({"tool": {"name": "bash", "suppressed": True}}),
+        }]
+        for _ in range(3)
+    ]
+
+    import egg.streaming as streaming_mod
+
+    class _SmallBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            for batch in batches:
+                yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _SmallBatchWatcher)
+
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(streaming_mod.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert sleeps.count(0) >= len(batches)
+
+
 def test_stream_flush_defers_renderer_while_input_is_dirty(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     calls = []

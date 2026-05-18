@@ -175,6 +175,7 @@ class StreamingMixin:
             saw_non_stream_msg = False
             saw_compaction_marker = False
             saw_children_status_event = False
+            saw_approval_event = False
             for idx, e in enumerate(batch):
                 try:
                     event_type = e["type"]
@@ -182,6 +183,8 @@ class StreamingMixin:
                         saw_non_stream_msg = True
                     elif event_type == "thread.compaction":
                         saw_compaction_marker = True
+                    elif event_type in ("tool_call.approval", "tool_call.output_approval"):
+                        saw_approval_event = True
                     if event_type in CHILDREN_PANEL_RELEVANT_EVENT_TYPES:
                         saw_children_status_event = True
                 except Exception:
@@ -250,12 +253,26 @@ class StreamingMixin:
                 except Exception:
                     pass
 
-            # Recompute approval prompts when new events arrive so the
+            # Recompute approval prompts when user-actionable events arrive so the
             # Approval panel content stays in sync, but avoid doing this on
             # every UI tick in update_panels(), which is costly on long
-            # threads.
+            # threads. Tool stream.delta bursts can arrive very frequently;
+            # approval state cannot change on those preview-only events, so
+            # don't rescan the tool-call state for each streaming chunk.
+            if saw_non_stream_msg or saw_compaction_marker or saw_approval_event:
+                try:
+                    self.compute_pending_prompt()
+                except Exception:
+                    pass
+
+            # EventWatcher immediately yields again while rows are available.
+            # Tool streams can therefore arrive as many small batches, and the
+            # per-batch loop above would otherwise monopolize the asyncio loop
+            # even though each individual batch is tiny. Yield once per batch
+            # so input echo and in-app scroll handling stay responsive during
+            # high-frequency tool output.
             try:
-                self.compute_pending_prompt()
+                await asyncio.sleep(0)
             except Exception:
                 pass
 
