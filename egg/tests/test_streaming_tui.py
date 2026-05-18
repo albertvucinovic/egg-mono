@@ -273,6 +273,22 @@ def test_stream_appends_are_coalesced_for_renderer(tmp_path, monkeypatch):
     assert all(str(i) in calls[0] for i in range(10))
 
 
+def test_tool_output_stream_append_uses_plain_text_fast_path(tmp_path, monkeypatch):
+    """Live tool stdout should not force Rich markup rendering per flush."""
+    app = _make_app(tmp_path, monkeypatch)
+    calls = []
+
+    class Renderer:
+        def stream_append(self, payload):
+            calls.append(payload)
+
+    app._renderer = Renderer()
+    app._stream_append_on_renderer("[literal tool output]", style=None)
+    app._flush_stream_render_buffer_now(force=True)
+
+    assert calls == ["[literal tool output]"]
+
+
 def test_stream_delta_only_batch_does_not_recompute_pending_prompt(tmp_path, monkeypatch):
     """Tool stream chunks should not rescan approval state for every batch."""
     app = _make_app(tmp_path, monkeypatch)

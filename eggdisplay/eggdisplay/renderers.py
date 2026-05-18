@@ -614,7 +614,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         """
         if text is None or text == "":
             return
-        if isinstance(text, str) and "[" not in text and "\x1b" not in text:
+        if isinstance(text, str) and "[" not in text:
             ansi = self._sanitize_rendered_ansi(text)
         else:
             ansi = self._rich_print_to_str(text, end="")

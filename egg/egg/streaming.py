@@ -19,7 +19,7 @@ from .panels import CHILDREN_PANEL_RELEVANT_EVENT_TYPES
 STREAM_STYLE_TEXT: Optional[str] = None           # assistant content: plain
 STREAM_STYLE_REASON: Optional[str] = "dim magenta"
 STREAM_STYLE_REASONING_SUMMARY: Optional[str] = "dim magenta"
-STREAM_STYLE_TOOL_OUTPUT: Optional[str] = "yellow"
+STREAM_STYLE_TOOL_OUTPUT: Optional[str] = None
 STREAM_STYLE_TOOL_CALL_ARGS: Optional[str] = "dim yellow"
 STREAM_STYLE_TOOL_SUMMARY: Optional[str] = "dim yellow"
 
@@ -411,6 +411,8 @@ class StreamingMixin:
         # Escape Rich-markup brackets in raw provider content so it renders
         # literally (we don't know whether the provider's text happens to
         # look like markup tags).
+        if not style:
+            return text or ""
         escaped = (text or "").replace('[', '\\[')
         return f"[{style}]{escaped}[/{style}]" if style else escaped
 
