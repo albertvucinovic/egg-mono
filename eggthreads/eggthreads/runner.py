@@ -2214,18 +2214,6 @@ class ThreadRunner:
                 }
                 if current_model:
                     msg['model_key'] = current_model
-                try:
-                    from .token_count import tool_message_tps_for_call
-                    tps = tool_message_tps_for_call(
-                        self.db,
-                        self.thread_id,
-                        str(tc.tool_call_id),
-                        content=str(msg.get('content') or ''),
-                    )
-                    if isinstance(tps, float) and tps > 0:
-                        msg['tps'] = tps
-                except Exception:
-                    pass
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.thread_id,
@@ -2592,18 +2580,6 @@ class ThreadRunner:
                     msg['no_api'] = True
                 if current_model:
                     msg['model_key'] = current_model
-                try:
-                    from .token_count import tool_message_tps_for_call
-                    tps = tool_message_tps_for_call(
-                        self.db,
-                        self.thread_id,
-                        str(tc.tool_call_id),
-                        content=str(msg.get('content') or ''),
-                    )
-                    if isinstance(tps, float) and tps > 0:
-                        msg['tps'] = tps
-                except Exception:
-                    pass
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.thread_id,

@@ -267,5 +267,36 @@ def test_wait_for_user_command_result_async(tmp_path):
 
     result = asyncio.run(wait_for_user_command_result_async(db, thread_id, tool_call_id, timeout_sec=1.0))
     assert result == "async wait"
+
+
+def test_runner_publishes_user_tool_result_without_tps_hot_scan(tmp_path, monkeypatch):
+    """Tool result publication should not compute TPS on the runner hot path."""
+    import asyncio
+
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+    tool_call_id = execute_bash_command_hidden(db, thread_id, "echo hot path")
+
+    def fail_tool_tps(*args, **kwargs):
+        raise AssertionError("tool TPS should not be computed while publishing tool messages")
+
+    monkeypatch.setattr("eggthreads.token_count.tool_message_tps_for_call", fail_tool_tps)
+
+    runner = ts.ThreadRunner(db, thread_id, llm=object())
+    assert asyncio.run(runner.run_once()) is True
+    assert asyncio.run(runner.run_once()) is True
+
+    cur = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' AND payload_json LIKE ? ORDER BY event_seq DESC LIMIT 1",
+        (thread_id, f'%"tool_call_id": "{tool_call_id}"%'),
+    )
+    row = cur.fetchone()
+    assert row is not None
+    payload = json.loads(row[0])
+    assert payload["role"] == "tool"
+    assert payload["tool_call_id"] == tool_call_id
+    assert "tps" not in payload
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
