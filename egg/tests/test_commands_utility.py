@@ -308,11 +308,16 @@ class TestCmdCost:
 
     def test_handles_no_stats_available(self, egg_app, monkeypatch):
         """Should handle case when no stats available."""
-        monkeypatch.setattr(egg_app, "current_token_stats", lambda: (None, None))
+        import eggthreads.eggthreads.builtin_plugins.diagnostics as diagnostics
+
+        def fail_stats(*args, **kwargs):
+            raise RuntimeError("not available")
+
+        monkeypatch.setattr(diagnostics, "thread_token_stats", fail_stats, raising=False)
 
         egg_app.handle_command("/cost")
 
-        assert any("No snapshot" in msg or "no snapshot" in msg.lower() or "not available" in msg.lower()
+        assert any("/cost error" in msg or "not available" in msg.lower()
                    for msg in egg_app._system_log)
 
     def test_shows_per_model_breakdown(self, egg_app, monkeypatch):

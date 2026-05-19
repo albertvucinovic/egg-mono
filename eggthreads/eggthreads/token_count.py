@@ -640,6 +640,73 @@ def snapshot_token_stats(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return _token_stats_for_messages([m for m in msgs if isinstance(m, dict)])
 
 
+def _usage_since_compaction_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
+    """Return API-usage stats for calls after the effective compaction marker.
+
+    Input tokens for those calls still include the provider-context prefix that
+    survives compaction, but assistant calls before the marker are not counted.
+    """
+
+    messages: List[Dict[str, Any]] = []
+    try:
+        th = db.get_thread(thread_id)
+    except Exception:
+        th = None
+    if th is not None:
+        snap_raw = getattr(th, "snapshot_json", None)
+        if isinstance(snap_raw, str) and snap_raw:
+            try:
+                snap = json.loads(snap_raw)
+            except Exception:
+                snap = None
+            if isinstance(snap, dict):
+                raw_messages = snap.get("messages") or []
+                if isinstance(raw_messages, list):
+                    messages = [m for m in raw_messages if isinstance(m, dict)]
+
+    try:
+        from .api import filter_messages_for_compaction_provider_context
+
+        messages = filter_messages_for_compaction_provider_context(db, thread_id, messages)
+    except Exception:
+        pass
+
+    compaction_event_seq: Optional[int] = None
+    try:
+        from .api import latest_effective_thread_compaction
+
+        compaction = latest_effective_thread_compaction(db, thread_id)
+        if isinstance(compaction, dict):
+            compaction_event_seq = int(compaction.get("event_seq"))
+    except Exception:
+        compaction_event_seq = None
+
+    if compaction_event_seq is None:
+        return _token_stats_for_messages([m for m in messages if isinstance(m, dict)])
+
+    prefix_messages: List[Dict[str, Any]] = []
+    tail_messages: List[Dict[str, Any]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        try:
+            ev_seq = int(m.get("event_seq"))
+        except Exception:
+            tail_messages.append(m)
+            continue
+        if ev_seq <= compaction_event_seq:
+            prefix_messages.append(m)
+        else:
+            tail_messages.append(m)
+
+    prefix_stats = _token_stats_for_messages(prefix_messages)
+    return _token_stats_for_messages(
+        tail_messages,
+        base_index=len(prefix_messages),
+        base_context_tokens=int(prefix_stats.get("context_tokens") or 0),
+    )
+
+
 def extend_snapshot_token_stats(snapshot: Dict[str, Any], tail_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Extend cached snapshot token stats with appended snapshot messages.
 
@@ -1176,10 +1243,11 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
     If ``llm`` is provided (e.g. an ``eggllm.LLMClient`` instance), we also
     attach an approximate USD cost estimate under ``api_usage.cost_usd``.
 
-    When a snapshot/compaction boundary exists, the returned dict also
-    includes ``api_usage_since_compaction`` — a full ``api_usage``-shaped
-    object (with its own ``cost_usd`` when ``llm`` is available) covering
-    only the events *after* the most recent snapshot.
+    The returned dict also includes ``api_usage_since_compaction`` — a full
+    ``api_usage``-shaped object (with its own ``cost_usd`` when ``llm`` is
+    available) covering only assistant calls after the latest effective
+    compaction marker.  Those calls' input-token estimates still include the
+    provider-context prefix that survives compaction.
 
     The merged result is conceptually:
 
@@ -1239,13 +1307,18 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
     if llm is not None:
         total = _attach_costs(total, llm=llm)
 
-    # Attach api_usage_since_compaction when a snapshot boundary exists.
-    if total.get("snapshot_context_tokens", 0) > 0:
-        if stream_with_cost is not None:
-            total["api_usage_since_compaction"] = stream_with_cost.get("api_usage", {})
-        else:
-            # Include raw usage stats even without cost config.
-            total["api_usage_since_compaction"] = stream_stats.get("api_usage", {})
+    try:
+        compacted_stats = _usage_since_compaction_stats(db, thread_id)
+    except Exception:
+        compacted_stats = {}
+    if isinstance(compacted_stats, dict):
+        if llm is not None:
+            try:
+                compacted_stats = _attach_costs(compacted_stats, llm=llm)
+            except Exception:
+                pass
+        compacted_api = compacted_stats.get("api_usage") if isinstance(compacted_stats.get("api_usage"), dict) else {}
+        total["api_usage_since_compaction"] = compacted_api
     return total
 
 

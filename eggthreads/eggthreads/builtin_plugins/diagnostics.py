@@ -3,9 +3,10 @@ from __future__ import annotations
 """Built-in diagnostic/status commands."""
 
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, Dict, List
 
 from ..plugins import PluginContext
+from ..token_count import thread_token_stats
 
 
 def _log(context: Any, message: str) -> None:
@@ -52,56 +53,32 @@ def schedulers_command(context: Any, arg: str):
 def cost_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
 
-    app = getattr(context, "app", None)
-    full_thread_tokens = None
-    stats = None
-    if app is not None and hasattr(app, "current_token_stats"):
-        ctx_tokens, api = app.current_token_stats()
-        if isinstance(api, dict) and isinstance(api.get("full_thread_tokens"), int):
-            full_thread_tokens = api.get("full_thread_tokens")
-    else:
-        target = _target(context, "cost")
-        if target is None:
-            return CommandResult(clear_input=False)
-        db, thread_id = target
-        try:
-            from ..token_count import thread_token_stats
-
-            stats = thread_token_stats(db, thread_id)
-            ctx_tokens = stats.get("context_tokens")
-            full_thread_tokens = stats.get("full_thread_tokens")
-            api = stats.get("api_usage", stats)
-        except Exception as e:
-            _log(context, f"/cost error: {e}")
-            return CommandResult(clear_input=False)
+    target = _target(context, "cost")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    try:
+        llm = context.llm_client if getattr(context, "llm_client", None) is not None else getattr(getattr(context, "app", None), "llm_client", None)
+        stats = thread_token_stats(db, thread_id, llm=llm)
+        ctx_tokens = stats.get("context_tokens")
+        full_thread_tokens = stats.get("full_thread_tokens")
+        api = stats.get("api_usage", stats)
+        since_api = stats.get("api_usage_since_compaction")
+    except Exception as e:
+        _log(context, f"/cost error: {e}")
+        return CommandResult(clear_input=False)
     if not (isinstance(ctx_tokens, int) or (isinstance(api, dict) and api)):
         _log(context, "No snapshot/token statistics available for this thread yet; send a message first.")
         return CommandResult(clear_input=False)
     if not isinstance(api, dict):
         api = {}
+    if not isinstance(since_api, dict):
+        since_api = None
 
-    target_thread = context.current_thread or getattr(app, "current_thread", "")
-    if not isinstance(full_thread_tokens, int):
-        target = _target(context, "cost")
-        if target is not None:
-            db, thread_id = target
-            try:
-                from ..token_count import thread_token_stats
-
-                stats = stats if isinstance(stats, dict) else thread_token_stats(db, thread_id)
-                ft = stats.get("full_thread_tokens")
-                if isinstance(ft, int):
-                    full_thread_tokens = ft
-            except Exception:
-                pass
+    target_thread = context.current_thread or thread_id
     compacted_away_tokens = None
     if isinstance(ctx_tokens, int) and isinstance(full_thread_tokens, int):
         compacted_away_tokens = max(0, full_thread_tokens - ctx_tokens)
-    ti = api.get("total_input_tokens") or 0
-    to = api.get("total_output_tokens") or 0
-    cached_ctx = api.get("cached_tokens") or 0
-    cached_in = api.get("cached_input_tokens") or 0
-    calls = api.get("approx_call_count") or 0
 
     def _fmt_tok(n: int) -> str:
         try:
@@ -110,26 +87,35 @@ def cost_command(context: Any, arg: str):
             return str(n)
         return str(n) if n < 1000 else f"{n/1000:.2f}k"
 
+    def _append_usage_section(lines: List[str], title: str, usage: Dict[str, Any]) -> None:
+        ti = usage.get("total_input_tokens") or 0
+        to = usage.get("total_output_tokens") or 0
+        cached_ctx = usage.get("cached_tokens") or 0
+        cached_in = usage.get("cached_input_tokens") or 0
+        calls = usage.get("approx_call_count") or 0
+        lines.append(title)
+        lines.append(f"  total_input_tokens:    {ti} ({_fmt_tok(ti)})")
+        lines.append(f"  cached_input_tokens:   {cached_in} ({_fmt_tok(cached_in)})")
+        lines.append(f"  cached_tokens (last):  {cached_ctx} ({_fmt_tok(cached_ctx)})")
+        lines.append(f"  total_output_tokens:   {to} ({_fmt_tok(to)})")
+        lines.append(f"  approx_call_count:     {calls}")
+        cu = usage.get("cost_usd") if isinstance(usage.get("cost_usd"), dict) else {}
+        if cu:
+            total_cost = float(cu.get("total") or 0.0)
+            lines.append(f"  cost_total_usd:        ${total_cost:.4f}")
+
     lines: List[str] = [f"Thread {str(target_thread)[-8:]} token usage:"]
-    if isinstance(ctx_tokens, int):
-        lines.append("  current_provider_context:")
-        lines.append(f"    context_tokens:      {ctx_tokens} ({_fmt_tok(ctx_tokens)})")
-        lines.append("    calculation:         provider/API prompt after compaction")
-    else:
-        lines.append("  current_provider_context: (n/a)")
     if isinstance(full_thread_tokens, int):
-        lines.append("  full_thread_context:")
-        lines.append(f"    context_tokens:      {full_thread_tokens} ({_fmt_tok(full_thread_tokens)})")
-        lines.append("    calculation:         full effective thread before compaction filtering")
+        lines.append(f"  full_thread_context_tokens:       {full_thread_tokens} ({_fmt_tok(full_thread_tokens)})")
+    if isinstance(ctx_tokens, int):
+        lines.append(f"  current_provider_context_tokens:  {ctx_tokens} ({_fmt_tok(ctx_tokens)})")
     if compacted_away_tokens:
-        lines.append(f"  compacted_away_tokens: {compacted_away_tokens} ({_fmt_tok(compacted_away_tokens)})")
+        lines.append(f"  compacted_away_tokens:            {compacted_away_tokens} ({_fmt_tok(compacted_away_tokens)})")
     lines.append("")
-    lines.append("Cumulative API usage inferred from full effective history:")
-    lines.append(f"  total_input_tokens:    {ti} ({_fmt_tok(ti)})")
-    lines.append(f"  cached_input_tokens:   {cached_in} ({_fmt_tok(cached_in)})")
-    lines.append(f"  cached_tokens (last):  {cached_ctx} ({_fmt_tok(cached_ctx)})")
-    lines.append(f"  total_output_tokens:   {to} ({_fmt_tok(to)})")
-    lines.append(f"  approx_call_count:     {calls}")
+    _append_usage_section(lines, "Full context usage (full effective history):", api)
+    if since_api is not None:
+        lines.append("")
+        _append_usage_section(lines, "Current provider context usage (after last compaction):", since_api)
 
     cost_lines: List[str] = ["", "Approximate cost (USD):"]
     cu = api.get("cost_usd") if isinstance(api.get("cost_usd"), dict) else {}

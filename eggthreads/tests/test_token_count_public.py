@@ -4,6 +4,7 @@ from eggthreads.token_count import (
     extend_snapshot_token_stats,
     live_llm_tps_for_invoke,
     snapshot_token_stats,
+    thread_token_stats,
 )
 
 
@@ -86,3 +87,26 @@ def test_total_token_stats_records_snapshot_context_boundary(tmp_path):
 
     assert stats["snapshot_context_tokens"] > 0
     assert stats["context_tokens"] > stats["snapshot_context_tokens"]
+
+
+def test_thread_token_stats_usage_since_compaction_uses_provider_context(tmp_path):
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "old prompt " * 20)
+    start = ts.append_message(db, tid, "assistant", "summary")
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.append_message(db, tid, "user", "current prompt")
+    ts.append_message(db, tid, "assistant", "current answer", extra={"model_key": "m"})
+    ts.create_snapshot(db, tid)
+
+    stats = thread_token_stats(db, tid)
+    full_api = stats["api_usage"]
+    current_api = stats["api_usage_since_compaction"]
+
+    assert stats["full_thread_tokens"] > stats["context_tokens"]
+    assert full_api["approx_call_count"] == 2
+    assert current_api["approx_call_count"] == 1
+    assert current_api["total_input_tokens"] < full_api["total_input_tokens"]
