@@ -219,6 +219,52 @@ class TestToolTimeout:
         assert "TIMEOUT" in result.output
         assert "parent done" in result.output
 
+    def test_streaming_bash_timeout_does_not_wait_forever_for_stuck_wait(self, tmp_path, monkeypatch):
+        """Timeout should finish even if asyncio subprocess wait never returns."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+
+        import asyncio
+
+        class FakeStream:
+            async def readline(self):
+                await asyncio.sleep(3600)
+
+        class FakeProc:
+            pid = 99999999
+            stdout = FakeStream()
+            stderr = FakeStream()
+
+            def __init__(self):
+                self.returncode = None
+
+            async def wait(self):
+                await asyncio.sleep(3600)
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return FakeProc()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        async def run():
+            return await tools.execute_async(
+                "bash",
+                {"script": "sleep 30"},
+                tool_timeout_sec=0.1,
+                preserve_tool_result=True,
+            )
+
+        result = asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+        assert getattr(result, "reason", None) == "timeout"
+        assert "TIMEOUT" in result.output
+
     def test_streaming_bash_timeout_when_stdout_waits_without_newline(self, tmp_path, monkeypatch):
         """Timeout should not wait forever in readline() for a partial line."""
         eggthreads = _import_eggthreads(monkeypatch, tmp_path)

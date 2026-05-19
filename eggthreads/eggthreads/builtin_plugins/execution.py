@@ -12,6 +12,10 @@ from ..terminal_safety import looks_like_terminal_control_text, sanitize_termina
 from ..tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegistry, resolve_tool_timeout_arg
 
 
+_BASH_TIMEOUT_TERM_GRACE_SEC = 2.0
+_BASH_TIMEOUT_FORCE_GRACE_SEC = 1.0
+
+
 def _called_from_different_thread(db: Any) -> bool:
     """Return True when using db.conn in this thread would violate sqlite."""
     # sqlite3 exposes no stable public owner-thread id.  A tiny read probe is
@@ -187,6 +191,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     kill_sent = False
     timeout = ctx.timeout_sec
     start = time.time()
+    stop_requested_at: float | None = None
 
     def _kill_process_and_container(*, force: bool = False) -> None:
         if sandbox_container_name and sandbox_provider == "docker":
@@ -209,19 +214,24 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 pass
 
     async def _watcher() -> None:
-        nonlocal timed_out, interrupted, terminate_sent, kill_sent
+        nonlocal timed_out, interrupted, terminate_sent, kill_sent, stop_requested_at
         while proc.returncode is None:
             await _asyncio.sleep(0.1)
-            if timeout and (time.time() - start) >= timeout:
+            now = time.time()
+            if timeout and (now - start) >= timeout:
                 timed_out = True
+                if stop_requested_at is None:
+                    stop_requested_at = now
                 if not terminate_sent:
                     terminate_sent = True
                     _kill_process_and_container()
-                elif not kill_sent and (time.time() - start) >= timeout + 2.0:
+                elif not kill_sent and (now - stop_requested_at) >= _BASH_TIMEOUT_TERM_GRACE_SEC:
                     kill_sent = True
                     _kill_process_and_container(force=True)
             if ctx.cancel_check and ctx.cancel_check():
                 interrupted = True
+                if stop_requested_at is None:
+                    stop_requested_at = now
                 if not terminate_sent:
                     terminate_sent = True
                     _kill_process_and_container()
@@ -295,8 +305,32 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     watcher = _asyncio.create_task(_watcher())
     stdout_task = _asyncio.create_task(_reader(proc.stdout, True))
     stderr_task = _asyncio.create_task(_reader(proc.stderr, False))
+    proc_wait_task = _asyncio.create_task(proc.wait())
     try:
-        await proc.wait()
+        while True:
+            done, _pending = await _asyncio.wait(
+                {proc_wait_task},
+                timeout=0.1,
+                return_when=_asyncio.FIRST_COMPLETED,
+            )
+            if proc_wait_task in done:
+                break
+            if timed_out or interrupted:
+                now = time.time()
+                if stop_requested_at is None:
+                    stop_requested_at = now
+                if not terminate_sent:
+                    terminate_sent = True
+                    _kill_process_and_container()
+                if not kill_sent and (now - stop_requested_at) >= _BASH_TIMEOUT_TERM_GRACE_SEC:
+                    kill_sent = True
+                    _kill_process_and_container(force=True)
+                if kill_sent and (now - stop_requested_at) >= (_BASH_TIMEOUT_TERM_GRACE_SEC + _BASH_TIMEOUT_FORCE_GRACE_SEC):
+                    # The process did not report exit even after SIGKILL/container
+                    # kill.  Do not leave the runner/tool stream stuck forever;
+                    # return a timeout result and let process cleanup best-effort
+                    # continue outside the user-visible tool state machine.
+                    break
         while True:
             done, _pending = await _asyncio.wait(
                 {stdout_task, stderr_task},
@@ -312,6 +346,12 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
         await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         await _flush_stream(force=True)
     finally:
+        if not proc_wait_task.done():
+            proc_wait_task.cancel()
+        try:
+            await _asyncio.gather(proc_wait_task, return_exceptions=True)
+        except BaseException:
+            pass
         watcher.cancel()
         try:
             await watcher
