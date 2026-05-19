@@ -219,6 +219,162 @@ class TestToolTimeout:
         assert "TIMEOUT" in result.output
         assert "parent done" in result.output
 
+    def test_streaming_bash_timeout_when_stdout_waits_without_newline(self, tmp_path, monkeypatch):
+        """Timeout should not wait forever in readline() for a partial line."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+
+        import asyncio
+
+        class Stream:
+            def __init__(self):
+                self.chunks = []
+
+            def stream_delta(self, text):
+                self.chunks.append(text)
+                return True
+
+        stream = Stream()
+        script = "printf partial; sleep 30"
+
+        async def run():
+            return await tools.execute_async(
+                "bash",
+                {"script": script},
+                tool_timeout_sec=0.5,
+                preserve_tool_result=True,
+                stream=stream,
+            )
+
+        result = asyncio.run(asyncio.wait_for(run(), timeout=4))
+
+        assert getattr(result, "reason", None) == "timeout"
+        assert "TIMEOUT" in result.output
+        assert "partial" in result.output
+        assert "partial" in "".join(stream.chunks)
+
+    def test_streaming_bash_timeout_with_slow_trap_closes_runner_stream(self, tmp_path, monkeypatch):
+        """A timed-out streaming bash tool should publish result and release lease."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+
+        import asyncio
+        import json
+
+        db = eggthreads.ThreadsDB(tmp_path / "threads.sqlite")
+        db.init_schema()
+        tid = eggthreads.create_root_thread(db, name="root")
+        tcid = "tc-bash-timeout"
+        eggthreads.append_message(
+            db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {
+                        "id": tcid,
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({
+                                "script": "trap 'echo trapped; sleep 5' TERM; echo started; sleep 30"
+                            }),
+                        },
+                    }
+                ]
+            },
+        )
+        db.append_event("approve", tid, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+
+        async def run_once():
+            runner = eggthreads.ThreadRunner(
+                db,
+                tid,
+                llm=object(),
+                config=eggthreads.RunnerConfig(tool_timeout_sec=0.5, lease_ttl_sec=5, heartbeat_sec=0.1),
+            )
+            return await runner.run_once()
+
+        assert asyncio.run(asyncio.wait_for(run_once(), timeout=4)) is True
+
+        assert db.current_open(tid) is None
+        close_row = db.conn.execute(
+            "SELECT invoke_id FROM events WHERE thread_id=? AND type='stream.close'",
+            (tid,),
+        ).fetchone()
+        assert close_row is not None
+        assert db.conn.execute(
+            "SELECT 1 FROM open_streams WHERE thread_id=? AND invoke_id=?",
+            (tid, close_row[0]),
+        ).fetchone() is None
+        states = eggthreads.build_tool_call_states(db, tid)
+        assert states[tcid].state == "TC5"
+        assert states[tcid].finished_reason == "timeout"
+        assert states[tcid].output_decision == "whole"
+        assert "TIMEOUT" in (states[tcid].finished_output or "")
+
+    def test_streaming_bash_timeout_closes_even_after_lease_expires(self, tmp_path, monkeypatch):
+        """Runner-owned timeout cleanup must not leave the TUI thinking it streams."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+
+        import asyncio
+        import json
+
+        db = eggthreads.ThreadsDB(tmp_path / "threads.sqlite")
+        db.init_schema()
+        tid = eggthreads.create_root_thread(db, name="root")
+        tcid = "tc-bash-timeout-expired-lease"
+        eggthreads.append_message(
+            db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {
+                        "id": tcid,
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({"script": "echo started; sleep 30"}),
+                        },
+                    }
+                ]
+            },
+        )
+        db.append_event("approve", tid, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+
+        async def run_once():
+            runner = eggthreads.ThreadRunner(
+                db,
+                tid,
+                llm=object(),
+                config=eggthreads.RunnerConfig(tool_timeout_sec=1.5, lease_ttl_sec=1, heartbeat_sec=3600),
+            )
+            return await runner.run_once()
+
+        assert asyncio.run(asyncio.wait_for(run_once(), timeout=5)) is True
+
+        events = [
+            (row["type"], row["invoke_id"])
+            for row in db.conn.execute(
+                "SELECT type, invoke_id FROM events WHERE thread_id=? ORDER BY event_seq",
+                (tid,),
+            )
+        ]
+        tool_invokes = [invoke for typ, invoke in events if typ == "stream.open" and invoke]
+        assert len(tool_invokes) == 1
+        invoke_id = tool_invokes[0]
+        assert ("tool_call.finished", invoke_id) in events
+        assert ("stream.close", invoke_id) in events
+        assert db.current_open(tid) is None
+
+        state = eggthreads.build_tool_call_states(db, tid)[tcid]
+        assert state.state == "TC5"
+        assert state.finished_reason == "timeout"
+        assert "TIMEOUT" in (state.finished_output or "")
+
+
     def test_streaming_bash_coalesces_tiny_live_chunks(self, tmp_path, monkeypatch):
         """Fast line-by-line output should not emit one live delta per line."""
         eggthreads = _import_eggthreads(monkeypatch, tmp_path)

@@ -960,7 +960,6 @@ class ThreadRunner:
             still_owner = bool(
                 row
                 and row['invoke_id'] == invoke_id
-                and row['lease_until'] > _utcnow_iso()
             )
         except Exception:
             still_owner = False
