@@ -170,20 +170,25 @@ def build_context_status(db: Any, thread_id: str, *, llm: Any = None) -> tuple[s
     stats = thread_token_stats(db, thread_id, llm=llm)
     context_tokens = int(stats.get("context_tokens") or 0)
     full_thread_tokens = int(stats.get("full_thread_tokens") or context_tokens)
+    compacted_away_tokens = max(0, full_thread_tokens - context_tokens)
     compaction = thread_compaction_status(db, thread_id)
     context_limit = get_context_limit(db, thread_id)
     auto_threshold = resolve_auto_compact_threshold(db, thread_id)
 
     lines = [
         f"Thread {thread_id[-8:]} context:",
-        f"  current_context_tokens: {fmt_tok(context_tokens)}",
-        f"  full_thread_tokens:     {fmt_tok(full_thread_tokens)}",
+        "  current_provider_context:",
+        f"    context_tokens:       {fmt_tok(context_tokens)}",
+        "    calculation:          provider/API prompt after compaction",
+        "  full_thread_context:",
+        f"    context_tokens:       {fmt_tok(full_thread_tokens)}",
+        "    calculation:          full effective thread before compaction filtering",
     ]
-    if full_thread_tokens > context_tokens:
-        lines.append(f"  compacted_away_tokens: {fmt_tok(full_thread_tokens - context_tokens)}")
+    if compacted_away_tokens:
+        lines.append(f"  compacted_away_tokens: {fmt_tok(compacted_away_tokens)}")
     if context_limit:
         pct = (context_tokens / context_limit * 100) if context_limit > 0 else 0
-        lines.append(f"  context_limit:         {fmt_tok(context_limit)} ({pct:.1f}% used)")
+        lines.append(f"  context_limit:         {fmt_tok(context_limit)} ({pct:.1f}% provider context used)")
     else:
         lines.append("  context_limit:         unlimited")
 
@@ -207,7 +212,10 @@ def build_context_status(db: Any, thread_id: str, *, llm: Any = None) -> tuple[s
 
     return "\n".join(lines), {
         "context_tokens": context_tokens,
+        "current_provider_context_tokens": context_tokens,
         "full_thread_tokens": full_thread_tokens,
+        "full_thread_context_tokens": full_thread_tokens,
+        "compacted_away_tokens": compacted_away_tokens,
         "context_limit": context_limit,
         "auto_compact_enabled": auto_threshold.enabled,
         "auto_compact_threshold": auto_threshold.threshold_tokens,

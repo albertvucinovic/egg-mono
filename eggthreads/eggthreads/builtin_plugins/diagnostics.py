@@ -54,6 +54,7 @@ def cost_command(context: Any, arg: str):
 
     app = getattr(context, "app", None)
     full_thread_tokens = None
+    stats = None
     if app is not None and hasattr(app, "current_token_stats"):
         ctx_tokens, api = app.current_token_stats()
         if isinstance(api, dict) and isinstance(api.get("full_thread_tokens"), int):
@@ -80,6 +81,22 @@ def cost_command(context: Any, arg: str):
         api = {}
 
     target_thread = context.current_thread or getattr(app, "current_thread", "")
+    if not isinstance(full_thread_tokens, int):
+        target = _target(context, "cost")
+        if target is not None:
+            db, thread_id = target
+            try:
+                from ..token_count import thread_token_stats
+
+                stats = stats if isinstance(stats, dict) else thread_token_stats(db, thread_id)
+                ft = stats.get("full_thread_tokens")
+                if isinstance(ft, int):
+                    full_thread_tokens = ft
+            except Exception:
+                pass
+    compacted_away_tokens = None
+    if isinstance(ctx_tokens, int) and isinstance(full_thread_tokens, int):
+        compacted_away_tokens = max(0, full_thread_tokens - ctx_tokens)
     ti = api.get("total_input_tokens") or 0
     to = api.get("total_output_tokens") or 0
     cached_ctx = api.get("cached_tokens") or 0
@@ -95,11 +112,19 @@ def cost_command(context: Any, arg: str):
 
     lines: List[str] = [f"Thread {str(target_thread)[-8:]} token usage:"]
     if isinstance(ctx_tokens, int):
-        lines.append(f"  context_tokens:        {ctx_tokens} ({_fmt_tok(ctx_tokens)})")
+        lines.append("  current_provider_context:")
+        lines.append(f"    context_tokens:      {ctx_tokens} ({_fmt_tok(ctx_tokens)})")
+        lines.append("    calculation:         provider/API prompt after compaction")
     else:
-        lines.append("  context_tokens:        (n/a)")
+        lines.append("  current_provider_context: (n/a)")
     if isinstance(full_thread_tokens, int):
-        lines.append(f"  full_thread_tokens:    {full_thread_tokens} ({_fmt_tok(full_thread_tokens)})")
+        lines.append("  full_thread_context:")
+        lines.append(f"    context_tokens:      {full_thread_tokens} ({_fmt_tok(full_thread_tokens)})")
+        lines.append("    calculation:         full effective thread before compaction filtering")
+    if compacted_away_tokens:
+        lines.append(f"  compacted_away_tokens: {compacted_away_tokens} ({_fmt_tok(compacted_away_tokens)})")
+    lines.append("")
+    lines.append("Cumulative API usage inferred from full effective history:")
     lines.append(f"  total_input_tokens:    {ti} ({_fmt_tok(ti)})")
     lines.append(f"  cached_input_tokens:   {cached_in} ({_fmt_tok(cached_in)})")
     lines.append(f"  cached_tokens (last):  {cached_ctx} ({_fmt_tok(cached_ctx)})")

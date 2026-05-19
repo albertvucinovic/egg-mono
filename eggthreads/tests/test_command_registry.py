@@ -396,7 +396,18 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
         current_thread="thread-1",
         log_system=logs.append,
         console_print_block=lambda title, text, **kwargs: printed.append((title, text)),
-        app=type("App", (), {"active_schedulers": {}, "current_token_stats": lambda self: (10, {"total_input_tokens": 5, "total_output_tokens": 2})})(),
+        app=type(
+            "App",
+            (),
+            {
+                "active_schedulers": {},
+                "current_thread": "thread-1",
+                "current_token_stats": lambda self: (
+                    10,
+                    {"full_thread_tokens": 30, "total_input_tokens": 5, "total_output_tokens": 2},
+                ),
+            },
+        )(),
     )
 
     registry.execute("schedulers", ctx)
@@ -404,6 +415,12 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
 
     assert any("No active" in message for message in logs)
     assert any(title == "Cost" for title, _text in printed)
+    cost_text = next(text for title, text in printed if title == "Cost")
+    assert "current_provider_context:" in cost_text
+    assert "context_tokens:      10" in cost_text
+    assert "full_thread_context:" in cost_text
+    assert "context_tokens:      30" in cost_text
+    assert "Cumulative API usage inferred from full effective history:" in cost_text
 
 
 def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:

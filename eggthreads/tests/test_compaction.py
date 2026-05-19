@@ -391,9 +391,14 @@ def test_context_command_reports_compaction_and_limits(tmp_path, monkeypatch):
 
     assert result.clear_input is True
     assert result.message
-    assert "current_context_tokens: 400" in result.message
-    assert "full_thread_tokens:     900" in result.message
-    assert "context_limit:         1,000 (40.0% used)" in result.message
+    assert "current_provider_context:" in result.message
+    assert "context_tokens:       400" in result.message
+    assert "calculation:          provider/API prompt after compaction" in result.message
+    assert "full_thread_context:" in result.message
+    assert "context_tokens:       900" in result.message
+    assert "calculation:          full effective thread before compaction filtering" in result.message
+    assert "compacted_away_tokens: 500" in result.message
+    assert "context_limit:         1,000 (40.0% provider context used)" in result.message
     assert "auto_compact_threshold: 800 (50.0% used, source: thread_event)" in result.message
     assert "compaction:             active" in result.message
     assert start in result.message
