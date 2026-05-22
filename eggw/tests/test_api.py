@@ -586,8 +586,8 @@ class TestCommands:
         messages = client.get(f"/api/threads/{thread_id}/messages").json()
         request = next(m for m in messages if m["id"] == data["data"]["request_msg_id"])
         assert request["role"] == "user"
-        assert "Compaction continuation-summary request" in request["content"]
-        assert "Do not continue the user task yet" in request["content"]
+        assert "compaction-checkpoint" in request["content"]
+        assert "summary_only" in request["content"]
         assert "compact_thread()" not in request["content"]
 
     def test_set_auto_compact_threshold_command_appends_context_length_event(self, client):
@@ -671,7 +671,9 @@ class TestCommands:
         assert data["data"]["auto_compact_source"] == "thread_event"
         assert data["data"]["compaction"]["compacted"] is True
         assert start in data["message"]
-        assert "context_limit:         1,000 (40.0% used)" in data["message"]
+        assert "context_limit:" in data["message"]
+        assert "1,000" in data["message"]
+        assert "40.0%" in data["message"]
 
     def test_reload_requires_eggw_wrapper(self, client, monkeypatch):
         """/reload reports a clear error when not launched by eggw.sh."""

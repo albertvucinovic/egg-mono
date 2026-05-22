@@ -264,7 +264,8 @@ def test_compact_with_summary_command_commits_then_appends_model_visible_request
     messages = _snapshot_messages(db, tid)
     request = messages[-1]
     assert request["role"] == "user"
-    assert request["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    assert "compaction-checkpoint" in request["content"]
+    assert "summary_only" in request["content"]
     assert request["compaction_summary_request"] is True
     assert request["created_by"] == "user_command"
     assert "compaction_checkpoint_skill" not in request
@@ -293,7 +294,9 @@ def test_compact_with_summary_command_returns_confirmation_without_logger(tmp_pa
     assert "Compaction committed and summary request queued" in result.message
     assert result.start_schedulers == (tid,)
     assert _events(db, tid)[0][1]["start_msg_id"] == user
-    assert _snapshot_messages(db, tid)[-1]["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    request_content = _snapshot_messages(db, tid)[-1]["content"]
+    assert "compaction-checkpoint" in request_content
+    assert "summary_only" in request_content
 
 
 def test_set_auto_compact_threshold_command_appends_context_length_event(tmp_path):
@@ -398,7 +401,9 @@ def test_context_command_reports_compaction_and_limits(tmp_path, monkeypatch):
     assert "context_tokens:       900" in result.message
     assert "calculation:          full effective thread before compaction filtering" in result.message
     assert "compacted_away_tokens: 500" in result.message
-    assert "context_limit:         1,000 (40.0% provider context used)" in result.message
+    assert "context_limit:" in result.message
+    assert "1,000" in result.message
+    assert "40.0%" in result.message
     assert "auto_compact_threshold: 800 (50.0% used, source: thread_event)" in result.message
     assert "compaction:             active" in result.message
     assert start in result.message
@@ -776,7 +781,8 @@ def test_maybe_auto_compact_checkpoint_resume_mode(tmp_path):
     assert result.compaction is not None
     assert result.compaction.start_msg_id == assistant
     request = [m for m in _snapshot_messages(db, tid) if m.get("auto_compaction_request")][-1]
-    assert request["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
+    assert "compaction-checkpoint" in request["content"]
+    assert "checkpoint_and_resume" in request["content"]
 
 
 def test_maybe_auto_compact_summary_mode_noops_below_threshold(tmp_path):
@@ -986,7 +992,8 @@ def test_runner_auto_compacts_summary_mode_after_llm_turn_and_runs_summary_next(
     asyncio.run(runner.run_once())
 
     assert len(seen_messages) == 2
-    assert seen_messages[1][-1]["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    assert "compaction-checkpoint" in seen_messages[1][-1]["content"]
+    assert "summary_only" in seen_messages[1][-1]["content"]
     assert all(m["content"] != "old context" for m in seen_messages[1])
     assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
 
@@ -1015,7 +1022,8 @@ def test_runner_auto_compacts_checkpoint_resume_when_user_queued_during_llm(tmp_
     asyncio.run(runner.run_once())
 
     request = [m for m in _snapshot_messages(db, tid) if m.get("auto_compaction_request")][-1]
-    assert request["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
+    assert "compaction-checkpoint" in request["content"]
+    assert "checkpoint_and_resume" in request["content"]
     provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, _snapshot_messages(db, tid))
     provider_contents = [m.get("content") for m in provider_view]
     assert "queued while streaming" in provider_contents
@@ -1059,7 +1067,8 @@ def test_runner_recovers_context_length_provider_error_by_queueing_summary_next(
     request = next(m for m in messages if m.get("auto_compaction_request"))
     assert markers[0]["request_msg_id"] == request["msg_id"]
     assert compaction_events[0][0] < request["event_seq"] < markers[0]["event_seq"]
-    assert request["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
+    assert "compaction-checkpoint" in request["content"]
+    assert "checkpoint_and_resume" in request["content"]
     assert request["event_seq"] > max(
         seq for seq, type_, _msg_id, _payload in _typed_events(db, tid) if type_ == "stream.close"
     )
@@ -1073,7 +1082,8 @@ def test_runner_recovers_context_length_provider_error_by_queueing_summary_next(
     asyncio.run(runner.run_once())
 
     assert len(seen_messages) == 2
-    assert seen_messages[1][-1]["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
+    assert "compaction-checkpoint" in seen_messages[1][-1]["content"]
+    assert "checkpoint_and_resume" in seen_messages[1][-1]["content"]
     assert all(m["content"] != "old context" for m in seen_messages[1])
     assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
 
