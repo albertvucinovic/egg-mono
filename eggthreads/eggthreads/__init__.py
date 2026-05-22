@@ -23,6 +23,14 @@ Quick start::
 
 See API.md for comprehensive documentation.
 """
+# Compatibility alias for monorepo imports like ``eggthreads.eggthreads.*``.
+# In editable installs the inner package is imported directly as ``eggthreads``,
+# so there is no real nested ``eggthreads.eggthreads`` package unless we provide
+# this alias.
+import sys as _sys
+
+_sys.modules.setdefault(f"{__name__}.eggthreads", _sys.modules[__name__])
+
 from .db import ThreadsDB  # type: ignore
 from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig, set_default_tool_timeout, get_default_tool_timeout, runner_actionable_resource_class  # type: ignore
 from .terminal_safety import sanitize_terminal_text  # type: ignore
