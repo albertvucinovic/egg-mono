@@ -110,3 +110,25 @@ def test_thread_token_stats_usage_since_compaction_uses_provider_context(tmp_pat
     assert full_api["approx_call_count"] == 2
     assert current_api["approx_call_count"] == 1
     assert current_api["total_input_tokens"] < full_api["total_input_tokens"]
+
+
+def test_full_api_usage_sums_compaction_epochs_not_raw_full_prompt(tmp_path):
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "old prompt " * 50)
+    first_answer = ts.append_message(db, tid, "assistant", "first answer", extra={"model_key": "m"})
+    ts.commit_thread_compaction(db, tid, first_answer, created_by="test")
+    ts.append_message(db, tid, "user", "new prompt")
+    ts.append_message(db, tid, "assistant", "second answer", extra={"model_key": "m"})
+    snapshot = ts.create_snapshot(db, tid)
+
+    raw_full = snapshot_token_stats(snapshot)["api_usage"]
+    stats = thread_token_stats(db, tid)
+    segmented = stats["api_usage"]
+
+    assert segmented["approx_call_count"] == 2
+    assert segmented["total_output_tokens"] == raw_full["total_output_tokens"]
+    assert segmented["total_input_tokens"] < raw_full["total_input_tokens"]

@@ -2304,6 +2304,9 @@ class ThreadRunner:
                             summary = tool_timeout_summary(tc.name or 'tool', tool_timeout_sec, start, now=now)
                             if summary:
                                 try:
+                                    row = self.db.current_open(self.thread_id)
+                                    if not row or row['invoke_id'] != invoke_id:
+                                        break
                                     emit_tool_summary_event(
                                         self.db,
                                         thread_id=self.thread_id,

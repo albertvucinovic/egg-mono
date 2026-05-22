@@ -182,10 +182,12 @@ def _tail_preserves_tool_states(
     }
     if not active_tool_invokes:
         return True
-    return not any(
-        ev.get("type") == "stream.close" and ev.get("invoke_id") in active_tool_invokes
-        for ev, _payload_obj, _ev_seq in records
-    )
+    for ev, payload, _ev_seq in records:
+        if ev.get("type") == "stream.close" and ev.get("invoke_id") in active_tool_invokes:
+            return False
+        if ev.get("type") == "control.interrupt" and payload.get("old_invoke_id") in active_tool_invokes:
+            return False
+    return True
 
 
 def _try_reduce_thread_events_incrementally(
@@ -417,11 +419,11 @@ def _reduce_loaded_thread_events(
     def _should_skip_tc_event(ev_seq: int, tcid: Optional[str]) -> bool:
         if continue_boundary_seq is None or continue_interrupt_seq is None:
             return False
-        if ev_seq <= continue_boundary_seq or ev_seq > continue_interrupt_seq:
+        if ev_seq < continue_boundary_seq or ev_seq > continue_interrupt_seq:
             return False
         if tcid and tcid in states:
             tc = states[tcid]
-            if tc.parent_event_seq >= continue_boundary_seq:
+            if tc.parent_event_seq > continue_boundary_seq:
                 return True
         return False
 
@@ -516,12 +518,19 @@ def _reduce_loaded_thread_events(
         global_intervals.append((current_global_start, None))
 
     closed_invokes: set[str] = set()
+    interrupted_invokes: set[str] = set()
     for ev, _payload_obj, _ev_seq in records:
         if ev.get("type") != "stream.close":
             continue
         inv = ev.get("invoke_id")
         if isinstance(inv, str) and inv:
             closed_invokes.add(inv)
+    for ev, payload, _ev_seq in records:
+        if ev.get("type") != "control.interrupt":
+            continue
+        old_inv = payload.get("old_invoke_id")
+        if isinstance(old_inv, str) and old_inv:
+            interrupted_invokes.add(old_inv)
 
     def _has_global_approval(ev_seq: int) -> bool:
         for start, end in global_intervals:
@@ -533,6 +542,25 @@ def _reduce_loaded_thread_events(
         return False
 
     for tc in states.values():
+        if tc.finished_reason is None and tc.output_decision is not None:
+            tc.finished_reason = "interrupted"
+            tc.finished_output = str(
+                (tc.last_output_approval_payload or {}).get("preview")
+                or "--- INTERRUPTED ---\nTool output was decided before the tool reported a result."
+            )
+        if tc.execution_started and tc.finished_reason is None and tc.owner_invoke_id in interrupted_invokes:
+            tc.finished_reason = "interrupted"
+            tc.finished_output = (
+                "--- INTERRUPTED ---\n"
+                "Tool execution was interrupted before the tool reported a result."
+            )
+            tc.output_decision = "whole"
+            tc.last_output_approval_payload = {
+                "tool_call_id": tc.tool_call_id,
+                "decision": "whole",
+                "reason": "Tool execution was interrupted before the tool reported a result.",
+                "preview": tc.finished_output,
+            }
         if tc.execution_started and tc.finished_reason is None and tc.owner_invoke_id in closed_invokes:
             tc.finished_reason = "interrupted"
             tc.finished_output = (

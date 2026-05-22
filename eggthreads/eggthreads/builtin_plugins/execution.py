@@ -244,6 +244,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     stream_buf: list[str] = []
     stream_buf_chars = 0
     stream_last_flush = 0.0
+    last_reader_activity = time.monotonic()
     stream_lock = _asyncio.Lock()
 
     async def _flush_stream(*, force: bool = False) -> bool:
@@ -275,7 +276,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
         return await _flush_stream()
 
     async def _reader(stream, is_stdout: bool) -> None:
-        nonlocal interrupted
+        nonlocal interrupted, last_reader_activity
         header_emitted = False
         prefix = "--- STDOUT ---\n" if is_stdout else "--- STDERR ---\n"
         while True:
@@ -285,6 +286,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 break
             if not chunk:
                 break
+            last_reader_activity = time.monotonic()
             text = chunk.decode(errors="replace")
             if not header_emitted:
                 if is_stdout:
@@ -306,6 +308,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     stdout_task = _asyncio.create_task(_reader(proc.stdout, True))
     stderr_task = _asyncio.create_task(_reader(proc.stderr, False))
     proc_wait_task = _asyncio.create_task(proc.wait())
+    proc_reported_exit = False
     try:
         while True:
             done, _pending = await _asyncio.wait(
@@ -314,6 +317,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 return_when=_asyncio.FIRST_COMPLETED,
             )
             if proc_wait_task in done:
+                proc_reported_exit = True
                 break
             if timed_out or interrupted:
                 now = time.time()
@@ -331,18 +335,23 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                     # return a timeout result and let process cleanup best-effort
                     # continue outside the user-visible tool state machine.
                     break
+        reader_drain_started = time.monotonic() if proc_reported_exit and not (timed_out or interrupted) else None
         while True:
-            done, _pending = await _asyncio.wait(
-                {stdout_task, stderr_task},
-                timeout=0.25,
-                return_when=_asyncio.ALL_COMPLETED,
-            )
-            if len(done) == 2:
+            if stdout_task.done() and stderr_task.done():
                 break
-            if timed_out or interrupted:
+            now = time.monotonic()
+            if (
+                timed_out
+                or interrupted
+                or (
+                    reader_drain_started is not None
+                    and (now - last_reader_activity >= 1.0 or now - reader_drain_started >= 5.0)
+                )
+            ):
                 for task in (stdout_task, stderr_task):
                     task.cancel()
                 break
+            await _asyncio.sleep(0.25)
         await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         await _flush_stream(force=True)
     finally:

@@ -27,7 +27,15 @@ def _make_db(tmp_path):
     return db
 
 
-def _append_event(db, tid: str, type_: str, payload: Dict[str, Any], *, msg_id: str | None = None) -> None:
+def _append_event(
+    db,
+    tid: str,
+    type_: str,
+    payload: Dict[str, Any],
+    *,
+    msg_id: str | None = None,
+    invoke_id: str | None = None,
+) -> None:
     """Append a JSON event with a fresh ULID-like event_id.
 
     Using the public ``append_event`` helper would also work but is not
@@ -37,7 +45,186 @@ def _append_event(db, tid: str, type_: str, payload: Dict[str, Any], *, msg_id: 
 
     # Very small, deterministic id for tests – uniqueness is enough.
     eid = f"{type_}-{db.max_event_seq(tid)+1}"
-    db.append_event(event_id=eid, thread_id=tid, type_=type_, payload=payload, msg_id=msg_id)
+    db.append_event(event_id=eid, thread_id=tid, type_=type_, payload=payload, msg_id=msg_id, invoke_id=invoke_id)
+
+
+def test_output_approval_without_finished_recovers_as_interrupted(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-output-decision-without-finish"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event(
+        event_id="msg-a",
+        thread_id=tid,
+        type_="msg.create",
+        msg_id="m-assistant",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tcA", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tcA", "decision": "granted"})
+    _append_event(
+        db,
+        tid,
+        "tool_call.output_approval",
+        {"tool_call_id": "tcA", "decision": "omit", "preview": "Output omitted."},
+    )
+
+    states = eggthreads.build_tool_call_states(db, tid)
+    tc = states["tcA"]
+    assert tc.finished_reason == "interrupted"
+    assert tc.state == "TC5"
+
+    ra = eggthreads.discover_runner_actionable(db, tid)
+    assert ra is not None
+    assert ra.kind == "RA2_tools_assistant"
+
+
+def test_tool_interrupt_without_finished_recovers_as_interrupted(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-tool-interrupt-without-finish"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event(
+        event_id="msg-a",
+        thread_id=tid,
+        type_="msg.create",
+        msg_id="m-assistant",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tcA", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tcA", "decision": "granted"})
+    invoke_id = "inv-tool"
+    _append_event(
+        db,
+        tid,
+        "tool_call.execution_started",
+        {"tool_call_id": "tcA"},
+        invoke_id=invoke_id,
+    )
+    _append_event(
+        db,
+        tid,
+        "control.interrupt",
+        {"reason": "user", "old_invoke_id": invoke_id, "new_invoke_id": "inv-new", "purpose": "tool"},
+    )
+
+    states = eggthreads.build_tool_call_states(db, tid)
+    tc = states["tcA"]
+    assert tc.finished_reason == "interrupted"
+    assert tc.output_decision == "whole"
+    assert tc.state == "TC5"
+
+    ra = eggthreads.discover_runner_actionable(db, tid)
+    assert ra is not None
+    assert ra.kind == "RA2_tools_assistant"
+
+
+def test_continue_from_tool_parent_preserves_parent_tool_events(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-continue-from-tool-parent"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "do it"}, msg_id="m-user")
+    db.append_event(
+        event_id="msg-a",
+        thread_id=tid,
+        type_="msg.create",
+        msg_id="m-assistant",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tcA", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tcA", "decision": "granted"})
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tcA"}, invoke_id="inv-tool")
+    _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tcA", "reason": "interrupted", "output": "partial"})
+    _append_event(
+        db,
+        tid,
+        "tool_call.output_approval",
+        {"tool_call_id": "tcA", "decision": "omit", "preview": "Output omitted."},
+    )
+    db.append_event(
+        event_id="msg-tool",
+        thread_id=tid,
+        type_="msg.create",
+        msg_id="m-tool",
+        payload={"role": "tool", "tool_call_id": "tcA", "content": "interrupted"},
+    )
+    db.append_event(
+        event_id="edit-tool",
+        thread_id=tid,
+        type_="msg.edit",
+        msg_id="m-tool",
+        payload={"skipped_on_continue": True},
+    )
+    db.append_event(
+        event_id="continue",
+        thread_id=tid,
+        type_="control.interrupt",
+        payload={"purpose": "continue", "continue_from_msg_id": "m-assistant"},
+    )
+
+    states = eggthreads.build_tool_call_states(db, tid)
+    tc = states["tcA"]
+    assert tc.state == "TC5"
+    assert tc.execution_started is True
+    assert tc.finished_reason == "interrupted"
+    assert tc.output_decision == "omit"
+
+
+def test_continue_from_before_tool_parent_skips_parent_tool_events(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-continue-before-tool-parent"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "do it"}, msg_id="m-user")
+    db.append_event(
+        event_id="msg-a",
+        thread_id=tid,
+        type_="msg.create",
+        msg_id="m-assistant",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tcA", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tcA", "decision": "granted"})
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tcA"}, invoke_id="inv-tool")
+    _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tcA", "reason": "interrupted", "output": "partial"})
+    _append_event(
+        db,
+        tid,
+        "tool_call.output_approval",
+        {"tool_call_id": "tcA", "decision": "omit", "preview": "Output omitted."},
+    )
+    db.append_event(
+        event_id="edit-assistant",
+        thread_id=tid,
+        type_="msg.edit",
+        msg_id="m-assistant",
+        payload={"skipped_on_continue": True},
+    )
+    db.append_event(
+        event_id="continue",
+        thread_id=tid,
+        type_="control.interrupt",
+        payload={"purpose": "continue", "continue_from_msg_id": "m-user"},
+    )
+
+    assert "tcA" not in eggthreads.build_tool_call_states(db, tid)
 
 
 def _tool_state_signature(tc):

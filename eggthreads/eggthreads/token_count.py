@@ -707,6 +707,122 @@ def _usage_since_compaction_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, 
     )
 
 
+def _full_usage_by_compaction_epoch_stats(db: "ThreadsDB", thread_id: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return API usage summed over provider-context compaction epochs."""
+
+    clean_messages = [m for m in messages if isinstance(m, dict)]
+    try:
+        from .api import _effective_thread_compactions_for_repl
+
+        markers = _effective_thread_compactions_for_repl(db, thread_id)
+    except Exception:
+        return _token_stats_for_messages(clean_messages)
+
+    marker_rows: List[Tuple[int, int]] = []
+    for marker in markers:
+        try:
+            marker_seq = int(marker.get("event_seq"))
+            start_seq = int(marker.get("start_event_seq"))
+        except Exception:
+            continue
+        marker_rows.append((marker_seq, start_seq))
+    if not marker_rows:
+        return _token_stats_for_messages(clean_messages)
+
+    marker_rows.sort(key=lambda row: row[0])
+    usage_stats: Optional[Dict[str, Any]] = None
+
+    def add_epoch(stats: Dict[str, Any]) -> None:
+        nonlocal usage_stats
+        if usage_stats is None:
+            usage_stats = stats
+        else:
+            usage_stats = _merge_token_stats(usage_stats, stats)
+
+    first_marker_seq = marker_rows[0][0]
+    pre_messages = [
+        m for m in clean_messages
+        if (seq := _message_event_seq(m)) is None or seq < first_marker_seq
+    ]
+    if pre_messages:
+        add_epoch(_token_stats_for_messages(pre_messages))
+
+    for idx, (marker_seq, start_seq) in enumerate(marker_rows):
+        next_marker_seq = marker_rows[idx + 1][0] if idx + 1 < len(marker_rows) else None
+        prefix_messages: List[Dict[str, Any]] = []
+        tail_messages: List[Dict[str, Any]] = []
+        for m in clean_messages:
+            seq = _message_event_seq(m)
+            role = m.get("role")
+            if role == "system":
+                if seq is None or seq <= marker_seq:
+                    prefix_messages.append(m)
+                elif next_marker_seq is None or seq < next_marker_seq:
+                    tail_messages.append(m)
+                continue
+            if seq is None:
+                continue
+            if seq < start_seq:
+                continue
+            if next_marker_seq is not None and seq >= next_marker_seq:
+                continue
+            if seq <= marker_seq:
+                prefix_messages.append(m)
+            else:
+                tail_messages.append(m)
+
+        prefix_stats = _token_stats_for_messages(prefix_messages)
+        epoch_stats = _token_stats_for_messages(
+            tail_messages,
+            base_index=len(prefix_messages),
+            base_context_tokens=int(prefix_stats.get("context_tokens") or 0),
+        )
+        if int((epoch_stats.get("api_usage") or {}).get("approx_call_count") or 0) > 0:
+            add_epoch(epoch_stats)
+
+    return usage_stats if isinstance(usage_stats, dict) else _token_stats_for_messages([])
+
+
+def _message_event_seq(message: Dict[str, Any]) -> Optional[int]:
+    try:
+        return int(message.get("event_seq"))
+    except Exception:
+        return None
+
+
+def _epoch_usage_token_stats(db: "ThreadsDB", thread_id: str, base_stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Return token stats with context from *base_stats* and usage summed per compaction epoch."""
+
+    messages: List[Dict[str, Any]] = []
+    try:
+        th = db.get_thread(thread_id)
+    except Exception:
+        th = None
+    if th is not None:
+        snap_raw = getattr(th, "snapshot_json", None)
+        if isinstance(snap_raw, str) and snap_raw:
+            try:
+                snap = json.loads(snap_raw)
+            except Exception:
+                snap = None
+            if isinstance(snap, dict):
+                raw_messages = snap.get("messages") or []
+                if isinstance(raw_messages, list):
+                    messages = [m for m in raw_messages if isinstance(m, dict)]
+    if not messages:
+        return base_stats
+
+    skipped_msg_ids = _get_skipped_msg_ids(db, thread_id)
+    if skipped_msg_ids:
+        messages = [m for m in messages if m.get("msg_id") not in skipped_msg_ids]
+
+    usage_stats = _full_usage_by_compaction_epoch_stats(db, thread_id, messages)
+    usage_api = usage_stats.get("api_usage") if isinstance(usage_stats.get("api_usage"), dict) else {}
+    out = dict(base_stats)
+    out["api_usage"] = usage_api
+    return out
+
+
 def extend_snapshot_token_stats(snapshot: Dict[str, Any], tail_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Extend cached snapshot token stats with appended snapshot messages.
 
@@ -1304,6 +1420,7 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
             stream_with_cost = None
 
     total = _merge_token_stats_with_boundary(snap_stats, stream_stats, include_snapshot_boundary=True)
+    total = _epoch_usage_token_stats(db, thread_id, total)
     if llm is not None:
         total = _attach_costs(total, llm=llm)
 
