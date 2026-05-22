@@ -266,11 +266,16 @@ def test_compact_with_summary_command_commits_then_appends_model_visible_request
     assert request["role"] == "user"
     assert request["content"] == ts.COMPACTION_SUMMARY_REQUEST
     assert request["compaction_summary_request"] is True
+    assert request["compaction_checkpoint_skill"] == "compaction-checkpoint"
+    assert request["compaction_mode"] == "summary_only"
+    assert request["compaction_trigger"] == "user_command"
     assert request["created_by"] == "user_command"
     assert "Compaction has already happened" in request["content"]
     assert "hydrated REPL/thread-history helpers" in request["content"]
     assert "older_messages_not_in_prompt" in request["content"]
     assert "concise continuation summary" in request["content"]
+    assert "compaction-checkpoint" in request["content"]
+    assert "summary_only" in request["content"]
     assert "not continue the user task yet" in request["content"]
     assert "compact_thread()" not in request["content"]
     assert "start_message omitted" not in request["content"]
@@ -726,12 +731,17 @@ def test_maybe_auto_compact_summary_mode_commits_before_request_and_marker_once(
     request = messages[-1]
     assert request["role"] == "user"
     assert request["created_by"] == "auto_compaction"
+    assert request["compaction_checkpoint_skill"] == "compaction-checkpoint"
+    assert request["compaction_mode"] == "summary_only"
+    assert request["compaction_trigger"] == "auto_threshold"
     assert "Compaction has already happened" in request["content"]
     assert "hydrated REPL/thread-history helpers" in request["content"]
     assert "all_messages" in request["content"]
     assert "older_messages_not_in_prompt" in request["content"]
     assert "search_thread(...)" in request["content"]
     assert "concise continuation summary" in request["content"]
+    assert "compaction-checkpoint" in request["content"]
+    assert "summary_only" in request["content"]
     assert "not continue the user task yet" in request["content"]
     assert "compact_thread()" not in request["content"]
     assert "start_message omitted" not in request["content"]
@@ -758,6 +768,31 @@ def test_maybe_auto_compact_defaults_to_summary_mode(tmp_path, monkeypatch):
     assert result.compaction.start_msg_id == assistant
     assert len(_events(db, tid)) == 1
     assert len(ts.list_thread_compaction_summary_in_progress_events(db, tid)) == 1
+
+
+def test_maybe_auto_compact_checkpoint_resume_mode(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old context")
+    assistant = ts.append_message(db, tid, "assistant", "previous answer")
+
+    result = ts.maybe_auto_compact_thread(
+        db,
+        tid,
+        threshold_tokens=10,
+        context_tokens=10,
+        summary_mode=True,
+        checkpoint_resume=True,
+    )
+
+    assert result.triggered is True
+    assert result.compaction is not None
+    assert result.compaction.start_msg_id == assistant
+    request = [m for m in _snapshot_messages(db, tid) if m.get("auto_compaction_request")][-1]
+    assert request["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
+    assert request["compaction_mode"] == "checkpoint_and_resume"
+    assert request["compaction_trigger"] == "queued_user_message"
+    assert "answer_user_while_preserving_llm_turn" in request["content"]
+    assert "not continue the user task yet" not in request["content"]
 
 
 def test_maybe_auto_compact_summary_mode_noops_below_threshold(tmp_path):
@@ -955,6 +990,8 @@ def test_runner_auto_compacts_summary_mode_after_llm_turn_and_runs_summary_next(
     assert compaction_events[0][0] < request["event_seq"] < markers[0]["event_seq"]
     assert "Compaction has already happened" in request["content"]
     assert "older_messages_not_in_prompt" in request["content"]
+    assert request["compaction_mode"] == "summary_only"
+    assert request["compaction_trigger"] == "auto_threshold"
     assert "compact_thread()" not in request["content"]
     provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, messages)
     assert old not in [m.get("msg_id") for m in provider_view]
@@ -972,6 +1009,39 @@ def test_runner_auto_compacts_summary_mode_after_llm_turn_and_runs_summary_next(
     assert seen_messages[1][-1]["content"] == ts.COMPACTION_SUMMARY_REQUEST
     assert all(m["content"] != "old context" for m in seen_messages[1])
     assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
+
+
+def test_runner_auto_compacts_checkpoint_resume_when_user_queued_during_llm(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old context")
+    ts.append_message(db, tid, "assistant", "previous answer")
+    trigger = ts.append_message(db, tid, "user", "write final answer")
+    ts.create_snapshot(db, tid)
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            ts.append_message(db, tid, "user", "queued while streaming")
+            yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 100},
+    )
+    monkeypatch.delenv("EGG_COMPACT_SUMMARY", raising=False)
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    request = [m for m in _snapshot_messages(db, tid) if m.get("auto_compaction_request")][-1]
+    assert request["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
+    assert request["compaction_mode"] == "checkpoint_and_resume"
+    assert request["compaction_trigger"] == "queued_user_message"
+    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, _snapshot_messages(db, tid))
+    provider_contents = [m.get("content") for m in provider_view]
+    assert "queued while streaming" in provider_contents
+    assert provider_view[0].get("content") == "queued while streaming"
 
 
 def test_runner_recovers_context_length_provider_error_by_queueing_summary_next(tmp_path, monkeypatch):
@@ -1011,7 +1081,12 @@ def test_runner_recovers_context_length_provider_error_by_queueing_summary_next(
     request = next(m for m in messages if m.get("auto_compaction_request"))
     assert markers[0]["request_msg_id"] == request["msg_id"]
     assert compaction_events[0][0] < request["event_seq"] < markers[0]["event_seq"]
-    assert request["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    assert request["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
+    assert request["compaction_checkpoint_skill"] == "compaction-checkpoint"
+    assert request["compaction_mode"] == "checkpoint_and_resume"
+    assert request["compaction_trigger"] == "context_length_error"
+    assert "answer_user_while_preserving_llm_turn" in request["content"]
+    assert "not continue the user task yet" not in request["content"]
     assert request["event_seq"] > max(
         seq for seq, type_, _msg_id, _payload in _typed_events(db, tid) if type_ == "stream.close"
     )
@@ -1025,7 +1100,7 @@ def test_runner_recovers_context_length_provider_error_by_queueing_summary_next(
     asyncio.run(runner.run_once())
 
     assert len(seen_messages) == 2
-    assert seen_messages[1][-1]["content"] == ts.COMPACTION_SUMMARY_REQUEST
+    assert seen_messages[1][-1]["content"] == ts.AUTO_COMPACTION_SUMMARY_REQUEST
     assert all(m["content"] != "old context" for m in seen_messages[1])
     assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
 

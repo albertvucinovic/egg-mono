@@ -595,6 +595,8 @@ COMPACTION_EVENT_TYPE = 'thread.compaction'
 COMPACTION_CONTEXT_LENGTH_EVENT_TYPE = 'thread.compaction_context_length'
 COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE = 'thread.compaction_summary_in_progress'
 
+COMPACTION_CHECKPOINT_SKILL_NAME = 'compaction-checkpoint'
+
 COMPACTION_SUMMARY_REQUEST = (
     "Compaction continuation-summary request:\n\n"
     "Compaction has already happened. You are now running in the newly "
@@ -607,10 +609,26 @@ COMPACTION_SUMMARY_REQUEST = (
     "request; important decisions and design constraints; files changed or "
     "intended to change; commands/tests already run and their results; known "
     "failures or unresolved risks; and exact next steps.\n\n"
-    "Do not continue the user task yet; only write the continuation summary as "
+    f"Use the `{COMPACTION_CHECKPOINT_SKILL_NAME}` skill in `summary_only` mode. "
+    "The request metadata identifies whether this was user/manual or automatic; "
+    "do not continue the user task yet. Only write the continuation summary as "
     "normal assistant content."
 )
-AUTO_COMPACTION_SUMMARY_REQUEST = COMPACTION_SUMMARY_REQUEST
+AUTO_COMPACTION_SUMMARY_REQUEST = (
+    "Compaction continuation-summary request:\n\n"
+    "Compaction has already happened. You are now running in the newly "
+    "compacted provider context. Use the hydrated REPL/thread-history helpers "
+    "when needed to inspect omitted history, including `all_messages`, "
+    "`current_prompt_messages`, `older_messages_not_in_prompt`, "
+    "`messages_by_id`, `messages_by_role`, `search_thread(...)`, "
+    "`get_message(...)`, `print_message(...)`, and `reload_thread_context()`.\n\n"
+    f"Use the `{COMPACTION_CHECKPOINT_SKILL_NAME}` skill in `checkpoint_and_resume` "
+    "mode. First send the checkpoint summary with "
+    "`answer_user_while_preserving_llm_turn`, then continue from the current "
+    "actionable state. If a newer unhandled user message arrived during the "
+    "interrupted work, handle that message before resuming older work. Do not "
+    "treat the checkpoint as the final task answer."
+)
 
 _FALSE_LIKE_ENV_VALUES = {'0', 'false', 'no', 'off'}
 
@@ -648,6 +666,46 @@ class CompactionSummaryRequestResult:
     marker_event_seq: Optional[int]
     message: str
     compaction: Optional[CompactionCommitResult] = None
+
+
+def _compaction_summary_request_extra(*, created_by: str, mode: str, trigger: str) -> Dict[str, Any]:
+    return {
+        'created_by': created_by,
+        'compaction_summary_request': True,
+        'compaction_checkpoint_skill': COMPACTION_CHECKPOINT_SKILL_NAME,
+        'compaction_mode': mode,
+        'compaction_trigger': trigger,
+    }
+
+
+def _normal_user_messages_after_seq(db: ThreadsDB, thread_id: str, after_seq: int) -> List[Dict[str, Any]]:
+    skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    cur = db.conn.execute(
+        "SELECT event_seq, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
+        (thread_id, int(after_seq)),
+    )
+    out: List[Dict[str, Any]] = []
+    for event_seq, msg_id, payload_json in cur.fetchall():
+        if msg_id and (str(msg_id) in skipped or str(msg_id) in deleted):
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict) or payload.get('role') != 'user':
+            continue
+        if payload.get('no_api') or payload.get('keep_user_turn') or payload.get('tool_calls'):
+            continue
+        if payload.get('compaction_summary_request') or payload.get('auto_compaction_request'):
+            continue
+        out.append({'event_seq': int(event_seq), 'msg_id': msg_id, 'payload': payload})
+    return out
+
+
+def _has_unhandled_user_message_after_seq(db: ThreadsDB, thread_id: str, after_seq: int) -> bool:
+    """Return True when a normal provider-visible user message exists after ``after_seq``."""
+
+    return bool(_normal_user_messages_after_seq(db, thread_id, after_seq))
 
 
 @dataclass
@@ -1476,6 +1534,8 @@ def append_auto_compaction_summary_request(
     *,
     content: str = AUTO_COMPACTION_SUMMARY_REQUEST,
     selector: str = 'last_llm',
+    mode: str = 'checkpoint_and_resume',
+    trigger: str = 'auto_compaction',
 ) -> CompactionSummaryRequestResult:
     """Commit an automatic compaction boundary, then append its summary request."""
 
@@ -1507,7 +1567,10 @@ def append_auto_compaction_summary_request(
         thread_id,
         'user',
         content,
-        extra={'created_by': 'auto_compaction', 'auto_compaction_request': True},
+        extra={
+            **_compaction_summary_request_extra(created_by='auto_compaction', mode=mode, trigger=trigger),
+            'auto_compaction_request': True,
+        },
     )
     marker_seq = append_compaction_summary_in_progress(
         db,
@@ -1531,6 +1594,8 @@ def append_compaction_summary_request(
     created_by: str = 'user_command',
     content: str = COMPACTION_SUMMARY_REQUEST,
     selector: Optional[str] = None,
+    mode: str = 'summary_only',
+    trigger: Optional[str] = None,
 ) -> str:
     """Commit compaction, then append a normal model-visible summary request."""
 
@@ -1548,7 +1613,11 @@ def append_compaction_summary_request(
         thread_id,
         'user',
         content,
-        extra={'created_by': created_by, 'compaction_summary_request': True},
+        extra=_compaction_summary_request_extra(
+            created_by=created_by,
+            mode=mode,
+            trigger=trigger or created_by,
+        ),
     )
 
 
@@ -1819,6 +1888,7 @@ def maybe_auto_compact_thread(
     context_tokens: Optional[int] = None,
     selector: str = 'last_llm',
     summary_mode: Optional[bool] = None,
+    checkpoint_resume: Optional[bool] = None,
 ) -> AutoCompactionResult:
     """Maybe perform automatic compaction at a safe turn boundary.
 
@@ -1866,7 +1936,19 @@ def maybe_auto_compact_thread(
                 None,
                 "No new provider-visible user or assistant message after current compaction start.",
             )
-        summary_result = append_auto_compaction_summary_request(db, thread_id, selector=selector)
+        if checkpoint_resume is None:
+            checkpoint_resume = False
+        mode = 'checkpoint_and_resume' if checkpoint_resume else 'summary_only'
+        trigger = 'queued_user_message' if checkpoint_resume else 'auto_threshold'
+        content = AUTO_COMPACTION_SUMMARY_REQUEST if checkpoint_resume else COMPACTION_SUMMARY_REQUEST
+        summary_result = append_auto_compaction_summary_request(
+            db,
+            thread_id,
+            selector=selector,
+            content=content,
+            mode=mode,
+            trigger=trigger,
+        )
         return AutoCompactionResult(
             bool(summary_result.success),
             True,

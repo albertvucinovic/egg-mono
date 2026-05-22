@@ -1020,12 +1020,14 @@ class ThreadRunner:
                     self.db,
                     self.thread_id,
                     selector=recovery_selector,
+                    trigger='context_length_error',
                 )
                 if not summary_result.success and summary_result.compaction is not None:
                     summary_result = append_auto_compaction_summary_request(
                         self.db,
                         self.thread_id,
                         selector="last_llm",
+                        trigger='context_length_error',
                     )
                 if summary_result.success:
                     create_snapshot(self.db, self.thread_id)
@@ -1060,7 +1062,7 @@ class ThreadRunner:
 
         if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None and not has_pending_assistant_tool:
             try:
-                from .api import auto_compact_summary_enabled, create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
+                from .api import _normal_user_messages_after_seq, auto_compact_summary_enabled, create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
                 from .token_count import provider_context_token_stats
 
                 threshold = resolve_auto_compact_threshold(
@@ -1074,11 +1076,24 @@ class ThreadRunner:
                     create_snapshot(self.db, self.thread_id)
                     stats = provider_context_token_stats(self.db, self.thread_id)
                     current_tokens = int(stats.get('context_tokens') or 0)
+                    queued_users = _normal_user_messages_after_seq(
+                        self.db,
+                        self.thread_id,
+                        int(ra.triggering_event_seq),
+                    )
+                    checkpoint_resume = bool(queued_users)
+                    compaction_selector = (
+                        str(queued_users[0].get('msg_id'))
+                        if queued_users and queued_users[0].get('msg_id')
+                        else 'last_llm'
+                    )
                     auto_result = maybe_auto_compact_thread(
                         self.db,
                         self.thread_id,
                         threshold_tokens=threshold.threshold_tokens,
                         context_tokens=current_tokens,
+                        selector=compaction_selector,
+                        checkpoint_resume=checkpoint_resume,
                         summary_mode=auto_compact_summary_enabled(),
                     )
                     if auto_result.triggered:

@@ -87,8 +87,10 @@ from .api import (
     # Continue thread API
     ContinueResult,
     COMPACTION_EVENT_TYPE,
+    COMPACTION_CHECKPOINT_SKILL_NAME,
     COMPACTION_CONTEXT_LENGTH_EVENT_TYPE,
     COMPACTION_SUMMARY_REQUEST,
+    AUTO_COMPACTION_SUMMARY_REQUEST,
     COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE,
     AutoCompactionResult,
     AutoCompactionThresholdResolution,
@@ -289,7 +291,7 @@ __all__ = [
     'set_context_limit', 'get_context_limit',
     # Continue thread API
     'ContinueResult', 'continue_thread', 'continue_child_thread', 'continue_thread_async', 'find_continue_point', 'is_thread_continuable',
-    'COMPACTION_EVENT_TYPE', 'COMPACTION_CONTEXT_LENGTH_EVENT_TYPE', 'COMPACTION_SUMMARY_REQUEST', 'COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE', 'AutoCompactionResult', 'AutoCompactionThresholdResolution', 'CompactionCommitResult', 'CompactionSummaryRequestResult', 'CompactionStartResolution',
+    'COMPACTION_EVENT_TYPE', 'COMPACTION_CHECKPOINT_SKILL_NAME', 'COMPACTION_CONTEXT_LENGTH_EVENT_TYPE', 'COMPACTION_SUMMARY_REQUEST', 'AUTO_COMPACTION_SUMMARY_REQUEST', 'COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE', 'AutoCompactionResult', 'AutoCompactionThresholdResolution', 'CompactionCommitResult', 'CompactionSummaryRequestResult', 'CompactionStartResolution',
     'append_auto_compaction_summary_request', 'append_compaction_summary_request', 'append_compaction_summary_in_progress', 'auto_compact_summary_enabled', 'build_repl_thread_context', 'commit_thread_compaction', 'current_thread_model_context_window_tokens', 'current_effective_compaction_start_event_seq',
     'latest_effective_thread_compaction', 'latest_thread_compaction', 'latest_effective_thread_compaction_context_length', 'latest_effective_thread_compaction_summary_in_progress', 'has_effective_thread_compaction_summary_in_progress', 'thread_compaction_status', 'list_thread_compaction_context_lengths', 'list_thread_compaction_summary_in_progress_events', 'list_thread_compactions', 'resolve_compaction_start_message',
     'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread', 'resolve_auto_compact_threshold', 'set_thread_compaction_context_length',
