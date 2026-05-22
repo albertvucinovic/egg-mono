@@ -379,7 +379,7 @@ def test_context_command_reports_compaction_and_limits(tmp_path, monkeypatch):
     ts.set_thread_compaction_context_length(db, tid, 800, created_by="test")
 
     monkeypatch.setattr(
-        "eggthreads.eggthreads.builtin_plugins.compaction.thread_token_stats",
+        "eggthreads.builtin_plugins.compaction.thread_token_stats",
         lambda db_arg, tid_arg, llm=None: {"context_tokens": 400, "full_thread_tokens": 900},
     )
 

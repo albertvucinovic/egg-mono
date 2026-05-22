@@ -308,7 +308,7 @@ class TestCmdCost:
 
     def test_handles_no_stats_available(self, egg_app, monkeypatch):
         """Should handle case when no stats available."""
-        import eggthreads.eggthreads.builtin_plugins.diagnostics as diagnostics
+        import eggthreads.builtin_plugins.diagnostics as diagnostics
 
         def fail_stats(*args, **kwargs):
             raise RuntimeError("not available")
