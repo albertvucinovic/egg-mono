@@ -598,36 +598,10 @@ COMPACTION_SUMMARY_IN_PROGRESS_EVENT_TYPE = 'thread.compaction_summary_in_progre
 COMPACTION_CHECKPOINT_SKILL_NAME = 'compaction-checkpoint'
 
 COMPACTION_SUMMARY_REQUEST = (
-    "Compaction continuation-summary request:\n\n"
-    "Compaction has already happened. You are now running in the newly "
-    "compacted provider context. Use the hydrated REPL/thread-history helpers "
-    "when needed to inspect omitted history, including `all_messages`, "
-    "`current_prompt_messages`, `older_messages_not_in_prompt`, "
-    "`messages_by_id`, `messages_by_role`, `search_thread(...)`, "
-    "`get_message(...)`, `print_message(...)`, and `reload_thread_context()`.\n\n"
-    "Write a concise continuation summary preserving: the pending user "
-    "request; important decisions and design constraints; files changed or "
-    "intended to change; commands/tests already run and their results; known "
-    "failures or unresolved risks; and exact next steps.\n\n"
-    f"Use the `{COMPACTION_CHECKPOINT_SKILL_NAME}` skill in `summary_only` mode. "
-    "The request metadata identifies whether this was user/manual or automatic; "
-    "do not continue the user task yet. Only write the continuation summary as "
-    "normal assistant content."
+    f"Use the `{COMPACTION_CHECKPOINT_SKILL_NAME}` skill. Mode: `summary_only`."
 )
 AUTO_COMPACTION_SUMMARY_REQUEST = (
-    "Compaction continuation-summary request:\n\n"
-    "Compaction has already happened. You are now running in the newly "
-    "compacted provider context. Use the hydrated REPL/thread-history helpers "
-    "when needed to inspect omitted history, including `all_messages`, "
-    "`current_prompt_messages`, `older_messages_not_in_prompt`, "
-    "`messages_by_id`, `messages_by_role`, `search_thread(...)`, "
-    "`get_message(...)`, `print_message(...)`, and `reload_thread_context()`.\n\n"
-    f"Use the `{COMPACTION_CHECKPOINT_SKILL_NAME}` skill in `checkpoint_and_resume` "
-    "mode. First send the checkpoint summary with "
-    "`answer_user_while_preserving_llm_turn`, then continue from the current "
-    "actionable state. If a newer unhandled user message arrived during the "
-    "interrupted work, handle that message before resuming older work. Do not "
-    "treat the checkpoint as the final task answer."
+    f"Use the `{COMPACTION_CHECKPOINT_SKILL_NAME}` skill. Mode: `checkpoint_and_resume`."
 )
 
 _FALSE_LIKE_ENV_VALUES = {'0', 'false', 'no', 'off'}
@@ -668,13 +642,10 @@ class CompactionSummaryRequestResult:
     compaction: Optional[CompactionCommitResult] = None
 
 
-def _compaction_summary_request_extra(*, created_by: str, mode: str, trigger: str) -> Dict[str, Any]:
+def _compaction_summary_request_extra(*, created_by: str) -> Dict[str, Any]:
     return {
         'created_by': created_by,
         'compaction_summary_request': True,
-        'compaction_checkpoint_skill': COMPACTION_CHECKPOINT_SKILL_NAME,
-        'compaction_mode': mode,
-        'compaction_trigger': trigger,
     }
 
 
@@ -1534,8 +1505,6 @@ def append_auto_compaction_summary_request(
     *,
     content: str = AUTO_COMPACTION_SUMMARY_REQUEST,
     selector: str = 'last_llm',
-    mode: str = 'checkpoint_and_resume',
-    trigger: str = 'auto_compaction',
 ) -> CompactionSummaryRequestResult:
     """Commit an automatic compaction boundary, then append its summary request."""
 
@@ -1568,7 +1537,7 @@ def append_auto_compaction_summary_request(
         'user',
         content,
         extra={
-            **_compaction_summary_request_extra(created_by='auto_compaction', mode=mode, trigger=trigger),
+            **_compaction_summary_request_extra(created_by='auto_compaction'),
             'auto_compaction_request': True,
         },
     )
@@ -1594,8 +1563,6 @@ def append_compaction_summary_request(
     created_by: str = 'user_command',
     content: str = COMPACTION_SUMMARY_REQUEST,
     selector: Optional[str] = None,
-    mode: str = 'summary_only',
-    trigger: Optional[str] = None,
 ) -> str:
     """Commit compaction, then append a normal model-visible summary request."""
 
@@ -1613,11 +1580,7 @@ def append_compaction_summary_request(
         thread_id,
         'user',
         content,
-        extra=_compaction_summary_request_extra(
-            created_by=created_by,
-            mode=mode,
-            trigger=trigger or created_by,
-        ),
+        extra=_compaction_summary_request_extra(created_by=created_by),
     )
 
 
@@ -1938,16 +1901,12 @@ def maybe_auto_compact_thread(
             )
         if checkpoint_resume is None:
             checkpoint_resume = False
-        mode = 'checkpoint_and_resume' if checkpoint_resume else 'summary_only'
-        trigger = 'queued_user_message' if checkpoint_resume else 'auto_threshold'
         content = AUTO_COMPACTION_SUMMARY_REQUEST if checkpoint_resume else COMPACTION_SUMMARY_REQUEST
         summary_result = append_auto_compaction_summary_request(
             db,
             thread_id,
             selector=selector,
             content=content,
-            mode=mode,
-            trigger=trigger,
         )
         return AutoCompactionResult(
             bool(summary_result.success),

@@ -1020,14 +1020,12 @@ class ThreadRunner:
                     self.db,
                     self.thread_id,
                     selector=recovery_selector,
-                    trigger='context_length_error',
                 )
                 if not summary_result.success and summary_result.compaction is not None:
                     summary_result = append_auto_compaction_summary_request(
                         self.db,
                         self.thread_id,
                         selector="last_llm",
-                        trigger='context_length_error',
                     )
                 if summary_result.success:
                     create_snapshot(self.db, self.thread_id)
