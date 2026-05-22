@@ -127,7 +127,7 @@ def test_tool_interrupt_without_finished_recovers_as_interrupted(tmp_path):
     assert ra.kind == "RA2_tools_assistant"
 
 
-def test_continue_from_tool_parent_preserves_parent_tool_events(tmp_path):
+def test_continue_from_tool_parent_retries_parent_tool_call(tmp_path):
     db = _make_db(tmp_path)
     tid = "thread-continue-from-tool-parent"
     db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
@@ -177,10 +177,10 @@ def test_continue_from_tool_parent_preserves_parent_tool_events(tmp_path):
 
     states = eggthreads.build_tool_call_states(db, tid)
     tc = states["tcA"]
-    assert tc.state == "TC5"
-    assert tc.execution_started is True
-    assert tc.finished_reason == "interrupted"
-    assert tc.output_decision == "omit"
+    assert tc.state == "TC1"
+    assert tc.execution_started is False
+    assert tc.finished_reason is None
+    assert tc.output_decision is None
 
 
 def test_continue_from_before_tool_parent_skips_parent_tool_events(tmp_path):

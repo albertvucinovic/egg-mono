@@ -419,11 +419,11 @@ def _reduce_loaded_thread_events(
     def _should_skip_tc_event(ev_seq: int, tcid: Optional[str]) -> bool:
         if continue_boundary_seq is None or continue_interrupt_seq is None:
             return False
-        if ev_seq < continue_boundary_seq or ev_seq > continue_interrupt_seq:
+        if ev_seq <= continue_boundary_seq or ev_seq > continue_interrupt_seq:
             return False
         if tcid and tcid in states:
             tc = states[tcid]
-            if tc.parent_event_seq > continue_boundary_seq:
+            if tc.parent_event_seq >= continue_boundary_seq:
                 return True
         return False
 
