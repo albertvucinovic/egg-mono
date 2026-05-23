@@ -4366,22 +4366,45 @@ def _latest_completed_llm_turn_seq(db: ThreadsDB, thread_id: str) -> int:
 
     skipped = _wait_skipped_msg_ids(db, thread_id)
     latest = -1
+    llm_invokes: set[str] = set()
     try:
         cur = db.conn.execute(
-            "SELECT event_seq, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            "SELECT event_seq, type, msg_id, invoke_id, payload_json FROM events "
+            "WHERE thread_id=? AND type IN ('msg.create', 'stream.open', 'stream.delta', 'stream.close') "
+            "ORDER BY event_seq ASC",
             (thread_id,),
         )
         rows = cur.fetchall()
     except Exception:
         rows = []
-    for event_seq, msg_id, payload_json in rows:
-        if msg_id and str(msg_id) in skipped:
-            continue
+    for event_seq, type_, msg_id, invoke_id, payload_json in rows:
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
         except Exception:
             continue
         if not isinstance(payload, dict):
+            continue
+        if type_ == 'stream.open':
+            if payload.get('stream_kind') == 'llm' and isinstance(invoke_id, str) and invoke_id:
+                llm_invokes.add(invoke_id)
+            continue
+        if type_ == 'stream.delta':
+            if (
+                'text' in payload
+                or 'reason' in payload
+                or 'reasoning_summary' in payload
+                or 'tool_call' in payload
+            ) and isinstance(invoke_id, str) and invoke_id:
+                llm_invokes.add(invoke_id)
+            continue
+        if type_ == 'stream.close':
+            if isinstance(invoke_id, str) and invoke_id in llm_invokes:
+                try:
+                    latest = int(event_seq)
+                except Exception:
+                    pass
+            continue
+        if msg_id and str(msg_id) in skipped:
             continue
         role = payload.get('role')
         completed = False

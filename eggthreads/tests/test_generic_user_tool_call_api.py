@@ -265,6 +265,43 @@ def test_wait_for_threads_waits_for_new_llm_turn_when_old_answer_exists(tmp_path
     assert result.last_assistant_message == "answer"
 
 
+def test_wait_for_threads_treats_llm_error_after_tool_message_as_completion(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    tcid = "tc-after-error"
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tcid,
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": json.dumps({"script": "echo hi"})},
+                }
+            ]
+        },
+    )
+    db.append_event("approve", tid, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+    db.append_event("finish", tid, "tool_call.finished", {"tool_call_id": tcid, "reason": "success", "output": "hi"})
+    db.append_event("output-approval", tid, "tool_call.output_approval", {"tool_call_id": tcid, "decision": "whole", "preview": "hi"})
+    ts.append_message(db, tid, "tool", "hi", extra={"tool_call_id": tcid})
+    invoke_id = "llm-error-invoke"
+    db.append_event("llm-open", tid, "stream.open", {"stream_kind": "llm"}, msg_id="llm-stream", invoke_id=invoke_id)
+    db.append_event("llm-delta", tid, "stream.delta", {"reason": "LLM/runner error: disconnected"}, invoke_id=invoke_id, chunk_seq=0)
+    ts.append_message(db, tid, "system", "LLM/runner error: disconnected")
+    db.append_event("llm-close", tid, "stream.close", {}, invoke_id=invoke_id)
+    ts.create_snapshot(db, tid)
+
+    results = ts.wait_for_threads(db, [tid], timeout_sec=0)
+    result = results[tid]
+
+    assert result.finished is True
+    assert result.state == "waiting_user"
+
+
 def test_wait_for_threads_releases_expired_open_stream_before_completion_check(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")

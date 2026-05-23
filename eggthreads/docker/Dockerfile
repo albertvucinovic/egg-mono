@@ -4,6 +4,10 @@
 # filesystem/toolchain base for the persistent REPL session image.  Keep shared
 # developer tools here so Docker sandboxing and Docker REPLs do not drift.
 
+ARG GO_VERSION=1.22.12
+
+FROM golang:${GO_VERSION}-bookworm AS go-toolchain
+
 FROM python:3.12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -11,8 +15,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
     HOME=/tmp \
+    GOROOT=/usr/local/go \
+    GOPATH=/tmp/go \
     ELAN_HOME=/opt/elan \
-    PATH=/opt/elan/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/usr/local/go/bin:/opt/elan/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
