@@ -22,6 +22,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 
+# Login shells can reset PATH via /etc/profile. Keep the main Go commands on
+# the system default PATH too, matching the Lean/lake symlinks below.
+RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
