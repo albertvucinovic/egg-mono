@@ -1780,7 +1780,7 @@ class ThreadRunner:
                                 payload={
                                     'tool_call': {
                                         'id': tcid,
-                                        'name': name,
+                                        'name': tool_calls_names_so_far.get(tcid, str(name or '')),
                                         'arguments_delta': delta_text,
                                     },
                                     'model_key': current_model,

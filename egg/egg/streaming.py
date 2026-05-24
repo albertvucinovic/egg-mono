@@ -312,6 +312,7 @@ class StreamingMixin:
                 "tool_stream_indicator": _new_tool_stream_indicator(),
                 "tool_summary": _new_tool_summary(),
                 "tc_text": {},
+                "tc_names": {},
                 "tc_order": [],
             }
             try:
@@ -359,12 +360,18 @@ class StreamingMixin:
             tcd = payload.get('tool_call')
             if isinstance(tcd, dict):
                 raw_key = str(tcd.get('id') or tcd.get('name') or 'tool')
+                name = str(tcd.get('name') or '').strip()
                 frag = tcd.get('text') or tcd.get('arguments_delta') or ''
                 if isinstance(frag, str) and frag:
                     order = self._live_state.setdefault('tc_order', [])
                     text_map = self._live_state.setdefault('tc_text', {})
+                    name_map = self._live_state.setdefault('tc_names', {})
+                    if name:
+                        name_map[raw_key] = name
                     if raw_key not in order:
                         order.append(raw_key)
+                        label = name_map.get(raw_key) or raw_key
+                        self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=STREAM_STYLE_TOOL_CALL_ARGS)
                     text_map[raw_key] = text_map.get(raw_key, '') + frag
                     self._stream_append_on_renderer(frag, style=STREAM_STYLE_TOOL_CALL_ARGS)
         elif t == 'tool_call.summary':
@@ -577,5 +584,7 @@ class StreamingMixin:
         for k in ls.get('tc_order') or []:
             t = (ls.get('tc_text') or {}).get(k, '')
             if isinstance(t, str) and t:
+                label = (ls.get('tc_names') or {}).get(k) or k
+                self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=STREAM_STYLE_TOOL_CALL_ARGS)
                 self._stream_append_on_renderer(t, style=STREAM_STYLE_TOOL_CALL_ARGS)
         self._flush_stream_render_buffer_now(force=True)

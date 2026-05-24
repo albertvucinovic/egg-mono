@@ -646,7 +646,8 @@ class FormattingMixin:
             for pk in ls.get('tc_order') or []:
                 delta = (ls.get('tc_text') or {}).get(pk, '')
                 if delta:
-                    parts.append(f"\n[Tool Call Args: {pk}]\n{delta}")
+                    label = (ls.get('tc_names') or {}).get(pk) or pk
+                    parts.append(f"\n[Tool Call Args: {label}]\n{delta}")
             for name, txt in (ls.get('tools') or {}).items():
                 if txt:
                     parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
