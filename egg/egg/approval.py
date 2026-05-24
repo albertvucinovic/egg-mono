@@ -184,6 +184,7 @@ class ApprovalMixin:
                     tc = states.get(str(tcid))
                     if not tc or not tc.finished_output:
                         continue
+                    _saved = ''
                     full = tc.finished_output
                     if not isinstance(full, str):
                         full = str(full)
@@ -192,11 +193,10 @@ class ApprovalMixin:
                     if decision == 'whole':
                         preview = full
                     elif decision == 'partial':
-                        # Stash the full output to disk and build a
-                        # preview that references the saved file —
-                        # same behaviour as the runner's auto-resolve
-                        # path, so user-initiated 'n' choices preserve
-                        # the complete output too.
+                        # Store the full output as an artifact and build the
+                        # same preview/read-tool note as the runner's
+                        # auto-resolve path, so user-initiated 'n' choices
+                        # preserve the complete output too.
                         try:
                             from eggthreads.runner import stash_tool_output_and_build_preview
                             preview, _saved = stash_tool_output_and_build_preview(
@@ -217,6 +217,7 @@ class ApprovalMixin:
                             'decision': decision,
                             'reason': f'User decided in UI ({source})',
                             'preview': preview,
+                            'artifact_path': _saved if decision == 'partial' else '',
                             'line_count': line_count,
                             'char_count': char_count,
                         },

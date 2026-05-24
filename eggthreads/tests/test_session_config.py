@@ -186,7 +186,7 @@ def test_docker_session_mount_dir_uses_thread_working_directory(tmp_path, monkey
     assert sid
 
 
-def test_start_docker_container_masks_egg_and_outputs(monkeypatch, tmp_path):
+def test_start_docker_container_masks_egg_without_outputs(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
@@ -215,15 +215,19 @@ def test_start_docker_container_masks_egg_and_outputs(monkeypatch, tmp_path):
     argv = calls[-1]
     joined = "\n".join(argv)
     assert f"{tmp_path.resolve()}:/workspace" in joined
-    assert ":/workspace/.egg:ro" in joined
-    assert ":/workspace/.egg_outputs:ro" in joined
-    assert f"{tmp_path.resolve()}/.egg_outputs/{tid}:/workspace/.egg_outputs/{tid}:ro" in joined
+    mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-v"]
+    egg_mounts = [spec for spec in mounts if spec.endswith(":/workspace/.egg:ro")]
+    assert len(egg_mounts) == 1
+    assert not egg_mounts[0].startswith(str(tmp_path.resolve() / ".egg") + ":")
+    assert ".egg/rlm_sessions" in egg_mounts[0]
+    assert not any(".egg_outputs" in spec for spec in mounts)
+    assert not any(".egg/egg_outputs" in spec for spec in mounts)
     assert "--user" in argv
     assert f"egg.db_hash={ts.docker_session_db_hash(db)}" in joined
     assert sid
 
 
-def test_start_docker_container_mounts_nested_runtime_output_path(monkeypatch, tmp_path):
+def test_start_docker_container_does_not_mount_runtime_output_path(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")
@@ -250,9 +254,9 @@ def test_start_docker_container_mounts_nested_runtime_output_path(monkeypatch, t
 
     ts.eggthreads.session._start_docker_container(db, runtime, cfg, "egg-test", bridge, runtime_dir)
 
-    joined = "\n".join(calls[-1])
-    nested = f".egg_outputs/{parent}/{runtime}"
-    assert f"{tmp_path.resolve()}/{nested}:/workspace/{nested}:ro" in joined
+    mounts = [calls[-1][i + 1] for i, arg in enumerate(calls[-1][:-1]) if arg == "-v"]
+    assert not any(".egg_outputs" in spec for spec in mounts)
+    assert not any(".egg/egg_outputs" in spec for spec in mounts)
 
 
 def test_start_docker_container_applies_sandbox_mount_policy(monkeypatch, tmp_path):
@@ -369,11 +373,13 @@ def test_tool_output_stash_is_thread_scoped(tmp_path, monkeypatch):
     )
 
     assert saved
-    assert Path(saved).parent == tmp_path / ".egg_outputs" / tid
-    assert f".egg_outputs/{tid}/" in preview
+    assert Path(saved).parent == tmp_path / ".egg" / "egg_outputs" / tid
+    assert f"Artifact id: {Path(saved).name}" in preview
+    assert "read_long_tool_output(" in preview
+    assert ".egg_outputs" not in preview
 
 
-def test_tool_output_stash_uses_thread_ancestry_path(tmp_path, monkeypatch):
+def test_tool_output_stash_uses_flat_thread_artifact_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")
@@ -390,10 +396,11 @@ def test_tool_output_stash_uses_thread_ancestry_path(tmp_path, monkeypatch):
         max_chars=1,
     )
 
-    expected_dir = tmp_path / ".egg_outputs" / parent / child / grandchild
+    expected_dir = tmp_path / ".egg" / "egg_outputs" / grandchild
     assert saved
     assert Path(saved).parent == expected_dir
-    assert f".egg_outputs/{parent}/{child}/{grandchild}/" in preview
+    assert f"Artifact id: {Path(saved).name}" in preview
+    assert ".egg_outputs" not in preview
 
 
 def test_docker_session_status_unavailable(monkeypatch, tmp_path):

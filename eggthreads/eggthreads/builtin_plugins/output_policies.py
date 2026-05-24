@@ -11,7 +11,7 @@ from ..plugins import PluginContext
 
 @dataclass(frozen=True)
 class DefaultOutputPolicy:
-    """Apply terminal-safety plus current long-output stash/preview defaults."""
+    """Apply terminal-safety plus current long-output artifact/preview defaults."""
 
     name: str = "default_output"
 
@@ -34,11 +34,13 @@ class DefaultOutputPolicy:
                 request.thread_id,
                 request.tool_call_id,
                 safe_output,
+                original_char_count=request.metadata.get("original_char_count") if isinstance(request.metadata, dict) else None,
+                output_capped=bool(request.metadata.get("output_capped")) if isinstance(request.metadata, dict) else False,
             )
             reason = (
-                f"Auto: output too long ({line_count} lines, {char_count} chars) — stashed to {saved}"
+                f"Auto: output too long ({line_count} lines, {char_count} chars) — stored as artifact"
                 if saved
-                else f"Auto: output too long ({line_count} lines, {char_count} chars); stash failed, sending preview only"
+                else f"Auto: output too long ({line_count} lines, {char_count} chars); artifact write failed, sending preview only"
             )
             return OutputPublicationDecision(
                 "partial",

@@ -402,7 +402,7 @@ def _docker_repl_mount_args_from_sandbox(
                 continue
             if any(_is_mount_equal_or_under(p, skip) for skip in skip_roots):
                 # These paths are already masked by fixed REPL safety mounts
-                # (notably .egg/.egg_outputs). Avoid duplicate/nested Docker
+                # (notably .egg). Avoid duplicate/nested Docker
                 # bind mounts, which can fail on some Docker versions.
                 continue
             if any(_is_mount_equal_or_under(p, existing) for existing in denied):
@@ -434,51 +434,6 @@ def _docker_repl_mandatory_mask_args(*, mount_dir: Path, workspace: str, session
     workspace = workspace or "/workspace"
     mask_dir = _session_mask_dir(session_id, "egg")
     return ["-v", f"{mask_dir}:{workspace.rstrip('/')}/.egg:ro"]
-
-
-def _safe_thread_output_dir_name(thread_id: str) -> str:
-    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(thread_id or 'thread'))
-    return safe or 'thread'
-
-
-def _docker_repl_thread_output_mount_args(*, db: ThreadsDB, mount_dir: Path, workspace: str, runtime_thread_id: str) -> List[str]:
-    """Expose only this runtime thread's output subtree inside the REPL."""
-
-    mount_dir = mount_dir.resolve()
-    workspace = workspace or "/workspace"
-    try:
-        from .output_paths import thread_output_relative_dir
-
-        rel_dir = thread_output_relative_dir(db, runtime_thread_id)
-        host_dir = mount_dir / rel_dir
-    except Exception:
-        safe_tid = _safe_thread_output_dir_name(runtime_thread_id)
-        rel_dir = Path(".egg_outputs") / safe_tid
-        host_dir = mount_dir / rel_dir
-    try:
-        host_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    container_dir = str(Path(workspace.rstrip("/") or "/") / rel_dir)
-    return ["-v", f"{host_dir}:{container_dir}:ro"]
-
-
-def _prepare_outputs_mask_dir(db: ThreadsDB, session_id: str, runtime_thread_id: str) -> Path:
-    """Create an empty .egg_outputs mask with this thread's mountpoint."""
-
-    mask_dir = _session_mask_dir(session_id, "egg_outputs")
-    try:
-        from .output_paths import thread_output_relative_dir
-
-        rel_dir = thread_output_relative_dir(db, runtime_thread_id)
-        rel_under_outputs = Path(*rel_dir.parts[1:]) if len(rel_dir.parts) > 1 else Path(_safe_thread_output_dir_name(runtime_thread_id))
-    except Exception:
-        rel_under_outputs = Path(_safe_thread_output_dir_name(runtime_thread_id))
-    try:
-        (mask_dir / rel_under_outputs).mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    return mask_dir
 
 
 def _docker_existing_mount_policy(container_name: str) -> Optional[str]:
@@ -708,13 +663,6 @@ def _start_docker_container(
         workspace=workspace,
         session_id=cfg.session_id or container_name,
     )
-    outputs_mask_dir = _prepare_outputs_mask_dir(db, cfg.session_id or container_name, runtime_thread_id)
-    thread_output_mount_args = _docker_repl_thread_output_mount_args(
-        db=db,
-        mount_dir=mount_dir,
-        workspace=workspace,
-        runtime_thread_id=runtime_thread_id,
-    )
     sandbox_mount_args = ["-v", f"{mount_dir}:{workspace}"]
     sandbox_effective = False
     try:
@@ -727,17 +675,16 @@ def _start_docker_container(
             # thread's sandbox provider is srt/bwrap, its filesystem/network
             # policy is still useful and translated onto Docker's coarser model.
             settings = normalize_provider_settings("docker", dict(sb.settings or {}))
-            # Do not call apply_mandatory_protections("srt", ...) here: that
-            # would inject the whole .egg directory into denyWrite, and this
-            # REPL mount layer has stronger fixed masks for .egg/.egg_outputs
-            # below. We also want missing allowWrite to mean workspace rw by
+            # Do not call apply_mandatory_protections("srt", ...) here: this
+            # REPL mount layer has a stronger fixed empty mask for .egg below.
+            # We also want missing allowWrite to mean workspace rw by
             # default, not the Docker provider default's allowWrite=["."].
             network = _sandbox_network_to_docker(settings.get("network"), network)
             sandbox_mount_args = _docker_repl_mount_args_from_sandbox(
                 mount_dir=mount_dir,
                 workspace=workspace,
                 sandbox_settings=settings,
-                skip_denied_paths=[mount_dir / ".egg", mount_dir / ".egg_outputs"],
+                skip_denied_paths=[mount_dir / ".egg"],
             )
     except Exception:
         sandbox_effective = False
@@ -758,8 +705,6 @@ def _start_docker_container(
         "-v", f"{bridge_dir}:/egg-bridge",
         "-v", f"{runtime_dir}:/egg-runtime:ro",
         *sandbox_mount_args,
-        "-v", f"{outputs_mask_dir}:{workspace.rstrip('/')}/.egg_outputs:ro",
-        *thread_output_mount_args,
         *mandatory_mask_args,
         "--cap-drop", "ALL",
         "-w", workspace,

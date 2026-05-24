@@ -89,7 +89,7 @@ if TYPE_CHECKING:  # pragma: no cover
 def get_mandatory_protected_paths() -> List[str]:
     """Return list of paths that must be protected in all sandbox configurations.
     
-    These paths should be made read-only or otherwise protected from writes
+    These paths should be hidden or otherwise protected from reads/writes
     regardless of provider or configuration.
     """
     sandbox_dir = _ensure_sandbox_dir()
@@ -98,7 +98,6 @@ def get_mandatory_protected_paths() -> List[str]:
         str(sandbox_dir),
         str((sandbox_dir / "default.json").resolve()),
         str(egg_dir),
-        str((egg_dir.parent / ".egg_outputs").resolve()),
     ]
 
 
@@ -109,7 +108,6 @@ def _mandatory_protected_paths_for_working_dir(working_dir: Optional[Path] = Non
     try:
         wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
         paths.append((wd / ".egg").resolve())
-        paths.append((wd / ".egg_outputs").resolve())
     except Exception:
         pass
     for raw in get_mandatory_protected_paths():
@@ -144,59 +142,6 @@ def _sandbox_mask_dir(*parts: str) -> Path:
     path = _ensure_sandbox_dir() / "masks" / Path(*safe_parts)
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def _docker_thread_output_mounts(settings: Dict[str, Any], workspace: str) -> List[str]:
-    """Return Docker mounts for tree-scoped .egg_outputs access.
-
-    The full .egg_outputs root is masked.  When the caller supplies the
-    internal thread context, the thread's own output subtree is mounted back
-    read-write at ``.egg_outputs/<root>/.../<thread>``.  Because descendants are
-    nested under that path, a parent can read/write its subtree while children
-    cannot read parent/sibling files.
-    """
-
-    workspace = workspace or "/workspace"
-    output_root = (Path.cwd().resolve() / ".egg_outputs")
-    try:
-        output_root.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-    mask_dir = _sandbox_mask_dir("egg_outputs")
-    mounts: List[str] = ["-v", f"{mask_dir}:{Path(workspace) / '.egg_outputs'}:ro"]
-
-    ctx = settings.get("_egg_thread_context") if isinstance(settings, dict) else None
-    if not isinstance(ctx, dict):
-        return mounts
-    thread_id = ctx.get("thread_id")
-    db_path = ctx.get("db_path")
-    if not isinstance(thread_id, str) or not thread_id:
-        return mounts
-
-    try:
-        from .db import ThreadsDB
-        from .output_paths import thread_output_relative_dir
-
-        db = ThreadsDB(db_path) if isinstance(db_path, str) and db_path else ThreadsDB()
-        rel_dir = thread_output_relative_dir(db, thread_id)
-    except Exception:
-        safe_tid = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '-' for ch in str(thread_id or 'thread')) or 'thread'
-        rel_dir = Path(".egg_outputs") / safe_tid
-
-    rel_under_outputs = Path(*rel_dir.parts[1:]) if len(rel_dir.parts) > 1 else Path(str(thread_id))
-    try:
-        (mask_dir / rel_under_outputs).mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    host_dir = Path.cwd().resolve() / rel_dir
-    try:
-        host_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    container_dir = Path(workspace) / rel_dir
-    mounts.extend(["-v", f"{host_dir}:{container_dir}"])
-    return mounts
 
 
 _default_docker_image_cache = None
@@ -303,10 +248,10 @@ def apply_mandatory_protections(provider_name: str, settings: Dict[str, Any],
         deny_read = fs.get("denyRead")
         if not isinstance(deny_read, list):
             deny_read = []
-            
-        egg_dir = _ensure_sandbox_dir().parent
-        if str(egg_dir) not in deny_read:
-            deny_read.append(str(egg_dir))
+
+        for path in protected_paths:
+            if path not in deny_read:
+                deny_read.append(path)
             
         fs["denyRead"] = deny_read
         
@@ -417,18 +362,6 @@ class DockerProvider:
         from pathlib import Path
         wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
         cmd.extend(["-v", f"{wd}:{workspace}"])
-        # Protect mandatory Egg-private paths last. These restrictions are not
-        # overridable by user-provided extra_mounts.
-        protected_mounts: List[tuple[Path, str]] = []
-        for prot_path in _mandatory_protected_paths_for_working_dir(wd):
-            try:
-                if prot_path.exists() or prot_path.name in (".egg", ".egg_outputs"):
-                    rel_path = prot_path.relative_to(wd)
-                    container_path = str(Path(workspace) / rel_path)
-                    protected_mounts.append((prot_path, container_path))
-            except (ValueError, Exception):
-                # Path not inside working directory or other error
-                pass
         for mount in extra_mounts:
             if isinstance(mount, dict) and mount.get("src") and mount.get("dst"):
                 cmd.extend(["-v", f"{mount['src']}:{mount['dst']}"])
@@ -436,11 +369,8 @@ class DockerProvider:
         for arg in extra_args:
             if isinstance(arg, str):
                 cmd.append(arg)
-        for prot_path, container_path in protected_mounts:
-            if prot_path.name == ".egg_outputs":
-                continue
-            cmd.extend(["-v", f"{prot_path}:{container_path}:ro"])
-        cmd.extend(_docker_thread_output_mounts(settings, str(workspace)))
+        egg_mask = _sandbox_mask_dir("egg")
+        cmd.extend(["-v", f"{egg_mask}:{Path(workspace) / '.egg'}:ro"])
         # Set working directory inside container
         cmd.extend(["-w", workspace])
         # Image
@@ -514,17 +444,17 @@ class BwrapProvider:
                "--proc", "/proc",
                "--unshare-net",
                "--chdir", str(wd)]
-        # Protect mandatory Egg-private paths last. These restrictions are not
-        # overridable by caller config.
+        # Hide mandatory Egg-private paths with empty read-only masks instead
+        # of read-only binding the real .egg tree into the sandbox.
         for prot_path in _mandatory_protected_paths_for_working_dir(wd):
             try:
-                if prot_path.exists():
-                    # Only protect if path is inside working directory
-                    _ = prot_path.relative_to(wd)
-                    cmd.extend(["--ro-bind", str(prot_path), str(prot_path)])
+                _ = prot_path.relative_to(wd)
             except (ValueError, Exception):
-                # Path not inside working directory or other error
-                pass
+                continue
+            if not prot_path.exists() and prot_path.name != ".egg":
+                continue
+            mask_dir = _sandbox_mask_dir("bwrap", prot_path.name)
+            cmd.extend(["--ro-bind", str(mask_dir), str(prot_path)])
         cmd.extend(argv)
         return cmd
     def get_status(self) -> Dict[str, Any]:
@@ -775,13 +705,14 @@ def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
         fs = {}
         out["filesystem"] = fs
 
-    # Add .egg to denyRead if present
+    # Add all mandatory protected paths to denyRead.
     deny_read = fs.get("denyRead")
     if not isinstance(deny_read, list):
         deny_read = []
-    egg_dir = _ensure_sandbox_dir().parent
-    if str(egg_dir) not in deny_read:
-        deny_read.append(str(egg_dir))
+    protected = get_mandatory_protected_paths()
+    for p in protected:
+        if p not in deny_read:
+            deny_read.append(p)
     fs["denyRead"] = deny_read
 
     deny = fs.get("denyWrite")
@@ -789,7 +720,6 @@ def _augment_with_protections(cfg: Dict[str, object]) -> Dict[str, object]:
         deny = []
 
     # Always protect our settings directory and the default.json file.
-    protected = get_mandatory_protected_paths()
     for p in protected:
         if p not in deny:
             deny.append(p)

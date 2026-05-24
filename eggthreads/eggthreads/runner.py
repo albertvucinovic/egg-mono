@@ -93,14 +93,17 @@ _SCHEDULER_FAIRNESS_TIME_SLICE_SEC = 0.01
 
 
 # Thresholds above which a tool output is considered "long" and should
-# be stashed to disk with a preview sent to the LLM instead of the full
+# be stored as an artifact with a preview sent to the LLM instead of the full
 # content. Matches the existing "prompt the user" thresholds so
 # behaviour is continuous with prior versions.
 LONG_OUTPUT_LINE_THRESHOLD = 800
 LONG_OUTPUT_CHAR_THRESHOLD = 100_000
+MAX_STORED_TOOL_OUTPUT_CHARS = 10_000_000
+LONG_OUTPUT_CHUNK_LINES = 400
+LONG_OUTPUT_CHUNK_CHARS = 40_000
 
 # Size of the preview that gets embedded in the tool message when
-# the full output is stashed to disk.
+# the full output is stored as an artifact.
 PREVIEW_MAX_LINES = 200
 PREVIEW_MAX_CHARS = 8000
 TOOL_STREAM_PREVIEW_MAX_LINES = PREVIEW_MAX_LINES
@@ -111,7 +114,7 @@ class ToolStreamPreviewLimiter:
     """Bound live tool-output streaming to a short preview.
 
     Full tool output is still accumulated by the runner and later handled by
-    the normal output-approval/stash path. This helper only controls what is
+    the normal output-approval/artifact path. This helper only controls what is
     emitted as ``stream.delta`` events for the live UI, so a huge stdout/stderr
     burst does not flood the TUI or event log.
     """
@@ -170,8 +173,87 @@ def tool_stream_suppressed_notice(tool_name: str = "") -> str:
     name = f" for {tool_name}" if tool_name else ""
     return (
         f"\n[Live tool output{name} exceeded preview limit; continuing without streaming. "
-        "Full output will be saved to a file if it exceeds the normal long-output threshold.]\n"
+        "Full output will be stored as a read_long_tool_output artifact if it exceeds the normal long-output threshold.]\n"
     )
+
+
+def _line_count(text: str) -> int:
+    return len(text.splitlines())
+
+
+def _capped_tool_output(full_output: str) -> tuple[str, bool, int]:
+    if not isinstance(full_output, str):
+        full_output = str(full_output or "")
+    original_char_count = len(full_output)
+    if original_char_count > MAX_STORED_TOOL_OUTPUT_CHARS:
+        return full_output[:MAX_STORED_TOOL_OUTPUT_CHARS], True, original_char_count
+    return full_output, False, original_char_count
+
+
+def _tool_output_chunk_size_chars() -> int:
+    return max(1, min(int(LONG_OUTPUT_CHUNK_CHARS), LONG_OUTPUT_CHAR_THRESHOLD // 2))
+
+
+def _tool_output_chunk_size_lines() -> int:
+    return max(1, min(int(LONG_OUTPUT_CHUNK_LINES), LONG_OUTPUT_LINE_THRESHOLD // 2))
+
+
+def _split_tool_output_chunks(text: str) -> list[str]:
+    chunk_size_chars = _tool_output_chunk_size_chars()
+    chunk_size_lines = _tool_output_chunk_size_lines()
+    if text == "":
+        return [""]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    current_lines = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        newline_at = text.find("\n", i)
+        if newline_at == -1:
+            segment = text[i:]
+            i = n
+        else:
+            segment = text[i : newline_at + 1]
+            i = newline_at + 1
+
+        while segment:
+            remaining_chars = chunk_size_chars - current_chars
+            if remaining_chars <= 0 or current_lines >= chunk_size_lines:
+                chunks.append("".join(current))
+                current = []
+                current_chars = 0
+                current_lines = 0
+                remaining_chars = chunk_size_chars
+
+            part = segment[:remaining_chars]
+            segment = segment[len(part):]
+            current.append(part)
+            current_chars += len(part)
+            if part.endswith("\n"):
+                current_lines += 1
+
+            if current_chars >= chunk_size_chars or current_lines >= chunk_size_lines:
+                chunks.append("".join(current))
+                current = []
+                current_chars = 0
+                current_lines = 0
+
+    if current:
+        chunks.append("".join(current))
+    return chunks or [""]
+
+
+def _tool_output_preview_text(full_output: str, *, max_lines: int, max_chars: int) -> str:
+    lines = full_output.splitlines()
+    preview = full_output
+    if len(lines) > max_lines:
+        preview = "\n".join(lines[:max_lines])
+    if len(preview) > max_chars:
+        preview = preview[:max_chars]
+    return preview
 
 
 def stash_tool_output_and_build_preview(
@@ -182,103 +264,121 @@ def stash_tool_output_and_build_preview(
     *,
     max_lines: int = PREVIEW_MAX_LINES,
     max_chars: int = PREVIEW_MAX_CHARS,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
 ) -> tuple:
-    """Persist *full_output* to disk and return ``(preview, saved_path)``.
+    """Persist tool output as a thread-owned artifact and return ``(preview, saved_path)``.
 
-    The file is created under a thread-scoped directory inside the thread's
-    working directory (``<thread_wd>/.egg_outputs/<thread_id>/``).  The
-    per-thread level is important when parent/child threads intentionally share
-    a working directory: a child should be able to read its own long-output
-    files, but not parent/sibling stashes.
-
-    The returned *preview* contains at most *max_lines*/*max_chars* of
-    the output followed by a note that references the saved file via
-    its workspace-relative path (e.g. ``.egg_outputs/<thread_id>/abc.txt``),
-    which resolves identically inside and outside the sandbox.
-
-    Returns ``(preview, "")`` if the file could not be written — the
-    preview will still be returned so the caller can proceed.
+    Artifacts are stored under ``.egg/egg_outputs/<thread_id>/<artifact_id>``.
+    The LLM-facing preview deliberately exposes only the short artifact id and
+    ``read_long_tool_output(...)`` usage, not filesystem paths.
     """
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
 
-    # Resolve the stash directory under the workspace root, not under a
-    # per-thread subdirectory.  Sandboxes/REPLs mask .egg_outputs and expose
-    # only the allowed thread/subtree stash directories explicitly; placing the
-    # store at the root keeps paths stable and avoids nesting inaccessible
-    # .egg_outputs directories inside child working dirs.
-    saved_path = ""  # absolute host path (for runner diagnostics)
-    relative_path = ""  # workspace-relative path (for the LLM)
-    try:
-        from pathlib import Path as _Path
-        workspace = _Path.cwd().resolve()
-        from .output_paths import thread_output_dir
-
-        out_dir = thread_output_dir(db, workspace, thread_id)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        tid_suffix = str(thread_id or "thread")[-8:]
-        tcid_suffix = str(tool_call_id or "tc")[-8:]
-        ts = int(time.time())
-        rand = os.urandom(4).hex()
-        path = out_dir / f"{tid_suffix}_{tcid_suffix}_{ts}_{rand}.txt"
-        path.write_text(full_output, encoding="utf-8")
-        # Restrict to owner-readable so even in bwrap the file is less
-        # casually visible to other users on a multi-user host. Does
-        # not protect against a sandboxed process running as the same
-        # uid — that's a bwrap-level concern.
+    stored_output, capped, detected_original_char_count = _capped_tool_output(full_output)
+    if original_char_count is None:
+        original_char_count = detected_original_char_count
+    else:
         try:
-            os.chmod(path, 0o600)
+            original_char_count = max(int(original_char_count), detected_original_char_count)
+        except Exception:
+            original_char_count = detected_original_char_count
+    capped = bool(output_capped or capped or original_char_count > len(stored_output))
+    chunks = _split_tool_output_chunks(stored_output)
+    chunk_count = len(chunks)
+    stored_char_count = len(stored_output)
+    original_line_count = _line_count(full_output)
+    stored_line_count = _line_count(stored_output)
+
+    saved_path = ""  # absolute host artifact directory (for runner diagnostics/tests)
+    artifact_id = ""
+    try:
+        workspace = Path.cwd().resolve()
+        from .output_paths import create_thread_artifact_dir
+
+        artifact_id, artifact_dir = create_thread_artifact_dir(workspace, thread_id)
+        for index, chunk in enumerate(chunks, start=1):
+            chunk_path = artifact_dir / f"chunk-{index:04d}.txt"
+            chunk_path.write_text(chunk, encoding="utf-8")
+            try:
+                os.chmod(chunk_path, 0o600)
+            except Exception:
+                pass
+        metadata = {
+            "artifact_id": artifact_id,
+            "thread_id": str(thread_id or ""),
+            "tool_call_id": str(tool_call_id or ""),
+            "chunk_count": chunk_count,
+            "chunk_size_chars": _tool_output_chunk_size_chars(),
+            "chunk_size_lines": _tool_output_chunk_size_lines(),
+            "stored_char_count": stored_char_count,
+            "original_char_count": original_char_count,
+            "stored_line_count": stored_line_count,
+            "original_line_count": original_line_count,
+            "capped": capped,
+            "max_stored_chars": MAX_STORED_TOOL_OUTPUT_CHARS,
+        }
+        metadata_path = artifact_dir / "metadata.json"
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+        try:
+            os.chmod(metadata_path, 0o600)
+            os.chmod(artifact_dir, 0o700)
         except Exception:
             pass
-        saved_path = str(path)
-        try:
-            relative_path = str(path.relative_to(workspace))
-        except ValueError:
-            # Fallback: file isn't under the workspace — emit the absolute
-            # path and hope the reader is on the same filesystem.
-            relative_path = saved_path
+        saved_path = str(artifact_dir)
     except Exception:
         saved_path = ""
-        relative_path = ""
+        artifact_id = ""
 
-    lines = full_output.splitlines()
-    line_count = len(lines)
-    char_count = len(full_output)
+    preview_body = _tool_output_preview_text(stored_output, max_lines=max_lines, max_chars=max_chars)
+    if preview_body != stored_output:
+        preview_body = preview_body.rstrip()
 
-    preview = full_output
-    if line_count > max_lines:
-        preview = "\n".join(lines[:max_lines])
-    if len(preview) > max_chars:
-        preview = preview[:max_chars]
-
-    if preview != full_output:
-        preview = preview.rstrip()
-        if relative_path:
-            preview += (
-                f"\n\n[Preview only — first {min(line_count, max_lines)} lines / "
-                f"{min(char_count, max_chars)} chars of {line_count} lines, "
-                f"{char_count} chars total. Full output saved (workspace-relative) "
-                f"to: {relative_path}. Read this file from the workspace root "
-                "(e.g. with cat/head/tail) if you need the complete content — "
-                "the path resolves identically inside or outside any sandbox.]"
+    if artifact_id:
+        note = (
+            f"[Preview only — first {min(stored_line_count, max_lines)} lines / "
+            f"{min(stored_char_count, max_chars)} chars shown. "
+            f"Artifact id: {artifact_id}. Chunks: {chunk_count}. "
+        )
+        if capped:
+            note += (
+                f"Stored output capped at {stored_char_count} of {original_char_count} chars. "
             )
         else:
-            preview += (
-                f"\n\n[Output truncated for preview ({line_count} lines, "
-                f"{char_count} chars); full output could not be saved to disk.]"
-            )
+            note += f"Stored output: {stored_char_count} chars. "
+        note += (
+            "Read chunks with read_long_tool_output("
+            f"'{artifact_id}', chunk_number) where chunk_number is 1-{chunk_count}"
+            "; use descendant_thread_id only when reading a descendant thread's artifact.]"
+        )
+    else:
+        note = (
+            f"[Output truncated for preview ({original_line_count} lines, "
+            f"{original_char_count} chars); artifact could not be saved to disk."
+        )
+        if capped:
+            note += f" Output was capped at {stored_char_count} chars."
+        note += "]"
 
-    return preview, saved_path
+    return f"{preview_body}\n\n{note}" if preview_body else note, saved_path
 
 
-def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_output: str) -> None:
+def _emit_auto_output_approval(
+    db,
+    thread_id: str,
+    tool_call_id: str,
+    full_output: str,
+    *,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
+) -> None:
     """Emit a ``tool_call.output_approval`` event for a finished tool call.
 
     No-op if an explicit decision already exists (e.g. user-cancelled
     via Ctrl+C). Small outputs are approved as ``whole``; large outputs
-    are stashed to disk via :func:`stash_tool_output_and_build_preview`
-    and approved as ``partial`` with a preview+file-path note so the
-    LLM can retrieve the full content on demand.
+    are stored as artifacts via :func:`stash_tool_output_and_build_preview`
+    and approved as ``partial`` with a bounded preview plus read-tool note.
     """
     try:
         cur = db.conn.execute(
@@ -316,6 +416,10 @@ def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_outpu
                     "preview_max_lines": PREVIEW_MAX_LINES,
                     "preview_max_chars": PREVIEW_MAX_CHARS,
                 },
+                metadata={
+                    "original_char_count": original_char_count,
+                    "output_capped": output_capped,
+                },
             ),
         )
         preview = publication.preview
@@ -333,14 +437,19 @@ def _emit_auto_output_approval(db, thread_id: str, tool_call_id: str, full_outpu
 
         if is_long:
             preview, saved = stash_tool_output_and_build_preview(
-                db, thread_id, tool_call_id, full_output,
+                db,
+                thread_id,
+                tool_call_id,
+                full_output,
+                original_char_count=original_char_count,
+                output_capped=output_capped,
             )
             decision = "partial"
             reason = (
                 f"Auto: output too long ({line_count} lines, {char_count} chars) — "
-                f"stashed to {saved}" if saved else
+                "stored as artifact" if saved else
                 f"Auto: output too long ({line_count} lines, {char_count} chars); "
-                "stash failed, sending preview only"
+                "artifact write failed, sending preview only"
             )
             artifact_path = saved
         else:
@@ -2442,6 +2551,12 @@ class ThreadRunner:
                     full_result = self._filter_tool_output(full_result, mask_secrets=False)
                 except Exception:
                     pass
+                output_was_capped = False
+                original_output_char_count = len(full_result)
+                try:
+                    full_result, output_was_capped, original_output_char_count = _capped_tool_output(full_result)
+                except Exception:
+                    pass
                 out = full_result or ''
                 CH = 400
                 cancelled = False
@@ -2460,7 +2575,7 @@ class ThreadRunner:
                         # Respect the per-thread lease while emitting only a
                         # bounded live preview. The full output remains in
                         # full_result and is handled by the normal long-output
-                        # approval/stash path below.
+                        # approval/artifact path below.
                         def _heartbeat() -> bool:
                             return self.db.heartbeat(
                                 self.thread_id,
@@ -2500,13 +2615,19 @@ class ThreadRunner:
                     },
                 )
                 # Auto output-approval: small outputs get decision='whole'
-                # and go through verbatim; long outputs are stashed to
-                # disk and get decision='partial' with a preview that
-                # references the saved file so the LLM can fetch the
-                # full content on demand. A UI cancellation (Ctrl+C)
+                # and go through verbatim; long outputs are stored as
+                # artifacts and get decision='partial' with a preview that
+                # references read_long_tool_output usage. A UI cancellation (Ctrl+C)
                 # that already recorded an explicit decision is respected.
                 try:
-                    _emit_auto_output_approval(self.db, self.thread_id, tc.tool_call_id, full_result)
+                    _emit_auto_output_approval(
+                        self.db,
+                        self.thread_id,
+                        tc.tool_call_id,
+                        full_result,
+                        original_char_count=original_output_char_count,
+                        output_capped=output_was_capped,
+                    )
                 except Exception:
                     pass
 
