@@ -458,6 +458,67 @@ def test_thread_event_reducer_matches_continue_skipped_messages(tmp_path):
     _assert_reducer_matches_public_state(db, tid)
 
 
+def test_incremental_reducer_preserves_continue_boundary_after_llm_stream_open(tmp_path):
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-continue-stream-open"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-tool", tid, "msg.create", {"role": "tool", "content": "tool result"}, msg_id="m-tool")
+    tool_seq = db.max_event_seq(tid)
+    db.append_event(
+        "old-open",
+        tid,
+        "stream.open",
+        {"stream_kind": "llm"},
+        msg_id="m-old-open",
+        invoke_id="old-invoke",
+    )
+    db.append_event(
+        "old-delta",
+        tid,
+        "stream.delta",
+        {"reason": "LLM/runner error: boom"},
+        invoke_id="old-invoke",
+        chunk_seq=0,
+    )
+    db.append_event("msg-error", tid, "msg.create", {"role": "system", "content": "LLM/runner error: boom"}, msg_id="m-error")
+    db.append_event("old-close", tid, "stream.close", {}, invoke_id="old-invoke")
+    db.append_event("skip-error", tid, "msg.edit", {"skipped_on_continue": True}, msg_id="m-error")
+    db.append_event(
+        "continue",
+        tid,
+        "control.interrupt",
+        {"reason": "continue", "purpose": "continue", "continue_from_msg_id": "m-tool"},
+    )
+
+    from eggthreads.tool_state import _REDUCER_CACHE, _last_stream_close_seq, _reduce_thread_events
+
+    _REDUCER_CACHE.clear()
+    before = _reduce_thread_events(db, tid)
+    assert before.last_llm_boundary_seq == tool_seq - 1
+    assert before.next_runner_actionable is not None
+    assert before.next_runner_actionable.kind == "RA1_llm"
+    assert before.next_runner_actionable.msg_id == "m-tool"
+
+    db.append_event(
+        "new-open",
+        tid,
+        "stream.open",
+        {"stream_kind": "llm"},
+        msg_id="m-new-open",
+        invoke_id="new-invoke",
+    )
+
+    after = _reduce_thread_events(db, tid)
+    assert after.last_llm_boundary_seq == tool_seq - 1
+    assert _last_stream_close_seq(db, tid) == tool_seq - 1
+    assert after.next_runner_actionable is not None
+    assert after.next_runner_actionable.kind == "RA1_llm"
+    assert after.next_runner_actionable.msg_id == "m-tool"
+
+    _assert_incremental_matches_full_rebuild(db, tid)
+
+
 def test_thread_event_reducer_matches_llm_interrupt_boundary(tmp_path):
     db = _make_db(tmp_path)
     tid = "thread-reducer-llm-interrupt"

@@ -219,8 +219,13 @@ def _try_reduce_thread_events_incrementally(
 
     skipped_msg_ids = set(previous.skipped_msg_ids)
     llm_invokes = set(previous._llm_invokes)
+    last_llm_boundary_seq = previous.last_llm_boundary_seq
     last_llm_stream_boundary_seq = previous._last_llm_stream_boundary_seq
     last_assistant_seq = previous._last_assistant_seq
+    assistant_fallback_boundary = (
+        previous._last_llm_stream_boundary_seq == -1
+        and previous.last_llm_boundary_seq == previous._last_assistant_seq
+    )
     messages_after_records = list(previous._messages_after_records)
     new_message_records: List[Tuple[Dict[str, Any], Dict[str, Any], int]] = []
 
@@ -242,11 +247,15 @@ def _try_reduce_thread_events_incrementally(
         elif ev_type == "stream.close":
             if isinstance(inv, str) and inv in llm_invokes:
                 last_llm_stream_boundary_seq = ev_seq
+                last_llm_boundary_seq = ev_seq
+                assistant_fallback_boundary = False
         elif ev_type == "control.interrupt":
             old_inv = payload.get("old_invoke_id")
             purpose = payload.get("purpose")
             if purpose == "llm" or (isinstance(old_inv, str) and old_inv in llm_invokes):
                 last_llm_stream_boundary_seq = ev_seq
+                last_llm_boundary_seq = ev_seq
+                assistant_fallback_boundary = False
         elif ev_type == "msg.create":
             msg_id = ev.get("msg_id")
             skipped = msg_id and str(msg_id) in skipped_msg_ids
@@ -254,13 +263,11 @@ def _try_reduce_thread_events_incrementally(
                 continue
             if payload.get("role") == "assistant" and not bool(payload.get("no_api")):
                 last_assistant_seq = ev_seq
+                if last_llm_boundary_seq == -1 or assistant_fallback_boundary:
+                    last_llm_boundary_seq = ev_seq
+                    assistant_fallback_boundary = True
             new_message_records.append((ev, payload, ev_seq))
 
-    last_llm_boundary_seq = (
-        last_llm_stream_boundary_seq
-        if last_llm_stream_boundary_seq != -1
-        else last_assistant_seq
-    )
     messages_after_records = [
         record for record in messages_after_records
         if record[2] > last_llm_boundary_seq
