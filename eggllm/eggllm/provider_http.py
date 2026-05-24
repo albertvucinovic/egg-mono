@@ -44,7 +44,7 @@ def build_provider_headers(
             )
 
         headers["OpenAI-Beta"] = "responses=experimental"
-        headers["originator"] = "codex_cli_rs"
+        headers["originator"] = "egg"
         headers["User-Agent"] = (
             f"eggllm/1.0 ({platform.system()} {platform.release()}; {platform.machine()})"
         )

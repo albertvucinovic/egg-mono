@@ -115,7 +115,7 @@ def login_browser(store: Optional[TokenStore] = None) -> TokenStore:
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
         "state": state,
-        "originator": "codex_cli_rs",
+        "originator": "egg",
     })
     auth_full_url = f"{AUTH_URL}?{auth_params}"
 

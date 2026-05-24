@@ -60,7 +60,7 @@ def test_build_provider_headers_for_chatgpt_oauth_provider(monkeypatch, tmp_path
     assert headers["Authorization"] == "Bearer access-123"
     assert headers["chatgpt-account-id"] == "acct_123"
     assert headers["OpenAI-Beta"] == "responses=experimental"
-    assert headers["originator"] == "codex_cli_rs"
+    assert headers["originator"] == "egg"
     assert headers["accept"] == "text/event-stream"
     assert headers["User-Agent"].startswith("eggllm/1.0 (")
 
