@@ -8,6 +8,8 @@ This is the authoritative Worker Manager skill. In repository checkouts it may b
 
 The manager stays responsible for direction, scope, review, and user-facing synthesis. The worker does focused implementation slices.
 
+If the user gives a time budget, e.g. “work on this for 4 hours,” that budget belongs to the **manager**, not the worker. The manager should not tell the worker “work for 4 hours.” Instead, the manager should assign one smaller concrete slice, wait for it to finish, review it, then send the next smaller concrete slice to the same worker until the requested manager-side budget is used, the work is complete, or a stop condition is reached.
+
 Worker threads are treated as **infinite** for this workflow: they have auto-compaction plus summarization and can keep useful project context across phases. Therefore, the manager should normally create **one primary worker thread for the task** and keep sending it the next slice.
 
 A good worker loop is:
@@ -50,6 +52,8 @@ After the primary worker exists, prefer sending continuations to that same worke
 
 Give the worker one coherent implementation slice at a time, not an entire multi-phase plan unless the user explicitly wants broad autonomous execution.
 
+Do not delegate duration management to the worker. A worker task should be scoped by concrete deliverable, not by wall-clock budget. The manager owns deciding when to send another slice and when to stop.
+
 Good worker scopes:
 
 ```text
@@ -66,6 +70,14 @@ Remove these three redundant tools and update tests. Do not implement the replac
 ```
 
 Bad worker scopes:
+
+```text
+Work on compaction for 4 hours.
+```
+
+```text
+Keep going until the long-run budget is used up.
+```
 
 ```text
 Finish compaction.
@@ -130,7 +142,7 @@ if not finished:
     wait again
 ```
 
-For long requested runs, repeat for the requested budget, e.g. up to 4 hours, but checkpoint after each worker result.
+For long requested runs, repeat for the requested manager-side budget, e.g. up to 4 hours, but checkpoint after each worker result. Do not send the worker a single 4-hour assignment; send one bounded slice, wait for completion, then decide and send the next bounded slice.
 
 If the worker is still running and healthy, keep waiting. If there are errors or no progress, intervene in that same worker when possible.
 
@@ -295,16 +307,43 @@ If the worker leaves a messy partial edit:
 
 When the user asks for a long loop, e.g. “wait in 300s increments for at least 4h or until done”:
 
-1. Spawn one primary worker for the next slice.
-2. Wait 300s.
-3. If unfinished, inspect child status.
-4. Continue waiting while healthy.
-5. When finished, send the next slice to the same worker.
-6. Stop early only if:
+1. Treat the requested duration as a manager-side budget.
+2. Spawn one primary worker for the next concrete slice only.
+3. Wait 300s.
+4. If unfinished, inspect child status.
+5. Continue waiting while healthy.
+6. When the worker finishes, review its result and decide the next concrete slice.
+7. Send the next slice to the same worker; do not delegate the remaining time budget to the worker.
+8. Repeat until the manager-side budget is used, implementation is complete, or a stop condition is reached.
+9. Stop early only if:
    - implementation is complete;
    - user/design decision is required;
    - tests fail in a way that needs manager/user input;
    - the current worker is unreliable enough to justify an exceptional replacement.
+
+Bad long-loop instruction to a worker:
+
+```text
+Work on this for 4 hours and decide what to do next.
+```
+
+Good long-loop manager behavior:
+
+```text
+Manager sends: Implement only the provider header helper and tests.
+Worker finishes.
+Manager reviews.
+Manager sends: Now implement only the API-key selector helper and tests.
+```
+
+The old loop in shorthand is:
+
+```text
+manager owns time budget
+worker owns current concrete slice
+manager reviews after each slice
+manager sends next slice if budget and stop conditions allow
+```
 
 Keep a compact manager-side ledger of:
 
