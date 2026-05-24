@@ -1762,24 +1762,6 @@ class ThreadRunner:
             partial_tool_calls_value = partial_msg.get('tool_calls')
             return bool(isinstance(partial_tool_calls_value, list) and partial_tool_calls_value)
 
-        err_payload: Dict[str, Any] = {
-            'role': 'system',
-            'content': (
-                'LLM/runner warning: LLM turn ended without an assistant message. '
-                'The provider stream may have returned empty, or the turn may have ended '
-                'before a response was received. You can retry with /continue or send a new user message.'
-            ),
-        }
-        if current_model:
-            err_payload['model_key'] = current_model
-        self.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=self.thread_id,
-            type_='msg.create',
-            msg_id=os.urandom(10).hex(),
-            payload=err_payload,
-        )
-
         return False
 
 

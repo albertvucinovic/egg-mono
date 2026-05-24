@@ -3660,7 +3660,6 @@ def _error_item_from_event(row: Any) -> Optional[Dict[str, Any]]:
             low = content.lower()
             if role == "system" and (
                 "llm/runner error" in low
-                or "llm/runner warning" in low
                 or "llm error" in low
                 or "context limit exceeded" in low
                 or low.startswith("error:")
@@ -4354,7 +4353,7 @@ def _is_llm_error_message(payload: Dict[str, Any]) -> bool:
     if not isinstance(content, str):
         return False
     low = content.lower()
-    return 'llm/runner error' in low or 'llm/runner warning' in low or 'llm error' in low or 'context limit exceeded' in low
+    return 'llm/runner error' in low or 'llm error' in low or 'context limit exceeded' in low
 
 
 def _latest_completed_llm_turn_seq(db: ThreadsDB, thread_id: str) -> int:

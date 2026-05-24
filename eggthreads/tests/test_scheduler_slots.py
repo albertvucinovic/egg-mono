@@ -1785,41 +1785,6 @@ def test_runner_persists_partial_tool_call_on_provider_transport_error(tmp_path)
     assert not any("LLM/runner error" in str(p.get("content", "")) for p in payloads)
 
 
-def test_empty_provider_stream_is_reported_in_child_status(tmp_path):
-    """An empty RA1 provider stream should be visible instead of silent idle."""
-
-    db = _make_db(tmp_path)
-    parent = ts.create_root_thread(db, name="parent")
-    child = ts.create_child_thread(db, parent, name="child")
-    ts.append_message(db, child, "user", "hello")
-    ts.create_snapshot(db, child)
-
-    class EmptyLLM:
-        current_model_key = "mock"
-
-        def set_model(self, model_key):
-            self.current_model_key = model_key
-
-        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
-            if False:
-                yield {}
-
-    async def run_test():
-        runner = ts.ThreadRunner(db, child, llm=EmptyLLM(), config=RunnerConfig())
-        assert await runner.run_once() is True
-
-    asyncio.run(run_test())
-
-    status = ts.get_child_thread_status(db, parent, child)
-    messages = [err["message"] for err in status.recent_errors or []]
-    assert any("without an assistant message" in msg for msg in messages)
-    assert any("send a new user message" in msg for msg in messages)
-
-    result = ts.wait_for_threads(db, [child], timeout_sec=0)[child]
-    assert result.finished is True
-    assert result.state == "waiting_user"
-
-
 def test_scheduler_bulk_max_event_seqs(tmp_path):
     from eggthreads.runner import _max_event_seqs_bulk
 
