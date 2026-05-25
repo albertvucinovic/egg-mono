@@ -79,6 +79,19 @@ class TestToolTimeout:
         assert "TIMEOUT" not in result
         assert "hello" in result
 
+    def test_python_tool_large_stdout_does_not_deadlock_pipe(self, tmp_path, monkeypatch):
+        """Python tool should drain stdout while the child runs."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+
+        result = tools.execute(
+            "python",
+            {"script": "import sys; sys.stdout.write('x' * 100_000)", "timeout_sec": 3},
+        )
+
+        assert "TIMEOUT" not in result
+        assert len(result) > 100_000
+
     def test_bash_tool_config_timeout_works(self, tmp_path, monkeypatch):
         """Bash tool should use _tool_timeout_sec from config when LLM doesn't specify."""
         eggthreads = _import_eggthreads(monkeypatch, tmp_path)
@@ -497,6 +510,27 @@ class TestToolTimeout:
         assert "line-1" in streamed
         assert "line-200" in streamed
         assert len(stream.chunks) < 50
+
+    def test_streaming_bash_large_single_line_stdout_does_not_timeout(self, tmp_path, monkeypatch):
+        """Streaming bash should not use readline() for huge newline-free output."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+
+        import asyncio
+
+        async def run():
+            return await tools.execute_async(
+                "bash",
+                {"script": "python3 - <<'PY'\nimport sys\nsys.stdout.write('x' * 100_000)\nPY"},
+                tool_timeout_sec=3,
+                preserve_tool_result=True,
+            )
+
+        result = asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+        assert getattr(result, "reason", None) == "success"
+        assert "TIMEOUT" not in result.output
+        assert len(result.output) > 100_000
 
 
 

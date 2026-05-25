@@ -116,7 +116,7 @@ def _run_interruptible_subprocess(
     start_time = time.time()
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
     try:
-        while proc.poll() is None:
+        while True:
             if cancel_check and cancel_check():
                 proc.kill()
                 proc.wait()
@@ -125,8 +125,14 @@ def _run_interruptible_subprocess(
                 proc.kill()
                 proc.wait()
                 return timeout_message.format(timeout=timeout)
-            time.sleep(0.1)
-        stdout_bytes, stderr_bytes = proc.communicate()
+            wait_timeout = 0.1
+            if timeout:
+                wait_timeout = max(0.0, min(wait_timeout, timeout - (time.time() - start_time)))
+            try:
+                stdout_bytes, stderr_bytes = proc.communicate(timeout=wait_timeout)
+                break
+            except subprocess.TimeoutExpired:
+                pass
     except Exception as e:
         proc.kill()
         proc.wait()
@@ -281,7 +287,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
         prefix = "--- STDOUT ---\n" if is_stdout else "--- STDERR ---\n"
         while True:
             try:
-                chunk = await stream.readline()
+                chunk = await stream.read(64 * 1024)
             except Exception:
                 break
             if not chunk:

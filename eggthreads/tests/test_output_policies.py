@@ -73,6 +73,39 @@ def test_runner_output_policy_artifacts_long_output_and_read_tool_reads_chunk(tm
     assert read.endswith("x" * 40_000)
 
 
+def test_runner_artifacts_large_python_stdout(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    tcid = ts.enqueue_user_tool_call(
+        db,
+        tid,
+        "python",
+        {"script": "import sys; sys.stdout.write('x' * 120_000)", "timeout_sec": 3},
+        auto_approve=True,
+        hidden=True,
+    )
+
+    runner = ts.ThreadRunner(db, tid, llm=object())
+    assert asyncio.run(runner.run_once()) is True
+
+    state = ts.build_tool_call_states(db, tid)[tcid]
+    assert state.finished_reason == "success"
+    assert state.finished_output is not None
+    assert len(state.finished_output) > 120_000
+
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.output_approval' ORDER BY event_seq DESC LIMIT 1",
+        (tid,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    assert payload["tool_call_id"] == tcid
+    assert payload["decision"] == "partial"
+    assert payload["artifact_path"]
+    assert "read_long_tool_output(" in payload["preview"]
+
+
 def test_runner_caps_persisted_tool_output_and_artifact_metadata(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("eggthreads.runner.MAX_STORED_TOOL_OUTPUT_CHARS", 50)
