@@ -1777,7 +1777,7 @@ def test_runner_persists_partial_tool_call_on_provider_transport_error(tmp_path)
         (root,),
     ).fetchall()
     payloads = [json.loads(r[0]) for r in rows]
-    assistant = payloads[-1]
+    assistant = next(payload for payload in reversed(payloads) if payload.get("role") == "assistant")
     assert assistant["role"] == "assistant"
     assert assistant["incomplete"] is True
     assert assistant["tool_calls"][0]["id"] == "call_partial"

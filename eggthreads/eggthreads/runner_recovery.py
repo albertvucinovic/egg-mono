@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import json
 from typing import Any, Dict, Optional
 
 DEFAULT_TRANSPORT_DELAY_SEC = 2.0
@@ -56,6 +57,22 @@ class RecoveryDecision:
         return self.retriable
 
 
+@dataclass(frozen=True)
+class RecoverySource:
+    """Persisted message that represents a recoverable/non-recoverable failure."""
+
+    msg_id: str
+    event_seq: int
+    payload: Dict[str, Any]
+    decision: RecoveryDecision
+
+
+@dataclass(frozen=True)
+class RecoveryFenceResult:
+    ok: bool
+    reason: str = ""
+
+
 def _short_text(value: Any, *, limit: int = 240) -> str:
     text = str(value or "").strip()
     if not text:
@@ -64,6 +81,14 @@ def _short_text(value: Any, *, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _payload_from_json(value: Any) -> Dict[str, Any]:
+    try:
+        payload = json.loads(value) if isinstance(value, str) else (value or {})
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _retry(category: str, reason: str, source: str, delay_sec: float) -> RecoveryDecision:
@@ -339,7 +364,7 @@ def classify_failure_text(
     low = source.lower()
 
     if _is_empty_assistant_error(low):
-        return _retry("empty_response", "Provider returned an empty assistant response", source, DEFAULT_EMPTY_OR_INCOMPLETE_DELAY_SEC)
+        return _delay_or_default(source, DEFAULT_EMPTY_OR_INCOMPLETE_DELAY_SEC, max_delay_sec, "empty_response", "Provider returned an empty assistant response")
     if _is_max_output_truncation(low):
         return _stop("max_output", "Assistant response stopped because of max output length", source)
     if _is_context_length_error(low):
@@ -356,9 +381,9 @@ def classify_failure_text(
     # Transport checks intentionally precede generic HTTP 400 handling. Some
     # transient transport exceptions include a 400 in their nested text.
     if _is_transport_error(low):
-        return _retry("transport", "Transient transport/provider stream failure", source, DEFAULT_TRANSPORT_DELAY_SEC)
+        return _delay_or_default(source, DEFAULT_TRANSPORT_DELAY_SEC, max_delay_sec, "transport", "Transient transport/provider stream failure")
     if _is_timeout_error(low):
-        return _retry("timeout", "Provider request timed out or returned no response", source, DEFAULT_TIMEOUT_DELAY_SEC)
+        return _delay_or_default(source, DEFAULT_TIMEOUT_DELAY_SEC, max_delay_sec, "timeout", "Provider request timed out or returned no response")
     if _is_rate_limit_or_overload(low, source):
         return _delay_or_default(source, DEFAULT_RATE_LIMIT_DELAY_SEC, max_delay_sec, "rate_limit", "Provider is rate-limited or overloaded")
     if _has_any_http_status(source, _RETRIABLE_SERVER_STATUS_CODES):
@@ -402,6 +427,151 @@ def classify_failure_payload(
     return _stop("none", "Payload does not describe a provider/runner failure", content or "")
 
 
+def find_latest_recovery_source_after(
+    db: Any,
+    thread_id: str,
+    after_event_seq: int,
+    *,
+    max_delay_sec: float = DEFAULT_MAX_RETRY_DELAY_SEC,
+) -> Optional[RecoverySource]:
+    """Return the latest provider/runner failure message after a RA1 trigger."""
+
+    try:
+        rows = db.conn.execute(
+            "SELECT event_seq, msg_id, payload_json FROM events "
+            "WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
+            (thread_id, int(after_event_seq)),
+        ).fetchall()
+    except Exception:
+        return None
+
+    latest: Optional[RecoverySource] = None
+    for event_seq, msg_id, payload_json in rows:
+        if not msg_id:
+            continue
+        if message_is_skipped(db, thread_id, str(msg_id)):
+            continue
+        payload = _payload_from_json(payload_json)
+        decision = classify_failure_payload(payload, max_delay_sec=max_delay_sec)
+        if decision.category in {"none", "local_notice"}:
+            continue
+        latest = RecoverySource(str(msg_id), int(event_seq), payload, decision)
+    return latest
+
+
+def recovery_attempt_count(db: Any, thread_id: str, trigger_msg_id: Optional[str]) -> int:
+    if not trigger_msg_id:
+        return 0
+    count = 0
+    try:
+        rows = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+    except Exception:
+        return 0
+    for (payload_json,) in rows:
+        payload = _payload_from_json(payload_json)
+        if not payload.get("recovery_notice"):
+            continue
+        if payload.get("auto_continue") is not True:
+            continue
+        if payload.get("action") != "applied":
+            continue
+        if payload.get("trigger_msg_id") == trigger_msg_id:
+            count += 1
+    return count
+
+
+def message_is_skipped(db: Any, thread_id: str, msg_id: str) -> bool:
+    try:
+        rows = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.edit' AND msg_id=? ORDER BY event_seq ASC",
+            (thread_id, msg_id),
+        ).fetchall()
+    except Exception:
+        return False
+    for (payload_json,) in rows:
+        payload = _payload_from_json(payload_json)
+        if payload.get("skipped_on_continue"):
+            return True
+    return False
+
+
+def check_recovery_fence(
+    db: Any,
+    thread_id: str,
+    *,
+    trigger_msg_id: Optional[str],
+    source_msg_id: str,
+    source_event_seq: int,
+    max_attempts: int = 1,
+) -> RecoveryFenceResult:
+    """Validate that delayed auto-continue is still safe to apply."""
+
+    try:
+        if db.current_open(thread_id) is not None:
+            return RecoveryFenceResult(False, "thread has an active runner lease")
+    except Exception:
+        return RecoveryFenceResult(False, "could not verify runner lease")
+
+    try:
+        row = db.conn.execute(
+            "SELECT 1 FROM events WHERE thread_id=? AND type='msg.create' AND msg_id=? LIMIT 1",
+            (thread_id, source_msg_id),
+        ).fetchone()
+    except Exception:
+        row = None
+    if row is None:
+        return RecoveryFenceResult(False, "source failure message no longer exists")
+    if message_is_skipped(db, thread_id, source_msg_id):
+        return RecoveryFenceResult(False, "thread was continued manually before the retry fired")
+
+    try:
+        rows = db.conn.execute(
+            "SELECT payload_json FROM events "
+            "WHERE thread_id=? AND type='control.interrupt' AND event_seq>? ORDER BY event_seq ASC",
+            (thread_id, int(source_event_seq)),
+        ).fetchall()
+    except Exception:
+        rows = []
+    for (payload_json,) in rows:
+        payload = _payload_from_json(payload_json)
+        if payload.get("purpose") == "continue":
+            return RecoveryFenceResult(False, "thread was continued manually before the retry fired")
+
+    if recovery_attempt_count(db, thread_id, trigger_msg_id) >= max_attempts:
+        return RecoveryFenceResult(False, "automatic continue attempt cap reached")
+
+    try:
+        rows = db.conn.execute(
+            "SELECT msg_id, payload_json FROM events "
+            "WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
+            (thread_id, int(source_event_seq)),
+        ).fetchall()
+    except Exception:
+        return RecoveryFenceResult(False, "could not inspect newer messages")
+    for msg_id, payload_json in rows:
+        payload = _payload_from_json(payload_json)
+        if payload.get("recovery_notice") or payload.get("no_api"):
+            continue
+        role = payload.get("role")
+        tool_calls = payload.get("tool_calls") or []
+        keep_user_turn = bool(payload.get("keep_user_turn"))
+        if role == "user" and not tool_calls and not keep_user_turn:
+            return RecoveryFenceResult(False, "newer user trigger message appeared")
+        if role == "tool" and not keep_user_turn:
+            return RecoveryFenceResult(False, "newer tool trigger message appeared")
+        if role == "assistant":
+            return RecoveryFenceResult(False, "newer assistant/provider result appeared")
+        if role == "system":
+            decision = classify_failure_payload(payload)
+            if decision.category not in {"none", "local_notice"}:
+                return RecoveryFenceResult(False, "newer provider failure appeared")
+
+    return RecoveryFenceResult(True)
+
+
 def format_retry_delay(delay_sec: Optional[float]) -> str:
     if delay_sec is None:
         return "no retry delay"
@@ -426,6 +596,35 @@ def format_recovery_decision_notice(decision: RecoveryDecision, *, source: str =
     return "\n".join(lines)
 
 
+def format_auto_continue_notice(
+    decision: RecoveryDecision,
+    *,
+    action: str,
+    trigger_msg_id: Optional[str] = None,
+    source_msg_id: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> str:
+    """Format a simple auto-continue status notice."""
+
+    lines = [f"Recovery: auto-continue {action}."]
+    if trigger_msg_id:
+        lines.append(f"Trigger: {trigger_msg_id[-8:]} ({trigger_msg_id}).")
+    if source_msg_id:
+        lines.append(f"Source failure: {source_msg_id[-8:]} ({source_msg_id}).")
+    if decision.retriable:
+        lines.append(f"Decision: retry ({decision.category}) after {format_retry_delay(decision.delay_sec)}.")
+    else:
+        lines.append(f"Decision: stop ({decision.category}).")
+    lines.append(f"Reason: {decision.reason}")
+    if decision.stop_reason and not decision.retriable:
+        lines.append(f"Stop reason: {decision.stop_reason}")
+    if detail:
+        lines.append(f"Detail: {detail}")
+    if decision.source_summary:
+        lines.append(f"Source: {decision.source_summary}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "DEFAULT_EMPTY_OR_INCOMPLETE_DELAY_SEC",
     "DEFAULT_MAX_RETRY_DELAY_SEC",
@@ -433,10 +632,17 @@ __all__ = [
     "DEFAULT_SERVER_DELAY_SEC",
     "DEFAULT_TIMEOUT_DELAY_SEC",
     "DEFAULT_TRANSPORT_DELAY_SEC",
+    "RecoveryFenceResult",
     "RecoveryDecision",
+    "RecoverySource",
+    "check_recovery_fence",
     "classify_failure_payload",
     "classify_failure_text",
+    "find_latest_recovery_source_after",
+    "format_auto_continue_notice",
     "format_recovery_decision_notice",
     "format_retry_delay",
+    "message_is_skipped",
     "parse_retry_delay_seconds",
+    "recovery_attempt_count",
 ]

@@ -788,6 +788,135 @@ class ThreadRunner:
         self.models_path = models_path or 'models.json'
         self.all_models_path = all_models_path or 'all-models.json'
 
+    async def _maybe_auto_continue_after_ra1_failure(self, ra: RunnerActionable) -> None:
+        if ra.kind != 'RA1_llm':
+            return
+        try:
+            from .api import append_recovery_notice, continue_thread, create_snapshot, get_thread_recovery
+            from .runner_recovery import (
+                check_recovery_fence,
+                find_latest_recovery_source_after,
+                format_auto_continue_notice,
+                recovery_attempt_count,
+            )
+        except Exception:
+            return
+
+        try:
+            if not get_thread_recovery(self.db, self.thread_id).auto_continue_on_error:
+                return
+        except Exception:
+            return
+
+        source = find_latest_recovery_source_after(self.db, self.thread_id, int(ra.triggering_event_seq))
+        if source is None:
+            return
+        decision = source.decision
+        trigger_msg_id = str(ra.msg_id or '') or None
+        extra_base = {
+            'auto_continue': True,
+            'trigger_msg_id': trigger_msg_id,
+            'source_msg_id': source.msg_id,
+            'source_event_seq': source.event_seq,
+            'decision_category': decision.category,
+        }
+
+        if not decision.retriable:
+            append_recovery_notice(
+                self.db,
+                self.thread_id,
+                format_auto_continue_notice(
+                    decision,
+                    action='stopped',
+                    trigger_msg_id=trigger_msg_id,
+                    source_msg_id=source.msg_id,
+                ),
+                extra={**extra_base, 'action': 'stopped'},
+            )
+            return
+
+        if recovery_attempt_count(self.db, self.thread_id, trigger_msg_id) >= 1:
+            append_recovery_notice(
+                self.db,
+                self.thread_id,
+                format_auto_continue_notice(
+                    decision,
+                    action='stopped',
+                    trigger_msg_id=trigger_msg_id,
+                    source_msg_id=source.msg_id,
+                    detail='automatic continue attempt cap reached',
+                ),
+                extra={**extra_base, 'action': 'stopped', 'stop_reason': 'attempt_cap'},
+            )
+            return
+
+        delay_sec = float(decision.delay_sec or 0.0)
+        append_recovery_notice(
+            self.db,
+            self.thread_id,
+            format_auto_continue_notice(
+                decision,
+                action='scheduled',
+                trigger_msg_id=trigger_msg_id,
+                source_msg_id=source.msg_id,
+            ),
+            extra={**extra_base, 'action': 'scheduled', 'delay_sec': delay_sec},
+        )
+        if delay_sec > 0:
+            await asyncio.sleep(delay_sec)
+
+        fence = check_recovery_fence(
+            self.db,
+            self.thread_id,
+            trigger_msg_id=trigger_msg_id,
+            source_msg_id=source.msg_id,
+            source_event_seq=source.event_seq,
+            max_attempts=1,
+        )
+        if not fence.ok:
+            append_recovery_notice(
+                self.db,
+                self.thread_id,
+                format_auto_continue_notice(
+                    decision,
+                    action='stopped',
+                    trigger_msg_id=trigger_msg_id,
+                    source_msg_id=source.msg_id,
+                    detail=fence.reason,
+                ),
+                extra={**extra_base, 'action': 'stopped', 'stop_reason': fence.reason},
+            )
+            return
+
+        result = continue_thread(self.db, self.thread_id, msg_id=trigger_msg_id)
+        if result.success:
+            append_recovery_notice(
+                self.db,
+                self.thread_id,
+                format_auto_continue_notice(
+                    decision,
+                    action='applied',
+                    trigger_msg_id=trigger_msg_id,
+                    source_msg_id=source.msg_id,
+                    detail=result.message,
+                ),
+                extra={**extra_base, 'action': 'applied', 'delay_sec': delay_sec},
+            )
+            create_snapshot(self.db, self.thread_id)
+        else:
+            append_recovery_notice(
+                self.db,
+                self.thread_id,
+                format_auto_continue_notice(
+                    decision,
+                    action='stopped',
+                    trigger_msg_id=trigger_msg_id,
+                    source_msg_id=source.msg_id,
+                    detail=result.message,
+                ),
+                extra={**extra_base, 'action': 'stopped', 'stop_reason': result.message},
+            )
+
     def _evaluate_pending_approval_policies(self) -> None:
         """Let deterministic approval policies advise on TC1 tool calls."""
 
@@ -1052,6 +1181,8 @@ class ThreadRunner:
                         msg_id=os.urandom(10).hex(),
                         payload=err_payload,
                     )
+                    if 'context length' in str(error_msg).lower() or 'context limit' in str(error_msg).lower():
+                        context_length_error = error_msg
                     print(f"Runner error: {error_msg}")
                 except Exception:
                     pass
@@ -1215,6 +1346,12 @@ class ThreadRunner:
             self.db.release(self.thread_id, invoke_id)
         except Exception:
             pass
+
+        if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None:
+            try:
+                await self._maybe_auto_continue_after_ra1_failure(ra)
+            except Exception as e:
+                print(f"Warning: auto-continue recovery check failed: {e}")
 
         if was_cancelled:
             raise asyncio.CancelledError

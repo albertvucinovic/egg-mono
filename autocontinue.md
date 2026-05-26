@@ -150,35 +150,39 @@ Expectations:
 
 ### Phase 4 — Runner integration
 
-- [ ] Wire Runner RA1 failure handling to recovery module.
-  - [ ] After provider/runner error is persisted, ask recovery module whether to auto-continue.
-  - [ ] Detect incomplete assistant messages and empty assistant system errors as sources.
-  - [ ] Honor effective `autoContinueOnError` setting.
-- [ ] Implement conservative attempt cap.
-  - [ ] Max 1 automatic continue per source failure/failed turn by default.
-  - [ ] Store enough metadata in recovery notices/control events to avoid repeated loops.
-- [ ] Implement delay behavior.
-  - [ ] Immediate/small async sleep inside runner is acceptable for initial version if it is fenced.
-  - [ ] If provider-requested delay exceeds policy, append recovery notice and do not retry.
-- [ ] Implement fence checks before applying delayed auto-continue.
-  - [ ] Thread has no active lease except the just-finished runner invocation.
-  - [ ] Source failure message still exists and is not skipped.
-  - [ ] No newer normal user/tool trigger message appeared after the source failure.
-  - [ ] No newer assistant/provider result appeared after the source failure.
-  - [ ] Attempt cap not exceeded.
-- [ ] On applying auto-continue:
-  - [ ] Append scheduled/applied recovery notices as appropriate.
-  - [ ] Call `continue_thread(...)` from the selected continue point.
-  - [ ] Rebuild snapshot.
-  - [ ] Let scheduler pick up the rerun normally.
-- [ ] Tests:
-  - [ ] RA1 503 error auto-continues and reruns once.
-  - [ ] Transfer truncation text auto-continues and reruns once.
-  - [ ] Timeout auto-continues once.
-  - [ ] Generic 400 does not auto-continue.
-  - [ ] Context-length path still uses existing recovery/does not auto-continue directly.
-  - [ ] Fence cancels if a newer user message appears.
-  - [ ] Attempt cap prevents loops.
+- [x] Wire Runner RA1 failure handling to recovery module.
+  - [x] After provider/runner error is persisted, ask recovery module whether to auto-continue.
+  - [x] Detect incomplete assistant messages and empty assistant system errors as sources.
+  - [x] Honor effective `autoContinueOnError` setting.
+- [x] Implement conservative attempt cap.
+  - [x] Max 1 automatic continue per source failure/failed turn by default.
+  - [x] Store enough metadata in recovery notices/control events to avoid repeated loops.
+- [x] Implement delay behavior.
+  - [x] Immediate/small async sleep inside runner is acceptable for initial version if it is fenced.
+  - [x] If provider-requested delay exceeds policy, append recovery notice and do not retry.
+- [x] Implement fence checks before applying delayed auto-continue.
+  - [x] Thread has no active lease except the just-finished runner invocation.
+  - [x] Source failure message still exists and is not skipped.
+  - [x] No newer normal user/tool trigger message appeared after the source failure.
+  - [x] No newer assistant/provider result appeared after the source failure.
+  - [x] Attempt cap not exceeded.
+  - [x] Manual `/continue` racing with delayed auto-continue cancels the retry.
+- [x] On applying auto-continue:
+  - [x] Append scheduled/applied recovery notices as appropriate.
+  - [x] Call `continue_thread(...)` from the selected continue point.
+  - [x] Rebuild snapshot.
+  - [x] Let scheduler pick up the rerun normally.
+- [x] Tests:
+  - [x] RA1 503 error auto-continues and reruns once.
+  - [x] Transfer truncation text auto-continues and reruns once.
+  - [x] Timeout auto-continues once.
+  - [x] Generic 400 does not auto-continue.
+  - [x] Context-length path still uses existing recovery/does not auto-continue directly.
+  - [x] Fence cancels if a newer user message appears.
+  - [x] Attempt cap prevents loops.
+  - [x] Toggle off disables auto-continue.
+  - [x] Manual `/continue` race cancels pending auto-continue.
+  - [x] Newer continue interrupt cancels pending auto-continue even if the source remains unskipped.
 
 ### Phase 5 — Incomplete-response metadata improvements
 
@@ -202,3 +206,5 @@ Expectations:
 - 2026-05-26 UTC: Phase 2 implemented. Added `thread.recovery` settings with `autoContinueOnError` defaulting enabled and nearest-ancestor inheritance; added terminal Egg and Eggw `/toggleAutoContinueOnError [on|off|true|false|1|0]`; Eggw settings endpoint now reports `autoContinueOnError`. Focused tests passed: `pytest -q eggthreads/tests/test_continue_thread.py eggthreads/tests/test_command_registry.py`; `PYTHONPATH=eggthreads pytest -q eggw/tests/test_api.py::TestAutoApproval eggw/tests/test_api.py::TestAutoContinueOnError eggw/tests/test_api.py::TestMessageOperations::test_web_continue_appends_recovery_notice`. Next: Phase 3 classification and retry-delay helpers.
 
 - 2026-05-26 UTC: Phase 3 implemented. Added pure `runner_recovery.py` classification, retry-delay parsing, and recovery-notice formatting helpers with focused coverage for transient transport/timeout/5xx/429/empty/incomplete cases and non-retry exclusions. Tests passed: `pytest -q eggthreads/tests/test_runner_recovery.py` (14 passed). Next: Phase 4 Runner integration.
+
+- 2026-05-26 UTC: Phase 4 implemented. Runner RA1 failures now classify persisted system errors/incomplete assistant messages, honor `autoContinueOnError`, append local scheduled/applied/stopped notices, enforce one automatic continue per triggering RA1 message, and fence delayed retries against active leases, skipped source failures/manual continues, newer user/tool triggers, newer provider results, and attempt caps. Context-length recovery remains on the compaction path. Tests passed: `pytest -q eggthreads/tests/test_runner_auto_continue.py eggthreads/tests/test_runner_recovery.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit::test_global_context_limit_blocks_ra1_when_exceeded eggthreads/tests/test_scheduler_slots.py::test_runner_persists_partial_tool_call_on_provider_transport_error` (27 passed); `pytest -q eggthreads/tests/test_compaction.py::test_runner_recovers_context_length_provider_error_by_queueing_summary_next eggthreads/tests/test_scheduler_slots.py::TestContextLimit` (8 passed). Next: Phase 5 incomplete-response metadata improvements.

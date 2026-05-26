@@ -40,6 +40,16 @@ def test_classifies_transfer_encoding_400_as_retriable_transport() -> None:
     assert "transport" in decision.reason.lower()
 
 
+def test_transport_and_timeout_respect_parsed_retry_delay() -> None:
+    transport = classify_failure_text("ClientPayloadError: disconnected, retry after 7 seconds")
+    timeout = classify_failure_text("asyncio.TimeoutError: read timeout, retry after 3 seconds")
+
+    assert_retriable(transport, "transport")
+    assert transport.delay_sec == 7.0
+    assert_retriable(timeout, "timeout")
+    assert timeout.delay_sec == 3.0
+
+
 def test_classifies_timeout_as_retriable() -> None:
     decision = classify_failure_text("asyncio.TimeoutError: provider read timeout")
 
