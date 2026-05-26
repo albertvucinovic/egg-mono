@@ -17,7 +17,9 @@ from eggthreads import (
     set_context_limit,
     get_context_limit,
     get_thread_scheduling,
+    get_thread_recovery,
     set_thread_scheduling,
+    set_thread_recovery,
     UNSET,
     parse_args,
     append_message,
@@ -168,6 +170,42 @@ async def cmd_toggle_auto_approval(thread_id: str) -> CommandResponse:
         success=True,
         message=f"Auto-approval {'enabled' if new_state else 'disabled'}",
         data={"auto_approval": new_state},
+    )
+
+
+def _parse_bool_arg(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    low = value.strip().lower()
+    if low in {"on", "true", "1"}:
+        return True
+    if low in {"off", "false", "0"}:
+        return False
+    return None
+
+
+async def cmd_toggle_auto_continue_on_error(thread_id: str, arg: str = "") -> CommandResponse:
+    """Handle /toggleAutoContinueOnError command."""
+
+    args = parse_args(arg or "")
+    raw = args.positional_or(0)
+    if raw is None:
+        raw = args.get("enabled") or args.get("value")
+
+    current = get_thread_recovery(core.db, thread_id).auto_continue_on_error
+    requested = _parse_bool_arg(raw)
+    if raw is not None and requested is None:
+        return CommandResponse(
+            success=False,
+            message="Usage: /toggleAutoContinueOnError [on|off|true|false|1|0]",
+        )
+
+    new_state = (not current) if requested is None else requested
+    set_thread_recovery(core.db, thread_id, auto_continue_on_error=new_state)
+    return CommandResponse(
+        success=True,
+        message=f"Auto-continue on error {'enabled' if new_state else 'disabled'}",
+        data={"autoContinueOnError": new_state},
     )
 
 
@@ -473,6 +511,7 @@ Persistent REPL Sessions:
 Utility:
   /cost                          - Show token usage and cost
   /toggleAutoApproval            - Toggle auto-approve tools
+  /toggleAutoContinueOnError     - Toggle auto-continue after errors
   /schedulers                    - Show active schedulers
   /waitForThreads <ids...>       - Wait for threads to complete
   /setContextLimit [limit]       - Set or show max context tokens

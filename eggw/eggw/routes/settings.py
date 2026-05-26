@@ -14,6 +14,7 @@ from eggthreads import (
     set_thread_sandbox_config,
     is_user_sandbox_control_enabled,
     get_thread_session_status,
+    get_thread_recovery,
     enable_thread_session,
     disable_thread_session,
 )
@@ -34,6 +35,7 @@ async def get_thread_settings(thread_id: str):
 
     return {
         "auto_approval": get_thread_auto_approval_status(core.db, thread_id),
+        "autoContinueOnError": get_thread_recovery(core.db, thread_id).auto_continue_on_error,
         "model_key": current_thread_model(core.db, thread_id),
     }
 

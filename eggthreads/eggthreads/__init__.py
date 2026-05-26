@@ -127,6 +127,10 @@ from .api import (
     # Thread diagnosis
     ThreadDiagnosis,
     diagnose_thread,
+    THREAD_RECOVERY_EVENT_TYPE,
+    ThreadRecoverySettings,
+    get_thread_recovery,
+    set_thread_recovery,
     # Thread scheduling API
     UNSET,
     ThreadSchedulingSettings,
@@ -296,7 +300,7 @@ __all__ = [
     'latest_effective_thread_compaction', 'latest_thread_compaction', 'latest_effective_thread_compaction_context_length', 'latest_effective_thread_compaction_summary_in_progress', 'has_effective_thread_compaction_summary_in_progress', 'thread_compaction_status', 'list_thread_compaction_context_lengths', 'list_thread_compaction_summary_in_progress_events', 'list_thread_compactions', 'resolve_compaction_start_message',
     'filter_messages_for_compaction_provider_context', 'maybe_auto_compact_thread', 'resolve_auto_compact_threshold', 'set_thread_compaction_context_length',
     # Thread diagnosis
-    'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text',
+    'ThreadDiagnosis', 'diagnose_thread', 'sanitize_terminal_text', 'THREAD_RECOVERY_EVENT_TYPE', 'ThreadRecoverySettings', 'get_thread_recovery', 'set_thread_recovery',
     # Thread scheduling API
     'UNSET', 'ThreadSchedulingSettings', 'get_thread_scheduling', 'set_thread_scheduling',
     # Argument parser

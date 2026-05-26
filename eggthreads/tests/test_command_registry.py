@@ -288,6 +288,14 @@ def test_default_registry_uses_tools_admin_plugin_handlers() -> None:
     assert registry.get("toggleAutoApproval").handler is tools_admin.toggle_auto_approval_command
 
 
+def test_default_registry_uses_recovery_toggle_handler() -> None:
+    from eggthreads.builtin_plugins import diagnostics
+
+    registry = create_default_command_registry()
+
+    assert registry.get("toggleAutoContinueOnError").handler is diagnostics.toggle_auto_continue_on_error_command
+
+
 def test_tools_on_off_commands_are_registered_handlers(monkeypatch) -> None:
     registry = create_default_command_registry()
     calls: list[tuple[str, bool]] = []
@@ -459,6 +467,37 @@ def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:
         decisions.append(json.loads(payload_json)["decision"])
 
     assert decisions[-2:] == ["global_approval", "revoke_global_approval"]
+    assert any("ENABLED" in message for message in logs)
+    assert any("DISABLED" in message for message in logs)
+
+
+def test_toggle_auto_continue_on_error_command(tmp_path) -> None:
+    from eggthreads import ThreadsDB, create_child_thread, create_root_thread, get_thread_recovery
+
+    registry = create_default_command_registry()
+    logs: list[str] = []
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    root = create_root_thread(db, "recovery-toggle-root")
+    child = create_child_thread(db, root, "recovery-toggle-child")
+
+    ctx = CommandContext(db=db, current_thread=root, log_system=logs.append)
+
+    assert get_thread_recovery(db, root).auto_continue_on_error is True
+    registry.execute("toggleAutoContinueOnError", ctx)
+    assert get_thread_recovery(db, root).auto_continue_on_error is False
+    assert get_thread_recovery(db, child).auto_continue_on_error is False
+
+    registry.execute("toggleAutoContinueOnError", ctx, "on")
+    assert get_thread_recovery(db, root).auto_continue_on_error is True
+    assert get_thread_recovery(db, child).auto_continue_on_error is True
+
+    registry.execute("toggleAutoContinueOnError", ctx, "0")
+    assert get_thread_recovery(db, root).auto_continue_on_error is False
+
+    result = registry.execute("toggleAutoContinueOnError", ctx, "maybe")
+    assert result.clear_input is False
+    assert get_thread_recovery(db, root).auto_continue_on_error is False
     assert any("ENABLED" in message for message in logs)
     assert any("DISABLED" in message for message in logs)
 

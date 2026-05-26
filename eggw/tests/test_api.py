@@ -475,6 +475,49 @@ class TestAutoApproval:
         assert data["data"]["auto_approval"] == initial_state  # Back to initial
 
 
+class TestAutoContinueOnError:
+    """Test auto-continue-on-error settings via command."""
+
+    def test_toggle_auto_continue_on_error(self, client):
+        from eggthreads import create_child_thread, get_thread_recovery
+
+        create_resp = client.post("/api/threads", json={"name": "Recovery Toggle"})
+        thread_id = create_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, thread_id, "Recovery Toggle Child")
+
+        response = client.get(f"/api/threads/{thread_id}/settings")
+        assert response.status_code == 200
+        assert response.json()["autoContinueOnError"] is True
+        assert get_thread_recovery(core_state.db, child_id).auto_continue_on_error is True
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/toggleAutoContinueOnError"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["autoContinueOnError"] is False
+        assert get_thread_recovery(core_state.db, child_id).auto_continue_on_error is False
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/toggleAutoContinueOnError on"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["data"]["autoContinueOnError"] is True
+        assert get_thread_recovery(core_state.db, child_id).auto_continue_on_error is True
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/toggleAutoContinueOnError nope"},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is False
+
+
 class TestTokenStats:
     """Test token statistics endpoint."""
 

@@ -579,6 +579,16 @@ class ContinueResult:
     diagnosis: Optional['ThreadDiagnosis'] = None
 
 
+THREAD_RECOVERY_EVENT_TYPE = 'thread.recovery'
+
+
+@dataclass
+class ThreadRecoverySettings:
+    """Effective recovery settings for a thread."""
+
+    auto_continue_on_error: bool = True
+
+
 RECOVERY_NOTICE_EXTRA: Dict[str, bool] = {
     'no_api': True,
     'recovery_notice': True,
@@ -594,6 +604,54 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
     )
     row = cur.fetchone()
     return row[0] if row else None
+
+
+def get_thread_recovery(db: ThreadsDB, thread_id: str) -> ThreadRecoverySettings:
+    """Return effective recovery settings, inherited from nearest ancestor."""
+
+    tid: Optional[str] = thread_id
+    seen: set[str] = set()
+    while tid and tid not in seen:
+        seen.add(tid)
+        try:
+            row = db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type=? ORDER BY event_seq DESC LIMIT 1",
+                (tid, THREAD_RECOVERY_EVENT_TYPE),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row is not None:
+            try:
+                payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and isinstance(payload.get('autoContinueOnError'), bool):
+                return ThreadRecoverySettings(auto_continue_on_error=payload['autoContinueOnError'])
+        try:
+            parent = db.conn.execute(
+                "SELECT parent_id FROM children WHERE child_id=? LIMIT 1",
+                (tid,),
+            ).fetchone()
+            tid = parent[0] if parent and parent[0] else None
+        except Exception:
+            tid = None
+    return ThreadRecoverySettings()
+
+
+def set_thread_recovery(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    auto_continue_on_error: bool,
+) -> None:
+    """Persist recovery settings for a thread."""
+
+    db.append_event(
+        event_id=_ulid_like(),
+        thread_id=thread_id,
+        type_=THREAD_RECOVERY_EVENT_TYPE,
+        payload={'autoContinueOnError': bool(auto_continue_on_error)},
+    )
 
 
 def append_recovery_notice(
@@ -2698,6 +2756,7 @@ _SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES = {
     'thread.compaction',
     'thread.compaction_context_length',
     'thread.compaction_summary_in_progress',
+    'thread.recovery',
     'model.switch',
     'runtime.config',
     'sandbox.config',

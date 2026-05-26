@@ -41,6 +41,7 @@ from .auth import cmd_login, cmd_logout, cmd_auth_status
 from .compaction import cmd_compact, cmd_compact_with_summary, cmd_context, cmd_set_auto_compact_threshold
 from .utility import (
     cmd_toggle_auto_approval,
+    cmd_toggle_auto_continue_on_error,
     cmd_cost,
     cmd_schedulers,
     cmd_wait_for_threads,
@@ -104,6 +105,7 @@ __all__ = [
     "cmd_bash_repl",
     # Utility commands
     "cmd_toggle_auto_approval",
+    "cmd_toggle_auto_continue_on_error",
     "cmd_cost",
     "cmd_schedulers",
     "cmd_wait_for_threads",
@@ -172,6 +174,8 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_skill(thread_id, command_arg)
         elif command_name == "toggleAutoApproval":
             return await cmd_toggle_auto_approval(thread_id)
+        elif command_name == "toggleAutoContinueOnError":
+            return await cmd_toggle_auto_continue_on_error(thread_id, command_arg)
         elif command_name == "parentThread":
             return await cmd_parent_thread(thread_id)
         elif command_name == "thread":

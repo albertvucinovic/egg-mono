@@ -89,7 +89,7 @@ Expectations:
 
 - [x] Create this TODO/handoff file.
 - [x] Run preflight (`git status --short`, `git log --oneline -8`) and record relevant baseline.
-- [ ] Spawn one long-lived primary worker for focused implementation slices using the worker-manager workflow.
+- [x] Spawn one long-lived primary worker for focused implementation slices using the worker-manager workflow.
 
 ### Phase 1 — Local recovery notices and manual `/continue` status
 
@@ -112,20 +112,20 @@ Expectations:
 
 ### Phase 2 — Recovery configuration and toggle command
 
-- [ ] Add effective recovery setting storage/resolution.
-  - [ ] Event type suggestion: `thread.recovery`.
-  - [ ] Field: `autoContinueOnError` boolean.
-  - [ ] Default: enabled.
-  - [ ] Inherit from nearest ancestor, like other thread settings where practical.
-- [ ] Add `/toggleAutoContinueOnError` command.
-  - [ ] With no argument: toggle current effective state.
-  - [ ] Accept `on`/`off`/`true`/`false` if simple.
-  - [ ] Log/status message reports new state.
-  - [ ] Avoid adding broader settings commands.
-- [ ] Tests:
-  - [ ] Default is enabled.
-  - [ ] Toggle off/on works.
-  - [ ] Child inheritance works if implemented.
+- [x] Add effective recovery setting storage/resolution.
+  - [x] Event type suggestion: `thread.recovery`.
+  - [x] Field: `autoContinueOnError` boolean.
+  - [x] Default: enabled.
+  - [x] Inherit from nearest ancestor, like other thread settings where practical.
+- [x] Add `/toggleAutoContinueOnError` command.
+  - [x] With no argument: toggle current effective state.
+  - [x] Accept `on`/`off`/`true`/`false` if simple.
+  - [x] Log/status message reports new state.
+  - [x] Avoid adding broader settings commands.
+- [x] Tests:
+  - [x] Default is enabled.
+  - [x] Toggle off/on works.
+  - [x] Child inheritance works if implemented.
 
 ### Phase 3 — Isolated classification / retry-delay module
 
@@ -198,3 +198,5 @@ Expectations:
 
 
 - 2026-05-26 UTC: Phase 1 implemented. Added reusable local recovery notice helpers in `eggthreads.api`; terminal Egg and Eggw manual `/continue` append recovery notices after successful continues; `continue_thread` preserves `preserve_on_continue` messages; diagnostics/status error checks ignore `recovery_notice` messages. Focused tests passed: `pytest -q eggthreads/tests/test_continue_thread.py eggthreads/tests/test_command_registry.py`; `PYTHONPATH=eggthreads pytest -q eggw/tests/test_api.py::TestMessageOperations`; `pytest -q eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py eggthreads/tests/test_generic_user_tool_call_api.py::test_wait_for_threads_treats_llm_error_after_tool_message_as_completion eggthreads/tests/test_tool_state_runner_actionable.py`. Next: Phase 2 recovery setting storage and `/toggleAutoContinueOnError`.
+
+- 2026-05-26 UTC: Phase 2 implemented. Added `thread.recovery` settings with `autoContinueOnError` defaulting enabled and nearest-ancestor inheritance; added terminal Egg and Eggw `/toggleAutoContinueOnError [on|off|true|false|1|0]`; Eggw settings endpoint now reports `autoContinueOnError`. Focused tests passed: `pytest -q eggthreads/tests/test_continue_thread.py eggthreads/tests/test_command_registry.py`; `PYTHONPATH=eggthreads pytest -q eggw/tests/test_api.py::TestAutoApproval eggw/tests/test_api.py::TestAutoContinueOnError eggw/tests/test_api.py::TestMessageOperations::test_web_continue_appends_recovery_notice`. Next: Phase 3 classification and retry-delay helpers.

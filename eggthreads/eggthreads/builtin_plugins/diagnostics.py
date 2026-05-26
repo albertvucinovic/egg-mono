@@ -263,6 +263,44 @@ def set_thread_priority_command(context: Any, arg: str):
     return CommandResult(clear_input=True)
 
 
+def _parse_bool_arg(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    low = value.strip().lower()
+    if low in {"on", "true", "1"}:
+        return True
+    if low in {"off", "false", "0"}:
+        return False
+    return None
+
+
+def toggle_auto_continue_on_error_command(context: Any, arg: str):
+    from ..api import get_thread_recovery, set_thread_recovery
+    from ..arg_parser import parse_args
+    from ..command_catalog import CommandResult
+
+    target = _target(context, "toggleAutoContinueOnError")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    args = parse_args(arg or "")
+    raw = args.positional_or(0)
+    if raw is None:
+        raw = args.get("enabled") or args.get("value")
+
+    current = get_thread_recovery(db, thread_id).auto_continue_on_error
+    requested = _parse_bool_arg(raw)
+    if raw is not None and requested is None:
+        _log(context, "Usage: /toggleAutoContinueOnError [on|off|true|false|1|0]")
+        return CommandResult(clear_input=False)
+
+    new_state = (not current) if requested is None else requested
+    set_thread_recovery(db, thread_id, auto_continue_on_error=new_state)
+    state_text = "ENABLED" if new_state else "DISABLED"
+    _log(context, f"Auto-continue on error {state_text} for this thread.")
+    return CommandResult(clear_input=True)
+
+
 def register_diagnostics_commands(registry: Any) -> None:
     from ..command_catalog import CommandSpec
 
@@ -270,6 +308,7 @@ def register_diagnostics_commands(registry: Any) -> None:
     registry.register(CommandSpec("cost", cost_command, category="diagnostics", usage="/cost", description="Show token usage and approximate cost."))
     registry.register(CommandSpec("setContextLimit", set_context_limit_command, category="diagnostics", usage="/setContextLimit [limit]", description="Set or show the thread context limit."))
     registry.register(CommandSpec("setThreadPriority", set_thread_priority_command, category="diagnostics", usage="/setThreadPriority ...", description="Set thread scheduler settings."))
+    registry.register(CommandSpec("toggleAutoContinueOnError", toggle_auto_continue_on_error_command, category="diagnostics", usage="/toggleAutoContinueOnError [on|off]", description="Toggle automatic continue after transient errors."))
 
 
 @dataclass(frozen=True)
@@ -289,4 +328,5 @@ __all__ = [
     "schedulers_command",
     "set_context_limit_command",
     "set_thread_priority_command",
+    "toggle_auto_continue_on_error_command",
 ]

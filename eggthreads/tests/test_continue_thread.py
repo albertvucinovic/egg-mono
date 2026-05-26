@@ -16,6 +16,7 @@ import pytest
 from eggthreads import (
     ThreadsDB,
     create_root_thread,
+    create_child_thread,
     append_message,
     create_snapshot,
     diagnose_thread,
@@ -23,7 +24,7 @@ from eggthreads import (
     is_thread_continuable,
     wait_thread_settled,
 )
-from eggthreads.api import append_continue_recovery_notice, append_recovery_notice, list_active_threads, collect_subtree
+from eggthreads.api import append_continue_recovery_notice, append_recovery_notice, list_active_threads, collect_subtree, get_thread_recovery, set_thread_recovery
 from eggthreads.tool_state import discover_runner_actionable, _last_stream_close_seq
 
 
@@ -388,6 +389,38 @@ class TestDiagnoseAndContinue:
         ra = discover_runner_actionable(db, tid)
         assert ra is not None
         assert ra.kind == "RA1_llm"
+
+
+class TestThreadRecoverySettings:
+    def test_recovery_auto_continue_defaults_enabled(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        assert get_thread_recovery(db, tid).auto_continue_on_error is True
+
+    def test_recovery_auto_continue_can_be_set(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        set_thread_recovery(db, tid, auto_continue_on_error=False)
+        assert get_thread_recovery(db, tid).auto_continue_on_error is False
+
+        set_thread_recovery(db, tid, auto_continue_on_error=True)
+        assert get_thread_recovery(db, tid).auto_continue_on_error is True
+
+    def test_recovery_settings_inherit_from_nearest_ancestor(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        root = create_root_thread(db, name="root")
+        child = create_child_thread(db, root, name="child")
+        grandchild = create_child_thread(db, child, name="grandchild")
+
+        set_thread_recovery(db, root, auto_continue_on_error=False)
+        assert get_thread_recovery(db, child).auto_continue_on_error is False
+        assert get_thread_recovery(db, grandchild).auto_continue_on_error is False
+
+        set_thread_recovery(db, child, auto_continue_on_error=True)
+        assert get_thread_recovery(db, child).auto_continue_on_error is True
+        assert get_thread_recovery(db, grandchild).auto_continue_on_error is True
 
 
 class TestContinuePointWithPendingToolCalls:
