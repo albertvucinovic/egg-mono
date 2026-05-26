@@ -129,24 +129,24 @@ Expectations:
 
 ### Phase 3 — Isolated classification / retry-delay module
 
-- [ ] Add `eggthreads/eggthreads/runner_recovery.py` (name can vary if better).
-- [ ] Implement classification helpers.
-  - [ ] Inputs can be exception text and/or persisted message payloads.
-  - [ ] Return a structured decision: retriable? class/reason, delay, source summary, stop reason.
-  - [ ] Recognize transient transport errors even when text contains `400`.
-  - [ ] Recognize 5xx/429 status codes from text.
-  - [ ] Exclude auth/context/permanent bad request/safety/quota/max-output classes.
-- [ ] Implement retry-delay parser.
-  - [ ] Parse `Retry-After`-like text when present.
-  - [ ] Parse seconds/minutes forms: `retry after 30 seconds`, `try again in 2m`, `available in 60s`, `resets in 45 seconds`.
-  - [ ] Clamp/decline according to max delay policy.
-- [ ] Implement recovery-notice formatting helpers.
-- [ ] Tests:
-  - [ ] Classify the known `TransferEncodingError: 400 Not enough data...` example as retriable transport.
-  - [ ] Classify timeout as retriable.
-  - [ ] Classify 503/500 as retriable.
-  - [ ] Classify generic 400/auth/context/quota/safety as non-retriable.
-  - [ ] Parse retry delays.
+- [x] Add `eggthreads/eggthreads/runner_recovery.py` (name can vary if better).
+- [x] Implement classification helpers.
+  - [x] Inputs can be exception text and/or persisted message payloads.
+  - [x] Return a structured decision: retriable? class/reason, delay, source summary, stop reason.
+  - [x] Recognize transient transport errors even when text contains `400`.
+  - [x] Recognize 5xx/429 status codes from text.
+  - [x] Exclude auth/context/permanent bad request/safety/quota/max-output classes.
+- [x] Implement retry-delay parser.
+  - [x] Parse `Retry-After`-like text when present.
+  - [x] Parse seconds/minutes forms: `retry after 30 seconds`, `try again in 2m`, `available in 60s`, `resets in 45 seconds`.
+  - [x] Clamp/decline according to max delay policy.
+- [x] Implement recovery-notice formatting helpers.
+- [x] Tests:
+  - [x] Classify the known `TransferEncodingError: 400 Not enough data...` example as retriable transport.
+  - [x] Classify timeout as retriable.
+  - [x] Classify 503/500 as retriable.
+  - [x] Classify generic 400/auth/context/quota/safety as non-retriable.
+  - [x] Parse retry delays.
 
 ### Phase 4 — Runner integration
 
@@ -200,3 +200,5 @@ Expectations:
 - 2026-05-26 UTC: Phase 1 implemented. Added reusable local recovery notice helpers in `eggthreads.api`; terminal Egg and Eggw manual `/continue` append recovery notices after successful continues; `continue_thread` preserves `preserve_on_continue` messages; diagnostics/status error checks ignore `recovery_notice` messages. Focused tests passed: `pytest -q eggthreads/tests/test_continue_thread.py eggthreads/tests/test_command_registry.py`; `PYTHONPATH=eggthreads pytest -q eggw/tests/test_api.py::TestMessageOperations`; `pytest -q eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py eggthreads/tests/test_generic_user_tool_call_api.py::test_wait_for_threads_treats_llm_error_after_tool_message_as_completion eggthreads/tests/test_tool_state_runner_actionable.py`. Next: Phase 2 recovery setting storage and `/toggleAutoContinueOnError`.
 
 - 2026-05-26 UTC: Phase 2 implemented. Added `thread.recovery` settings with `autoContinueOnError` defaulting enabled and nearest-ancestor inheritance; added terminal Egg and Eggw `/toggleAutoContinueOnError [on|off|true|false|1|0]`; Eggw settings endpoint now reports `autoContinueOnError`. Focused tests passed: `pytest -q eggthreads/tests/test_continue_thread.py eggthreads/tests/test_command_registry.py`; `PYTHONPATH=eggthreads pytest -q eggw/tests/test_api.py::TestAutoApproval eggw/tests/test_api.py::TestAutoContinueOnError eggw/tests/test_api.py::TestMessageOperations::test_web_continue_appends_recovery_notice`. Next: Phase 3 classification and retry-delay helpers.
+
+- 2026-05-26 UTC: Phase 3 implemented. Added pure `runner_recovery.py` classification, retry-delay parsing, and recovery-notice formatting helpers with focused coverage for transient transport/timeout/5xx/429/empty/incomplete cases and non-retry exclusions. Tests passed: `pytest -q eggthreads/tests/test_runner_recovery.py` (14 passed). Next: Phase 4 Runner integration.
