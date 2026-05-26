@@ -35,6 +35,7 @@ class MessageContent(BaseModel):
     tps: Optional[float] = None
     model_key: Optional[str] = None
     answer_user_preserve_turn: bool = False
+    recovery_notice: bool = False
 
 
 class ToolCallInfo(BaseModel):

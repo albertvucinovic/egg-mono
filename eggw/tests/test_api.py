@@ -296,7 +296,9 @@ class TestMessageOperations:
 
         messages_resp = client.get(f"/api/threads/{thread_id}/messages")
         assert messages_resp.status_code == 200
-        assert any("manual /continue" in str(msg.get("content")) for msg in messages_resp.json())
+        notice_messages = [msg for msg in messages_resp.json() if "manual /continue" in str(msg.get("content"))]
+        assert notice_messages
+        assert notice_messages[0]["recovery_notice"] is True
 
 
 class TestEventStreaming:

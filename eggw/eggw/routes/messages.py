@@ -168,6 +168,7 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
             tokens=total_tokens,
             tps=float(msg.get("tps")) if isinstance(msg.get("tps"), (int, float)) and float(msg.get("tps")) > 0 else None,
             answer_user_preserve_turn=bool(msg.get("answer_user_preserve_turn")),
+            recovery_notice=bool(msg.get("recovery_notice")),
         ))
 
     return messages

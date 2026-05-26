@@ -126,6 +126,7 @@ function messageMetadataText(message: Message, label: string): string {
 
 function isImportantSystemMessage(message: Message): boolean {
   if (message.role !== "system") return false;
+  if (message.recovery_notice) return true;
   if (message.id?.startsWith("cmd-")) return true;
   const content = (message.content || "").trim().toLowerCase();
   return content.startsWith("llm error:") ||
@@ -228,6 +229,9 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
   };
 
   const displayRole = message.answer_user_preserve_turn && message.role === "assistant" ? "assistant_note" : message.role;
+  const roleLabel = message.recovery_notice && message.role === "system"
+    ? "Continue Status"
+    : roleLabels[displayRole] || displayRole;
 
   // Check if this is a shell command (starts with $ or $$)
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
@@ -261,7 +265,7 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
       {/* Header */}
       <div className="flex items-center gap-2 mb-2 text-xs flex-wrap" style={{ color: "var(--muted)" }}>
         <span className="font-medium" style={roleStyles[displayRole] ? { color: roleStyles[displayRole].color } : { color: "var(--foreground)" }}>
-          {isShellCommand ? "Shell" : roleLabels[displayRole] || displayRole}
+          {isShellCommand ? "Shell" : roleLabel}
         </span>
         {message.model_key && (
           <span style={{ color: "var(--muted)" }}>({message.model_key})</span>

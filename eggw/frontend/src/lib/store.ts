@@ -26,6 +26,7 @@ export interface Message {
   tokens?: number;     // Per-message token count
   tps?: number;
   answer_user_preserve_turn?: boolean;
+  recovery_notice?: boolean;
 }
 
 export interface ToolCall {

@@ -1343,7 +1343,9 @@ class PanelsMixin:
             return full_title
 
         if role == 'system':
-            title = '[bold blue]System[/bold blue]'
+            is_recovery_notice = bool(m.get('recovery_notice'))
+            title = '[bold magenta]Continue Status[/bold magenta]' if is_recovery_notice else '[bold blue]System[/bold blue]'
+            style = 'magenta' if is_recovery_notice else 'blue'
             if isinstance(content, str) and content.lower().startswith('llm error:'):
                 title = '[bold red]Error[/bold red]'
                 if verbosity == 'min':
@@ -1354,7 +1356,7 @@ class PanelsMixin:
                 append_hidden_details()
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
-            panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
+            panel(Text(content, no_wrap=False, overflow='fold', style=style), title, style)
             return items
 
         if role == 'user':

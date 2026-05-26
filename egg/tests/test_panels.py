@@ -524,6 +524,43 @@ class TestConsolePrintMessage:
 
         assert len(printed) >= 1
 
+    def test_recovery_notice_prints_continue_status_title(self, egg_app, monkeypatch):
+        """Recovery notices should be titled separately from normal system messages."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.console_print_message({
+            'role': 'system',
+            'content': 'Manual /continue applied',
+            'recovery_notice': True,
+        })
+
+        assert len(printed) >= 1
+        rendered = printed[0][0][0]
+        assert 'Continue Status' in str(getattr(rendered, 'title', ''))
+
+    def test_recovery_notice_flushes_min_hidden_details(self, egg_app, monkeypatch):
+        """Min verbosity should keep recovery notices visible like other system messages."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+        egg_app._display_verbosity = 'min'
+
+        egg_app.console_print_message({
+            'role': 'tool',
+            'content': 'hidden tool output',
+            'name': 'bash',
+        })
+        egg_app.console_print_message({
+            'role': 'system',
+            'content': 'Manual /continue applied',
+            'recovery_notice': True,
+        })
+
+        printed_text = "\n".join(str(getattr(args[0], 'renderable', args[0])) for args, _kwargs in printed)
+        titles = [str(getattr(args[0], 'title', '')) for args, _kwargs in printed]
+        assert 'got 1 tool result' in printed_text
+        assert any('Continue Status' in title for title in titles)
+
     def test_prints_tool_message(self, egg_app, monkeypatch):
         """Should print tool message with yellow style."""
         printed = []

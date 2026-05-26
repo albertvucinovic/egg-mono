@@ -168,6 +168,28 @@ class TestFormatMessagesText:
         assert f"msg_id: {user}" in text
         assert f"msg_id: {assistant}" in text
 
+    def test_recovery_notice_uses_continue_status_label(self, isolated_db):
+        from eggthreads import create_root_thread, create_snapshot
+        from eggthreads.api import append_recovery_notice
+        from egg.formatting import FormattingMixin
+
+        tid = create_root_thread(isolated_db, name="RecoveryLabel")
+        append_recovery_notice(isolated_db, tid, "Manual /continue applied")
+        create_snapshot(isolated_db, tid)
+
+        class MinimalApp:
+            def __init__(self):
+                self.db = isolated_db
+                self.current_thread = tid
+
+        class TestApp(FormattingMixin, MinimalApp):
+            pass
+
+        text = TestApp().format_messages_text(tid)
+
+        assert "[Continue Status" in text
+        assert "[System" not in text
+
     def test_display_verbosity_default_max_preserves_reasoning_and_tool_output(self, isolated_db):
         """Default max text should match the existing full-body transcript format."""
         from eggthreads import append_message, create_root_thread, create_snapshot

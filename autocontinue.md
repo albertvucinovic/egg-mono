@@ -192,9 +192,9 @@ Expectations:
 
 ### Phase 6 — Optional UI polish
 
-- [ ] If small, render `recovery_notice=True` system messages with a “Recovery” / “Continue Status” title instead of normal “System”.
-- [ ] Do not block core recovery on this polish.
-- [ ] Tests only if rendering changes are made.
+- [x] If small, render `recovery_notice=True` system messages with a “Recovery” / “Continue Status” title instead of normal “System”.
+- [x] Do not block core recovery on this polish.
+- [x] Tests only if rendering changes are made.
 
 ## Status notes
 
@@ -210,3 +210,5 @@ Expectations:
 - 2026-05-26 UTC: Phase 4 implemented. Runner RA1 failures now classify persisted system errors/incomplete assistant messages, honor `autoContinueOnError`, append local scheduled/applied/stopped notices, enforce one automatic continue per triggering RA1 message, and fence delayed retries against active leases, skipped source failures/manual continues, newer user/tool triggers, newer provider results, and attempt caps. Context-length recovery remains on the compaction path. Tests passed: `pytest -q eggthreads/tests/test_runner_auto_continue.py eggthreads/tests/test_runner_recovery.py eggthreads/tests/test_scheduler_slots.py::TestContextLimit::test_global_context_limit_blocks_ra1_when_exceeded eggthreads/tests/test_scheduler_slots.py::test_runner_persists_partial_tool_call_on_provider_transport_error` (27 passed); `pytest -q eggthreads/tests/test_compaction.py::test_runner_recovers_context_length_provider_error_by_queueing_summary_next eggthreads/tests/test_scheduler_slots.py::TestContextLimit` (8 passed). Next: Phase 5 incomplete-response metadata improvements.
 
 - 2026-05-26 UTC: Phase 5 implemented. Responses API sync/async adapters now preserve `response.incomplete` as assistant `incomplete=True` metadata with `incomplete_reason` and `incomplete_details` when provided; runner persistence keeps incomplete-only assistant messages instead of replacing them with empty-response errors; runner recovery classification also inspects structured incomplete details so `max_output_tokens` truncation stops instead of retrying while transport/provider early termination remains retriable. Focused tests passed: `pytest -q eggllm/tests/test_openai_responses.py::TestResponsesIncompleteMetadata eggthreads/tests/test_runner_recovery.py::test_incomplete_payload_with_max_output_details_is_not_retriable eggthreads/tests/test_runner_auto_continue.py::test_max_output_incomplete_metadata_does_not_auto_continue`; `pytest -q eggllm/tests/test_openai_responses.py eggthreads/tests/test_runner_recovery.py eggthreads/tests/test_runner_auto_continue.py` (64 passed). Next: Phase 6 optional UI polish.
+
+- 2026-05-26 UTC: Phase 6 implemented. Terminal Egg text transcripts and static transcript panels now label `recovery_notice=True` system messages as “Continue Status”; Eggw message API now exposes `recovery_notice`, and the web chat labels those messages as “Continue Status” and keeps them visible in min verbosity. Focused tests passed: `PYTHONPATH=eggthreads:eggw:egg pytest -q egg/tests/test_formatting.py::TestFormatMessagesText egg/tests/test_panels.py::TestConsolePrintMessage eggw/tests/test_api.py::TestMessageOperations::test_web_continue_appends_recovery_notice eggw/tests/test_api.py::TestAutoContinueOnError` (36 passed); `cd eggw/frontend && npx tsc --noEmit`. `npm run lint -- --file ...` was attempted but Next prompted to configure ESLint, so it was not usable non-interactively. Auto-continue TODO is complete.
