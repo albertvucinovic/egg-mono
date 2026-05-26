@@ -281,9 +281,16 @@ def _is_max_output_truncation(low: str) -> bool:
             "maximum output tokens",
             "finish_reason=length",
             "finish_reason: length",
+            '"finish_reason": "length"',
+            '"finish_reason":"length"',
+            "'finish_reason': 'length'",
+            "'finish_reason':'length'",
+            "finish_reason length",
             "finish reason length",
             "finish reason: length",
             "stop reason length",
+            '"stop_reason": "length"',
+            '"stop_reason":"length"',
             "output token limit",
         ),
     )
@@ -414,6 +421,13 @@ def classify_failure_payload(
     incomplete_reason = payload.get("incomplete_reason")
     if payload.get("incomplete") or incomplete_reason:
         reason_text = str(incomplete_reason or "assistant message marked incomplete")
+        incomplete_details = payload.get("incomplete_details")
+        if incomplete_details:
+            try:
+                details_text = json.dumps(incomplete_details, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                details_text = str(incomplete_details)
+            reason_text = f"{reason_text} {details_text}"
         low = reason_text.lower()
         if _is_max_output_truncation(low):
             return _stop("max_output", "Assistant response stopped because of max output length", reason_text)

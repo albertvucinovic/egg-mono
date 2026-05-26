@@ -1,5 +1,6 @@
 """Tests for OpenAI Responses API adapter and factory."""
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -744,3 +745,129 @@ class TestResponsesReasoningSummaries:
                 "reasoning_content": "Actual reasoning.",
             },
         }
+
+
+class TestResponsesIncompleteMetadata:
+    """Responses API incomplete events are preserved on final messages."""
+
+    class _FakeResponse:
+        def __init__(self, events):
+            self._events = events
+
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            for event in self._events:
+                yield ("data: " + json.dumps(event)).encode("utf-8")
+
+    class _FakeSession:
+        def __init__(self, events):
+            self.events = events
+
+        def post(self, *args, **kwargs):
+            return TestResponsesIncompleteMetadata._FakeResponse(self.events)
+
+    class _FakeAsyncContent:
+        def __init__(self, events):
+            self._lines = [("data: " + json.dumps(event)).encode("utf-8") for event in events]
+
+        async def readline(self):
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+    class _FakeAsyncResponse:
+        status = 200
+
+        def __init__(self, events):
+            self.content = TestResponsesIncompleteMetadata._FakeAsyncContent(events)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def text(self):
+            return ""
+
+    class _FakeAsyncSession:
+        def __init__(self, *args, events, **kwargs):
+            self.events = events
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, *args, **kwargs):
+            return TestResponsesIncompleteMetadata._FakeAsyncResponse(self.events)
+
+    def test_sync_response_incomplete_details_are_on_done_message(self):
+        adapter = OpenAIResponsesAdapter()
+        events = [
+            {"type": "response.output_text.delta", "delta": "Partial answer."},
+            {
+                "type": "response.incomplete",
+                "response": {"incomplete_details": {"reason": "max_output_tokens"}},
+            },
+        ]
+
+        out = list(adapter.stream(
+            "https://example.test/v1/responses",
+            {},
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "Hi"}]},
+            session=self._FakeSession(events),
+        ))
+
+        assert out[-1] == {
+            "type": "done",
+            "message": {
+                "role": "assistant",
+                "content": "Partial answer.",
+                "incomplete": True,
+                "incomplete_reason": "response.incomplete: max_output_tokens",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        }
+
+    def test_async_response_incomplete_details_are_on_done_message(self, monkeypatch):
+        adapter = OpenAIResponsesAdapter()
+        events = [
+            {"type": "response.output_text.delta", "delta": "Partial answer."},
+            {
+                "type": "response.incomplete",
+                "response": {"incomplete_details": {"reason": "max_output_tokens"}},
+            },
+        ]
+
+        import sys
+
+        class _FakeAiohttp:
+            @staticmethod
+            def ClientTimeout(*args, **kwargs):
+                return None
+
+            @staticmethod
+            def ClientSession(*args, **kwargs):
+                return TestResponsesIncompleteMetadata._FakeAsyncSession(*args, events=events, **kwargs)
+
+        monkeypatch.setitem(sys.modules, "aiohttp", _FakeAiohttp())
+
+        async def collect():
+            return [
+                event
+                async for event in adapter.stream_async(
+                    "https://example.test/v1/responses",
+                    {},
+                    {"model": "gpt-test", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+            ]
+
+        out = asyncio.run(collect())
+
+        assert out[-1]["message"]["incomplete"] is True
+        assert out[-1]["message"]["incomplete_reason"] == "response.incomplete: max_output_tokens"
+        assert out[-1]["message"]["incomplete_details"] == {"reason": "max_output_tokens"}

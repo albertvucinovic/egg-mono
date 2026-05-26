@@ -131,6 +131,21 @@ def test_incomplete_payload_with_max_output_reason_is_not_retriable() -> None:
     assert_non_retriable(decision, "max_output")
 
 
+def test_incomplete_payload_with_max_output_details_is_not_retriable() -> None:
+    for details in ({"reason": "max_output_tokens"}, {"finish_reason": "length"}):
+        decision = classify_failure_payload(
+            {
+                "role": "assistant",
+                "content": "partial",
+                "incomplete": True,
+                "incomplete_reason": "response.incomplete",
+                "incomplete_details": details,
+            }
+        )
+
+        assert_non_retriable(decision, "max_output")
+
+
 def test_incomplete_payload_without_transient_reason_is_not_retriable() -> None:
     decision = classify_failure_payload({"role": "assistant", "content": "partial", "incomplete": True})
 

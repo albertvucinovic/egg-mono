@@ -146,6 +146,45 @@ def test_transfer_truncation_incomplete_auto_continues_from_trigger(tmp_path):
     assert any(payload.get("role") == "assistant" and payload.get("content") == "ok after partial" for payload in payloads)
 
 
+def test_max_output_incomplete_metadata_does_not_auto_continue(tmp_path):
+    db = _make_db(tmp_path)
+    tid, _user_msg_id = _make_thread(db)
+
+    class MaxOutputLLM:
+        current_model_key = "mock"
+        calls = 0
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            self.calls += 1
+            yield {
+                "type": "done",
+                "message": {
+                    "role": "assistant",
+                    "incomplete": True,
+                    "incomplete_reason": "response.incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
+            }
+
+    llm = MaxOutputLLM()
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+
+    asyncio.run(_run_until_idle(runner))
+
+    assert llm.calls == 1
+    payloads = _payloads(db, tid)
+    assert any(
+        payload.get("role") == "assistant"
+        and payload.get("incomplete") is True
+        and payload.get("incomplete_details") == {"reason": "max_output_tokens"}
+        for payload in payloads
+    )
+    assert any(notice.get("action") == "stopped" and notice.get("decision_category") == "max_output" for notice in _notices(db, tid))
+
+
 def test_timeout_auto_continues_once(tmp_path):
     db = _make_db(tmp_path)
     tid, _user_msg_id = _make_thread(db)

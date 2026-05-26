@@ -1780,7 +1780,10 @@ class ThreadRunner:
                 and not assistant_msg.get('tool_calls')
                 and not reasoning_parts
                 and not assistant_msg.get('reasoning')
-                and not assistant_msg.get('reasoning_content')):
+                and not assistant_msg.get('reasoning_content')
+                and not assistant_msg.get('incomplete')
+                and not assistant_msg.get('incomplete_reason')
+                and not assistant_msg.get('incomplete_details')):
                 err_payload: Dict[str, Any] = {
                     'role': 'system',
                     'content': 'LLM error: empty assistant message returned by provider',

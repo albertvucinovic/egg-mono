@@ -192,6 +192,41 @@ class OpenAIResponsesAdapter(ProviderAdapter):
 
         return payload
 
+    def _response_incomplete_metadata(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize a Responses API response.incomplete event for persistence."""
+
+        response = event_data.get("response") if isinstance(event_data.get("response"), dict) else {}
+        details = event_data.get("incomplete_details")
+        if details is None and isinstance(response, dict):
+            details = response.get("incomplete_details")
+
+        reason: Any = event_data.get("reason")
+        if not reason and isinstance(details, dict):
+            reason = details.get("reason")
+        if not reason and isinstance(details, str):
+            reason = details
+
+        if not reason and isinstance(response, dict):
+            reason = response.get("incomplete_reason") or response.get("status_details")
+
+        if reason:
+            if not isinstance(reason, str):
+                try:
+                    reason = json.dumps(reason, ensure_ascii=False, sort_keys=True)
+                except Exception:
+                    reason = str(reason)
+            reason_text = f"response.incomplete: {reason}"
+        else:
+            reason_text = "response.incomplete"
+
+        metadata: Dict[str, Any] = {
+            "incomplete": True,
+            "incomplete_reason": reason_text,
+        }
+        if details is not None:
+            metadata["incomplete_details"] = details
+        return metadata
+
     def stream(self,
                url: str,
                headers: Dict[str, str],
@@ -207,6 +242,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         reasoning_parts: list[str] = []
         tool_calls_buf: Dict[int, Dict[str, Any]] = {}
         current_output_index: int = -1
+        incomplete_metadata: Dict[str, Any] = {}
 
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
@@ -333,6 +369,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 # Generation stopped early (e.g. max_output_tokens reached).
                 # Still yield whatever was accumulated — reasoning-only responses
                 # are valid for reasoning models.
+                incomplete_metadata = self._response_incomplete_metadata(event_data)
                 break
 
             elif event_type in ("response.failed", "error"):
@@ -356,6 +393,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         reasoning = "".join(reasoning_parts)
         if reasoning.strip():
             final_message["reasoning_content"] = reasoning
+        final_message.update(incomplete_metadata)
 
         yield {"type": "done", "message": final_message}
 
@@ -398,6 +436,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         reasoning_parts: list[str] = []
         tool_calls_buf: Dict[int, Dict[str, Any]] = {}
         current_output_index: int = -1
+        incomplete_metadata: Dict[str, Any] = {}
 
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
@@ -525,6 +564,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         # Generation stopped early (e.g. max_output_tokens reached).
                         # Still yield whatever was accumulated — reasoning-only responses
                         # are valid for reasoning models.
+                        incomplete_metadata = self._response_incomplete_metadata(event_data)
                         break
 
                     elif event_type in ("response.failed", "error"):
@@ -546,5 +586,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         reasoning = "".join(reasoning_parts)
         if reasoning.strip():
             final_message["reasoning_content"] = reasoning
+        final_message.update(incomplete_metadata)
 
         yield {"type": "done", "message": final_message}
