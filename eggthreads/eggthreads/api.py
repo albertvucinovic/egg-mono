@@ -579,6 +579,13 @@ class ContinueResult:
     diagnosis: Optional['ThreadDiagnosis'] = None
 
 
+RECOVERY_NOTICE_EXTRA: Dict[str, bool] = {
+    'no_api': True,
+    'recovery_notice': True,
+    'preserve_on_continue': True,
+}
+
+
 def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Optional[int]:
     """Get the event_seq for a message ID."""
     cur = db.conn.execute(
@@ -587,6 +594,123 @@ def _get_event_seq_for_msg_id(db: ThreadsDB, thread_id: str, msg_id: str) -> Opt
     )
     row = cur.fetchone()
     return row[0] if row else None
+
+
+def append_recovery_notice(
+    db: ThreadsDB,
+    thread_id: str,
+    content: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Append a persistent local recovery/status notice to a thread."""
+
+    payload_extra: Dict[str, Any] = dict(extra or {})
+    payload_extra.update(RECOVERY_NOTICE_EXTRA)
+    msg_id = append_message(db, thread_id, 'system', content, extra=payload_extra)
+    create_snapshot(db, thread_id)
+    return msg_id
+
+
+def _payload_is_recovery_notice(payload: Dict[str, Any]) -> bool:
+    return bool(payload.get('recovery_notice'))
+
+
+def _provider_error_text_from_payload(payload: Dict[str, Any]) -> str:
+    if _payload_is_recovery_notice(payload):
+        return ''
+    content = payload.get('content')
+    if not isinstance(content, str):
+        return ''
+    low = content.lower()
+    if (
+        'llm/runner error' in low
+        or 'llm error' in low
+        or 'context limit exceeded' in low
+        or low.startswith('error:')
+    ):
+        return content.strip()
+    return ''
+
+
+def _continue_notice_skipped_payloads(
+    db: ThreadsDB,
+    thread_id: str,
+    skipped_msg_ids: List[str],
+) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    for msg_id in skipped_msg_ids:
+        cur = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND msg_id=? AND type='msg.create' ORDER BY event_seq ASC LIMIT 1",
+            (thread_id, msg_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            continue
+        try:
+            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _format_continue_recovery_notice(db: ThreadsDB, thread_id: str, result: ContinueResult, *, source: str) -> str:
+    skipped_payloads = _continue_notice_skipped_payloads(db, thread_id, result.skipped_msg_ids)
+
+    role_counts: Dict[str, int] = {}
+    provider_error = ''
+    incomplete_info = ''
+    for payload in skipped_payloads:
+        role = payload.get('role')
+        role_name = role if isinstance(role, str) and role else 'unknown'
+        role_counts[role_name] = role_counts.get(role_name, 0) + 1
+
+        error_text = _provider_error_text_from_payload(payload)
+        if error_text:
+            provider_error = error_text
+        incomplete_reason = payload.get('incomplete_reason')
+        if payload.get('incomplete') or incomplete_reason:
+            incomplete_info = str(incomplete_reason or 'assistant message marked incomplete')
+
+    skipped_count = len(result.skipped_msg_ids)
+    skipped_word = 'message' if skipped_count == 1 else 'messages'
+    role_summary = ', '.join(f"{role}={count}" for role, count in sorted(role_counts.items()))
+    skipped_line = f"Skipped: {skipped_count} {skipped_word}"
+    if role_summary:
+        skipped_line += f" ({role_summary})"
+    skipped_line += '.'
+
+    lines = [f"Recovery: {source} succeeded."]
+    if result.continue_from_msg_id:
+        msg_id = result.continue_from_msg_id
+        lines.append(f"Continue point: {msg_id[-8:]} ({msg_id}).")
+    else:
+        lines.append("Continue point: none selected.")
+    lines.append(skipped_line)
+    if provider_error:
+        lines.append(f"Previous error: {_truncate_status_text(provider_error, limit=300)}")
+    if incomplete_info:
+        lines.append(f"Previous incomplete: {_truncate_status_text(incomplete_info, limit=300)}")
+    if result.diagnosis and result.diagnosis.issues:
+        lines.append(f"Diagnosis: {'; '.join(result.diagnosis.issues)}")
+    return '\n'.join(lines)
+
+
+def append_continue_recovery_notice(
+    db: ThreadsDB,
+    thread_id: str,
+    result: ContinueResult,
+    *,
+    source: str = 'manual /continue',
+) -> str:
+    """Append a local recovery notice describing a successful continue."""
+
+    return append_recovery_notice(
+        db,
+        thread_id,
+        _format_continue_recovery_notice(db, thread_id, result, source=source),
+    )
 
 
 # --------- Compaction API -----------------------------------------------------
@@ -2015,6 +2139,8 @@ def diagnose_thread(db: ThreadsDB, thread_id: str) -> ThreadDiagnosis:
             payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
         except Exception:
             payload = {}
+        if isinstance(payload, dict) and payload.get('recovery_notice'):
+            continue
         # Assistant notes are local/user-visible status updates emitted by the
         # answer-user tool. They are filtered out of provider/API context, so
         # they must not participate in protocol checks such as consecutive
@@ -2368,6 +2494,13 @@ def continue_thread(
 
         # Skip already-skipped messages (check msg.edit events, not msg.create payload)
         if row_msg_id in already_skipped:
+            continue
+
+        try:
+            payload = json.loads(pj) if isinstance(pj, str) else (pj or {})
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and payload.get('preserve_on_continue'):
             continue
 
         # Mark this message as skipped
@@ -3635,6 +3768,8 @@ def _error_item_from_event(row: Any) -> Optional[Dict[str, Any]]:
         return None
 
     payload = _event_payload_from_row(row)
+    if payload.get("recovery_notice"):
+        return None
 
     def item(category: str, message: Any) -> Optional[Dict[str, Any]]:
         text = _truncate_status_text(message)
@@ -4347,6 +4482,8 @@ def _wait_skipped_msg_ids(db: ThreadsDB, thread_id: str) -> set[str]:
 
 
 def _is_llm_error_message(payload: Dict[str, Any]) -> bool:
+    if payload.get('recovery_notice'):
+        return False
     if payload.get('role') != 'system':
         return False
     content = payload.get('content')

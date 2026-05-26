@@ -259,6 +259,45 @@ class TestMessageOperations:
         assert message["role"] == "assistant"
         assert message["answer_user_preserve_turn"] is True
 
+    def test_web_continue_appends_recovery_notice(self, client):
+        """Eggw /continue persists a local recovery notice after success."""
+        from eggthreads import append_message
+
+        create_resp = client.post("/api/threads", json={"name": "Continue Notice"})
+        thread_id = create_resp.json()["id"]
+
+        user_msg_id = append_message(core_state.db, thread_id, "user", "Hello")
+        append_message(core_state.db, thread_id, "assistant", "Partial answer")
+        append_message(core_state.db, thread_id, "system", "LLM/runner error: provider exploded")
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": f"/continue {user_msg_id}"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert body["data"]["skipped_count"] == 2
+
+        rows = core_state.db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+        payloads = [json.loads(row[0]) for row in rows]
+        notices = [payload for payload in payloads if payload.get("recovery_notice")]
+        assert len(notices) == 1
+        notice = notices[0]
+        assert notice["role"] == "system"
+        assert notice["no_api"] is True
+        assert notice["preserve_on_continue"] is True
+        assert "manual /continue" in notice["content"]
+        assert "Previous error: LLM/runner error: provider exploded" in notice["content"]
+
+        messages_resp = client.get(f"/api/threads/{thread_id}/messages")
+        assert messages_resp.status_code == 200
+        assert any("manual /continue" in str(msg.get("content")) for msg in messages_resp.json())
+
 
 class TestEventStreaming:
     """Test SSE event shaping for streaming UI clients."""

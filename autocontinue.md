@@ -93,22 +93,22 @@ Expectations:
 
 ### Phase 1 — Local recovery notices and manual `/continue` status
 
-- [ ] Add a small helper for appending recovery notices, preferably in a low-level module that both commands and runner code can call.
-  - [ ] Message role: `system`.
-  - [ ] Extra flags: `no_api=True`, `recovery_notice=True`, `preserve_on_continue=True`.
-- [ ] Update `/continue` command path to append a descriptive recovery notice after a successful continue.
-  - [ ] Include source: manual `/continue`.
-  - [ ] Include continue point short ID / full ID where helpful.
-  - [ ] Include skipped count and role/type summary.
-  - [ ] Include previous provider/runner error or incomplete reason if one was skipped.
-  - [ ] Preserve existing command result/log behavior.
-- [ ] Ensure `continue_thread(...)` does not skip messages with `preserve_on_continue=True`.
-- [ ] Ensure diagnostics/continue-point logic ignores recovery notices where they would otherwise look like system errors.
-- [ ] Tests:
-  - [ ] Manual `/continue` appends one persistent local recovery notice.
-  - [ ] Notice has `no_api`, `recovery_notice`, `preserve_on_continue`.
-  - [ ] Notice survives a later continue.
-  - [ ] Diagnosis does not treat recovery notice as an error.
+- [x] Add a small helper for appending recovery notices, preferably in a low-level module that both commands and runner code can call.
+  - [x] Message role: `system`.
+  - [x] Extra flags: `no_api=True`, `recovery_notice=True`, `preserve_on_continue=True`.
+- [x] Update `/continue` command path to append a descriptive recovery notice after a successful continue.
+  - [x] Include source: manual `/continue`.
+  - [x] Include continue point short ID / full ID where helpful.
+  - [x] Include skipped count and role/type summary.
+  - [x] Include previous provider/runner error or incomplete reason if one was skipped.
+  - [x] Preserve existing command result/log behavior.
+- [x] Ensure `continue_thread(...)` does not skip messages with `preserve_on_continue=True`.
+- [x] Ensure diagnostics/continue-point logic ignores recovery notices where they would otherwise look like system errors.
+- [x] Tests:
+  - [x] Manual `/continue` appends one persistent local recovery notice.
+  - [x] Notice has `no_api`, `recovery_notice`, `preserve_on_continue`.
+  - [x] Notice survives a later continue.
+  - [x] Diagnosis does not treat recovery notice as an error.
 
 ### Phase 2 — Recovery configuration and toggle command
 
@@ -196,3 +196,5 @@ Expectations:
 
 - 2026-05-26 UTC: TODO created from user-approved design. Preflight: recent head `68834c9 long tool calls handling`; dirty state only `autocontinue.md` plus pre-existing untracked `count-lines.sh`. Existing untracked file `count-lines.sh` should not be touched by workers.
 
+
+- 2026-05-26 UTC: Phase 1 implemented. Added reusable local recovery notice helpers in `eggthreads.api`; terminal Egg and Eggw manual `/continue` append recovery notices after successful continues; `continue_thread` preserves `preserve_on_continue` messages; diagnostics/status error checks ignore `recovery_notice` messages. Focused tests passed: `pytest -q eggthreads/tests/test_continue_thread.py eggthreads/tests/test_command_registry.py`; `PYTHONPATH=eggthreads pytest -q eggw/tests/test_api.py::TestMessageOperations`; `pytest -q eggthreads/tests/test_child_status.py eggthreads/tests/test_send_message_to_child.py eggthreads/tests/test_generic_user_tool_call_api.py::test_wait_for_threads_treats_llm_error_after_tool_message_as_completion eggthreads/tests/test_tool_state_runner_actionable.py`. Next: Phase 2 recovery setting storage and `/toggleAutoContinueOnError`.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -533,6 +534,46 @@ def test_thread_ui_commands_are_registered_handlers(tmp_path, monkeypatch) -> No
     registry.execute("deleteThread", make_context(), duplicate_id[-8:])
     assert db.get_thread(duplicate_id) is None
     assert any("Switched to thread" in message for message in logs)
+
+
+def test_thread_ui_continue_appends_recovery_notice(tmp_path) -> None:
+    from eggthreads import ThreadsDB, append_message, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, "continue")
+    user_msg_id = append_message(db, thread_id, "user", "Hello")
+    append_message(db, thread_id, "assistant", "Partial answer")
+    append_message(db, thread_id, "system", "LLM/runner error: provider exploded")
+
+    logs: list[str] = []
+    registry = create_default_command_registry()
+    registry.execute(
+        "continue",
+        CommandContext(
+            db=db,
+            current_thread=thread_id,
+            log_system=logs.append,
+            print_current_thread=lambda **kwargs: None,
+        ),
+        user_msg_id,
+    )
+
+    rows = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+        (thread_id,),
+    ).fetchall()
+    payloads = [json.loads(row[0]) for row in rows]
+    notices = [payload for payload in payloads if payload.get("recovery_notice")]
+
+    assert len(notices) == 1
+    notice = notices[0]
+    assert notice["role"] == "system"
+    assert notice["no_api"] is True
+    assert notice["preserve_on_continue"] is True
+    assert "manual /continue" in notice["content"]
+    assert "Previous error: LLM/runner error: provider exploded" in notice["content"]
+    assert any("Continued from message" in message for message in logs)
 
 
 def test_subagent_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:

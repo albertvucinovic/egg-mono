@@ -22,6 +22,7 @@ from eggthreads import (
     parse_args,
     get_thread_statuses_bulk,
 )
+from eggthreads.api import append_continue_recovery_notice
 
 from ..models import CommandResponse
 from .. import core
@@ -353,7 +354,9 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
     if delay_sec is not None and delay_sec > 0:
         async def delayed_continue():
             await asyncio.sleep(delay_sec)
-            continue_thread(core.db, thread_id, msg_id=msg_id)
+            result = continue_thread(core.db, thread_id, msg_id=msg_id)
+            if result.success:
+                append_continue_recovery_notice(core.db, thread_id, result)
 
         asyncio.create_task(delayed_continue())
         return CommandResponse(
@@ -369,6 +372,7 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
     result = continue_thread(core.db, thread_id, msg_id=msg_id)
 
     if result.success:
+        append_continue_recovery_notice(core.db, thread_id, result)
         msg = result.message
         if was_interrupted:
             msg = f"Interrupted streaming. {msg}"

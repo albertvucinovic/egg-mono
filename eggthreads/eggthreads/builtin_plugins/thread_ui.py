@@ -333,7 +333,7 @@ def duplicate_thread_command(context: Any, arg: str):
 
 
 def continue_thread_command(context: Any, arg: str):
-    from ..api import continue_thread, is_thread_continuable
+    from ..api import append_continue_recovery_notice, continue_thread, is_thread_continuable
     from ..arg_parser import parse_args
     from ..command_catalog import CommandResult
 
@@ -354,6 +354,7 @@ def continue_thread_command(context: Any, arg: str):
             await asyncio.sleep(delay_sec)
             result = continue_thread(db, current_thread, msg_id=msg_id)
             if result.success:
+                append_continue_recovery_notice(db, current_thread, result)
                 _log(context, f"After {delay_sec}s delay: {result.message}")
                 _print_current_thread(context, heading=f"Continued thread: {current_thread}")
             else:
@@ -365,6 +366,7 @@ def continue_thread_command(context: Any, arg: str):
 
     result = continue_thread(db, current_thread, msg_id=msg_id)
     if result.success:
+        append_continue_recovery_notice(db, current_thread, result)
         _log(context, result.message)
         _print_current_thread(context, heading=f"Continued thread: {current_thread}")
         return CommandResult(clear_input=True)

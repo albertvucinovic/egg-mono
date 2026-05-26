@@ -23,7 +23,7 @@ from eggthreads import (
     is_thread_continuable,
     wait_thread_settled,
 )
-from eggthreads.api import list_active_threads, collect_subtree
+from eggthreads.api import append_continue_recovery_notice, append_recovery_notice, list_active_threads, collect_subtree
 from eggthreads.tool_state import discover_runner_actionable, _last_stream_close_seq
 
 
@@ -219,6 +219,69 @@ class TestSkippedMessages:
 
 class TestDiagnoseAndContinue:
     """Integration tests for diagnose_thread + continue_thread flow."""
+
+    def test_manual_continue_notice_has_local_recovery_flags(self, tmp_path):
+        """Manual /continue status is persisted locally and hidden from APIs."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        user_msg_id = append_message(db, tid, "user", "Hello")
+        append_message(db, tid, "assistant", "partial")
+        append_message(db, tid, "system", "LLM/runner error: provider exploded")
+
+        result = continue_thread(db, tid, user_msg_id)
+        assert result.success is True
+        notice_id = append_continue_recovery_notice(db, tid, result)
+
+        messages = create_snapshot(db, tid)["messages"]
+        notice = next(msg for msg in messages if msg.get("msg_id") == notice_id)
+        assert notice["role"] == "system"
+        assert notice["no_api"] is True
+        assert notice["recovery_notice"] is True
+        assert notice["preserve_on_continue"] is True
+        assert "manual /continue" in notice["content"]
+        assert "Skipped: 2 messages" in notice["content"]
+        assert "assistant=1" in notice["content"]
+        assert "system=1" in notice["content"]
+        assert "Previous error: LLM/runner error: provider exploded" in notice["content"]
+
+    def test_recovery_notice_survives_later_continue(self, tmp_path):
+        """Local recovery notices are not skipped by subsequent continues."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        first_user = append_message(db, tid, "user", "First")
+        append_message(db, tid, "assistant", "First answer")
+        first = continue_thread(db, tid, first_user)
+        assert first.success is True
+        notice_id = append_continue_recovery_notice(db, tid, first)
+
+        second_user = append_message(db, tid, "user", "Second")
+        append_message(db, tid, "assistant", "Second answer")
+        second = continue_thread(db, tid, first_user)
+        assert second.success is True
+        assert notice_id not in second.skipped_msg_ids
+        assert second_user in second.skipped_msg_ids
+
+        messages = create_snapshot(db, tid)["messages"]
+        assert any(msg.get("msg_id") == notice_id for msg in messages)
+
+    def test_diagnose_ignores_recovery_notice_error_text(self, tmp_path):
+        """Recovery notices are not interpreted as provider/system errors."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        append_message(db, tid, "user", "Hello")
+        append_message(db, tid, "assistant", "Hi")
+        append_recovery_notice(db, tid, "Recovery note mentioning LLM/runner error: old failure")
+
+        diagnosis = diagnose_thread(db, tid)
+        assert diagnosis.is_healthy is True
+        assert "last_error" not in diagnosis.details
+
+        result = continue_thread(db, tid)
+        assert result.success is True
+        assert result.skipped_msg_ids == []
 
     def test_diagnose_ignores_assistant_notes_for_consecutive_assistant_check(self, tmp_path):
         """Assistant notes are provider-hidden and can appear between tool calls."""
