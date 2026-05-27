@@ -178,10 +178,10 @@ projection, not the full transcript.
 Extend the reducer tail path for the normal events that make tool execution
 advance after a cached baseline:
 
-- [ ] `tool_call.approval`
+- [x] `tool_call.approval`
   - [x] explicit `granted` / `denied` by `tool_call_id`;
-  - [ ] `all-in-turn` using cached `user_seqs` and current turn boundaries;
-  - [ ] global approval / revoke using incremental global approval state.
+  - [x] `all-in-turn` using cached `user_seqs` and current turn boundaries;
+  - [x] global approval / revoke using incremental global approval state.
 - [x] `tool_call.execution_started`
   - set `execution_started=True`;
   - record `owner_invoke_id`;
@@ -209,7 +209,8 @@ advance after a cached baseline:
       each lifecycle transition and for a combined assistant-tool round trip.
   - Current status: explicit approval, execution_started, finished,
     output_approval, tool result publication, and assistant/user tool-call
-    declarations are covered; combined round trip remains for later slices.
+    declarations, all-in-turn approval, and global approval/revoke are covered;
+    combined round trip remains for later slices.
 - [x] Add mutation-safety tests: old cached states must not be mutated by later
       incremental updates.
 
@@ -356,3 +357,8 @@ Then implement Phase 2 in small event-family slices, committing each after tests
   `ToolCallState` entries, update message-after-boundary/RA/coarse state, and
   fall back for reused ids so current full-rebuild replacement semantics stay
   exact. All-in-turn/global approval and interrupt/close synthesis remain later.
+- 2026-05-27: Phase 2 approval semantics slice implemented. Incremental tails
+  now handle `all-in-turn`, global approval, and global revoke using private
+  cached user-turn/global-open state, including later declarations under active
+  global approval. Declarations after earlier all-in-turn still fall back because
+  applying past turn approvals to future declarations is not exact locally.

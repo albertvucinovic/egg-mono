@@ -101,6 +101,8 @@ class _ThreadEventReduction:
     _llm_invokes: set[str] = field(default_factory=set)
     _last_llm_stream_boundary_seq: int = -1
     _last_assistant_seq: int = -1
+    _user_seqs: List[int] = field(default_factory=list)
+    _current_global_start: Optional[int] = None
 
 
 def _payload(ev: Dict[str, Any]) -> Dict[str, Any]:
@@ -232,7 +234,7 @@ def _records_declare_tool_calls(records: List[Tuple[Dict[str, Any], Dict[str, An
     return False
 
 
-def _has_prior_broad_tool_approval(db: ThreadsDB, thread_id: str, max_seq: int) -> bool:
+def _has_hard_prior_broad_tool_approval(db: ThreadsDB, thread_id: str, max_seq: int) -> bool:
     cur = db.conn.execute(
         """
         SELECT payload_json FROM events
@@ -249,9 +251,36 @@ def _has_prior_broad_tool_approval(db: ThreadsDB, thread_id: str, max_seq: int) 
             continue
         if not isinstance(payload, dict):
             continue
-        if payload.get("decision") in {"all-in-turn", "global_approval", "revoke_global_approval"}:
+        if payload.get("decision") == "all-in-turn":
             return True
     return False
+
+
+def _has_open_global_approval(reduction: _ThreadEventReduction) -> bool:
+    return reduction._current_global_start is not None
+
+
+def _tool_call_ids_in_turn(
+    states: Dict[Any, ToolCallState],
+    user_seqs: List[int],
+    ev_seq: int,
+) -> List[Tuple[Any, ToolCallState]]:
+    prev_user_seq = -1
+    next_user_seq = None
+    for user_seq in user_seqs:
+        if user_seq <= ev_seq:
+            prev_user_seq = user_seq
+        elif next_user_seq is None:
+            next_user_seq = user_seq
+            break
+    out: List[Tuple[Any, ToolCallState]] = []
+    for tcid, tc in states.items():
+        if tc.parent_event_seq < prev_user_seq:
+            continue
+        if next_user_seq is not None and tc.parent_event_seq >= next_user_seq:
+            continue
+        out.append((tcid, tc))
+    return out
 
 
 def _has_prior_tool_approval_for_ids(
@@ -333,11 +362,13 @@ def _try_reduce_thread_events_incrementally(
     records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
     if not _has_incremental_safe_tail(records) or not _tail_preserves_tool_states(records, previous.tool_call_states):
         return None
-    if _records_declare_tool_calls(records) and _has_prior_broad_tool_approval(db, thread_id, max_seq):
+    if _records_declare_tool_calls(records) and _has_hard_prior_broad_tool_approval(db, thread_id, previous.max_event_seq):
         return None
 
     skipped_msg_ids = set(previous.skipped_msg_ids)
     llm_invokes = set(previous._llm_invokes)
+    user_seqs = list(previous._user_seqs)
+    current_global_start = previous._current_global_start
     last_llm_boundary_seq = previous.last_llm_boundary_seq
     last_llm_stream_boundary_seq = previous._last_llm_stream_boundary_seq
     last_assistant_seq = previous._last_assistant_seq
@@ -385,6 +416,8 @@ def _try_reduce_thread_events_incrementally(
             raw_tool_calls = payload.get("tool_calls")
             if raw_tool_calls and payload.get("role") not in {"assistant", "user"}:
                 return None
+            if payload.get("role") == "user":
+                user_seqs.append(ev_seq)
             if payload.get("role") == "assistant" and not bool(payload.get("no_api")):
                 last_assistant_seq = ev_seq
                 if last_llm_boundary_seq == -1 or assistant_fallback_boundary:
@@ -417,31 +450,42 @@ def _try_reduce_thread_events_incrementally(
                     return None
                 if _has_prior_tool_approval_for_ids(db, thread_id, ev_seq, declared):
                     return None
+                if _has_open_global_approval(previous):
+                    declared = {
+                        tcid: replace(tc, approval_decision="granted")
+                        for tcid, tc in declared.items()
+                    }
                 tool_call_states.update(declared)
                 continue
         tcid = payload.get("tool_call_id")
+        decision = payload.get("decision") if ev_type == "tool_call.approval" else None
+        broad_approval = decision in {"all-in-turn", "global_approval", "revoke_global_approval"}
         if tcid not in tool_call_states:
-            if ev_type == "msg.create" and payload.get("tool_call_id") is not None:
+            if broad_approval:
+                tc = None
+            elif ev_type == "msg.create" and payload.get("tool_call_id") is not None:
                 return None
-            if ev_type in {
+            elif ev_type in {
                 "tool_call.approval",
                 "tool_call.execution_started",
                 "tool_call.finished",
                 "tool_call.output_approval",
             }:
                 return None
-            continue
-        tc = tool_call_states[tcid]
-        if ev_seq <= tc.parent_event_seq:
-            if ev_type in {
-                "msg.create",
-                "tool_call.approval",
-                "tool_call.execution_started",
-                "tool_call.finished",
-                "tool_call.output_approval",
-            }:
-                return None
-            continue
+            else:
+                continue
+        else:
+            tc = tool_call_states[tcid]
+            if ev_seq <= tc.parent_event_seq:
+                if ev_type in {
+                    "msg.create",
+                    "tool_call.approval",
+                    "tool_call.execution_started",
+                    "tool_call.finished",
+                    "tool_call.output_approval",
+                }:
+                    return None
+                continue
         if ev_type == "tool_call.summary":
             summary = payload.get("summary")
             if isinstance(summary, str):
@@ -455,9 +499,20 @@ def _try_reduce_thread_events_incrementally(
             tool_call_states[tcid] = replace(tc, published=True)
         elif ev_type == "tool_call.approval":
             decision = payload.get("decision")
-            if decision in {"global_approval", "revoke_global_approval", "all-in-turn"}:
-                return None
+            if decision == "global_approval":
+                current_global_start = ev_seq
+                continue
+            if decision == "revoke_global_approval":
+                current_global_start = None
+                continue
+            if decision == "all-in-turn":
+                for candidate_tcid, candidate_tc in _tool_call_ids_in_turn(tool_call_states, user_seqs, ev_seq):
+                    if candidate_tc.approval_decision is None:
+                        tool_call_states[candidate_tcid] = replace(candidate_tc, approval_decision="granted")
+                continue
             if decision in {"granted", "denied"}:
+                if tc is None:
+                    return None
                 tool_call_states[tcid] = replace(tc, approval_decision=decision)
             else:
                 return None
@@ -517,6 +572,8 @@ def _try_reduce_thread_events_incrementally(
         _llm_invokes=llm_invokes,
         _last_llm_stream_boundary_seq=last_llm_stream_boundary_seq,
         _last_assistant_seq=last_assistant_seq,
+        _user_seqs=user_seqs,
+        _current_global_start=current_global_start,
     )
 
 
@@ -646,20 +703,8 @@ def _reduce_loaded_thread_events(
                 continue
 
             if decision == "all-in-turn":
-                prev_user_seq = -1
-                next_user_seq = None
-                for user_seq in user_seqs:
-                    if user_seq <= ev_seq:
-                        prev_user_seq = user_seq
-                    elif next_user_seq is None:
-                        next_user_seq = user_seq
-                        break
-                for tc in states.values():
+                for _tcid, tc in _tool_call_ids_in_turn(states, user_seqs, ev_seq):
                     if tc.approval_decision is not None:
-                        continue
-                    if tc.parent_event_seq < prev_user_seq:
-                        continue
-                    if next_user_seq is not None and tc.parent_event_seq >= next_user_seq:
                         continue
                     tc.approval_decision = "granted"
             else:
@@ -822,6 +867,8 @@ def _reduce_loaded_thread_events(
         _llm_invokes=llm_invokes,
         _last_llm_stream_boundary_seq=last_llm_stream_boundary_seq,
         _last_assistant_seq=last_assistant_seq,
+        _user_seqs=user_seqs,
+        _current_global_start=current_global_start if global_auto_approval else None,
     )
 
 

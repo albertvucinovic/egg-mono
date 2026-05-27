@@ -1520,13 +1520,150 @@ def test_reducer_cache_tool_call_declaration_tail_falls_back_for_reused_tool_cal
     assert after_tc is not before_tc
 
 
-def test_reducer_cache_tool_call_declaration_tail_falls_back_after_global_approval(tmp_path, monkeypatch):
-    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+def test_reducer_cache_incrementally_applies_declaration_after_global_approval(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
 
     db = _make_db(tmp_path)
     tid = "thread-incremental-declaration-after-global"
     db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
     db.append_event("global-approval", tid, "tool_call.approval", {"decision": "global_approval"})
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states == {}
+
+    db.append_event(
+        "msg-user-tool-global",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "tool_calls": [
+                {"id": "tc_global", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user-tool-global",
+    )
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after.tool_call_states["tc_global"].state == "TC2.1"
+    assert before.tool_call_states == {}
+
+
+def test_reducer_cache_incrementally_applies_all_in_turn_approval_tail(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-all-in-turn"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event(
+        "msg-user-old-tool",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "tool_calls": [
+                {"id": "tc_old", "type": "function", "function": {"name": "bash", "arguments": "old"}},
+            ],
+        },
+        msg_id="m-user-old-tool",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_old", "decision": "denied"})
+    db.append_event("msg-user-turn", tid, "msg.create", {"role": "user", "content": "new turn"}, msg_id="m-user-turn")
+    db.append_event(
+        "msg-asst-tool-turn",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tc_turn_a", "type": "function", "function": {"name": "bash", "arguments": "a"}},
+                {"id": "tc_turn_b", "type": "function", "function": {"name": "python", "arguments": "b"}},
+            ],
+        },
+        msg_id="m-asst-tool-turn",
+    )
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states["tc_old"].state == "TC2.2"
+    assert before.tool_call_states["tc_turn_a"].state == "TC1"
+    assert before.tool_call_states["tc_turn_b"].state == "TC1"
+
+    _append_event(db, tid, "tool_call.approval", {"decision": "all-in-turn"})
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after.tool_call_states["tc_old"].state == "TC2.2"
+    assert after.tool_call_states["tc_turn_a"].state == "TC2.1"
+    assert after.tool_call_states["tc_turn_b"].state == "TC2.1"
+    assert after.next_runner_actionable is not None
+    assert after.next_runner_actionable.kind == "RA3_tools_user"
+    assert before.tool_call_states["tc_turn_a"].state == "TC1"
+    assert before.tool_call_states["tc_turn_b"].state == "TC1"
+    assert after.tool_call_states["tc_turn_a"] is not before.tool_call_states["tc_turn_a"]
+    assert after.tool_call_states["tc_turn_b"] is not before.tool_call_states["tc_turn_b"]
+
+
+def test_reducer_cache_incrementally_applies_global_approval_and_revoke_tails(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-global-approval"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states == {}
+
+    db.append_event("global-approval", tid, "tool_call.approval", {"decision": "global_approval"})
+    after_global = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after_global._current_global_start == db.max_event_seq(tid)
+    assert before._current_global_start is None
+
+    db.append_event(
+        "msg-user-tool-global-tail",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "tool_calls": [
+                {"id": "tc_global_tail", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user-tool-global-tail",
+    )
+    after_decl = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after_decl.tool_call_states["tc_global_tail"].state == "TC2.1"
+
+    db.append_event("global-revoke", tid, "tool_call.approval", {"decision": "revoke_global_approval"})
+    after_revoke = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after_revoke._current_global_start is None
+
+    db.append_event(
+        "msg-user-tool-after-revoke",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "tool_calls": [
+                {"id": "tc_after_revoke", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user-tool-after-revoke",
+    )
+    after_second_decl = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after_second_decl.tool_call_states["tc_after_revoke"].state == "TC1"
+
+
+def test_reducer_cache_declaration_tail_falls_back_after_all_in_turn_approval(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-declaration-after-all-in-turn"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "turn"}, msg_id="m-user")
+    db.append_event("approve-turn", tid, "tool_call.approval", {"decision": "all-in-turn"})
 
     before = _reduce_thread_events(db, tid)
     assert before.tool_call_states == {}
@@ -1542,21 +1679,21 @@ def test_reducer_cache_tool_call_declaration_tail_falls_back_after_global_approv
     monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
 
     db.append_event(
-        "msg-user-tool-global",
+        "msg-user-tool-turn",
         tid,
         "msg.create",
         {
             "role": "user",
             "tool_calls": [
-                {"id": "tc_global", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                {"id": "tc_turn", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
             ],
         },
-        msg_id="m-user-tool-global",
+        msg_id="m-user-tool-turn",
     )
     after = _reduce_thread_events(db, tid)
 
     assert calls == 1
-    assert after.tool_call_states["tc_global"].state == "TC2.1"
+    assert after.tool_call_states["tc_turn"].state == "TC1"
     _assert_incremental_matches_full_rebuild(db, tid)
 
 
