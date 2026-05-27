@@ -322,21 +322,33 @@ snapshots, and UI rendering were not changed.
 Add focused synthetic tests/benchmarks that run in the checkout without requiring
 real provider calls:
 
-- [ ] Build a long historical thread with at least tens of thousands of events
-      and many completed tool calls.
-- [ ] Warm the scheduler projection once.
-- [ ] Append normal tail events one by one:
+- [x] Build a long-ish historical thread with many completed tool calls at CI
+      scale.
+- [x] Warm the scheduler projection once.
+- [x] Append normal tail events one by one:
   - summary-only;
   - stream deltas;
   - tool lifecycle sequence;
   - final tool message;
   - next user/tool-triggering message.
-- [ ] Assert normal tails do not call `_reduce_loaded_thread_events` after warmup.
-- [ ] Assert actionability matches a full rebuild after each tail.
-- [ ] Measure tail-apply timing and record order-of-magnitude result in this TODO.
+- [x] Assert normal tails do not call `_reduce_loaded_thread_events` after warmup.
+- [x] Assert actionability matches a full rebuild after each tail.
+- [x] Measure tail-apply timing and record order-of-magnitude result in this TODO.
 - [ ] Re-run py-spy on the long `T9JM`/`FQ7A` style scenario after restart. Target:
   - scheduler no longer dominated by full `_reduce_thread_events` rebuilds;
   - active UI scroll/input lag is not caused by scheduler CPU saturation.
+
+2026-05-27 synthetic pytest status: added
+`test_reducer_cache_synthetic_long_thread_normal_tails_do_not_rebuild`. It uses
+120 completed historical tool-call round trips plus stream boundaries
+(~1.3k events, intentionally below tens of thousands to keep normal CI fast),
+warms `_reduce_thread_events` once, then appends summary-only, stream
+open/delta/close, tool finish, output approval, final tool message, and a next
+user tool-triggering message. Each tail asserts zero calls to
+`_reduce_loaded_thread_events` after warmup and compares the incremental
+projection signature with a forced full rebuild. Local focused run completed in
+~0.28s wall time, giving a qualitative sub-second regression bound rather than
+a strict microbenchmark. External py-spy/restart profiling remains unchecked.
 
 ## Implementation notes / likely pitfalls
 

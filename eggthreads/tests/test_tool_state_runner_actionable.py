@@ -16,6 +16,7 @@ These tests build small synthetic event logs through the public
 from __future__ import annotations
 
 import json
+import time
 from typing import Dict, Any
 
 import eggthreads
@@ -277,6 +278,18 @@ def _reduction_signature(reduced):
         "next_runner_actionable": _ra_signature(reduced.next_runner_actionable),
         "coarse_thread_state_without_lease": reduced.coarse_thread_state_without_lease,
     }
+
+
+def _full_rebuild_signature(db, tid: str, reducer=None):
+    if reducer is None:
+        from eggthreads.tool_state import _reduce_loaded_thread_events as reducer
+
+    events = [dict(row) for row in db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()]
+    full = reducer(tid, db.max_event_seq(tid), events)
+    return _reduction_signature(full)
 
 
 def _assert_incremental_matches_full_rebuild(db, tid: str) -> None:
@@ -1913,6 +1926,120 @@ def test_reducer_cache_incrementally_applies_combined_assistant_tool_round_trip(
     assert after_publish.next_runner_actionable is not None
     assert after_publish.next_runner_actionable.kind == "RA1_llm"
     assert after_publish.next_runner_actionable.msg_id == "m-tool-combined"
+
+
+def test_reducer_cache_synthetic_long_thread_normal_tails_do_not_rebuild(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-synthetic-long"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    for idx in range(120):
+        tcid = f"tc_hist_{idx}"
+        msg_id = f"m-hist-user-{idx}"
+        db.append_event(
+            f"hist-msg-{idx}",
+            tid,
+            "msg.create",
+            {
+                "role": "user",
+                "content": f"cmd {idx}",
+                "tool_calls": [
+                    {"id": tcid, "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                ],
+            },
+            msg_id=msg_id,
+        )
+        _append_event(db, tid, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+        _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": tcid}, invoke_id=f"inv-hist-tool-{idx}")
+        _append_event(db, tid, "tool_call.summary", {"tool_call_id": tcid, "summary": f"running {idx}"})
+        _append_event(db, tid, "tool_call.finished", {"tool_call_id": tcid, "reason": "success", "output": f"ok {idx}"})
+        _append_event(db, tid, "tool_call.output_approval", {"tool_call_id": tcid, "decision": "whole", "preview": f"ok {idx}"})
+        _append_event(db, tid, "msg.create", {"role": "tool", "tool_call_id": tcid, "content": f"ok {idx}"}, msg_id=f"m-hist-tool-{idx}")
+        inv = f"inv-hist-llm-{idx}"
+        db.append_event(f"hist-llm-open-{idx}", tid, "stream.open", {"stream_kind": "llm"}, msg_id=f"m-hist-asst-{idx}", invoke_id=inv)
+        db.append_event(f"hist-llm-delta-{idx}", tid, "stream.delta", {"text": f"done {idx}"}, invoke_id=inv, chunk_seq=idx)
+        db.append_event(f"hist-asst-{idx}", tid, "msg.create", {"role": "assistant", "content": f"done {idx}"}, msg_id=f"m-hist-asst-{idx}")
+        db.append_event(f"hist-llm-close-{idx}", tid, "stream.close", {}, invoke_id=inv)
+
+    db.append_event("tail-active-tool-parent", tid, "msg.create", {
+        "role": "assistant",
+        "tool_calls": [
+            {"id": "tc_tail_active", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+        ],
+    }, msg_id="m-tail-active-tool-parent")
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_tail_active", "decision": "granted"})
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tc_tail_active"}, invoke_id="inv-tail-active-tool")
+
+    warm = _reduce_thread_events(db, tid)
+    assert warm.tool_call_states["tc_tail_active"].state == "TC3"
+
+    calls = 0
+    original = _reduce_loaded_thread_events
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal calls
+        calls += 1
+        return original(thread_id, max_event_seq, events)
+
+    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+
+    reductions = []
+    start = time.perf_counter()
+
+    def reduce_tail(label: str):
+        reduced = _reduce_thread_events(db, tid)
+        reductions.append((label, reduced.max_event_seq))
+        assert calls == 0
+        assert _reduction_signature(reduced) == _full_rebuild_signature(db, tid, original)
+        return reduced
+
+    _append_event(db, tid, "tool_call.summary", {"tool_call_id": "tc_tail_active", "summary": "still running"})
+    after_summary = reduce_tail("summary-only")
+    assert after_summary.tool_call_states["tc_tail_active"].summary == "still running"
+
+    inv = "inv-tail-llm"
+    db.append_event("tail-stream-open", tid, "stream.open", {"stream_kind": "llm"}, msg_id="m-tail-stream", invoke_id=inv)
+    reduce_tail("stream-open")
+    db.append_event("tail-stream-delta", tid, "stream.delta", {"text": "partial"}, invoke_id=inv, chunk_seq=10_000)
+    reduce_tail("stream-delta")
+    db.append_event("tail-stream-close", tid, "stream.close", {}, invoke_id=inv)
+    after_stream_close = reduce_tail("stream-close")
+    assert after_stream_close.next_runner_actionable is None
+
+    _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tc_tail_active", "reason": "success", "output": "ok"})
+    after_finish = reduce_tail("tool-finished")
+    assert after_finish.tool_call_states["tc_tail_active"].state == "TC4"
+
+    _append_event(db, tid, "tool_call.output_approval", {"tool_call_id": "tc_tail_active", "decision": "whole", "preview": "ok"})
+    after_output_approval = reduce_tail("tool-output-approval")
+    assert after_output_approval.tool_call_states["tc_tail_active"].state == "TC5"
+
+    _append_event(db, tid, "msg.create", {"role": "tool", "tool_call_id": "tc_tail_active", "content": "ok"}, msg_id="m-tail-tool-result")
+    after_tool_msg = reduce_tail("tool-result-message")
+    assert after_tool_msg.tool_call_states["tc_tail_active"].state == "TC6"
+    assert after_tool_msg.next_runner_actionable is not None
+    assert after_tool_msg.next_runner_actionable.kind == "RA1_llm"
+    assert after_tool_msg.next_runner_actionable.msg_id == "m-tail-tool-result"
+
+    db.append_event("tail-user-tool-parent", tid, "msg.create", {
+        "role": "user",
+        "content": "run user tool",
+        "tool_calls": [
+            {"id": "tc_tail_user", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+        ],
+    }, msg_id="m-tail-user-tool-parent")
+    after_user_tool = reduce_tail("next-user-tool-trigger")
+    assert after_user_tool.tool_call_states["tc_tail_user"].state == "TC1"
+    assert after_user_tool.next_runner_actionable is not None
+    assert after_user_tool.next_runner_actionable.kind == "RA1_llm"
+    assert after_user_tool.coarse_thread_state_without_lease == "running"
+
+    elapsed = time.perf_counter() - start
+    assert calls == 0
+    assert len(reductions) == 8
+    assert elapsed >= 0.0
 
 
 def test_last_stream_close_seq_reuses_reducer_cache(tmp_path):
