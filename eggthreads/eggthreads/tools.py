@@ -7,6 +7,25 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping
 
 
+_TOOL_SUMMARY_EMIT_INTERVAL_SEC = 5.0
+
+
+def _should_emit_tool_summary(
+    last_summary_at: float | None,
+    now: float,
+    *,
+    interval_sec: float = _TOOL_SUMMARY_EMIT_INTERVAL_SEC,
+) -> bool:
+    """Return True for the first summary, then only at a sparse cadence."""
+
+    try:
+        if last_summary_at is None:
+            return True
+        return (float(now) - float(last_summary_at)) >= max(0.0, float(interval_sec))
+    except Exception:
+        return True
+
+
 def resolve_tool_timeout_arg(
     args: Dict[str, Any],
     *,

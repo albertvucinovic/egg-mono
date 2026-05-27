@@ -60,10 +60,10 @@ logs after small status/countdown events.
 
 ## Phase 3 — Reduce persisted countdown churn from long-running tools
 
-- [ ] Inspect current `tool_call.summary` emission cadence for bash/Python/generic tools and `wait`.
-- [ ] Persist summaries only when the visible text changes materially or at a sparse cadence. Do not remove start/end/failure visibility.
-- [ ] Prefer computing purely time-based countdown display locally if there is an existing local UI path; do not add a new public API unless needed.
-- [ ] Add focused tests for summary throttling behavior.
+- [x] Inspect current `tool_call.summary` emission cadence for bash/Python/generic tools and `wait`.
+- [x] Persist summaries only when the visible text changes materially or at a sparse cadence. Do not remove start/end/failure visibility.
+- [x] Prefer computing purely time-based countdown display locally if there is an existing local UI path; do not add a new public API unless needed.
+- [x] Add focused tests for summary throttling behavior.
 
 ## Phase 4 — Follow-up profiling / regression checks
 
@@ -76,3 +76,4 @@ logs after small status/countdown events.
 - 2026-05-26: Created plan from py-spy evidence. Next implementation slice: Phase 1 only, because it directly targets the profiled full-rebuild-on-summary cause and should be contained to reducer code plus tests.
 - 2026-05-27: Phase 1 implemented. `tool_call.summary` now stays on the incremental reducer path, copying only updated `ToolCallState` entries and preserving hard-event full-rebuild fallbacks. Focused reducer tests pass.
 - 2026-05-27: Phase 2 implemented. `wait_for_threads` now uses cheap missing/paused/open-stream checks, caches unchanged unfinished poll results by event watermark within a wait call, and uses reducer-cached actionability in `_thread_wait_complete`. Focused wait/reducer tests pass.
+- 2026-05-27: Phase 3 implemented. Timeout countdown summaries now emit immediately, then at a sparse shared cadence for runner-managed tools and wait-for-tool-call polling. Focused throttling/wait/tool-timeout tests pass.

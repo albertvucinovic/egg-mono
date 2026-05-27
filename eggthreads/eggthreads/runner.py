@@ -14,7 +14,13 @@ try:
 except Exception:
     LLMClient = None  # type: ignore
 from .db import ThreadsDB
-from .tools import ToolExecutionResult, ToolRegistry, ToolStreamContext, create_default_tools
+from .tools import (
+    ToolExecutionResult,
+    ToolRegistry,
+    ToolStreamContext,
+    create_default_tools,
+    _should_emit_tool_summary,
+)
 from .tool_state import (
     ToolCallState,
     RunnerActionable,
@@ -2558,10 +2564,10 @@ class ThreadRunner:
                     if tool_timeout_sec is None:
                         return
                     start = time.time()
-                    last = 0.0
+                    last: Optional[float] = None
                     while not summary_stop.is_set():
                         now = time.time()
-                        if not last or now - last >= 1.0:
+                        if _should_emit_tool_summary(last, now):
                             last = now
                             summary = tool_timeout_summary(tc.name or 'tool', tool_timeout_sec, start, now=now)
                             if summary:

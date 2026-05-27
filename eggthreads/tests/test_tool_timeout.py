@@ -14,12 +14,30 @@ from pathlib import Path
 import pytest
 
 import eggthreads as _eggthreads_mod
+from eggthreads.runner import tool_timeout_summary
+from eggthreads.tools import _should_emit_tool_summary
 
 
 def _import_eggthreads(monkeypatch, tmp_path: Path):
     """Return the eggthreads module with cwd set to tmp_path."""
     monkeypatch.chdir(tmp_path)
     return _eggthreads_mod
+
+
+def test_tool_summary_emit_cadence_keeps_first_then_throttles_countdown():
+    start = 1000.0
+    emitted: list[tuple[float, str]] = []
+    last = None
+
+    for now in (start, start + 1, start + 4.9, start + 5, start + 6, start + 10):
+        if _should_emit_tool_summary(last, now):
+            last = now
+            summary = tool_timeout_summary("bash", 30, start, now=now)
+            assert summary is not None
+            emitted.append((now, summary))
+
+    assert [now - start for now, _summary in emitted] == [0, 5, 10]
+    assert emitted[0][1] == "bash running; timeout in 30s (limit 30s)"
 
 
 class TestToolTimeout:
