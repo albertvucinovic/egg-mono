@@ -1072,6 +1072,36 @@ def _assert_incremental_tail_without_full_rebuild(db, tid: str, monkeypatch):
     return reduced
 
 
+def _assert_next_reduce_uses_full_rebuild(db, tid: str, monkeypatch, *, require_prior_cache: bool = True):
+    from eggthreads.tool_state import _REDUCER_CACHE, _reduce_loaded_thread_events, _reduce_thread_events
+
+    if require_prior_cache:
+        assert any(
+            key[0] == str(db.path) and key[1] == tid and key[2] < db.max_event_seq(tid)
+            for key in _REDUCER_CACHE
+        )
+
+    calls = 0
+    original = _reduce_loaded_thread_events
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal calls
+        calls += 1
+        return original(thread_id, max_event_seq, events)
+
+    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+    reduced = _reduce_thread_events(db, tid)
+
+    assert calls == 1
+    events = [dict(row) for row in db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()]
+    full = original(tid, db.max_event_seq(tid), events)
+    assert _reduction_signature(reduced) == _reduction_signature(full)
+    return reduced
+
+
 def _append_assistant_tool_parent(db, tid: str, *, tcid: str = "tc_lifecycle") -> None:
     db.append_event(
         "msg-asst",
@@ -1419,7 +1449,7 @@ def test_reducer_cache_incrementally_publishes_no_api_tool_result_without_ra1(tm
 
 
 def test_reducer_cache_lifecycle_tail_falls_back_for_unresolved_tool_call(tmp_path, monkeypatch):
-    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+    from eggthreads.tool_state import _reduce_thread_events
 
     db = _make_db(tmp_path)
     tid = "thread-incremental-unknown-tool"
@@ -1427,42 +1457,35 @@ def test_reducer_cache_lifecycle_tail_falls_back_for_unresolved_tool_call(tmp_pa
     db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
     _reduce_thread_events(db, tid)
 
-    calls = 0
-    original = _reduce_loaded_thread_events
-
-    def counting_full_rebuild(thread_id, max_event_seq, events):
-        nonlocal calls
-        calls += 1
-        return original(thread_id, max_event_seq, events)
-
-    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
-
     _append_event(db, tid, "tool_call.finished", {"tool_call_id": "missing", "reason": "success", "output": "ok"})
-    reduced = _reduce_thread_events(db, tid)
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
 
-    assert calls == 1
     assert "missing" not in reduced.tool_call_states
-    _assert_incremental_matches_full_rebuild(db, tid)
+
+
+def test_reducer_cache_summary_tail_falls_back_for_malformed_tool_call_id(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-malformed-summary"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    _reduce_thread_events(db, tid)
+
+    _append_event(db, tid, "tool_call.summary", {"summary": "orphaned summary"})
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
+
+    assert reduced.tool_call_states == {}
 
 
 def test_reducer_cache_tool_result_tail_falls_back_for_unresolved_tool_call(tmp_path, monkeypatch):
-    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+    from eggthreads.tool_state import _reduce_thread_events
 
     db = _make_db(tmp_path)
     tid = "thread-incremental-unknown-tool-result"
     db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
     db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
     _reduce_thread_events(db, tid)
-
-    calls = 0
-    original = _reduce_loaded_thread_events
-
-    def counting_full_rebuild(thread_id, max_event_seq, events):
-        nonlocal calls
-        calls += 1
-        return original(thread_id, max_event_seq, events)
-
-    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
 
     _append_event(
         db,
@@ -1471,11 +1494,36 @@ def test_reducer_cache_tool_result_tail_falls_back_for_unresolved_tool_call(tmp_
         {"role": "tool", "tool_call_id": "missing", "content": "ok"},
         msg_id="m-missing-tool-result",
     )
-    reduced = _reduce_thread_events(db, tid)
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
 
-    assert calls == 1
     assert "missing" not in reduced.tool_call_states
-    _assert_incremental_matches_full_rebuild(db, tid)
+
+
+def test_reducer_cache_tool_call_declaration_tail_falls_back_for_malformed_tool_call_id(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-malformed-declaration"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    _reduce_thread_events(db, tid)
+
+    db.append_event(
+        "msg-bad-tool-id",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": 123, "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-bad-tool-id",
+    )
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
+
+    assert 123 in reduced.tool_call_states
+    assert reduced.tool_call_states[123].tool_call_id == "123"
 
 
 def test_reducer_cache_incrementally_applies_assistant_tool_call_declaration_tail(tmp_path, monkeypatch):
@@ -1878,8 +1926,8 @@ def test_last_stream_close_seq_reuses_reducer_cache(tmp_path):
     ]
 
 
-def test_reducer_cache_hard_events_fall_back_to_full_rebuild(tmp_path, monkeypatch):
-    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+def test_reducer_cache_msg_edit_falls_back_to_full_rebuild(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
 
     db = _make_db(tmp_path)
     tid = "thread-incremental-hard-event"
@@ -1888,23 +1936,94 @@ def test_reducer_cache_hard_events_fall_back_to_full_rebuild(tmp_path, monkeypat
     db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
     assert _reduce_thread_events(db, tid).next_runner_actionable is not None
 
-    calls = 0
-    original = _reduce_loaded_thread_events
-
-    def counting_full_rebuild(thread_id, max_event_seq, events):
-        nonlocal calls
-        calls += 1
-        return original(thread_id, max_event_seq, events)
-
-    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
-
     db.append_event("msg-edit", tid, "msg.edit", {"skipped_on_continue": True}, msg_id="m-user")
 
-    reduced = _reduce_thread_events(db, tid)
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
 
-    assert calls == 1
     assert reduced.next_runner_actionable is None
-    _assert_incremental_matches_full_rebuild(db, tid)
+
+
+def test_reducer_cache_msg_delete_falls_back_to_full_rebuild(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-msg-delete"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    assert _reduce_thread_events(db, tid).next_runner_actionable is not None
+
+    db.append_event("msg-delete", tid, "msg.delete", {}, msg_id="m-user")
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
+
+    assert reduced.next_runner_actionable is not None
+    assert reduced.next_runner_actionable.msg_id == "m-user"
+
+
+def test_reducer_cache_continue_interrupt_falls_back_to_full_rebuild(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-continue-interrupt"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    assert _reduce_thread_events(db, tid).next_runner_actionable is not None
+
+    db.append_event(
+        "continue",
+        tid,
+        "control.interrupt",
+        {"reason": "continue", "purpose": "continue", "continue_from_msg_id": "m-user"},
+    )
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
+
+    assert reduced.next_runner_actionable is not None
+    assert reduced.next_runner_actionable.msg_id == "m-user"
+
+
+def test_reducer_cache_falls_back_for_impossible_cached_tool_event_ordering(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from eggthreads.tool_state import _REDUCER_CACHE, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-impossible-ordering"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    _append_assistant_tool_parent(db, tid, tcid="tc_impossible")
+    baseline = _reduce_thread_events(db, tid)
+    tc = baseline.tool_call_states["tc_impossible"]
+
+    impossible = replace(
+        baseline,
+        tool_call_states={
+            "tc_impossible": replace(tc, parent_event_seq=db.max_event_seq(tid) + 100),
+        },
+    )
+    _REDUCER_CACHE.clear()
+    _REDUCER_CACHE[(str(db.path), tid, impossible.max_event_seq)] = impossible
+
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_impossible", "decision": "granted"})
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch)
+
+    assert reduced.tool_call_states["tc_impossible"].state == "TC2.1"
+
+
+def test_reducer_cache_ignores_future_cached_watermark_and_full_rebuilds(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _REDUCER_CACHE, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-impossible-watermark"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    first = _reduce_thread_events(db, tid)
+    assert first.next_runner_actionable is not None
+
+    _REDUCER_CACHE.clear()
+    _REDUCER_CACHE[(str(db.path), tid, db.max_event_seq(tid) + 100)] = first
+    db.append_event("msg-user-2", tid, "msg.create", {"role": "user", "content": "next"}, msg_id="m-user-2")
+
+    reduced = _assert_next_reduce_uses_full_rebuild(db, tid, monkeypatch, require_prior_cache=False)
+
+    assert reduced.max_event_seq == db.max_event_seq(tid)
 
 
 def test_thread_state_reuses_reducer_after_actionable_cache(tmp_path):

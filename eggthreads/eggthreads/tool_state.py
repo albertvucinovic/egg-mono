@@ -149,6 +149,8 @@ def _latest_cached_reduction_before(
 
 def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
     ev_type = ev.get("type")
+    if ev_type in {"msg.edit", "msg.delete"}:
+        return False
     if ev_type == "msg.create":
         raw_tool_calls = payload.get("tool_calls")
         if isinstance(raw_tool_calls, list) and raw_tool_calls:
@@ -168,13 +170,18 @@ def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any])
         # the full-rebuild path for now.
         return payload.get("purpose") != "continue"
     if ev_type == "tool_call.summary":
-        return True
+        return isinstance(payload.get("tool_call_id"), str)
     if ev_type in {
         "tool_call.approval",
         "tool_call.execution_started",
         "tool_call.finished",
         "tool_call.output_approval",
     }:
+        decision = payload.get("decision") if ev_type == "tool_call.approval" else None
+        if decision in {"all-in-turn", "global_approval", "revoke_global_approval"}:
+            return True
+        if not isinstance(payload.get("tool_call_id"), str):
+            return False
         return True
     return False
 
@@ -474,6 +481,8 @@ def _try_reduce_thread_events_incrementally(
                 tc = None
             elif ev_type == "msg.create" and payload.get("tool_call_id") is not None:
                 return None
+            elif ev_type == "tool_call.summary":
+                return None
             elif ev_type in {
                 "tool_call.approval",
                 "tool_call.execution_started",
@@ -490,6 +499,7 @@ def _try_reduce_thread_events_incrementally(
                     "msg.create",
                     "tool_call.approval",
                     "tool_call.execution_started",
+                    "tool_call.summary",
                     "tool_call.finished",
                     "tool_call.output_approval",
                 }:

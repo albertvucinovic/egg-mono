@@ -205,13 +205,14 @@ advance after a cached baseline:
     interruption synthesis. Do not silently mark tools finished incorrectly.
 - [x] Recompute `next_runner_actionable` and coarse state from compact state after
       applying the tail.
-- [ ] Add equivalence tests comparing incremental reductions to full rebuilds for
+- [x] Add equivalence tests comparing incremental reductions to full rebuilds for
       each lifecycle transition and for a combined assistant-tool round trip.
-  - Current status: explicit approval, execution_started, finished,
-    output_approval, tool result publication, and assistant/user tool-call
-    declarations, all-in-turn approval, and global approval/revoke are covered;
-    active-tool interrupt/stream-close synthesis and a combined assistant-tool
-    round trip are covered.
+  - Current status: explicit approval/denial, execution_started, finished,
+    output_approval with and without a prior finish, tool result publication,
+    assistant/user tool-call declarations, all-in-turn approval, global
+    approval/revoke, active-tool interrupt/stream-close synthesis, no-op
+    non-matching interrupts, and a combined assistant-tool round trip are
+    covered. Each incremental helper path compares against a full rebuild.
 - [x] Add mutation-safety tests: old cached states must not be mutated by later
       incremental updates.
 
@@ -219,12 +220,17 @@ advance after a cached baseline:
 
 Document and enforce a small set of events that still force full rebuild:
 
-- [ ] `msg.edit` and `msg.delete` until edit/delete semantics are incremental.
-- [ ] `control.interrupt` with `purpose='continue'` because it rewrites the
+- [x] `msg.edit` and `msg.delete` until edit/delete semantics are incremental.
+- [x] `control.interrupt` with `purpose='continue'` because it rewrites the
       effective message boundary and skipped set.
-- [ ] malformed/reused tool-call ids that cannot be resolved against cached
+- [x] malformed/reused tool-call ids that cannot be resolved against cached
       state.
-- [ ] schema/version mismatch or impossible ordering.
+- [x] schema/version mismatch or impossible ordering.
+  - Current status: there is no event-schema version marker in the local event
+    projection, so no new public schema/version API was added. Existing local
+    impossible-ordering checks force fallback when a cached tool-call parent seq
+    is newer than a tail lifecycle/publication event; focused tests also cover
+    future cached watermarks being ignored in favor of a full rebuild.
 
 Add instrumentation counters in tests or debug-only local helpers so we can say:
 
@@ -234,6 +240,12 @@ continue/edit/delete: full rebuild fallback
 ```
 
 Do not add noisy runtime logging by default.
+
+2026-05-27 status: hard-event tests spy on `_reduce_loaded_thread_events` and
+assert exactly one full rebuild for edit/delete, continue interrupts,
+malformed/unresolvable/reused tool-call ids, and impossible cached ordering.
+Malformed lifecycle ids are rejected by the safe-tail gate before tail apply;
+unresolvable/reused ids and impossible ordering return `None` from tail apply.
 
 ## Phase 4 — Scheduler-owned projection cache
 
