@@ -249,12 +249,12 @@ unresolvable/reused ids and impossible ordering return `None` from tail apply.
 
 ## Phase 4 — Scheduler-owned projection cache
 
-- [ ] Decide whether scheduler uses the existing `_REDUCER_CACHE` or a smaller
+- [x] Decide whether scheduler uses the existing `_REDUCER_CACHE` or a smaller
       scheduler-owned cache.
-- [ ] Preferred long-term design: a private scheduler cache keyed by
+- [x] Preferred long-term design: a private scheduler cache keyed by
       `(db_path, thread_id)` that stores one mutable/current projection and
       applies event tails by watermark.
-- [ ] Expose a private helper such as:
+- [x] Expose a private helper such as:
 
 ```python
 def discover_runner_actionable_incremental(db, thread_id) -> Optional[RunnerActionable]:
@@ -263,24 +263,40 @@ def discover_runner_actionable_incremental(db, thread_id) -> Optional[RunnerActi
 
   or evolve `discover_runner_actionable_cached` so callers keep their API while
   internals become genuinely incremental.
-- [ ] Bound memory:
+- [x] Bound memory:
   - keep one current projection per active thread in process;
   - do not keep all historical reductions;
   - prune cache entries for deleted/unknown threads or subtree changes.
-- [ ] Preserve process-local nature. No persisted scheduler cache until there is
+- [x] Preserve process-local nature. No persisted scheduler cache until there is
       evidence process restarts need it.
+
+2026-05-27 status: chose the existing process-local `_REDUCER_CACHE` rather
+than a new scheduler-owned cache. After Phase 2/3, `_reduce_thread_events` is the
+incremental projection used by `discover_runner_actionable_cached`, and
+`_store_reducer_cache` already prunes older watermarks so each
+`(db_path, thread_id)` has at most one current projection. Added a tiny private
+`_prune_reducer_cache_for_threads` hook for scheduler subtree removals/deleted
+threads; no public API or persisted cache was added.
 
 ## Phase 5 — Scheduler loop integration
 
-- [ ] Use the incremental actionability helper in `SubtreeScheduler.run_forever`.
-- [ ] Keep `last_checked_seq` semantics:
+- [x] Use the incremental actionability helper in `SubtreeScheduler.run_forever`.
+- [x] Keep `last_checked_seq` semantics:
   - non-runnable idle threads may be skipped until their event watermark changes;
   - runnable-but-unscheduled threads must not be watermarked away;
   - active leased threads must be cheap and safe for multi-UI operation.
-- [ ] Review sticky scheduling with the new helper so idle checks do not trigger
+- [x] Review sticky scheduling with the new helper so idle checks do not trigger
       full history scans.
-- [ ] Keep fairness yields, but the main win should be less work, not only more
+- [x] Keep fairness yields, but the main win should be less work, not only more
       yielding.
+
+2026-05-27 status: `SubtreeScheduler.run_forever` continues to call
+`discover_runner_actionable_cached`, which now uses the incremental reducer tail
+path after warmup. Focused scheduler tests spy on `_reduce_loaded_thread_events`
+and prove a changed normal tail can be discovered after warmup without another
+full rebuild. Existing scheduler tests cover active-lease skipping, sticky idle
+lease behavior, runnable-but-unscheduled watermark preservation, and cooperative
+fairness yields.
 
 ## Phase 6 — Status/wait consumers
 

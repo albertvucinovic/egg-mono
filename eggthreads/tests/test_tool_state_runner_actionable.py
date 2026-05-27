@@ -876,6 +876,23 @@ def test_discover_runner_actionable_cached_reuses_single_reducer_query(tmp_path)
         db.conn.set_trace_callback(None)
 
 
+def test_reducer_cache_keeps_one_current_projection_per_thread(tmp_path):
+    from eggthreads.tool_state import _REDUCER_CACHE, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-reducer-cache-one-current"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user-1", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user-1")
+    first = _reduce_thread_events(db, tid)
+
+    db.append_event("msg-user-2", tid, "msg.create", {"role": "user", "content": "next"}, msg_id="m-user-2")
+    second = _reduce_thread_events(db, tid)
+
+    cache_keys = [key for key in _REDUCER_CACHE if key[0] == str(db.path) and key[1] == tid]
+    assert cache_keys == [(str(db.path), tid, second.max_event_seq)]
+    assert first.max_event_seq < second.max_event_seq
+
+
 def test_reducer_cache_incrementally_applies_plain_messages_and_llm_boundaries(tmp_path, monkeypatch):
     from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
 

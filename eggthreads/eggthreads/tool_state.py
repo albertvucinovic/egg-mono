@@ -133,6 +133,15 @@ def _store_reducer_cache(db_path: str, thread_id: str, reduction: _ThreadEventRe
             del _REDUCER_CACHE[key]
 
 
+def _prune_reducer_cache_for_threads(db_path: str, thread_ids: Iterable[str]) -> None:
+    thread_id_set = {str(tid) for tid in thread_ids}
+    if not thread_id_set:
+        return
+    for key in list(_REDUCER_CACHE.keys()):
+        if key[0] == db_path and key[1] in thread_id_set:
+            del _REDUCER_CACHE[key]
+
+
 def _latest_cached_reduction_before(
     db_path: str,
     thread_id: str,
@@ -627,7 +636,9 @@ def _reduce_thread_events(db: ThreadsDB, thread_id: str) -> _ThreadEventReductio
 
     This is private and rebuildable: SQLite events remain the source of truth.
     The cache is keyed by database path, thread id, and max event sequence, so
-    any appended event naturally invalidates the previous reduction.
+    any appended event naturally invalidates the previous reduction.  Storing a
+    new reduction prunes older entries for that same ``(db_path, thread_id)``,
+    keeping at most one current projection per thread in this process.
     """
 
     try:

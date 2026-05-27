@@ -1810,6 +1810,113 @@ def test_scheduler_sticky_idle_skips_actionability_for_active_leased_thread(tmp_
     asyncio.run(run_test())
 
 
+def test_scheduler_actionability_uses_incremental_tail_after_warmup(tmp_path, monkeypatch):
+    from eggthreads import append_message
+    from eggthreads import runner as runner_module
+    from eggthreads import tool_state
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    append_message(db, root, "user", "hello")
+
+    full_rebuild_calls = 0
+    original = tool_state._reduce_loaded_thread_events
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal full_rebuild_calls
+        full_rebuild_calls += 1
+        return original(thread_id, max_event_seq, events)
+
+    first_discovery = asyncio.Event()
+    second_discovery = asyncio.Event()
+    discover_calls = 0
+    discovery_seqs: List[int] = []
+
+    def counting_discover(db_arg, thread_id):
+        nonlocal discover_calls
+        discover_calls += 1
+        discovery_seqs.append(db_arg.max_event_seq(thread_id))
+        result = tool_state.discover_runner_actionable_cached(db_arg, thread_id)
+        if discover_calls == 1:
+            first_discovery.set()
+        elif discover_calls == 2:
+            second_discovery.set()
+        return result
+
+    async def run_test():
+        scheduler = SubtreeScheduler(db, root, llm=MagicMock(), config=RunnerConfig(max_concurrent_threads=0))
+        monkeypatch.setattr(tool_state, "_reduce_loaded_thread_events", counting_full_rebuild)
+        monkeypatch.setattr(runner_module, "discover_runner_actionable_cached", counting_discover)
+
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.01))
+        try:
+            await asyncio.wait_for(first_discovery.wait(), timeout=1)
+            assert full_rebuild_calls == 1
+            append_message(db, root, "user", "next")
+            await asyncio.wait_for(second_discovery.wait(), timeout=1)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(run_test())
+
+    assert discover_calls == 2
+    assert len(discovery_seqs) == 2
+    assert discovery_seqs[1] > discovery_seqs[0]
+    assert full_rebuild_calls == 1
+
+
+def test_scheduler_prunes_reducer_cache_for_threads_removed_from_subtree(tmp_path, monkeypatch):
+    from eggthreads import append_message, delete_thread
+    from eggthreads import runner as runner_module
+    from eggthreads.tool_state import _REDUCER_CACHE, discover_runner_actionable_cached
+
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    child = ts.create_child_thread(db, root, name="child")
+    append_message(db, child, "user", "hello")
+    assert discover_runner_actionable_cached(db, child) is not None
+    assert any(key[0] == str(db.path) and key[1] == child for key in _REDUCER_CACHE)
+
+    first_collect_seen = asyncio.Event()
+    second_collect_seen = asyncio.Event()
+    collect_calls = 0
+    original_collect = runner_module.SubtreeScheduler._collect_subtree
+
+    def counting_collect(self, thread_id):
+        nonlocal collect_calls
+        collect_calls += 1
+        result = original_collect(self, thread_id)
+        if collect_calls == 1:
+            first_collect_seen.set()
+        elif collect_calls == 2:
+            second_collect_seen.set()
+        return result
+
+    async def run_test():
+        scheduler = SubtreeScheduler(db, root, llm=MagicMock(), config=RunnerConfig(max_concurrent_threads=0))
+        monkeypatch.setattr(runner_module.SubtreeScheduler, "_collect_subtree", counting_collect)
+
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.01))
+        try:
+            await asyncio.wait_for(first_collect_seen.wait(), timeout=1)
+            delete_thread(db, child)
+            await asyncio.wait_for(second_collect_seen.wait(), timeout=1)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(run_test())
+
+    assert not any(key[0] == str(db.path) and key[1] == child for key in _REDUCER_CACHE)
+
+
 def test_thread_runner_skips_actionability_for_active_lease(tmp_path, monkeypatch):
     db = _make_db(tmp_path)
     root = ts.create_root_thread(db, name="root")

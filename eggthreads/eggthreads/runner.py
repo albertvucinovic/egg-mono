@@ -27,6 +27,7 @@ from .tool_state import (
     discover_runner_actionable_cached,
     thread_state,
     build_tool_call_states,
+    _prune_reducer_cache_for_threads,
 )
 from .tools_config import get_thread_tools_config
 from .tool_call_id import normalize_tool_call_id
@@ -3443,6 +3444,7 @@ class SubtreeScheduler:
         # since the last iteration.
         last_checked_seq: Dict[str, int] = {}
         last_active_lease: Dict[str, str] = {}
+        previous_subtree_threads: Set[str] = set()
 
         # Sticky scheduling state
         last_run_end: Dict[str, float] = {}  # thread_id -> monotonic time when last run ended
@@ -3499,6 +3501,22 @@ class SubtreeScheduler:
 
         while True:
             all_threads = self._collect_subtree(self.root)
+            known_threads = set(all_threads)
+            stale_scheduler_threads = (
+                previous_subtree_threads
+                | set(last_checked_seq)
+                | set(last_active_lease)
+                | set(last_run_end)
+                | set(reserved_slots)
+            ) - known_threads
+            if stale_scheduler_threads:
+                for tid in stale_scheduler_threads:
+                    last_checked_seq.pop(tid, None)
+                    last_active_lease.pop(tid, None)
+                    last_run_end.pop(tid, None)
+                reserved_slots -= stale_scheduler_threads
+                _prune_reducer_cache_for_threads(str(self.db.path), stale_scheduler_threads)
+            previous_subtree_threads = known_threads
             await checkpoint_scheduler_fairness(force=True)
             max_event_seqs = _max_event_seqs_bulk(self.db, all_threads)
             await checkpoint_scheduler_fairness(force=True)
