@@ -179,16 +179,16 @@ Extend the reducer tail path for the normal events that make tool execution
 advance after a cached baseline:
 
 - [ ] `tool_call.approval`
-  - explicit `granted` / `denied` by `tool_call_id`;
-  - `all-in-turn` using cached `user_seqs` and current turn boundaries;
-  - global approval / revoke using incremental global approval state.
-- [ ] `tool_call.execution_started`
+  - [x] explicit `granted` / `denied` by `tool_call_id`;
+  - [ ] `all-in-turn` using cached `user_seqs` and current turn boundaries;
+  - [ ] global approval / revoke using incremental global approval state.
+- [x] `tool_call.execution_started`
   - set `execution_started=True`;
   - record `owner_invoke_id`;
   - preserve `timeout_sec` payload as display metadata only if needed elsewhere.
-- [ ] `tool_call.finished`
+- [x] `tool_call.finished`
   - set `finished_reason` and `finished_output`.
-- [ ] `tool_call.output_approval`
+- [x] `tool_call.output_approval`
   - set `output_decision` and `last_output_approval_payload`.
 - [ ] tool result `msg.create` with `tool_call_id`
   - mark the matching tool call `published=True`;
@@ -203,11 +203,13 @@ advance after a cached baseline:
 - [ ] stream close for active tool invokes
   - preserve the existing conservative behavior or implement exact incremental
     interruption synthesis. Do not silently mark tools finished incorrectly.
-- [ ] Recompute `next_runner_actionable` and coarse state from compact state after
+- [x] Recompute `next_runner_actionable` and coarse state from compact state after
       applying the tail.
 - [ ] Add equivalence tests comparing incremental reductions to full rebuilds for
       each lifecycle transition and for a combined assistant-tool round trip.
-- [ ] Add mutation-safety tests: old cached states must not be mutated by later
+  - Current status: explicit approval, execution_started, finished, and
+    output_approval are covered; combined round trip remains for later slices.
+- [x] Add mutation-safety tests: old cached states must not be mutated by later
       incremental updates.
 
 ## Phase 3 — Hard-event boundary and fallback policy
@@ -336,3 +338,9 @@ Then implement Phase 2 in small event-family slices, committing each after tests
   before actionability, the scheduler records active-lease watermarks and clears
   them when leases disappear/expire, and regression tests cover main scheduling
   plus sticky idle active-lease skips. Phase 2 reducer-tail work remains next.
+- 2026-05-27: Phase 2 first lifecycle slice implemented. Incremental tails now
+  handle explicit per-tool `granted`/`denied` approval, execution start,
+  finished, and output approval for resolvable existing tool calls, with RA/coarse
+  recomputation and mutation-safety/equivalence tests. Unknown tool ids,
+  all-in-turn, global approval/revoke, publication, declarations, and interrupt/
+  close synthesis remain full-rebuild/later-slice work.

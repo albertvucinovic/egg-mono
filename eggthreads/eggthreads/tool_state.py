@@ -165,6 +165,13 @@ def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any])
         return payload.get("purpose") != "continue"
     if ev_type == "tool_call.summary":
         return True
+    if ev_type in {
+        "tool_call.approval",
+        "tool_call.execution_started",
+        "tool_call.finished",
+        "tool_call.output_approval",
+    }:
+        return True
     return False
 
 
@@ -281,17 +288,68 @@ def _try_reduce_thread_events_incrementally(
     messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
     tool_call_states = dict(previous.tool_call_states)
     for ev, payload, ev_seq in records:
-        if ev.get("type") != "tool_call.summary":
-            continue
+        ev_type = ev.get("type")
         tcid = payload.get("tool_call_id")
         if tcid not in tool_call_states:
+            if ev_type in {
+                "tool_call.approval",
+                "tool_call.execution_started",
+                "tool_call.finished",
+                "tool_call.output_approval",
+            }:
+                return None
             continue
         tc = tool_call_states[tcid]
         if ev_seq <= tc.parent_event_seq:
+            if ev_type in {
+                "tool_call.approval",
+                "tool_call.execution_started",
+                "tool_call.finished",
+                "tool_call.output_approval",
+            }:
+                return None
             continue
-        summary = payload.get("summary")
-        if isinstance(summary, str):
-            tool_call_states[tcid] = replace(tc, summary=summary)
+        if ev_type == "tool_call.summary":
+            summary = payload.get("summary")
+            if isinstance(summary, str):
+                tool_call_states[tcid] = replace(tc, summary=summary)
+        elif ev_type == "tool_call.approval":
+            decision = payload.get("decision")
+            if decision in {"global_approval", "revoke_global_approval", "all-in-turn"}:
+                return None
+            if decision in {"granted", "denied"}:
+                tool_call_states[tcid] = replace(tc, approval_decision=decision)
+            else:
+                return None
+        elif ev_type == "tool_call.execution_started":
+            inv = ev.get("invoke_id")
+            tool_call_states[tcid] = replace(
+                tc,
+                execution_started=True,
+                owner_invoke_id=inv if isinstance(inv, str) and inv else tc.owner_invoke_id,
+            )
+        elif ev_type == "tool_call.finished":
+            changes: Dict[str, Any] = {}
+            reason = payload.get("reason")
+            if isinstance(reason, str):
+                changes["finished_reason"] = reason
+            out = payload.get("output")
+            if out is not None:
+                changes["finished_output"] = str(out)
+            if changes:
+                tool_call_states[tcid] = replace(tc, **changes)
+        elif ev_type == "tool_call.output_approval":
+            decision = payload.get("decision")
+            changes = {"last_output_approval_payload": payload}
+            if isinstance(decision, str):
+                changes["output_decision"] = decision
+            if tc.finished_reason is None and "output_decision" in changes:
+                changes["finished_reason"] = "interrupted"
+                changes["finished_output"] = str(
+                    payload.get("preview")
+                    or "--- INTERRUPTED ---\nTool output was decided before the tool reported a result."
+                )
+            tool_call_states[tcid] = replace(tc, **changes)
     next_runner_actionable = _next_runner_actionable_from_reduction(
         thread_id,
         tool_call_states,
