@@ -148,14 +148,12 @@ def _latest_cached_reduction_before(
 def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
     ev_type = ev.get("type")
     if ev_type == "msg.create":
-        # The initial slice deliberately avoids incremental tool-state
-        # maintenance. A plain tool result still participates in RA1
-        # detection, but a tool message with tool_call_id mutates tool
-        # publication state and belongs on the full-rebuild path.
-        if payload.get("tool_call_id") is not None:
-            return False
         tool_calls = payload.get("tool_calls") or []
-        return not (isinstance(tool_calls, list) and tool_calls)
+        if isinstance(tool_calls, list) and tool_calls:
+            return False
+        if payload.get("tool_call_id") is not None:
+            return payload.get("role") == "tool"
+        return True
     if ev_type in {"stream.open", "stream.delta", "stream.close"}:
         return True
     if ev_type == "control.interrupt":
@@ -208,10 +206,11 @@ def _try_reduce_thread_events_incrementally(
     """Apply a small safe incremental reducer slice for safe tail events.
 
     This handles the hot RA1/LLM bookkeeping path (plain messages and stream
-    boundaries) and summary-only tool status updates without replaying/parsing
-    the full event log. Lifecycle tool-state mutations, msg edits, continue
-    interrupts, or other hard events stay on the full reducer until their
-    incremental semantics are explicit.
+    boundaries), resolvable tool lifecycle tails, and resolvable tool result
+    publication without replaying/parsing the full event log. Tool-call
+    declarations, unresolved ids, msg edits, continue interrupts, or other hard
+    events stay on the full reducer until their incremental semantics are
+    explicit.
     """
 
     cur = db.conn.execute(
@@ -270,6 +269,8 @@ def _try_reduce_thread_events_incrementally(
             skipped = msg_id and str(msg_id) in skipped_msg_ids
             if skipped:
                 continue
+            if payload.get("tool_call_id") is not None and payload.get("role") != "tool":
+                return None
             if payload.get("role") == "assistant" and not bool(payload.get("no_api")):
                 last_assistant_seq = ev_seq
                 if last_llm_boundary_seq == -1 or assistant_fallback_boundary:
@@ -291,6 +292,8 @@ def _try_reduce_thread_events_incrementally(
         ev_type = ev.get("type")
         tcid = payload.get("tool_call_id")
         if tcid not in tool_call_states:
+            if ev_type == "msg.create" and payload.get("tool_call_id") is not None:
+                return None
             if ev_type in {
                 "tool_call.approval",
                 "tool_call.execution_started",
@@ -302,6 +305,7 @@ def _try_reduce_thread_events_incrementally(
         tc = tool_call_states[tcid]
         if ev_seq <= tc.parent_event_seq:
             if ev_type in {
+                "msg.create",
                 "tool_call.approval",
                 "tool_call.execution_started",
                 "tool_call.finished",
@@ -313,6 +317,13 @@ def _try_reduce_thread_events_incrementally(
             summary = payload.get("summary")
             if isinstance(summary, str):
                 tool_call_states[tcid] = replace(tc, summary=summary)
+        elif ev_type == "msg.create":
+            if payload.get("role") != "tool" or payload.get("tool_call_id") is None:
+                continue
+            msg_id = ev.get("msg_id")
+            if msg_id and str(msg_id) in skipped_msg_ids:
+                continue
+            tool_call_states[tcid] = replace(tc, published=True)
         elif ev_type == "tool_call.approval":
             decision = payload.get("decision")
             if decision in {"global_approval", "revoke_global_approval", "all-in-turn"}:

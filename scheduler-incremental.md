@@ -190,7 +190,7 @@ advance after a cached baseline:
   - set `finished_reason` and `finished_output`.
 - [x] `tool_call.output_approval`
   - set `output_decision` and `last_output_approval_payload`.
-- [ ] tool result `msg.create` with `tool_call_id`
+- [x] tool result `msg.create` with `tool_call_id`
   - mark the matching tool call `published=True`;
   - also add it to `messages_after_records` if it is an API-visible tool message
     after the current LLM boundary, because it can trigger RA1.
@@ -207,8 +207,9 @@ advance after a cached baseline:
       applying the tail.
 - [ ] Add equivalence tests comparing incremental reductions to full rebuilds for
       each lifecycle transition and for a combined assistant-tool round trip.
-  - Current status: explicit approval, execution_started, finished, and
-    output_approval are covered; combined round trip remains for later slices.
+  - Current status: explicit approval, execution_started, finished,
+    output_approval, and tool result publication are covered; combined round
+    trip remains for later slices.
 - [x] Add mutation-safety tests: old cached states must not be mutated by later
       incremental updates.
 
@@ -344,3 +345,9 @@ Then implement Phase 2 in small event-family slices, committing each after tests
   recomputation and mutation-safety/equivalence tests. Unknown tool ids,
   all-in-turn, global approval/revoke, publication, declarations, and interrupt/
   close synthesis remain full-rebuild/later-slice work.
+- 2026-05-27: Phase 2 tool result publication slice implemented. Incremental
+  tails now handle API-visible and no-api `msg.create` tool results for
+  resolvable existing `tool_call_id`s, mark the tool call published, preserve
+  message-after-boundary/RA1 semantics, and fall back for unresolved ids. Tool
+  declarations, all-in-turn/global approval, and interrupt/close synthesis remain
+  later-slice work.
