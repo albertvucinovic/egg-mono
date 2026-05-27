@@ -3752,6 +3752,14 @@ class ThreadWaitResult:
 
 
 @dataclass
+class _ThreadWaitUnfinishedCache:
+    """Per-call cache for an unchanged thread that was already proven unfinished."""
+
+    event_watermark: int
+    state: str
+
+
+@dataclass
 class ChildThreadStatus:
     """Manager-visible status for a child/descendant thread."""
 
@@ -4685,11 +4693,11 @@ def _thread_wait_complete(db: ThreadsDB, thread_id: str) -> bool:
         return False
 
     try:
-        from .tool_state import build_tool_call_states, discover_runner_actionable
+        from .tool_state import build_tool_call_states, discover_runner_actionable_cached
 
         if any(tc.state != 'TC6' for tc in build_tool_call_states(db, thread_id).values()):
             return False
-        if discover_runner_actionable(db, thread_id) is not None:
+        if discover_runner_actionable_cached(db, thread_id) is not None:
             return False
     except Exception:
         return False
@@ -4699,6 +4707,104 @@ def _thread_wait_complete(db: ThreadsDB, thread_id: str) -> bool:
         return True
     latest_completion = _latest_completed_llm_turn_seq(db, thread_id)
     return latest_completion >= latest_trigger
+
+
+def _thread_wait_state_after_cheap_checks(db: ThreadsDB, thread_id: str, row: ThreadRow) -> Optional[str]:
+    """Return a known unfinished wait state, or None if reducer checks are needed."""
+
+    if row.status == 'paused':
+        return 'paused'
+
+    try:
+        open_row = db.current_open(thread_id)
+    except Exception:
+        open_row = None
+    if open_row is None:
+        return None
+
+    try:
+        if str(open_row['lease_until'] or '') <= _utcnow_iso():
+            db.release(thread_id, str(open_row['invoke_id']))
+            return None
+        return 'running'
+    except Exception:
+        return 'running'
+
+
+def _thread_wait_poll_once(
+    db: ThreadsDB,
+    thread_id: str,
+    cached_unfinished: Optional[_ThreadWaitUnfinishedCache] = None,
+    *,
+    include_unfinished_details: bool = False,
+) -> tuple[ThreadWaitResult, Optional[_ThreadWaitUnfinishedCache]]:
+    """Evaluate one thread for ``wait_for_threads`` with cheap unchanged-state reuse."""
+
+    row = db.get_thread(thread_id)
+    if row is None:
+        return ThreadWaitResult(
+            thread_id=thread_id,
+            finished=False,
+            state='not_found',
+        ), None
+
+    cheap_state = _thread_wait_state_after_cheap_checks(db, thread_id, row)
+    if cheap_state is not None:
+        return ThreadWaitResult(
+            thread_id=thread_id,
+            finished=False,
+            state=cheap_state,
+            last_assistant_message=(
+                _last_assistant_content_from_snapshot(db, thread_id)
+                if include_unfinished_details else ''
+            ),
+            short_recap=row.short_recap,
+        ), None
+
+    event_watermark = db.max_event_seq(thread_id)
+    if cached_unfinished is not None and cached_unfinished.event_watermark == event_watermark:
+        return ThreadWaitResult(
+            thread_id=thread_id,
+            finished=False,
+            state=cached_unfinished.state,
+            last_assistant_message=(
+                _last_assistant_content_from_snapshot(db, thread_id)
+                if include_unfinished_details else ''
+            ),
+            short_recap=row.short_recap,
+        ), cached_unfinished
+
+    from .tool_state import thread_state
+
+    try:
+        state = thread_state(db, thread_id)
+    except Exception:
+        state = 'unknown'
+
+    if state == 'waiting_user' and _thread_wait_complete(db, thread_id):
+        return ThreadWaitResult(
+            thread_id=thread_id,
+            finished=True,
+            state=state,
+            last_assistant_message=_last_assistant_content_from_snapshot(db, thread_id),
+            short_recap=row.short_recap,
+        ), None
+
+    # Only cache states that are deterministically unfinished without relying
+    # on an exception path.  An ``unknown`` state should be rechecked each poll.
+    result = ThreadWaitResult(
+        thread_id=thread_id,
+        finished=False,
+        state=state,
+        last_assistant_message=(
+            _last_assistant_content_from_snapshot(db, thread_id)
+            if include_unfinished_details else ''
+        ),
+        short_recap=row.short_recap,
+    )
+    if state in {'running', 'waiting_tool_approval', 'waiting_output_approval'}:
+        return result, _ThreadWaitUnfinishedCache(event_watermark=event_watermark, state=state)
+    return result, None
 
 def wait_for_threads(
     db: ThreadsDB,
@@ -4716,44 +4822,28 @@ def wait_for_threads(
     not used to decide whether a thread is finished.
     """
 
-    from .tool_state import thread_state
-
     clean_ids = [_clean_wait_thread_id(t) for t in (thread_ids or []) if isinstance(t, (str, int))]
     clean_ids = [tid for tid in clean_ids if tid]
     start = time.time()
     finished: Dict[str, bool] = {tid: False for tid in clean_ids}
     results: Dict[str, ThreadWaitResult] = {}
+    unfinished_cache: Dict[str, _ThreadWaitUnfinishedCache] = {}
 
     while True:
         all_done = True
         for tid in clean_ids:
             if finished.get(tid):
                 continue
-            row = db.get_thread(tid)
-            if row is None:
-                results[tid] = ThreadWaitResult(
-                    thread_id=tid,
-                    finished=False,
-                    state='not_found',
-                )
+            result, cache_entry = _thread_wait_poll_once(db, tid, unfinished_cache.get(tid))
+            if result.finished or result.state == 'not_found':
+                results[tid] = result
                 finished[tid] = True
                 continue
-            try:
-                st = thread_state(db, tid)
-            except Exception:
-                st = 'unknown'
-
-            if st == 'waiting_user' and _thread_wait_complete(db, tid):
-                results[tid] = ThreadWaitResult(
-                    thread_id=tid,
-                    finished=True,
-                    state=st,
-                    last_assistant_message=_last_assistant_content_from_snapshot(db, tid),
-                    short_recap=(row.short_recap if row else None),
-                )
-                finished[tid] = True
+            if cache_entry is not None:
+                unfinished_cache[tid] = cache_entry
             else:
-                all_done = False
+                unfinished_cache.pop(tid, None)
+            all_done = False
         if all_done:
             break
         limit = _safe_float(timeout_sec)
@@ -4772,25 +4862,15 @@ def wait_for_threads(
     for tid in clean_ids:
         if tid in results:
             continue
-        row = db.get_thread(tid)
-        if row is None:
-            results[tid] = ThreadWaitResult(
-                thread_id=tid,
-                finished=False,
-                state='not_found',
-            )
-            continue
-        try:
-            st = thread_state(db, tid)
-        except Exception:
-            st = 'unknown'
-        results[tid] = ThreadWaitResult(
-            thread_id=tid,
-            finished=False,
-            state=st,
-            last_assistant_message=_last_assistant_content_from_snapshot(db, tid),
-            short_recap=(row.short_recap if row else None),
+        result, cache_entry = _thread_wait_poll_once(
+            db,
+            tid,
+            unfinished_cache.get(tid),
+            include_unfinished_details=True,
         )
+        results[tid] = result
+        if cache_entry is not None:
+            unfinished_cache[tid] = cache_entry
     return results
 
 def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_dir: str, reason: str = "user") -> None:

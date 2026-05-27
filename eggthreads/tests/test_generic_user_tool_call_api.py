@@ -326,3 +326,83 @@ def test_thread_state_releases_expired_open_stream(tmp_path):
 
     assert ts.thread_state(db, tid) == "waiting_user"
     assert db.current_open(tid) is None
+
+
+def test_wait_for_threads_reuses_unchanged_unfinished_poll_result(tmp_path, monkeypatch):
+    import eggthreads.api as api
+    import eggthreads.tool_state as tool_state
+
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "work to do")
+
+    reducer_calls = 0
+    original_reduce_thread_events = tool_state._reduce_thread_events
+
+    def counting_reduce_thread_events(db_arg, thread_id):
+        nonlocal reducer_calls
+        assert thread_id == tid
+        reducer_calls += 1
+        return original_reduce_thread_events(db_arg, thread_id)
+
+    now = [1000.0]
+    sleep_calls = 0
+
+    def fake_time():
+        return now[0]
+
+    def fake_sleep(seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        now[0] += float(seconds)
+
+    monkeypatch.setattr(tool_state, "_reduce_thread_events", counting_reduce_thread_events)
+    monkeypatch.setattr(api.time, "time", fake_time)
+    monkeypatch.setattr(api.time, "sleep", fake_sleep)
+
+    results = ts.wait_for_threads(db, [tid], timeout_sec=0.003, poll_interval=0.001)
+
+    assert sleep_calls >= 2
+    assert reducer_calls == 1
+    assert results[tid].finished is False
+    assert results[tid].state == "running"
+
+
+def test_wait_for_threads_active_open_stream_avoids_reducer_polling(tmp_path, monkeypatch):
+    import eggthreads.api as api
+    import eggthreads.tool_state as tool_state
+
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    assert db.try_open_stream(tid, "active-invoke", "2999-01-01 00:00:00", owner="test", purpose="llm")
+
+    reducer_calls = 0
+    original_reduce_thread_events = tool_state._reduce_thread_events
+
+    def counting_reduce_thread_events(db_arg, thread_id):
+        nonlocal reducer_calls
+        assert thread_id == tid
+        reducer_calls += 1
+        return original_reduce_thread_events(db_arg, thread_id)
+
+    now = [1000.0]
+    sleep_calls = 0
+
+    def fake_time():
+        return now[0]
+
+    def fake_sleep(seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        now[0] += float(seconds)
+
+    monkeypatch.setattr(tool_state, "_reduce_thread_events", counting_reduce_thread_events)
+    monkeypatch.setattr(api.time, "time", fake_time)
+    monkeypatch.setattr(api.time, "sleep", fake_sleep)
+
+    results = ts.wait_for_threads(db, [tid], timeout_sec=0.003, poll_interval=0.001)
+
+    assert sleep_calls >= 2
+    assert reducer_calls == 0
+    assert results[tid].finished is False
+    assert results[tid].state == "running"

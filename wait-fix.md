@@ -48,15 +48,15 @@ logs after small status/countdown events.
 
 ## Phase 2 — Make `wait_for_threads` polling cheap when nothing meaningful changed
 
-- [ ] Avoid calling full `thread_state()` every poll when a cheap check is enough:
+- [x] Avoid calling full `thread_state()` every poll when a cheap check is enough:
   - missing thread -> finish as not found;
   - paused thread -> state is paused;
   - active non-expired open stream -> state is running;
   - expired open stream -> release, then continue checks.
-- [ ] Track each waited thread's last event watermark during the wait call. If the watermark did not change and the previous poll already proved the thread unfinished, reuse that result instead of recomputing reducer/completion state.
-- [ ] Use cached reducer-backed actionability in `_thread_wait_complete` where possible, so the completion path does not re-scan via the older uncached actionability helper.
-- [ ] Add tests for repeated polling on an unchanged unfinished thread and an active-open-stream thread, verifying reducer calls are not repeated unnecessarily.
-- [ ] Keep timeout result reporting accurate enough for current API behavior.
+- [x] Track each waited thread's last event watermark during the wait call. If the watermark did not change and the previous poll already proved the thread unfinished, reuse that result instead of recomputing reducer/completion state.
+- [x] Use cached reducer-backed actionability in `_thread_wait_complete` where possible, so the completion path does not re-scan via the older uncached actionability helper.
+- [x] Add tests for repeated polling on an unchanged unfinished thread and an active-open-stream thread, verifying reducer calls are not repeated unnecessarily.
+- [x] Keep timeout result reporting accurate enough for current API behavior.
 
 ## Phase 3 — Reduce persisted countdown churn from long-running tools
 
@@ -75,3 +75,4 @@ logs after small status/countdown events.
 
 - 2026-05-26: Created plan from py-spy evidence. Next implementation slice: Phase 1 only, because it directly targets the profiled full-rebuild-on-summary cause and should be contained to reducer code plus tests.
 - 2026-05-27: Phase 1 implemented. `tool_call.summary` now stays on the incremental reducer path, copying only updated `ToolCallState` entries and preserving hard-event full-rebuild fallbacks. Focused reducer tests pass.
+- 2026-05-27: Phase 2 implemented. `wait_for_threads` now uses cheap missing/paused/open-stream checks, caches unchanged unfinished poll results by event watermark within a wait call, and uses reducer-cached actionability in `_thread_wait_complete`. Focused wait/reducer tests pass.
