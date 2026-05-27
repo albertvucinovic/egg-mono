@@ -23,6 +23,7 @@ from eggthreads import (
     RunnerConfig,
 )
 from eggthreads.runner import SubtreeScheduler
+from eggthreads.tool_state import RunnerActionable
 
 
 import uuid
@@ -1705,6 +1706,128 @@ def test_scheduler_runnable_discovery_yields_cooperatively(tmp_path, monkeypatch
         assert 0 < discovery_count_at_ui_tick < len(children)
 
     asyncio.run(run_test())
+
+
+def test_scheduler_skips_actionability_for_active_leased_thread(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    _make_thread_runnable(db, root)
+    lease_until = (_utcnow() + timedelta(minutes=1)).strftime(ISO_FORMAT)
+    assert db.try_open_stream(root, _unique_id(), lease_until, owner="test")
+
+    discover_calls = []
+
+    def mock_discover(_db, tid):
+        discover_calls.append(tid)
+        return None
+
+    async def run_test():
+        import eggthreads.runner as runner_module
+
+        original_active_bulk = runner_module._active_open_thread_leases_bulk
+        active_bulk_calls = 0
+        second_poll_seen = asyncio.Event()
+
+        def mock_active_bulk(_db, thread_ids):
+            nonlocal active_bulk_calls
+            result = original_active_bulk(_db, thread_ids)
+            active_bulk_calls += 1
+            if active_bulk_calls >= 2:
+                second_poll_seen.set()
+            return result
+
+        scheduler = SubtreeScheduler(db, root, llm=MagicMock(), config=RunnerConfig())
+        monkeypatch.setattr('eggthreads.runner.discover_runner_actionable_cached', mock_discover)
+        monkeypatch.setattr('eggthreads.runner._active_open_thread_leases_bulk', mock_active_bulk)
+
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.01))
+        try:
+            await asyncio.wait_for(second_poll_seen.wait(), timeout=1)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(run_test())
+
+    assert root not in discover_calls
+
+
+def test_scheduler_sticky_idle_skips_actionability_for_active_leased_thread(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    reserved = ts.create_child_thread(db, root, name="reserved")
+    _make_thread_runnable(db, reserved)
+
+    lease_seen = asyncio.Event()
+    discover_calls = []
+    sticky_idle_discover_calls = []
+
+    def mock_discover(_db, tid):
+        discover_calls.append(tid)
+        if tid == reserved:
+            return RunnerActionable("RA1_llm", tid, db.max_event_seq(tid))
+        return None
+
+    async def mock_run_once(self):
+        lease_until = (_utcnow() + timedelta(minutes=1)).strftime(ISO_FORMAT)
+        assert db.try_open_stream(reserved, _unique_id(), lease_until, owner="test")
+        lease_seen.set()
+
+    def mock_sticky_idle_discover(_db, tid):
+        sticky_idle_discover_calls.append(tid)
+        return None
+
+    async def run_test():
+        scheduler = SubtreeScheduler(
+            db,
+            root,
+            llm=MagicMock(),
+            config=RunnerConfig(max_concurrent_threads=1, sticky_scheduling=True),
+        )
+        monkeypatch.setattr('eggthreads.runner.discover_runner_actionable_cached', mock_discover)
+        monkeypatch.setattr('eggthreads.tool_state.discover_runner_actionable_cached', mock_sticky_idle_discover)
+        monkeypatch.setattr('eggthreads.runner.ThreadRunner.run_once', mock_run_once)
+
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=0.01))
+        try:
+            await asyncio.wait_for(lease_seen.wait(), timeout=1)
+            calls_after_lease = len(discover_calls)
+            await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        assert discover_calls == [reserved]
+        assert calls_after_lease == 1
+        assert sticky_idle_discover_calls == []
+
+    asyncio.run(run_test())
+
+
+def test_thread_runner_skips_actionability_for_active_lease(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    _make_thread_runnable(db, root)
+    lease_until = (_utcnow() + timedelta(minutes=1)).strftime(ISO_FORMAT)
+    assert db.try_open_stream(root, _unique_id(), lease_until, owner="test")
+
+    discover_calls = []
+
+    def mock_discover(_db, tid):
+        discover_calls.append(tid)
+        return RunnerActionable("RA1_llm", tid, db.max_event_seq(tid))
+
+    monkeypatch.setattr('eggthreads.runner.discover_runner_actionable_cached', mock_discover)
+
+    runner = ts.ThreadRunner(db, root, llm=MagicMock(), config=RunnerConfig())
+    assert asyncio.run(runner.run_once()) is False
+    assert discover_calls == []
 
 
 def test_runner_cancellation_does_not_emit_runner_error(tmp_path):

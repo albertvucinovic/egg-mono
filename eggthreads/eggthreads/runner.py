@@ -989,6 +989,15 @@ class ThreadRunner:
         if th and th.status == 'paused':
             return False
 
+        try:
+            row_open = self.db.current_open(self.thread_id)
+            if row_open:
+                lease_until = row_open['lease_until']
+                if lease_until and lease_until > _utcnow_iso():
+                    return False
+        except Exception:
+            pass
+
         # Let approval policies auto-resolve safe TC1 calls before asking
         # discover_runner_actionable() what work is runnable.
         try:
@@ -3176,16 +3185,19 @@ def _is_thread_idle(db: ThreadsDB, thread_id: str) -> bool:
     """
     from .api import is_thread_runnable
 
-    # Not idle if runnable
-    if is_thread_runnable(db, thread_id):
-        return False
-
-    # Not idle if waiting for API response (has open stream)
+    # Not idle if waiting for API response (has an active open stream).  This
+    # cheap lease check must run before actionability discovery so sticky
+    # scheduling does not full-reduce large threads that are already leased.
+    now_iso = _utcnow_iso()
     row = db.conn.execute(
-        "SELECT 1 FROM open_streams WHERE thread_id = ? LIMIT 1",
-        (thread_id,)
+        "SELECT 1 FROM open_streams WHERE thread_id = ? AND lease_until > ? LIMIT 1",
+        (thread_id, now_iso),
     ).fetchone()
     if row:
+        return False
+
+    # Not idle if runnable
+    if is_thread_runnable(db, thread_id):
         return False
 
     return True
@@ -3242,9 +3254,9 @@ def _max_event_seqs_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, int]
     return out
 
 
-def _active_open_threads_bulk(db: ThreadsDB, thread_ids: List[str]) -> Set[str]:
-    """Return thread ids with currently active leases."""
-    out: Set[str] = set()
+def _active_open_thread_leases_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, str]:
+    """Return active lease expiry by thread id."""
+    out: Dict[str, str] = {}
     now_iso = _utcnow_iso()
     for batch in _thread_id_batches(thread_ids):
         if not batch:
@@ -3252,13 +3264,19 @@ def _active_open_threads_bulk(db: ThreadsDB, thread_ids: List[str]) -> Set[str]:
         placeholders = ",".join("?" for _ in batch)
         try:
             cur = db.conn.execute(
-                f"SELECT thread_id FROM open_streams WHERE lease_until > ? AND thread_id IN ({placeholders})",
+                f"SELECT thread_id, lease_until FROM open_streams WHERE lease_until > ? AND thread_id IN ({placeholders})",
                 (now_iso, *batch),
             )
-            out.update(str(row[0]) for row in cur.fetchall())
+            for row in cur.fetchall():
+                out[str(row[0])] = str(row[1])
         except Exception:
             continue
     return out
+
+
+def _active_open_threads_bulk(db: ThreadsDB, thread_ids: List[str]) -> Set[str]:
+    """Return thread ids with currently active leases."""
+    return set(_active_open_thread_leases_bulk(db, thread_ids))
 
 
 def _thread_scheduling_bulk(db: ThreadsDB, thread_ids: List[str]) -> Dict[str, _SchedulerThreadSettings]:
@@ -3424,6 +3442,7 @@ class SubtreeScheduler:
         # runnable checks when a thread's event log has not changed
         # since the last iteration.
         last_checked_seq: Dict[str, int] = {}
+        last_active_lease: Dict[str, str] = {}
 
         # Sticky scheduling state
         last_run_end: Dict[str, float] = {}  # thread_id -> monotonic time when last run ended
@@ -3483,10 +3502,16 @@ class SubtreeScheduler:
             await checkpoint_scheduler_fairness(force=True)
             max_event_seqs = _max_event_seqs_bulk(self.db, all_threads)
             await checkpoint_scheduler_fairness(force=True)
-            active_open_threads = _active_open_threads_bulk(self.db, all_threads)
+            active_open_leases = _active_open_thread_leases_bulk(self.db, all_threads)
+            active_open_threads = set(active_open_leases)
             await checkpoint_scheduler_fairness(force=True)
             scheduling_settings = _thread_scheduling_bulk(self.db, all_threads)
             await checkpoint_scheduler_fairness(force=True)
+
+            for tid in list(last_active_lease):
+                if tid not in active_open_threads:
+                    last_active_lease.pop(tid, None)
+                    last_checked_seq.pop(tid, None)
 
             # Update idle tracking and expire reservations (sticky scheduling)
             if self.cfg.sticky_scheduling:
@@ -3496,6 +3521,14 @@ class SubtreeScheduler:
                 for tid in list(reserved_slots):
                     if tid in running_threads:
                         # Running threads are not idle - clear any idle timer
+                        last_run_end.pop(tid, None)
+                        await checkpoint_scheduler_fairness()
+                        continue
+
+                    if tid in active_open_threads:
+                        # Active leased threads are not idle.  Use the bulk
+                        # lease snapshot so sticky scheduling does not need an
+                        # actionability check for threads already running.
                         last_run_end.pop(tid, None)
                         await checkpoint_scheduler_fairness()
                         continue
@@ -3566,20 +3599,22 @@ class SubtreeScheduler:
                     max_seq = max_event_seqs.get(tid, -1)
                 except Exception:
                     max_seq = -1
+
+                # Skip active leased threads before actionability discovery.
+                # Keep a lease-specific watermark so an unchanged active lease
+                # does not keep reaching this branch, but clear that watermark
+                # above as soon as the lease disappears or expires so takeover
+                # and post-lease work are still discovered.
+                if tid in active_open_threads:
+                    last_checked_seq[tid] = max_seq
+                    last_active_lease[tid] = active_open_leases[tid]
+                    await checkpoint_scheduler_fairness()
+                    continue
+
                 if max_seq == last_checked_seq.get(tid, -1):
                     await checkpoint_scheduler_fairness()
                     continue
                 checked_seqs[tid] = max_seq
-
-                # Skip threads with an active lease held by another process.
-                # This prevents unnecessary is_thread_runnable() calls and
-                # failed try_open_stream() attempts when TUI or another eggw
-                # instance is already running the thread.
-                # NOTE: We do NOT update watermark here - when lease expires,
-                # we want to re-check the thread.
-                if tid in active_open_threads:
-                    await checkpoint_scheduler_fairness()
-                    continue
 
                 ra = discover_runner_actionable_cached(self.db, tid)
                 if ra is not None:

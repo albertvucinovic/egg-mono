@@ -159,17 +159,17 @@ projection, not the full transcript.
 
 ## Phase 1 — Cheap lease-aware scheduler guardrails
 
-- [ ] Ensure scheduler never calls `discover_runner_actionable_cached` for an
+- [x] Ensure scheduler never calls `discover_runner_actionable_cached` for an
       active non-expired lease, including sticky idle checks.
-- [ ] Review `_is_thread_idle`: it currently calls `is_thread_runnable` before
+- [x] Review `_is_thread_idle`: it currently calls `is_thread_runnable` before
       checking open streams. Reverse this order or use the existing bulk lease
       state so sticky scheduling cannot full-reduce actively leased huge threads.
-- [ ] When a thread is skipped because of an active lease, record enough lease
+- [x] When a thread is skipped because of an active lease, record enough lease
       state to avoid repeatedly reconsidering it until either:
       - lease disappears/expires, or
       - event seq changes in a way that matters after the lease ends.
       Do not hide lease expiry; expired leases must still become eligible.
-- [ ] Add tests proving active leased threads do not invoke
+- [x] Add tests proving active leased threads do not invoke
       `discover_runner_actionable_cached` through either the main scheduling pass
       or sticky idle path.
 
@@ -332,3 +332,7 @@ Then implement Phase 2 in small event-family slices, committing each after tests
   and UI streaming paths. No implementation yet. Current preceding commits:
   `bd6ca44` local timeout display, `fc77985` no automatic countdown summaries,
   `06b6a69` wait unchanged-poll cache, `3956f30` summary incremental reducer.
+- 2026-05-27: Phase 1 implemented. `_is_thread_idle` now checks active leases
+  before actionability, the scheduler records active-lease watermarks and clears
+  them when leases disappear/expire, and regression tests cover main scheduling
+  plus sticky idle active-lease skips. Phase 2 reducer-tail work remains next.
