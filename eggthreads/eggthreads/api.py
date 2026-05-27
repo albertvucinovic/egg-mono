@@ -4345,12 +4345,6 @@ def _append_tool_wait_summary(
         pass
 
 
-def _should_emit_tool_wait_summary(last_summary_at: Optional[float], now: float) -> bool:
-    from .tools import _should_emit_tool_summary
-
-    return _should_emit_tool_summary(last_summary_at, now)
-
-
 def wait_for_tool_call_result(
     db: ThreadsDB,
     thread_id: str,
@@ -4368,18 +4362,12 @@ def wait_for_tool_call_result(
     from .tool_state import build_tool_call_states
 
     start = time.time()
-    last_summary: Optional[float] = None
     while True:
         states = build_tool_call_states(db, thread_id)
         tc = states.get(tool_call_id)
         if tc is not None and tc.published:
             return _tool_call_result_now(db, thread_id, tool_call_id)
         limit = _safe_float(timeout_sec)
-        if limit is not None and limit > 0 and tc is not None:
-            now = time.time()
-            if _should_emit_tool_wait_summary(last_summary, now):
-                last_summary = now
-                _append_tool_wait_summary(db, thread_id, tool_call_id, tc.name or 'tool', limit, start, now=now)
         if limit is not None and (time.time() - start) >= limit:
             return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
         try:
@@ -4446,18 +4434,12 @@ async def wait_for_tool_call_result_async(
     from .tool_state import build_tool_call_states
     loop = asyncio.get_running_loop()
     start = loop.time()
-    last_summary: Optional[float] = None
     while True:
         states = build_tool_call_states(db, thread_id)
         tc = states.get(tool_call_id)
         if tc is not None and tc.published:
             return _tool_call_result_now(db, thread_id, tool_call_id)
         limit = _safe_float(timeout_sec)
-        if limit is not None and limit > 0 and tc is not None:
-            now = loop.time()
-            if _should_emit_tool_wait_summary(last_summary, now):
-                last_summary = now
-                _append_tool_wait_summary(db, thread_id, tool_call_id, tc.name or 'tool', limit, start, now=now)
         if limit is not None and (loop.time() - start) >= limit:
             return _tool_call_result_now(db, thread_id, tool_call_id, timed_out=True)
         if limit is not None:

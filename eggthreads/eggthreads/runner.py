@@ -19,7 +19,6 @@ from .tools import (
     ToolRegistry,
     ToolStreamContext,
     create_default_tools,
-    _should_emit_tool_summary,
 )
 from .tool_state import (
     ToolCallState,
@@ -2558,38 +2557,6 @@ class ThreadRunner:
                     _default_tool_timeout_sec,
                 )
 
-                summary_stop = asyncio.Event()
-
-                async def _summary_watcher() -> None:
-                    if tool_timeout_sec is None:
-                        return
-                    start = time.time()
-                    last: Optional[float] = None
-                    while not summary_stop.is_set():
-                        now = time.time()
-                        if _should_emit_tool_summary(last, now):
-                            last = now
-                            summary = tool_timeout_summary(tc.name or 'tool', tool_timeout_sec, start, now=now)
-                            if summary:
-                                try:
-                                    row = self.db.current_open(self.thread_id)
-                                    if not row or row['invoke_id'] != invoke_id:
-                                        break
-                                    emit_tool_summary_event(
-                                        self.db,
-                                        thread_id=self.thread_id,
-                                        invoke_id=invoke_id,
-                                        tool_call_id=tc.tool_call_id,
-                                        tool_name=tc.name or '',
-                                        summary=summary,
-                                    )
-                                except Exception:
-                                    pass
-                        try:
-                            await asyncio.wait_for(summary_stop.wait(), timeout=0.25)
-                        except asyncio.TimeoutError:
-                            pass
-
                 # Create a cancel check that returns True if lease is lost (e.g., Ctrl+C)
                 def make_cancel_check(db_path, thread_id, invoke_id):
                     # Thread-local storage for executor thread's own connection
@@ -2614,7 +2581,6 @@ class ThreadRunner:
 
                 cancel_check = make_cancel_check(self.db.path, self.thread_id, invoke_id)
                 stream_ctx = self._tool_stream_context(tc=tc, invoke_id=invoke_id, current_model=current_model)
-                summary_task = asyncio.create_task(_summary_watcher())
 
                 try:
                     tool_result = await self.tools.execute_async(
@@ -2679,12 +2645,6 @@ class ThreadRunner:
                     full_result = f"ERROR: {e}"
                     finish_reason = 'error'
                     already_streamed = False
-                finally:
-                    summary_stop.set()
-                    try:
-                        await summary_task
-                    except Exception:
-                        pass
                 if not isinstance(full_result, str):
                     full_result = str(full_result)
 

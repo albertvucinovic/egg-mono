@@ -80,7 +80,7 @@ def test_wait_for_tool_call_result_async(tmp_path):
     assert result.state == "TC6"
 
 
-def test_wait_for_tool_call_result_summary_events_are_throttled(tmp_path, monkeypatch):
+def test_wait_for_tool_call_result_does_not_emit_countdown_summary_events(tmp_path, monkeypatch):
     import eggthreads.api as api
 
     db = _make_db(tmp_path)
@@ -102,15 +102,10 @@ def test_wait_for_tool_call_result_summary_events_are_throttled(tmp_path, monkey
 
     assert result.timed_out is True
     rows = db.conn.execute(
-        "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.summary' ORDER BY event_seq ASC",
+        "SELECT 1 FROM events WHERE thread_id=? AND type='tool_call.summary'",
         (tid,),
     ).fetchall()
-    summaries = [json.loads(row[0])["summary"] for row in rows]
-
-    assert summaries == [
-        "waiting for bash result; timeout in 6s (limit 6s)",
-        "waiting for bash result; timeout in 1s (limit 6s)",
-    ]
+    assert rows == []
 
 
 def test_wait_for_threads_returns_structured_results(tmp_path):
