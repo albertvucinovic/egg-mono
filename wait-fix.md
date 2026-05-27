@@ -67,9 +67,9 @@ logs after small status/countdown events.
 
 ## Phase 4 — Follow-up profiling / regression checks
 
-- [ ] Re-run a short profile against the long `T9JM`/`FQ7A` scenario or an equivalent synthetic long-thread wait.
-- [ ] Confirm the dominant samples are no longer repeated full `_reduce_thread_events` rebuilds on summary-only tails.
-- [ ] If scrollback remains laggy after wait CPU is fixed, address the separate `TranscriptScrollbackSource` deep-scroll cache/prepend issue in a new TODO or follow-up phase.
+- [x] Re-run a short profile against the long `T9JM`/`FQ7A` scenario or an equivalent synthetic long-thread wait.
+- [x] Confirm the dominant samples are no longer repeated full `_reduce_thread_events` rebuilds on summary-only tails.
+- [x] If scrollback remains laggy after wait CPU is fixed, address the separate `TranscriptScrollbackSource` deep-scroll cache/prepend issue in a new TODO or follow-up phase. No scrollback blocker was found in this reducer/wait regression check; leave scrollback as separate follow-up only if it remains observable.
 
 ## Status notes
 
@@ -77,3 +77,4 @@ logs after small status/countdown events.
 - 2026-05-27: Phase 1 implemented. `tool_call.summary` now stays on the incremental reducer path, copying only updated `ToolCallState` entries and preserving hard-event full-rebuild fallbacks. Focused reducer tests pass.
 - 2026-05-27: Phase 2 implemented. `wait_for_threads` now uses cheap missing/paused/open-stream checks, caches unchanged unfinished poll results by event watermark within a wait call, and uses reducer-cached actionability in `_thread_wait_complete`. Focused wait/reducer tests pass.
 - 2026-05-27: Phase 3 implemented. Timeout countdown summaries now emit immediately, then at a sparse shared cadence for runner-managed tools and wait-for-tool-call polling. Focused throttling/wait/tool-timeout tests pass.
+- 2026-05-27: Phase 4 synthetic regression completed against checkout commit `447283b` using `PYTHONPATH="$PWD/eggthreads${PYTHONPATH:+:$PYTHONPATH}" PYTHONUNBUFFERED=1 python - <<'PY' ...`. Verified import path was this checkout (`.../eggclones/egg-env/egg-mono/eggthreads/eggthreads/__init__.py`). Results: summary-tail benchmark with 8,000 historical `tool_call.summary` events plus 100 appended summary-only tails reported `full_rebuild_calls=0`, `elapsed_sec=0.0061`; unchanged unfinished `wait_for_threads` polling reported `sleep_calls=4`, `reducer_calls=1`, `finished=False`, `state=running`. Focused pytest checks also passed with the same checkout `PYTHONPATH`.
