@@ -168,6 +168,39 @@ def test_suppressed_tool_stream_shows_indicator_not_more_output(tmp_path, monkey
     assert app._live_state["tool_stream_indicator"]["active"] is True
 
 
+def test_tool_timeout_countdown_is_calculated_without_summary_events(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    monkeypatch.setattr("egg.panels.time.time", lambda: 1030.0)
+
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "stream.open",
+                "invoke_id": invoke_id,
+                "ts": "1970-01-01T00:16:40Z",
+                "payload_json": json.dumps({"stream_kind": "tool"}),
+            },
+            tid,
+        )
+    )
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "tool_call.execution_started",
+                "payload_json": json.dumps({"tool_call_id": "call-wait", "timeout_sec": 300}),
+            },
+            tid,
+        )
+    )
+
+    assert app._live_state["timeout_sec"] == 300
+    assert "timeout in 270s (limit 300s)" in app._current_stream_header_part()
+    assert "timeout in 270s (limit 300s)" in app.compose_chat_panel_text()
+
+
 def test_watch_thread_yields_while_replaying_large_active_reasoning_stream(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     tid = app.current_thread

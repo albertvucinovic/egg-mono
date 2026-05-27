@@ -905,10 +905,29 @@ class PanelsMixin:
                 except Exception:
                     tool_name = ""
             inner = f"tool {tool_name}" if tool_name else "tool"
+            countdown = self._current_tool_timeout_countdown()
+            if countdown:
+                inner = f"{inner}; {countdown}"
         else:
             inner = str(kind)
         # Escape inner brackets so Rich doesn't try to parse them as markup.
         return f"[yellow]Streaming\\[{inner}][/yellow]"
+
+    def _current_tool_timeout_countdown(self) -> str:
+        """Return a local, non-persisted timeout countdown for an active tool stream."""
+
+        ls = getattr(self, '_live_state', {}) or {}
+        if not ls.get('active_invoke') or ls.get('stream_kind') != 'tool':
+            return ""
+        try:
+            timeout = float(ls.get('timeout_sec'))
+            started = float(ls.get('started_at'))
+        except Exception:
+            return ""
+        if timeout <= 0 or started <= 0:
+            return ""
+        remaining = max(0.0, timeout - (time.time() - started))
+        return f"timeout in {remaining:.0f}s (limit {timeout:.0f}s)"
 
     def current_stream_tps(self) -> str:
         """Return a compact live TPS string for the active LLM stream."""

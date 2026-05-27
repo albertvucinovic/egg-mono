@@ -39,6 +39,40 @@ def _new_tool_summary() -> Dict[str, Any]:
     return {"active": False, "name": "", "text": ""}
 
 
+def _timeout_from_tool_call_payload(payload: Dict[str, Any]) -> Optional[float]:
+    try:
+        tool_calls = payload.get('tool_calls') or []
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return None
+        tc = tool_calls[0]
+        if not isinstance(tc, dict):
+            return None
+        fn = tc.get('function') if isinstance(tc.get('function'), dict) else {}
+        args = fn.get('arguments') if 'function' in tc else tc.get('arguments')
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except Exception:
+                args = {}
+        if not isinstance(args, dict):
+            return None
+        value = args.get('timeout_sec') or args.get('_tool_timeout_sec')
+        if value is None:
+            return None
+        timeout = float(value)
+        return timeout if timeout > 0 else None
+    except Exception:
+        return None
+
+
+def _positive_timeout(value: Any) -> Optional[float]:
+    try:
+        timeout = float(value)
+    except Exception:
+        return None
+    return timeout if timeout > 0 else None
+
+
 def _new_reasoning_summary() -> Dict[str, Any]:
     return {"active": False, "text": ""}
 
@@ -84,6 +118,7 @@ class StreamingMixin:
             "active_invoke": None,
             "stream_kind": None,
             "started_at": None,
+            "timeout_sec": None,
             "content": "",
             "reason": "",
             "reasoning_summary": _new_reasoning_summary(),
@@ -132,6 +167,7 @@ class StreamingMixin:
                     "active_invoke": row_open["invoke_id"],
                     "stream_kind": row_open["purpose"],
                     "started_at": self._event_started_at_epoch(row_open["opened_at"]),
+                    "timeout_sec": None,
                     "content": "",
                     "reason": "",
                     "reasoning_summary": _new_reasoning_summary(),
@@ -305,6 +341,7 @@ class StreamingMixin:
                 "active_invoke": e["invoke_id"],
                 "stream_kind": stream_kind,
                 "started_at": started_at,
+                "timeout_sec": None,
                 "content": "",
                 "reason": "",
                 "reasoning_summary": _new_reasoning_summary(),
@@ -374,6 +411,24 @@ class StreamingMixin:
                         self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=STREAM_STYLE_TOOL_CALL_ARGS)
                     text_map[raw_key] = text_map.get(raw_key, '') + frag
                     self._stream_append_on_renderer(frag, style=STREAM_STYLE_TOOL_CALL_ARGS)
+        elif t == 'msg.create':
+            try:
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                timeout = _timeout_from_tool_call_payload(payload)
+                if timeout is not None:
+                    self._live_state['timeout_sec'] = timeout
+        elif t == 'tool_call.execution_started':
+            try:
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                timeout = _positive_timeout(payload.get('timeout_sec'))
+                if timeout is not None:
+                    self._live_state['timeout_sec'] = timeout
         elif t == 'tool_call.summary':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})

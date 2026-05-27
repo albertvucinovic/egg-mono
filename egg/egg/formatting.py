@@ -652,6 +652,13 @@ class FormattingMixin:
             for name, txt in (ls.get('tools') or {}).items():
                 if txt:
                     parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
+            countdown = ""
+            try:
+                countdown = self._current_tool_timeout_countdown()
+            except Exception:
+                countdown = ""
+            if countdown:
+                parts.append(f"\n[Tool status]\n{countdown}")
             summary = ls.get('tool_summary') or {}
             if isinstance(summary, dict) and summary.get('active') and summary.get('text'):
                 name = str(summary.get('name') or 'tool')

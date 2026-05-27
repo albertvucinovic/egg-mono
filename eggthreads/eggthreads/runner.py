@@ -2539,14 +2539,6 @@ class ThreadRunner:
                     )
                     continue
 
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
-                    type_='tool_call.execution_started',
-                    msg_id=None,
-                    invoke_id=invoke_id,
-                    payload={'tool_call_id': tc.tool_call_id},
-                )
                 # ToolRegistry supports both sync and async tool
                 # implementations. Synchronous tools run in a worker thread;
                 # async tools are awaited directly.
@@ -2555,6 +2547,17 @@ class ThreadRunner:
                     tc.arguments,
                     self.cfg.tool_timeout_sec if self.cfg is not None else None,
                     _default_tool_timeout_sec,
+                )
+                started_payload: Dict[str, Any] = {'tool_call_id': tc.tool_call_id}
+                if tool_timeout_sec is not None:
+                    started_payload['timeout_sec'] = tool_timeout_sec
+                self.db.append_event(
+                    event_id=os.urandom(10).hex(),
+                    thread_id=self.thread_id,
+                    type_='tool_call.execution_started',
+                    msg_id=None,
+                    invoke_id=invoke_id,
+                    payload=started_payload,
                 )
 
                 # Create a cancel check that returns True if lease is lost (e.g., Ctrl+C)
