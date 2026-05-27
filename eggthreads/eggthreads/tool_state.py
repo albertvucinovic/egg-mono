@@ -148,8 +148,12 @@ def _latest_cached_reduction_before(
 def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
     ev_type = ev.get("type")
     if ev_type == "msg.create":
-        tool_calls = payload.get("tool_calls") or []
-        if isinstance(tool_calls, list) and tool_calls:
+        raw_tool_calls = payload.get("tool_calls")
+        if isinstance(raw_tool_calls, list) and raw_tool_calls:
+            if payload.get("tool_call_id") is not None:
+                return False
+            return payload.get("role") in {"assistant", "user"}
+        if raw_tool_calls:
             return False
         if payload.get("tool_call_id") is not None:
             return payload.get("role") == "tool"
@@ -170,6 +174,111 @@ def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any])
         "tool_call.output_approval",
     }:
         return True
+    return False
+
+
+def _tool_call_states_from_declaration(
+    thread_id: str,
+    ev: Dict[str, Any],
+    payload: Dict[str, Any],
+    ev_seq: int,
+    *,
+    strict: bool = False,
+) -> Optional[Dict[Any, ToolCallState]]:
+    msg_id = ev.get("msg_id") or ""
+    role = payload.get("role")
+    tcs = payload.get("tool_calls") or []
+    if not isinstance(tcs, list) or not tcs:
+        return {}
+    out: Dict[Any, ToolCallState] = {}
+    for idx, tc in enumerate(tcs):
+        if not isinstance(tc, dict):
+            if strict:
+                return None
+            continue
+        explicit_tcid = tc.get("id")
+        if strict and explicit_tcid is not None and not isinstance(explicit_tcid, str):
+            return None
+        tcid = explicit_tcid or f"{msg_id}:{idx}"
+        if strict and tcid in out:
+            return None
+        fn = tc.get("function") or {}
+        if strict and not isinstance(fn, dict):
+            return None
+        name = fn.get("name") or tc.get("name") or ""
+        args = fn.get("arguments") if "function" in tc else tc.get("arguments")
+        out[tcid] = ToolCallState(
+            thread_id=thread_id,
+            tool_call_id=str(tcid),
+            parent_msg_id=str(msg_id),
+            parent_event_seq=ev_seq,
+            parent_role=str(role) if isinstance(role, str) else None,
+            index=idx,
+            name=str(name),
+            arguments=args,
+        )
+        if out[tcid].name in AUTO_APPROVED_TOOL_NAMES:
+            out[tcid] = replace(out[tcid], approval_decision="granted")
+    return out
+
+
+def _records_declare_tool_calls(records: List[Tuple[Dict[str, Any], Dict[str, Any], int]]) -> bool:
+    for ev, payload, _ev_seq in records:
+        if ev.get("type") != "msg.create":
+            continue
+        raw_tool_calls = payload.get("tool_calls")
+        if isinstance(raw_tool_calls, list) and raw_tool_calls:
+            return True
+    return False
+
+
+def _has_prior_broad_tool_approval(db: ThreadsDB, thread_id: str, max_seq: int) -> bool:
+    cur = db.conn.execute(
+        """
+        SELECT payload_json FROM events
+         WHERE thread_id=?
+           AND type='tool_call.approval'
+           AND event_seq<=?
+        """,
+        (thread_id, max_seq),
+    )
+    for row in cur.fetchall():
+        try:
+            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("decision") in {"all-in-turn", "global_approval", "revoke_global_approval"}:
+            return True
+    return False
+
+
+def _has_prior_tool_approval_for_ids(
+    db: ThreadsDB,
+    thread_id: str,
+    max_seq: int,
+    tool_call_ids: Iterable[Any],
+) -> bool:
+    wanted = set(tool_call_ids)
+    if not wanted:
+        return False
+    cur = db.conn.execute(
+        """
+        SELECT payload_json FROM events
+         WHERE thread_id=?
+           AND type='tool_call.approval'
+           AND event_seq<=?
+        """,
+        (thread_id, max_seq),
+    )
+    for row in cur.fetchall():
+        try:
+            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+        except Exception:
+            continue
+        if isinstance(payload, dict) and payload.get("tool_call_id") in wanted:
+            return True
     return False
 
 
@@ -206,11 +315,11 @@ def _try_reduce_thread_events_incrementally(
     """Apply a small safe incremental reducer slice for safe tail events.
 
     This handles the hot RA1/LLM bookkeeping path (plain messages and stream
-    boundaries), resolvable tool lifecycle tails, and resolvable tool result
-    publication without replaying/parsing the full event log. Tool-call
-    declarations, unresolved ids, msg edits, continue interrupts, or other hard
-    events stay on the full reducer until their incremental semantics are
-    explicit.
+    boundaries), resolvable tool lifecycle tails, resolvable tool result
+    publication, and well-formed tool-call declarations without replaying/parsing
+    the full event log. Unresolved ids, malformed declarations, msg edits,
+    continue interrupts, or other hard events stay on the full reducer until
+    their incremental semantics are explicit.
     """
 
     cur = db.conn.execute(
@@ -223,6 +332,8 @@ def _try_reduce_thread_events_incrementally(
 
     records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
     if not _has_incremental_safe_tail(records) or not _tail_preserves_tool_states(records, previous.tool_call_states):
+        return None
+    if _records_declare_tool_calls(records) and _has_prior_broad_tool_approval(db, thread_id, max_seq):
         return None
 
     skipped_msg_ids = set(previous.skipped_msg_ids)
@@ -271,6 +382,9 @@ def _try_reduce_thread_events_incrementally(
                 continue
             if payload.get("tool_call_id") is not None and payload.get("role") != "tool":
                 return None
+            raw_tool_calls = payload.get("tool_calls")
+            if raw_tool_calls and payload.get("role") not in {"assistant", "user"}:
+                return None
             if payload.get("role") == "assistant" and not bool(payload.get("no_api")):
                 last_assistant_seq = ev_seq
                 if last_llm_boundary_seq == -1 or assistant_fallback_boundary:
@@ -290,6 +404,21 @@ def _try_reduce_thread_events_incrementally(
     tool_call_states = dict(previous.tool_call_states)
     for ev, payload, ev_seq in records:
         ev_type = ev.get("type")
+        if ev_type == "msg.create":
+            raw_tool_calls = payload.get("tool_calls")
+            if isinstance(raw_tool_calls, list) and raw_tool_calls:
+                msg_id = ev.get("msg_id")
+                if msg_id and str(msg_id) in skipped_msg_ids:
+                    continue
+                declared = _tool_call_states_from_declaration(thread_id, ev, payload, ev_seq, strict=True)
+                if declared is None:
+                    return None
+                if any(tcid in tool_call_states for tcid in declared):
+                    return None
+                if _has_prior_tool_approval_for_ids(db, thread_id, ev_seq, declared):
+                    return None
+                tool_call_states.update(declared)
+                continue
         tcid = payload.get("tool_call_id")
         if tcid not in tool_call_states:
             if ev_type == "msg.create" and payload.get("tool_call_id") is not None:
@@ -480,27 +609,10 @@ def _reduce_loaded_thread_events(
         msg_id = ev.get("msg_id") or ""
         if msg_id and str(msg_id) in skipped_msg_ids:
             continue
-        role = payload.get("role")
-        tcs = payload.get("tool_calls") or []
-        if not isinstance(tcs, list) or not tcs:
+        declared = _tool_call_states_from_declaration(thread_id, ev, payload, ev_seq)
+        if not declared:
             continue
-        for idx, tc in enumerate(tcs):
-            if not isinstance(tc, dict):
-                continue
-            tcid = tc.get("id") or f"{msg_id}:{idx}"
-            fn = tc.get("function") or {}
-            name = fn.get("name") or tc.get("name") or ""
-            args = fn.get("arguments") if "function" in tc else tc.get("arguments")
-            states[tcid] = ToolCallState(
-                thread_id=thread_id,
-                tool_call_id=str(tcid),
-                parent_msg_id=str(msg_id),
-                parent_event_seq=ev_seq,
-                parent_role=str(role) if isinstance(role, str) else None,
-                index=idx,
-                name=str(name),
-                arguments=args,
-            )
+        states.update(declared)
 
     global_auto_approval = False
     global_intervals: list[tuple[int, Optional[int]]] = []

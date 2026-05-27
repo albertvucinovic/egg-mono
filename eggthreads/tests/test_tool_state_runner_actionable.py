@@ -1381,6 +1381,185 @@ def test_reducer_cache_tool_result_tail_falls_back_for_unresolved_tool_call(tmp_
     _assert_incremental_matches_full_rebuild(db, tid)
 
 
+def test_reducer_cache_incrementally_applies_assistant_tool_call_declaration_tail(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-assistant-declaration"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+
+    before = _reduce_thread_events(db, tid)
+    assert before.next_runner_actionable is not None
+    assert before.next_runner_actionable.kind == "RA1_llm"
+    assert before.tool_call_states == {}
+
+    db.append_event(
+        "msg-asst-tool",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tc_decl", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-asst-tool",
+    )
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    tc = after.tool_call_states["tc_decl"]
+    assert tc.parent_role == "assistant"
+    assert tc.parent_msg_id == "m-asst-tool"
+    assert tc.state == "TC1"
+    assert after.next_runner_actionable is None
+    assert after.coarse_thread_state_without_lease == "waiting_tool_approval"
+    assert after.messages_after_boundary == []
+    assert before.tool_call_states == {}
+
+
+def test_reducer_cache_incrementally_applies_user_tool_call_declaration_tail(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-user-declaration"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    before = _reduce_thread_events(db, tid)
+    assert before.next_runner_actionable is None
+    assert before.tool_call_states == {}
+
+    db.append_event(
+        "msg-user-tool",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "content": "cmd",
+            "tool_calls": [
+                {"id": "tc_user_decl", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user-tool",
+    )
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    tc = after.tool_call_states["tc_user_decl"]
+    assert tc.parent_role == "user"
+    assert tc.parent_msg_id == "m-user-tool"
+    assert tc.state == "TC1"
+    assert after.next_runner_actionable is None
+    assert after.coarse_thread_state_without_lease == "waiting_tool_approval"
+    assert [int(ev["event_seq"]) for ev in after.messages_after_boundary] == [db.max_event_seq(tid)]
+    assert before.tool_call_states == {}
+
+
+def test_reducer_cache_tool_call_declaration_tail_falls_back_for_reused_tool_call_id(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-reused-declaration"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event(
+        "msg-old-tool",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "tool_calls": [
+                {"id": "tc_reused", "type": "function", "function": {"name": "bash", "arguments": "old"}},
+            ],
+        },
+        msg_id="m-old-tool",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_reused", "decision": "granted"})
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tc_reused"})
+    _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tc_reused", "reason": "success", "output": "old"})
+    _append_event(db, tid, "tool_call.output_approval", {"tool_call_id": "tc_reused", "decision": "whole", "preview": "old"})
+    _append_event(db, tid, "msg.create", {"role": "tool", "tool_call_id": "tc_reused", "content": "old"}, msg_id="m-old-result")
+
+    before = _reduce_thread_events(db, tid)
+    before_tc = before.tool_call_states["tc_reused"]
+    assert before_tc.state == "TC6"
+    assert before_tc.parent_msg_id == "m-old-tool"
+    assert before_tc.published is True
+
+    db.append_event(
+        "msg-new-tool",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "tool_calls": [
+                {"id": "tc_reused", "type": "function", "function": {"name": "bash", "arguments": "new"}},
+            ],
+        },
+        msg_id="m-new-tool",
+    )
+
+    calls = 0
+    original = _reduce_loaded_thread_events
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal calls
+        calls += 1
+        return original(thread_id, max_event_seq, events)
+
+    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+    after = _reduce_thread_events(db, tid)
+
+    after_tc = after.tool_call_states["tc_reused"]
+    assert calls == 1
+    assert after_tc.state == "TC2.1"
+    assert after_tc.parent_msg_id == "m-new-tool"
+    assert after_tc.arguments == "new"
+    assert after_tc.approval_decision == "granted"
+    assert after_tc.published is False
+    assert before_tc.state == "TC6"
+    assert before_tc.parent_msg_id == "m-old-tool"
+    assert after_tc is not before_tc
+
+
+def test_reducer_cache_tool_call_declaration_tail_falls_back_after_global_approval(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-declaration-after-global"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("global-approval", tid, "tool_call.approval", {"decision": "global_approval"})
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states == {}
+
+    calls = 0
+    original = _reduce_loaded_thread_events
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal calls
+        calls += 1
+        return original(thread_id, max_event_seq, events)
+
+    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+
+    db.append_event(
+        "msg-user-tool-global",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "tool_calls": [
+                {"id": "tc_global", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user-tool-global",
+    )
+    after = _reduce_thread_events(db, tid)
+
+    assert calls == 1
+    assert after.tool_call_states["tc_global"].state == "TC2.1"
+    _assert_incremental_matches_full_rebuild(db, tid)
+
+
 def test_last_stream_close_seq_reuses_reducer_cache(tmp_path):
     from eggthreads.tool_state import _last_stream_close_seq, _last_stream_close_seq_uncached, _reduce_thread_events
 

@@ -194,7 +194,7 @@ advance after a cached baseline:
   - mark the matching tool call `published=True`;
   - also add it to `messages_after_records` if it is an API-visible tool message
     after the current LLM boundary, because it can trigger RA1.
-- [ ] assistant/user `msg.create` with declared `tool_calls`
+- [x] assistant/user `msg.create` with declared `tool_calls`
   - create/replace `ToolCallState` entries for the declared calls;
   - update message-after-boundary records as current full reducer does.
 - [ ] non-continue `control.interrupt` that references active tool invokes
@@ -208,8 +208,8 @@ advance after a cached baseline:
 - [ ] Add equivalence tests comparing incremental reductions to full rebuilds for
       each lifecycle transition and for a combined assistant-tool round trip.
   - Current status: explicit approval, execution_started, finished,
-    output_approval, and tool result publication are covered; combined round
-    trip remains for later slices.
+    output_approval, tool result publication, and assistant/user tool-call
+    declarations are covered; combined round trip remains for later slices.
 - [x] Add mutation-safety tests: old cached states must not be mutated by later
       incremental updates.
 
@@ -351,3 +351,8 @@ Then implement Phase 2 in small event-family slices, committing each after tests
   message-after-boundary/RA1 semantics, and fall back for unresolved ids. Tool
   declarations, all-in-turn/global approval, and interrupt/close synthesis remain
   later-slice work.
+- 2026-05-27: Phase 2 tool-call declaration slice implemented. Incremental tails
+  now handle well-formed assistant/user `msg.create` declarations, create new
+  `ToolCallState` entries, update message-after-boundary/RA/coarse state, and
+  fall back for reused ids so current full-rebuild replacement semantics stay
+  exact. All-in-turn/global approval and interrupt/close synthesis remain later.
