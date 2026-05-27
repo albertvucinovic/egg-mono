@@ -961,6 +961,85 @@ def test_reducer_cache_incrementally_applies_safe_tail_after_historical_tool_sta
     _assert_incremental_matches_full_rebuild(db, tid)
 
 
+def test_reducer_cache_incrementally_applies_summary_tail_after_active_tool(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-summary-active-tool"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event(
+        "msg-asst",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tc_active", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-asst",
+    )
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_active", "decision": "granted"})
+    _append_event(
+        db,
+        tid,
+        "tool_call.execution_started",
+        {"tool_call_id": "tc_active"},
+        invoke_id="inv-tool-active",
+    )
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states["tc_active"].state == "TC3"
+    assert before.tool_call_states["tc_active"].summary is None
+    assert before.next_runner_actionable is None
+
+    full_rebuild_calls = 0
+    original = _reduce_loaded_thread_events
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal full_rebuild_calls
+        full_rebuild_calls += 1
+        return original(thread_id, max_event_seq, events)
+
+    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+
+    _append_event(db, tid, "tool_call.summary", {"tool_call_id": "tc_active", "summary": "running 1"})
+    after_first_summary = _reduce_thread_events(db, tid)
+
+    assert full_rebuild_calls == 0
+    assert after_first_summary.tool_call_states["tc_active"].state == "TC3"
+    assert after_first_summary.tool_call_states["tc_active"].summary == "running 1"
+    assert after_first_summary.next_runner_actionable is None
+    assert before.tool_call_states["tc_active"].summary is None
+    assert after_first_summary.tool_call_states["tc_active"] is not before.tool_call_states["tc_active"]
+
+    _append_event(db, tid, "tool_call.summary", {"tool_call_id": "tc_active", "summary": "running 2"})
+    after_second_summary = _reduce_thread_events(db, tid)
+
+    assert full_rebuild_calls == 0
+    assert after_second_summary.tool_call_states["tc_active"].state == "TC3"
+    assert after_second_summary.tool_call_states["tc_active"].summary == "running 2"
+    assert after_second_summary.next_runner_actionable is None
+    assert before.tool_call_states["tc_active"].summary is None
+    assert after_first_summary.tool_call_states["tc_active"].summary == "running 1"
+    assert after_second_summary.tool_call_states["tc_active"] is not after_first_summary.tool_call_states["tc_active"]
+
+    events = [dict(row) for row in db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()]
+    full = original(tid, db.max_event_seq(tid), events)
+    assert _reduction_signature(after_second_summary) == _reduction_signature(full)
+
+    _append_event(db, tid, "stream.close", {}, invoke_id="inv-tool-active")
+    after_tool_stream_close = _reduce_thread_events(db, tid)
+
+    assert full_rebuild_calls == 1
+    assert after_tool_stream_close.tool_call_states["tc_active"].state == "TC5"
+    assert after_tool_stream_close.tool_call_states["tc_active"].finished_reason == "interrupted"
+
+
 def test_last_stream_close_seq_reuses_reducer_cache(tmp_path):
     from eggthreads.tool_state import _last_stream_close_seq, _last_stream_close_seq_uncached, _reduce_thread_events
 

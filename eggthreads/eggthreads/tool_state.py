@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -145,7 +145,7 @@ def _latest_cached_reduction_before(
     return latest
 
 
-def _is_incremental_no_tool_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any]) -> bool:
     ev_type = ev.get("type")
     if ev_type == "msg.create":
         # The initial slice deliberately avoids incremental tool-state
@@ -163,13 +163,15 @@ def _is_incremental_no_tool_event(ev: Dict[str, Any], payload: Dict[str, Any]) -
         # message and can skip previous messages/tool events.  Keep that on
         # the full-rebuild path for now.
         return payload.get("purpose") != "continue"
+    if ev_type == "tool_call.summary":
+        return True
     return False
 
 
 def _has_incremental_safe_tail(records: List[Tuple[Dict[str, Any], Dict[str, Any], int]]) -> bool:
-    """Return True when all events can be tail-applied without tool-state mutation."""
+    """Return True when all events can be tail-applied by the cached reducer."""
 
-    return all(_is_incremental_no_tool_event(ev, payload) for ev, payload, _ev_seq in records)
+    return all(_is_incremental_safe_tail_event(ev, payload) for ev, payload, _ev_seq in records)
 
 
 def _tail_preserves_tool_states(
@@ -199,10 +201,10 @@ def _try_reduce_thread_events_incrementally(
     """Apply a small safe incremental reducer slice for safe tail events.
 
     This handles the hot RA1/LLM bookkeeping path (plain messages and stream
-    boundaries) without replaying/parsing the full event log. Existing tool
-    states can be preserved unchanged; new tool-state mutations, msg edits,
-    continue interrupts, or other hard events stay on the full reducer until
-    their incremental semantics are explicit.
+    boundaries) and summary-only tool status updates without replaying/parsing
+    the full event log. Lifecycle tool-state mutations, msg edits, continue
+    interrupts, or other hard events stay on the full reducer until their
+    incremental semantics are explicit.
     """
 
     cur = db.conn.execute(
@@ -278,6 +280,18 @@ def _try_reduce_thread_events_incrementally(
     )
     messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
     tool_call_states = dict(previous.tool_call_states)
+    for ev, payload, ev_seq in records:
+        if ev.get("type") != "tool_call.summary":
+            continue
+        tcid = payload.get("tool_call_id")
+        if tcid not in tool_call_states:
+            continue
+        tc = tool_call_states[tcid]
+        if ev_seq <= tc.parent_event_seq:
+            continue
+        summary = payload.get("summary")
+        if isinstance(summary, str):
+            tool_call_states[tcid] = replace(tc, summary=summary)
     next_runner_actionable = _next_runner_actionable_from_reduction(
         thread_id,
         tool_call_states,

@@ -32,19 +32,19 @@ logs after small status/countdown events.
 
 ## Phase 1 — Make `tool_call.summary` reducer-incremental-safe
 
-- [ ] Extend the cached reducer's incremental tail path so a tail containing only already-safe events plus `tool_call.summary` does not force a full replay.
-- [ ] Apply summary events by copying only the affected cached `ToolCallState` objects, so previous cached reductions are not mutated.
-- [ ] Recompute cheap derived fields (`next_runner_actionable`, coarse state) from the updated in-memory states/messages.
-- [ ] Preserve full-rebuild fallback for hard events:
+- [x] Extend the cached reducer's incremental tail path so a tail containing only already-safe events plus `tool_call.summary` does not force a full replay.
+- [x] Apply summary events by copying only the affected cached `ToolCallState` objects, so previous cached reductions are not mutated.
+- [x] Recompute cheap derived fields (`next_runner_actionable`, coarse state) from the updated in-memory states/messages.
+- [x] Preserve full-rebuild fallback for hard events:
   - new tool-call declarations;
   - approval/execution/finish/output approval/tool result messages;
   - `continue` interrupts;
   - stream closes that may interrupt active tool executions.
-- [ ] Add tests showing:
+- [x] Add tests showing:
   - summary tails after an active tool do not call `_reduce_loaded_thread_events`;
   - incremental summary results match a full rebuild, including `ToolCallState.summary`;
   - prior cached reductions are not mutated by later summary updates.
-- [ ] Run focused reducer tests.
+- [x] Run focused reducer tests.
 
 ## Phase 2 — Make `wait_for_threads` polling cheap when nothing meaningful changed
 
@@ -74,3 +74,4 @@ logs after small status/countdown events.
 ## Status notes
 
 - 2026-05-26: Created plan from py-spy evidence. Next implementation slice: Phase 1 only, because it directly targets the profiled full-rebuild-on-summary cause and should be contained to reducer code plus tests.
+- 2026-05-27: Phase 1 implemented. `tool_call.summary` now stays on the incremental reducer path, copying only updated `ToolCallState` entries and preserving hard-event full-rebuild fallbacks. Focused reducer tests pass.
