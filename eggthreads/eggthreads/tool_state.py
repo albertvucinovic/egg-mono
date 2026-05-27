@@ -317,22 +317,19 @@ def _has_incremental_safe_tail(records: List[Tuple[Dict[str, Any], Dict[str, Any
     return all(_is_incremental_safe_tail_event(ev, payload) for ev, payload, _ev_seq in records)
 
 
-def _tail_preserves_tool_states(
-    records: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
-    tool_call_states: Dict[str, ToolCallState],
-) -> bool:
-    active_tool_invokes = {
-        tc.owner_invoke_id for tc in tool_call_states.values()
-        if tc.execution_started and tc.finished_reason is None and tc.owner_invoke_id
-    }
-    if not active_tool_invokes:
-        return True
-    for ev, payload, _ev_seq in records:
-        if ev.get("type") == "stream.close" and ev.get("invoke_id") in active_tool_invokes:
-            return False
-        if ev.get("type") == "control.interrupt" and payload.get("old_invoke_id") in active_tool_invokes:
-            return False
-    return True
+def _interrupted_tool_update(tc: ToolCallState, reason: str, output: str) -> ToolCallState:
+    return replace(
+        tc,
+        finished_reason="interrupted",
+        finished_output=output,
+        output_decision="whole",
+        last_output_approval_payload={
+            "tool_call_id": tc.tool_call_id,
+            "decision": "whole",
+            "reason": reason,
+            "preview": output,
+        },
+    )
 
 
 def _try_reduce_thread_events_incrementally(
@@ -360,7 +357,7 @@ def _try_reduce_thread_events_incrementally(
         return previous
 
     records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
-    if not _has_incremental_safe_tail(records) or not _tail_preserves_tool_states(records, previous.tool_call_states):
+    if not _has_incremental_safe_tail(records):
         return None
     if _records_declare_tool_calls(records) and _has_hard_prior_broad_tool_approval(db, thread_id, previous.max_event_seq):
         return None
@@ -435,8 +432,20 @@ def _try_reduce_thread_events_incrementally(
     )
     messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
     tool_call_states = dict(previous.tool_call_states)
+    closed_invokes: set[str] = set()
+    interrupted_invokes: set[str] = set()
     for ev, payload, ev_seq in records:
         ev_type = ev.get("type")
+        if ev_type == "control.interrupt":
+            old_inv = payload.get("old_invoke_id")
+            if isinstance(old_inv, str) and old_inv:
+                interrupted_invokes.add(old_inv)
+            continue
+        if ev_type == "stream.close":
+            inv = ev.get("invoke_id")
+            if isinstance(inv, str) and inv:
+                closed_invokes.add(inv)
+            continue
         if ev_type == "msg.create":
             raw_tool_calls = payload.get("tool_calls")
             if isinstance(raw_tool_calls, list) and raw_tool_calls:
@@ -545,6 +554,32 @@ def _try_reduce_thread_events_incrementally(
                     or "--- INTERRUPTED ---\nTool output was decided before the tool reported a result."
                 )
             tool_call_states[tcid] = replace(tc, **changes)
+
+    for candidate_tcid, candidate_tc in list(tool_call_states.items()):
+        if not candidate_tc.execution_started or candidate_tc.finished_reason is not None:
+            continue
+        if (
+            candidate_tc.owner_invoke_id is not None
+            and candidate_tc.owner_invoke_id in interrupted_invokes
+        ):
+            tool_call_states[candidate_tcid] = _interrupted_tool_update(
+                candidate_tc,
+                "Tool execution was interrupted before the tool reported a result.",
+                "--- INTERRUPTED ---\n"
+                "Tool execution was interrupted before the tool reported a result.",
+            )
+            candidate_tc = tool_call_states[candidate_tcid]
+        if (
+            candidate_tc.finished_reason is None
+            and candidate_tc.owner_invoke_id is not None
+            and candidate_tc.owner_invoke_id in closed_invokes
+        ):
+            tool_call_states[candidate_tcid] = _interrupted_tool_update(
+                candidate_tc,
+                "Tool execution stream closed before the tool reported a result.",
+                "--- INTERRUPTED ---\n"
+                "Tool execution stream closed before the tool reported a result.",
+            )
     next_runner_actionable = _next_runner_actionable_from_reduction(
         thread_id,
         tool_call_states,
@@ -796,31 +831,27 @@ def _reduce_loaded_thread_events(
                 or "--- INTERRUPTED ---\nTool output was decided before the tool reported a result."
             )
         if tc.execution_started and tc.finished_reason is None and tc.owner_invoke_id in interrupted_invokes:
-            tc.finished_reason = "interrupted"
-            tc.finished_output = (
+            updated = _interrupted_tool_update(
+                tc,
+                "Tool execution was interrupted before the tool reported a result.",
                 "--- INTERRUPTED ---\n"
-                "Tool execution was interrupted before the tool reported a result."
+                "Tool execution was interrupted before the tool reported a result.",
             )
-            tc.output_decision = "whole"
-            tc.last_output_approval_payload = {
-                "tool_call_id": tc.tool_call_id,
-                "decision": "whole",
-                "reason": "Tool execution was interrupted before the tool reported a result.",
-                "preview": tc.finished_output,
-            }
+            tc.finished_reason = updated.finished_reason
+            tc.finished_output = updated.finished_output
+            tc.output_decision = updated.output_decision
+            tc.last_output_approval_payload = updated.last_output_approval_payload
         if tc.execution_started and tc.finished_reason is None and tc.owner_invoke_id in closed_invokes:
-            tc.finished_reason = "interrupted"
-            tc.finished_output = (
+            updated = _interrupted_tool_update(
+                tc,
+                "Tool execution stream closed before the tool reported a result.",
                 "--- INTERRUPTED ---\n"
-                "Tool execution stream closed before the tool reported a result."
+                "Tool execution stream closed before the tool reported a result.",
             )
-            tc.output_decision = "whole"
-            tc.last_output_approval_payload = {
-                "tool_call_id": tc.tool_call_id,
-                "decision": "whole",
-                "reason": "Tool execution stream closed before the tool reported a result.",
-                "preview": tc.finished_output,
-            }
+            tc.finished_reason = updated.finished_reason
+            tc.finished_output = updated.finished_output
+            tc.output_decision = updated.output_decision
+            tc.last_output_approval_payload = updated.last_output_approval_payload
         if tc.approval_decision is None and _has_global_approval(tc.parent_event_seq):
             tc.approval_decision = "granted"
         if tc.approval_decision is None and tc.name in AUTO_APPROVED_TOOL_NAMES:

@@ -197,10 +197,10 @@ advance after a cached baseline:
 - [x] assistant/user `msg.create` with declared `tool_calls`
   - create/replace `ToolCallState` entries for the declared calls;
   - update message-after-boundary records as current full reducer does.
-- [ ] non-continue `control.interrupt` that references active tool invokes
+- [x] non-continue `control.interrupt` that references active tool invokes
   - apply the same interrupted-tool synthesis as full rebuild for affected
     tool calls.
-- [ ] stream close for active tool invokes
+- [x] stream close for active tool invokes
   - preserve the existing conservative behavior or implement exact incremental
     interruption synthesis. Do not silently mark tools finished incorrectly.
 - [x] Recompute `next_runner_actionable` and coarse state from compact state after
@@ -210,7 +210,8 @@ advance after a cached baseline:
   - Current status: explicit approval, execution_started, finished,
     output_approval, tool result publication, and assistant/user tool-call
     declarations, all-in-turn approval, and global approval/revoke are covered;
-    combined round trip remains for later slices.
+    active-tool interrupt/stream-close synthesis and a combined assistant-tool
+    round trip are covered.
 - [x] Add mutation-safety tests: old cached states must not be mutated by later
       incremental updates.
 
@@ -362,3 +363,9 @@ Then implement Phase 2 in small event-family slices, committing each after tests
   cached user-turn/global-open state, including later declarations under active
   global approval. Declarations after earlier all-in-turn still fall back because
   applying past turn approvals to future declarations is not exact locally.
+- 2026-05-27: Phase 2 interrupt/close synthesis slice implemented. Incremental
+  tails now synthesize interrupted tool results for non-continue interrupts and
+  stream closes that match cached active tool owner invokes, with equivalence and
+  mutation-safety tests plus a combined assistant-tool round-trip equivalence
+  test. Non-matching interrupts/closes remain no-op incremental tails matching
+  full rebuild behavior.

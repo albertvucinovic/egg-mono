@@ -1035,9 +1035,17 @@ def test_reducer_cache_incrementally_applies_summary_tail_after_active_tool(tmp_
     _append_event(db, tid, "stream.close", {}, invoke_id="inv-tool-active")
     after_tool_stream_close = _reduce_thread_events(db, tid)
 
-    assert full_rebuild_calls == 1
+    assert full_rebuild_calls == 0
     assert after_tool_stream_close.tool_call_states["tc_active"].state == "TC5"
     assert after_tool_stream_close.tool_call_states["tc_active"].finished_reason == "interrupted"
+    assert after_second_summary.tool_call_states["tc_active"].state == "TC3"
+    assert after_tool_stream_close.tool_call_states["tc_active"] is not after_second_summary.tool_call_states["tc_active"]
+    events = [dict(row) for row in db.conn.execute(
+        "SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+        (tid,),
+    ).fetchall()]
+    full = original(tid, db.max_event_seq(tid), events)
+    assert _reduction_signature(after_tool_stream_close) == _reduction_signature(full)
 
 
 def _assert_incremental_tail_without_full_rebuild(db, tid: str, monkeypatch):
@@ -1245,6 +1253,95 @@ def test_reducer_cache_incrementally_applies_output_approval_without_finished_ta
     assert before.tool_call_states["tc_lifecycle"].state == "TC2.1"
     assert before.tool_call_states["tc_lifecycle"].finished_reason is None
     assert tc is not before.tool_call_states["tc_lifecycle"]
+
+
+def test_reducer_cache_incrementally_applies_tool_interrupt_tail(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-tool-interrupt"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    _append_assistant_tool_parent(db, tid)
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_lifecycle", "decision": "granted"})
+    _append_event(
+        db,
+        tid,
+        "tool_call.execution_started",
+        {"tool_call_id": "tc_lifecycle"},
+        invoke_id="inv-tool-lifecycle",
+    )
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states["tc_lifecycle"].state == "TC3"
+
+    _append_event(
+        db,
+        tid,
+        "control.interrupt",
+        {"reason": "user", "old_invoke_id": "inv-tool-lifecycle", "new_invoke_id": "inv-new", "purpose": "tool"},
+    )
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    tc = after.tool_call_states["tc_lifecycle"]
+    assert tc.state == "TC5"
+    assert tc.finished_reason == "interrupted"
+    assert tc.output_decision == "whole"
+    assert "interrupted before the tool reported a result" in (tc.finished_output or "")
+    assert before.tool_call_states["tc_lifecycle"].state == "TC3"
+    assert tc is not before.tool_call_states["tc_lifecycle"]
+
+
+def test_reducer_cache_incrementally_applies_tool_stream_close_tail(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-tool-close"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    _append_assistant_tool_parent(db, tid)
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_lifecycle", "decision": "granted"})
+    _append_event(
+        db,
+        tid,
+        "tool_call.execution_started",
+        {"tool_call_id": "tc_lifecycle"},
+        invoke_id="inv-tool-lifecycle",
+    )
+
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states["tc_lifecycle"].state == "TC3"
+
+    _append_event(db, tid, "stream.close", {}, invoke_id="inv-tool-lifecycle")
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    tc = after.tool_call_states["tc_lifecycle"]
+    assert tc.state == "TC5"
+    assert tc.finished_reason == "interrupted"
+    assert tc.output_decision == "whole"
+    assert "stream closed before the tool reported a result" in (tc.finished_output or "")
+    assert before.tool_call_states["tc_lifecycle"].state == "TC3"
+    assert tc is not before.tool_call_states["tc_lifecycle"]
+
+
+def test_reducer_cache_tool_interrupt_without_matching_owner_is_noop(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-tool-interrupt-missing-owner"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    _append_assistant_tool_parent(db, tid)
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_lifecycle", "decision": "granted"})
+    before = _reduce_thread_events(db, tid)
+    assert before.tool_call_states["tc_lifecycle"].state == "TC2.1"
+
+    _append_event(
+        db,
+        tid,
+        "control.interrupt",
+        {"reason": "user", "old_invoke_id": "inv-missing", "new_invoke_id": "inv-new", "purpose": "tool"},
+    )
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after.tool_call_states["tc_lifecycle"].state == "TC2.1"
 
 
 def test_reducer_cache_incrementally_applies_tool_result_publication_tail(tmp_path, monkeypatch):
@@ -1695,6 +1792,62 @@ def test_reducer_cache_declaration_tail_falls_back_after_all_in_turn_approval(tm
     assert calls == 1
     assert after.tool_call_states["tc_turn"].state == "TC1"
     _assert_incremental_matches_full_rebuild(db, tid)
+
+
+def test_reducer_cache_incrementally_applies_combined_assistant_tool_round_trip(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-combined-round-trip"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user")
+    before = _reduce_thread_events(db, tid)
+    assert before.next_runner_actionable is not None
+    assert before.next_runner_actionable.kind == "RA1_llm"
+
+    db.append_event(
+        "msg-asst-tool-combined",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "tc_combined", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-asst-tool-combined",
+    )
+    after_decl = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+    assert after_decl.tool_call_states["tc_combined"].state == "TC1"
+
+    _append_event(db, tid, "tool_call.approval", {"tool_call_id": "tc_combined", "decision": "granted"})
+    after_approval = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+    assert after_approval.tool_call_states["tc_combined"].state == "TC2.1"
+
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "tc_combined"}, invoke_id="inv-combined")
+    after_start = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+    assert after_start.tool_call_states["tc_combined"].state == "TC3"
+
+    _append_event(db, tid, "tool_call.finished", {"tool_call_id": "tc_combined", "reason": "success", "output": "ok"})
+    after_finish = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+    assert after_finish.tool_call_states["tc_combined"].state == "TC4"
+
+    _append_event(db, tid, "tool_call.output_approval", {"tool_call_id": "tc_combined", "decision": "whole", "preview": "ok"})
+    after_output_approval = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+    assert after_output_approval.tool_call_states["tc_combined"].state == "TC5"
+
+    _append_event(
+        db,
+        tid,
+        "msg.create",
+        {"role": "tool", "tool_call_id": "tc_combined", "content": "ok"},
+        msg_id="m-tool-combined",
+    )
+    after_publish = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+    assert after_publish.tool_call_states["tc_combined"].state == "TC6"
+    assert after_publish.next_runner_actionable is not None
+    assert after_publish.next_runner_actionable.kind == "RA1_llm"
+    assert after_publish.next_runner_actionable.msg_id == "m-tool-combined"
 
 
 def test_last_stream_close_seq_reuses_reducer_cache(tmp_path):
