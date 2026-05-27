@@ -2066,6 +2066,32 @@ def test_thread_state_reuses_reducer_after_actionable_cache(tmp_path):
     ]
 
 
+def test_thread_state_uses_incremental_reducer_tail_after_warmup(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events, thread_state
+
+    db = _make_db(tmp_path)
+    tid = "thread-state-incremental-tail"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user-1", tid, "msg.create", {"role": "user", "content": "hello"}, msg_id="m-user-1")
+
+    assert _reduce_thread_events(db, tid).coarse_thread_state_without_lease == "running"
+
+    calls = 0
+    original = _reduce_loaded_thread_events
+
+    def counting_full_rebuild(thread_id, max_event_seq, events):
+        nonlocal calls
+        calls += 1
+        return original(thread_id, max_event_seq, events)
+
+    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
+
+    db.append_event("msg-user-2", tid, "msg.create", {"role": "user", "content": "next"}, msg_id="m-user-2")
+
+    assert thread_state(db, tid) == "running"
+    assert calls == 0
+
+
 def test_build_tool_call_states_returns_cache_safe_copies(tmp_path):
     db = _make_db(tmp_path)
     tid = "thread-state-copy"

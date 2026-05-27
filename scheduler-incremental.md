@@ -300,11 +300,22 @@ fairness yields.
 
 ## Phase 6 — Status/wait consumers
 
-- [ ] `thread_state` and `wait_for_threads` can reuse the same compact projection
+- [x] `thread_state` and `wait_for_threads` can reuse the same compact projection
       for coarse state, but only after scheduler equivalence tests are strong.
-- [ ] Keep `wait_for_threads` cheap unchanged-watermark cache from `wait-fix.md`.
-- [ ] Avoid token stats, snapshots, or UI rendering from depending on the
+- [x] Keep `wait_for_threads` cheap unchanged-watermark cache from `wait-fix.md`.
+- [x] Avoid token stats, snapshots, or UI rendering from depending on the
       scheduler projection unless there is a clear local benefit.
+
+2026-05-27 status: no broad wait/status refactor needed. `thread_state` already
+does cheap thread/paused/lease checks first, then returns
+`_reduce_thread_events(...).coarse_thread_state_without_lease`, so it reuses the
+same compact reducer projection after warmup. `wait_for_threads` keeps the
+existing `wait-fix.md` per-call unchanged-watermark cache and cheap unfinished
+checks, and its reducer/actionability calls already go through the cached
+projection. Added focused regression coverage that `thread_state` can consume a
+normal tail after warmup without another full rebuild; existing wait tests cover
+unchanged unfinished polls and active open streams staying cheap. Token stats,
+snapshots, and UI rendering were not changed.
 
 ## Phase 7 — Benchmarks and profiling acceptance
 
