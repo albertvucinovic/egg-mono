@@ -334,7 +334,7 @@ real provider calls:
 - [x] Assert normal tails do not call `_reduce_loaded_thread_events` after warmup.
 - [x] Assert actionability matches a full rebuild after each tail.
 - [x] Measure tail-apply timing and record order-of-magnitude result in this TODO.
-- [ ] Re-run py-spy on the long `T9JM`/`FQ7A` style scenario after restart. Target:
+- [x] Re-run py-spy on the long `T9JM`/`FQ7A` style scenario after restart. Target:
   - scheduler no longer dominated by full `_reduce_thread_events` rebuilds;
   - active UI scroll/input lag is not caused by scheduler CPU saturation.
 
@@ -348,7 +348,16 @@ user tool-triggering message. Each tail asserts zero calls to
 `_reduce_loaded_thread_events` after warmup and compares the incremental
 projection signature with a forced full rebuild. Local focused run completed in
 ~0.28s wall time, giving a qualitative sub-second regression bound rather than
-a strict microbenchmark. External py-spy/restart profiling remains unchecked.
+a strict microbenchmark.
+
+2026-05-28 live py-spy status: after `/reload`, profiled the `T9JM` process
+(`EGG_RELOAD_THREAD_ID=01KSB9YAR01VXB7DY57PR9T9JM`, PID `1600122`) for 20s:
+`/tmp/egg-pyspy-1600122-scheduler-after-reload-20s-1780004987.raw`. The sample
+showed scheduler/actionability no longer dominating CPU: `_reduce_thread_events`
+and `discover_runner_actionable_cached` were each ~1.6% of samples, all on the
+incremental `_try_reduce_thread_events_incrementally` path, with no visible
+`_reduce_loaded_thread_events` hot path. Remaining samples were spread across
+normal UI/input, snapshot JSON, wait polling, and active runner/tool work.
 
 ## Implementation notes / likely pitfalls
 
