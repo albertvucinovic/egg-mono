@@ -195,18 +195,6 @@ class InputMixin:
         # model, sliding the history view above the live region.
         # Mouse wheel events (SGR: "\x1b[<button;col;rowM|m") also map here.
         if isinstance(key, str):
-            if key in ('\x1b[5;5~', '\x1b[5;6~'):
-                try:
-                    self.scroll_children_panel(-5)
-                except Exception:
-                    pass
-                return True
-            if key in ('\x1b[6;5~', '\x1b[6;6~'):
-                try:
-                    self.scroll_children_panel(5)
-                except Exception:
-                    pass
-                return True
             renderer = getattr(self, '_renderer', None)
             if renderer is not None and hasattr(renderer, 'scroll'):
                 # PageUp: \x1b[5~ (most terminals). PageDown: \x1b[6~.

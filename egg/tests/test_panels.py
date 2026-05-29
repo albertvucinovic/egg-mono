@@ -211,30 +211,6 @@ class TestUpdatePanels:
 
         assert calls["count"] == 2
 
-    def test_children_panel_slices_large_tree_and_scrolls(self, egg_app, monkeypatch):
-        """Large Children trees should be viewable through a local panel slice."""
-        monkeypatch.setattr(egg_app, "format_tree", lambda thread_id: "\n".join(f"child {i}" for i in range(30)))
-
-        egg_app.update_panels()
-
-        assert "child 0" in egg_app.children_output.content
-        assert "child 29" not in egg_app.children_output.content
-        assert "Ctrl+PgUp/PgDn scroll" in egg_app.children_output.content
-
-        egg_app.scroll_children_panel(5)
-
-        assert "child 0" not in egg_app.children_output.content
-        assert "child 5" in egg_app.children_output.content
-
-    def test_children_panel_scroll_clamps_to_available_content(self, egg_app, monkeypatch):
-        monkeypatch.setattr(egg_app, "format_tree", lambda thread_id: "\n".join(f"child {i}" for i in range(30)))
-
-        egg_app.update_panels()
-        egg_app.scroll_children_panel(999)
-
-        assert egg_app._children_panel_scroll_top == 9
-        assert "child 29" in egg_app.children_output.content
-
     def test_typing_does_not_reformat_children_tree(self, egg_app, monkeypatch):
         """Input echo should not wait on expensive children tree refreshes."""
         calls = {"count": 0}

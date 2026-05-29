@@ -405,26 +405,6 @@ class TestHandleKeyDelegation:
         assert renderer.scrolled_to_bottom is False
         assert egg_app.input_panel.editor.editor.cursor.col == len("hello")
 
-    def test_ctrl_page_keys_scroll_children_panel_not_transcript(self, egg_app):
-        """Ctrl+PageUp/PageDown scroll the Children panel viewport."""
-
-        class Renderer:
-            def __init__(self):
-                self.scroll_calls = []
-
-            def scroll(self, step):
-                self.scroll_calls.append(step)
-
-        calls = []
-        egg_app._renderer = Renderer()
-        egg_app.scroll_children_panel = lambda step: calls.append(step)
-
-        assert egg_app.handle_key('\x1b[6;5~') is True
-        assert egg_app.handle_key('\x1b[5;5~') is True
-
-        assert calls == [5, -5]
-        assert egg_app._renderer.scroll_calls == []
-
     def test_unknown_key_delegates_to_editor(self, egg_app, monkeypatch):
         """Unknown keys should be delegated to the editor."""
         delegated = []
