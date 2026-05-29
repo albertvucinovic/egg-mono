@@ -1313,9 +1313,11 @@ class ThreadRunner:
         if ra.kind == 'RA1_llm' and not was_cancelled:
             has_pending_assistant_tool = bool(ra1_emitted_assistant_tool_calls)
 
+        recovery_compaction_queued = False
         if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None and not has_pending_assistant_tool:
             try:
                 from .api import _normal_user_messages_after_seq, auto_compact_summary_enabled, create_snapshot, maybe_auto_compact_thread, resolve_auto_compact_threshold
+                from .runner_recovery import find_latest_recovery_source_after
                 from .token_count import provider_context_token_stats
 
                 threshold = resolve_auto_compact_threshold(
@@ -1334,12 +1336,21 @@ class ThreadRunner:
                         self.thread_id,
                         int(ra.triggering_event_seq),
                     )
-                    checkpoint_resume = bool(queued_users)
+                    recovery_source = find_latest_recovery_source_after(
+                        self.db,
+                        self.thread_id,
+                        int(ra.triggering_event_seq),
+                    )
+                    recovery_checkpoint_resume = bool(
+                        recovery_source is not None and recovery_source.decision.retriable
+                    )
+                    checkpoint_resume = bool(queued_users) or recovery_checkpoint_resume
                     compaction_selector = (
                         str(queued_users[0].get('msg_id'))
                         if queued_users and queued_users[0].get('msg_id')
-                        else 'last_llm'
+                        else (str(ra.msg_id or '') or 'last_message') if recovery_checkpoint_resume else 'last_llm'
                     )
+                    summary_mode_enabled = auto_compact_summary_enabled()
                     auto_result = maybe_auto_compact_thread(
                         self.db,
                         self.thread_id,
@@ -1347,10 +1358,11 @@ class ThreadRunner:
                         context_tokens=current_tokens,
                         selector=compaction_selector,
                         checkpoint_resume=checkpoint_resume,
-                        summary_mode=auto_compact_summary_enabled(),
+                        summary_mode=summary_mode_enabled,
                     )
                     if auto_result.triggered:
                         create_snapshot(self.db, self.thread_id)
+                        recovery_compaction_queued = bool(summary_mode_enabled and recovery_checkpoint_resume)
             except Exception as e:
                 # Token accounting/auto-compaction is best-effort; do not block
                 # the existing runner path on advisory compaction.
@@ -1362,7 +1374,7 @@ class ThreadRunner:
         except Exception:
             pass
 
-        if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None:
+        if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None and not recovery_compaction_queued:
             try:
                 await self._maybe_auto_continue_after_ra1_failure(ra)
             except Exception as e:

@@ -1087,6 +1087,82 @@ def test_runner_recovers_context_length_provider_error_by_queueing_summary_next(
     assert all(m["content"] != "old context" for m in seen_messages[1])
     assert ts.latest_effective_thread_compaction_summary_in_progress(db, tid) is None
 
+
+def test_runner_auto_compacts_checkpoint_resume_after_retriable_failure(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old context")
+    previous = ts.append_message(db, tid, "assistant", "previous answer")
+    current = ts.append_message(db, tid, "user", "next question")
+    ts.create_snapshot(db, tid)
+
+    class LLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            raise RuntimeError("HTTP 503 Service Unavailable; retry after 0 seconds")
+            yield  # pragma: no cover - make this an async generator
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 100},
+    )
+    monkeypatch.delenv("EGG_COMPACT_SUMMARY", raising=False)
+
+    runner = ThreadRunner(db, tid, llm=LLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    compaction_events = _events(db, tid)
+    assert len(compaction_events) == 1
+    assert compaction_events[0][1]["created_by"] == "auto_compaction"
+    assert compaction_events[0][1]["selector"] == current
+    assert compaction_events[0][1]["start_msg_id"] == current
+
+    request = [m for m in _snapshot_messages(db, tid) if m.get("auto_compaction_request")][-1]
+    assert "compaction-checkpoint" in request["content"]
+    assert "checkpoint_and_resume" in request["content"]
+    assert "summary_only" not in request["content"]
+    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, _snapshot_messages(db, tid))
+    assert old not in [m.get("msg_id") for m in provider_view]
+    assert previous not in [m.get("msg_id") for m in provider_view]
+    assert [m.get("role") for m in provider_view] == ["user", "system", "user"]
+    assert provider_view[0].get("msg_id") == current
+    assert provider_view[-1].get("msg_id") == request["msg_id"]
+    assert "HTTP 503" in str(provider_view[1].get("content", ""))
+    assert not any(m.get("recovery_notice") and m.get("auto_continue") for m in _snapshot_messages(db, tid))
+
+
+def test_runner_auto_compacts_checkpoint_resume_after_empty_provider_response(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "old context")
+    ts.append_message(db, tid, "assistant", "previous answer")
+    current = ts.append_message(db, tid, "user", "next question")
+    ts.create_snapshot(db, tid)
+
+    class EmptyLLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            yield {"type": "done", "message": {"role": "assistant"}}
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 100},
+    )
+    monkeypatch.delenv("EGG_COMPACT_SUMMARY", raising=False)
+
+    runner = ThreadRunner(db, tid, llm=EmptyLLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    compaction_events = _events(db, tid)
+    assert len(compaction_events) == 1
+    assert compaction_events[0][1]["selector"] == current
+
+    messages = _snapshot_messages(db, tid)
+    assert any("empty assistant message" in str(m.get("content", "")) for m in messages)
+    request = [m for m in messages if m.get("auto_compaction_request")][-1]
+    assert "checkpoint_and_resume" in request["content"]
+    assert "summary_only" not in request["content"]
+
 def test_runner_auto_compacts_direct_mode_when_summary_env_false(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old context")
