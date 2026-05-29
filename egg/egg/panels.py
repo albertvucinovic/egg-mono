@@ -640,6 +640,28 @@ class PanelsMixin:
         """Request a Children panel tree refresh on the next safe panel tick."""
         self._children_panel_dirty = True
 
+    def _children_panel_visible_text(self, text: str) -> str:
+        """Return the Children panel slice selected by its local scroll offset."""
+        lines = str(text or '').split('\n') if text else []
+        try:
+            visible_count = max(1, int(self.children_output.max_height) - 3)
+        except Exception:
+            visible_count = 1
+        max_top = max(0, len(lines) - visible_count)
+        top = min(max(0, int(getattr(self, '_children_panel_scroll_top', 0) or 0)), max_top)
+        self._children_panel_scroll_top = top
+        visible = lines[top:top + visible_count]
+        if max_top > 0:
+            visible.append(f"[dim]Children {top + 1}-{min(len(lines), top + visible_count)} of {len(lines)} — Ctrl+PgUp/PgDn scroll[/dim]")
+        return "\n".join(visible)
+
+    def scroll_children_panel(self, delta: int) -> None:
+        """Scroll the Children panel viewport by logical lines."""
+        old_top = int(getattr(self, '_children_panel_scroll_top', 0) or 0)
+        self._children_panel_scroll_top = max(0, old_top + int(delta))
+        cached = getattr(self, '_children_panel_full_text', '')
+        self.children_output.set_content(self._children_panel_visible_text(str(cached or '')))
+
     def _get_static_box(self) -> Any:
         """Get the box style to use for static console panels.
 
@@ -832,7 +854,8 @@ class PanelsMixin:
                         subtree_text = self.format_tree(self.current_thread)
                     except Exception:
                         subtree_text = "(error rendering children tree)"
-                    self.children_output.set_content(subtree_text)
+                    self._children_panel_full_text = subtree_text
+                    self.children_output.set_content(self._children_panel_visible_text(subtree_text))
                     self._children_panel_cached_status_key = status_key
                 self._children_panel_dirty = False
         except Exception:
