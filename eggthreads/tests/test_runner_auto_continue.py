@@ -146,7 +146,7 @@ def test_transfer_truncation_incomplete_auto_continues_from_trigger(tmp_path):
     assert any(payload.get("role") == "assistant" and payload.get("content") == "ok after partial" for payload in payloads)
 
 
-def test_max_output_incomplete_metadata_does_not_auto_continue(tmp_path):
+def test_max_output_incomplete_metadata_queues_recovery_compaction_not_continue(tmp_path):
     db = _make_db(tmp_path)
     tid, _user_msg_id = _make_thread(db)
 
@@ -172,7 +172,7 @@ def test_max_output_incomplete_metadata_does_not_auto_continue(tmp_path):
     llm = MaxOutputLLM()
     runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
 
-    asyncio.run(_run_until_idle(runner))
+    asyncio.run(runner.run_once())
 
     assert llm.calls == 1
     payloads = _payloads(db, tid)
@@ -182,7 +182,62 @@ def test_max_output_incomplete_metadata_does_not_auto_continue(tmp_path):
         and payload.get("incomplete_details") == {"reason": "max_output_tokens"}
         for payload in payloads
     )
+    assert not any(notice.get("action") == "applied" for notice in _notices(db, tid))
+    assert any(
+        notice.get("action") == "compaction_scheduled" and notice.get("decision_category") == "max_output"
+        for notice in _notices(db, tid)
+    )
+    request = next(payload for payload in payloads if payload.get("auto_compaction_request"))
+    assert "checkpoint_and_resume" in request.get("content", "")
+
+    source_msg_id = db.conn.execute(
+        "SELECT msg_id FROM events WHERE thread_id=? AND type='msg.create' AND payload_json LIKE '%max_output_tokens%' ORDER BY event_seq ASC LIMIT 1",
+        (tid,),
+    ).fetchone()[0]
+    compaction_payload = json.loads(
+        db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='thread.compaction' ORDER BY event_seq ASC LIMIT 1",
+            (tid,),
+        ).fetchone()[0]
+    )
+    assert compaction_payload["selector"] == source_msg_id
+    assert compaction_payload["start_msg_id"] == source_msg_id
+
+
+def test_max_output_from_compaction_request_does_not_queue_recursive_compaction(tmp_path):
+    db = _make_db(tmp_path)
+    tid, _user_msg_id = _make_thread(db)
+    result = ts.append_auto_compaction_summary_request(db, tid, selector="last_user")
+    assert result.success is True
+
+    class MaxOutputLLM:
+        current_model_key = "mock"
+        calls = 0
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            self.calls += 1
+            yield {
+                "type": "done",
+                "message": {
+                    "role": "assistant",
+                    "incomplete": True,
+                    "incomplete_reason": "response.incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
+            }
+
+    llm = MaxOutputLLM()
+    runner = ts.ThreadRunner(db, tid, llm=llm, config=RunnerConfig())
+
+    asyncio.run(runner.run_once())
+
+    assert llm.calls == 1
+    assert len(ts.list_thread_compactions(db, tid)) == 1
     assert any(notice.get("action") == "stopped" and notice.get("decision_category") == "max_output" for notice in _notices(db, tid))
+    assert not any(notice.get("action") == "compaction_scheduled" for notice in _notices(db, tid))
 
 
 def test_timeout_auto_continues_once(tmp_path):

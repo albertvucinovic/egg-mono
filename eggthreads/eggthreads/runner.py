@@ -794,11 +794,25 @@ class ThreadRunner:
         self.models_path = models_path or 'models.json'
         self.all_models_path = all_models_path or 'all-models.json'
 
+    def _has_compaction_summary_request_between(self, start_event_seq: int, before_event_seq: int) -> bool:
+        rows = self.db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>=? AND event_seq<? ORDER BY event_seq ASC",
+            (self.thread_id, int(start_event_seq), int(before_event_seq)),
+        ).fetchall()
+        for (payload_json,) in rows:
+            try:
+                payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+            except Exception:
+                continue
+            if isinstance(payload, dict) and (payload.get('compaction_summary_request') or payload.get('auto_compaction_request')):
+                return True
+        return False
+
     async def _maybe_auto_continue_after_ra1_failure(self, ra: RunnerActionable) -> None:
         if ra.kind != 'RA1_llm':
             return
         try:
-            from .api import append_recovery_notice, continue_thread, create_snapshot, get_thread_recovery
+            from .api import append_auto_compaction_summary_request, append_recovery_notice, continue_thread, create_snapshot, get_thread_recovery
             from .runner_recovery import (
                 check_recovery_fence,
                 find_latest_recovery_source_after,
@@ -828,6 +842,34 @@ class ThreadRunner:
         }
 
         if not decision.retriable:
+            if decision.category in {'context_length', 'max_output'}:
+                try:
+                    # A failure while answering a compaction checkpoint request
+                    # should stop for the user instead of recursively queuing
+                    # another checkpoint request.
+                    if not self._has_compaction_summary_request_between(ra.triggering_event_seq, source.event_seq):
+                        summary_result = append_auto_compaction_summary_request(
+                            self.db,
+                            self.thread_id,
+                            selector=source.msg_id if decision.category == 'max_output' else (trigger_msg_id or 'last_message'),
+                        )
+                        if summary_result.success:
+                            append_recovery_notice(
+                                self.db,
+                                self.thread_id,
+                                format_auto_continue_notice(
+                                    decision,
+                                    action='compaction scheduled',
+                                    trigger_msg_id=trigger_msg_id,
+                                    source_msg_id=source.msg_id,
+                                    detail=summary_result.message,
+                                ),
+                                extra={**extra_base, 'action': 'compaction_scheduled'},
+                            )
+                            create_snapshot(self.db, self.thread_id)
+                            return
+                except Exception:
+                    pass
             append_recovery_notice(
                 self.db,
                 self.thread_id,
