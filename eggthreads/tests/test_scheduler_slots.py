@@ -1026,7 +1026,7 @@ class TestFullSchedulerIntegration:
             def set_model_with_config(self, model_key, config):
                 self.current_model_key = model_key
 
-            async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+            async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
                 """Yield mock LLM response events."""
                 self.call_count += 1
                 response_text = f"Response #{self.call_count}"
@@ -1950,7 +1950,7 @@ def test_runner_cancellation_does_not_emit_runner_error(tmp_path):
         def set_model(self, model_key):
             self.current_model_key = model_key
 
-        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
             await asyncio.sleep(3600)
             yield {"type": "done", "message": {"role": "assistant", "content": "late"}}
 
@@ -1988,7 +1988,7 @@ def test_runner_persists_partial_tool_call_on_provider_transport_error(tmp_path)
         def set_model(self, model_key):
             self.current_model_key = model_key
 
-        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
             yield {"type": "tool_calls_delta", "delta": [{
                 "id": "call_partial",
                 "type": "function",

@@ -15,7 +15,7 @@ class _SummaryOnlyLLM:
     def set_model_with_config(self, model_key, config):
         self.current_model_key = model_key
 
-    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
         yield {"type": "reasoning_summary_delta", "text": "display summary"}
         yield {"type": "content_delta", "text": "final"}
         yield {"type": "done", "message": {"role": "assistant", "content": "final"}}
@@ -30,7 +30,7 @@ class _ReasoningLLM:
     def set_model_with_config(self, model_key, config):
         self.current_model_key = model_key
 
-    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
         yield {"type": "reasoning_delta", "text": "durable reasoning"}
         yield {"type": "content_delta", "text": "final"}
         yield {
@@ -119,7 +119,7 @@ def test_reasoning_content_not_round_tripped_without_explicit_encrypted_policy(t
         def set_model_with_config(self, model_key, config):
             self.current_model_key = model_key
 
-        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
             captured.extend(messages)
             yield {"type": "content_delta", "text": "ok"}
             yield {"type": "done", "message": {"role": "assistant", "content": "ok"}}

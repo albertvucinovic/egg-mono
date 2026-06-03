@@ -259,7 +259,8 @@ class LLMClient:
                     tools: Optional[List[Dict[str, Any]]] = None,
                     tool_choice: Optional[str] = "auto",
                     timeout: int = 600,
-                    extra_headers: Optional[Dict[str, str]] = None) -> Generator[Dict[str, Any], None, None]:
+                    extra_headers: Optional[Dict[str, str]] = None,
+                    extra_body: Optional[Dict[str, Any]] = None) -> Generator[Dict[str, Any], None, None]:
         mc = self.registry.get_model_config(self.current_model_key)
         api_model_name = mc.get("model_name")
         if not api_model_name:
@@ -307,6 +308,9 @@ class LLMClient:
                 payload["tool_choice"] = tool_choice
         payload.update(merged_params)
 
+        if extra_body:
+            payload.update(extra_body)
+
         adapter = self._get_adapter_for_current_model()
         for evt in adapter.stream(base_url, headers, payload, timeout=timeout):
             yield evt
@@ -316,7 +320,8 @@ class LLMClient:
                     tools: Optional[List[Dict[str, Any]]] = None,
                     tool_choice: Optional[str] = "auto",
                     timeout: int = 600,
-                    extra_headers: Optional[Dict[str, str]] = None):
+                    extra_headers: Optional[Dict[str, str]] = None,
+                    extra_body: Optional[Dict[str, Any]] = None):
         """Async streaming variant of stream_chat().
 
         This keeps the synchronous API untouched for chat.sh and other callers,
@@ -359,6 +364,9 @@ class LLMClient:
             if tool_choice is not None:
                 payload["tool_choice"] = tool_choice
         payload.update(merged_params)
+
+        if extra_body:
+            payload.update(extra_body)
 
         adapter = self._get_adapter_for_current_model()
         async for evt in adapter.stream_async(base_url, headers, payload, timeout=timeout):

@@ -131,7 +131,8 @@
       "api_base": "https://chatgpt.com/backend-api/codex/responses",
       "auth_type": "chatgpt_oauth",
       "parameters": {
-        "store": false
+        "store": false,
+        "prompt_cache_retention": "24h"
       },
       "models": {
         "Pro: GPT-5.3 Codex high": {
@@ -622,9 +623,9 @@
             }
           },
           "cost": {
-            "input_tokens": 1.74,
-            "cached_input": 0.0145,
-            "output_tokens": 3.48
+            "input_tokens": 0.435,
+            "cached_input": 0.003625,
+            "output_tokens": 0.87
           }
         },
         "deepseek-v4-pro max": {

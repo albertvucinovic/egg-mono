@@ -18,7 +18,7 @@ class _BoomLLM:
     def set_model(self, model_key):
         self.current_model_key = model_key
 
-    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
         self.calls += 1
         if self.errors:
             raise RuntimeError(self.errors.pop(0))
@@ -34,7 +34,7 @@ class _RateLimitThenOkLLM:
     def set_model(self, model_key):
         self.current_model_key = model_key
 
-    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("HTTP 429 rate limit exceeded; retry after 0.01 seconds")
@@ -50,7 +50,7 @@ class _PartialThenBoomLLM:
     def set_model(self, model_key):
         self.current_model_key = model_key
 
-    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
         self.calls += 1
         if self.calls == 1:
             yield {"type": "content_delta", "text": "partial"}
@@ -157,7 +157,7 @@ def test_max_output_incomplete_metadata_does_not_auto_continue(tmp_path):
         def set_model(self, model_key):
             self.current_model_key = model_key
 
-        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
             self.calls += 1
             yield {
                 "type": "done",

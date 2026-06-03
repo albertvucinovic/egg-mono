@@ -1850,7 +1850,13 @@ class ThreadRunner:
             return bool(isinstance(persisted_tool_calls, list) and persisted_tool_calls)
 
         try:
-            async for raw in self.llm.astream_chat(base_messages, tools=tools_spec_to_use, tool_choice=tool_choice, timeout=api_timeout_int):
+            async for raw in self.llm.astream_chat(
+                base_messages,
+                tools=tools_spec_to_use,
+                tool_choice=tool_choice,
+                timeout=api_timeout_int,
+                extra_body={"prompt_cache_key": self.thread_id[-4:]},
+            ):
                 try:
                     if recorder is not None:
                         recorder.write(json.dumps(raw, ensure_ascii=False) + "\n")

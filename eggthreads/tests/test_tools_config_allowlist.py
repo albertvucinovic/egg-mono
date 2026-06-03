@@ -163,7 +163,7 @@ class _ToolCallingLLM:
     def set_model_with_config(self, model_key, config):
         self.current_model_key = model_key
 
-    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
         self.seen_tool_names = {
             t.get("function", {}).get("name")
             for t in (tools or [])

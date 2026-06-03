@@ -187,7 +187,7 @@ def test_python_repl_wait_observes_child_result_under_scheduler(tmp_path, monkey
         def set_model_with_config(self, model_key, config):
             self.current_model_key = model_key
 
-        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
             yield {"type": "content_delta", "text": "child done"}
             yield {"type": "done", "message": {"role": "assistant", "content": "child done"}}
 
@@ -253,7 +253,7 @@ def test_wait_accepts_message_event_as_completed_assistant_turn(tmp_path, monkey
         def set_model_with_config(self, model_key, config):
             self.current_model_key = model_key
 
-        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None):
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
             yield {"type": "content_delta", "text": "child via message"}
             yield {"type": "message", "role": "assistant", "content": "child via message", "stop_reason": "end_turn"}
 
