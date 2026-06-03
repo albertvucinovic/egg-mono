@@ -132,7 +132,8 @@
       "auth_type": "chatgpt_oauth",
       "parameters": {
         "store": false,
-        "prompt_cache_retention": "24h"
+        "prompt_cache_retention": "24h",
+        "prompt_cache_key": "prompt_cache_key"
       },
       "models": {
         "Pro: GPT-5.3 Codex high": {
@@ -642,9 +643,9 @@
             }
           },
           "cost": {
-            "input_tokens": 1.74,
-            "cached_input": 0.0145,
-            "output_tokens": 3.48
+            "input_tokens": 0.435,
+            "cached_input": 0.003625,
+            "output_tokens": 0.87
           }
         },
         "deepseek-v4-flash high": {

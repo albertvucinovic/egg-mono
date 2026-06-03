@@ -1850,12 +1850,21 @@ class ThreadRunner:
             return bool(isinstance(persisted_tool_calls, list) and persisted_tool_calls)
 
         try:
+            extra_body: Optional[Dict[str, Any]] = None
+            try:
+                if hasattr(self.llm, 'registry') and hasattr(self.llm, 'current_model_key'):
+                    params = self.llm.registry.merge_parameters(self.llm.current_model_key)
+                    cache_key_name = params.get("prompt_cache_key") if isinstance(params, dict) else None
+                    if cache_key_name:
+                        extra_body = {cache_key_name: self.thread_id[-4:]}
+            except Exception:
+                pass
             async for raw in self.llm.astream_chat(
                 base_messages,
                 tools=tools_spec_to_use,
                 tool_choice=tool_choice,
                 timeout=api_timeout_int,
-                extra_body={"prompt_cache_key": self.thread_id[-4:]},
+                extra_body=extra_body,
             ):
                 try:
                     if recorder is not None:

@@ -308,6 +308,10 @@ class LLMClient:
                 payload["tool_choice"] = tool_choice
         payload.update(merged_params)
 
+        # prompt_cache_key is a config directive, not an API parameter.
+        # The actual value is injected via extra_body by the caller.
+        payload.pop("prompt_cache_key", None)
+
         if extra_body:
             payload.update(extra_body)
 
@@ -364,6 +368,10 @@ class LLMClient:
             if tool_choice is not None:
                 payload["tool_choice"] = tool_choice
         payload.update(merged_params)
+
+        # prompt_cache_key is a config directive, not an API parameter.
+        # The actual value is injected via extra_body by the caller.
+        payload.pop("prompt_cache_key", None)
 
         if extra_body:
             payload.update(extra_body)
