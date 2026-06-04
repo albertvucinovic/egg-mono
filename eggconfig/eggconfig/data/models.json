@@ -132,7 +132,6 @@
       "auth_type": "chatgpt_oauth",
       "parameters": {
         "store": false,
-        "prompt_cache_retention": "24h",
         "prompt_cache_key": "prompt_cache_key"
       },
       "models": {
