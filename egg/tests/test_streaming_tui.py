@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 
 
@@ -28,6 +29,10 @@ def _make_app(tmp_path, monkeypatch):
 
     monkeypatch.setattr(EggDisplayApp, "start_scheduler", lambda self, root_tid: None)
     return EggDisplayApp()
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
 
 
 def test_streaming_is_rendered_in_chat_panel_and_thread_list(tmp_path, monkeypatch):
@@ -415,10 +420,37 @@ def test_tool_output_stream_append_uses_plain_text_fast_path(tmp_path, monkeypat
             calls.append(payload)
 
     app._renderer = Renderer()
-    app._stream_append_on_renderer("[literal tool output]", style=None)
+    app._stream_append_on_renderer("literal tool output", style=None)
     app._flush_stream_render_buffer_now(force=True)
 
-    assert calls == ["[literal tool output]"]
+    assert calls == ["literal tool output"]
+
+
+def test_bracketed_tool_output_streams_literally_in_fullscreen_renderer(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    from eggdisplay.renderers import FullScreenDiffRenderer
+
+    class Renderer(FullScreenDiffRenderer):
+        def _term_width(self):
+            return 80
+
+        def _term_height(self):
+            return 5
+
+        def _paint(self, width):
+            self._prev_viewport = self._compose_visible_viewport(width)
+            self._viewport_h = self._term_height()
+            self._viewport_w = width
+
+    renderer = Renderer()
+    app._renderer = renderer
+    renderer.stream_begin()
+    app._stream_append_on_renderer("[literal tool output]\n", style=None)
+    app._flush_stream_render_buffer_now(force=True)
+
+    assert "[literal tool output]" in _strip_ansi(renderer._stream_buffer)
+    assert any("[literal tool output]" in _strip_ansi(row) for row in renderer._prev_viewport)
 
 
 def test_streaming_tool_call_arguments_show_tool_name_first(tmp_path, monkeypatch):

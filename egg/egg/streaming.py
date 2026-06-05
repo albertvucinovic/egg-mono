@@ -474,7 +474,8 @@ class StreamingMixin:
         # literally (we don't know whether the provider's text happens to
         # look like markup tags).
         if not style:
-            return text or ""
+            raw = text or ""
+            return raw if "[" not in raw else raw.replace('[', '\\[')
         escaped = (text or "").replace('[', '\\[')
         return f"[{style}]{escaped}[/{style}]" if style else escaped
 
