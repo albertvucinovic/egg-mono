@@ -276,6 +276,3 @@ Behavior:
 4. If there is a newer unhandled user message that arrived during the interrupted work, handle that user message before resuming older work.
 5. Do not fabricate tool results. If complete assistant tool calls were persisted, let the tool-call state machine handle them; if only partial tool-call deltas existed, resume from the last stable user/task state.
 
-## Output style
-
-Keep the checkpoint concise but specific. Prefer bullets. Avoid replaying the whole transcript.
