@@ -1163,6 +1163,59 @@ def test_runner_auto_compacts_checkpoint_resume_after_empty_provider_response(tm
     assert "checkpoint_and_resume" in request["content"]
     assert "summary_only" not in request["content"]
 
+
+def test_runner_auto_compacts_checkpoint_resume_after_max_output(tmp_path, monkeypatch):
+    db, tid = _new_thread(tmp_path)
+    old = ts.append_message(db, tid, "user", "old context")
+    previous = ts.append_message(db, tid, "assistant", "previous answer")
+    current = ts.append_message(db, tid, "user", "next question")
+    ts.create_snapshot(db, tid)
+
+    class MaxOutputLLM:
+        current_model_key = "test-model"
+
+        async def astream_chat(self, messages, **kwargs):
+            yield {
+                "type": "done",
+                "message": {
+                    "role": "assistant",
+                    "incomplete": True,
+                    "incomplete_reason": "response.incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
+            }
+
+    monkeypatch.setattr(
+        "eggthreads.token_count.provider_context_token_stats",
+        lambda db_arg, tid_arg: {"context_tokens": 100},
+    )
+    monkeypatch.delenv("EGG_COMPACT_SUMMARY", raising=False)
+
+    runner = ThreadRunner(db, tid, llm=MaxOutputLLM(), config=RunnerConfig(auto_compact_threshold_tokens=100))
+    asyncio.run(runner.run_once())
+
+    compaction_events = _events(db, tid)
+    assert len(compaction_events) == 1
+    assert compaction_events[0][1]["created_by"] == "auto_compaction"
+    source_msg_id = db.conn.execute(
+        "SELECT msg_id FROM events WHERE thread_id=? AND type='msg.create' AND payload_json LIKE '%max_output_tokens%' ORDER BY event_seq ASC LIMIT 1",
+        (tid,),
+    ).fetchone()[0]
+    assert compaction_events[0][1]["selector"] == source_msg_id
+    assert compaction_events[0][1]["start_msg_id"] == source_msg_id
+
+    messages = _snapshot_messages(db, tid)
+    request = [m for m in messages if m.get("auto_compaction_request")][-1]
+    assert "checkpoint_and_resume" in request["content"]
+    assert "summary_only" not in request["content"]
+    provider_view = ts.filter_messages_for_compaction_provider_context(db, tid, messages)
+    assert old not in [m.get("msg_id") for m in provider_view]
+    assert previous not in [m.get("msg_id") for m in provider_view]
+    assert current not in [m.get("msg_id") for m in provider_view]
+    assert provider_view[0].get("msg_id") == source_msg_id
+    assert provider_view[-1].get("msg_id") == request["msg_id"]
+
+
 def test_runner_auto_compacts_direct_mode_when_summary_env_false(tmp_path, monkeypatch):
     db, tid = _new_thread(tmp_path)
     old = ts.append_message(db, tid, "user", "old context")
