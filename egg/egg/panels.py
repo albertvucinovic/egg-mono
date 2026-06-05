@@ -881,32 +881,32 @@ class PanelsMixin:
             inner = f"llm {tps_str}" if tps_str else "llm"
         elif kind == 'tool':
             tool_name = ""
+            countdown = self._current_tool_timeout_countdown()
             summary = ls.get('tool_summary') if isinstance(ls.get('tool_summary'), dict) else {}
             if summary and summary.get('active') and summary.get('text'):
                 inner = str(summary.get('text') or '')
-                return f"[yellow]Streaming\[{inner}][/yellow]"
-            indicator = ls.get('tool_stream_indicator') if isinstance(ls.get('tool_stream_indicator'), dict) else {}
-            if indicator and indicator.get('active'):
-                tool_name = str(indicator.get('name') or "")
-                try:
-                    indicator_text = self._tool_stream_indicator_text(
-                        name=tool_name,
-                        frames=int(indicator.get('frames') or 0),
-                        compact=True,
-                    )
-                except Exception:
-                    indicator_text = "tool: saving output"
-                inner = indicator_text
-                return f"[yellow]Streaming\[{inner}][/yellow]"
-            tools = ls.get('tools') if isinstance(ls.get('tools'), dict) else {}
-            if tools:
-                try:
-                    tool_name = next(iter(tools.keys())) or ""
-                except Exception:
-                    tool_name = ""
-            inner = f"tool {tool_name}" if tool_name else "tool"
-            countdown = self._current_tool_timeout_countdown()
-            if countdown:
+            else:
+                indicator = ls.get('tool_stream_indicator') if isinstance(ls.get('tool_stream_indicator'), dict) else {}
+                if indicator and indicator.get('active'):
+                    tool_name = str(indicator.get('name') or "")
+                    try:
+                        indicator_text = self._tool_stream_indicator_text(
+                            name=tool_name,
+                            frames=int(indicator.get('frames') or 0),
+                            compact=True,
+                        )
+                    except Exception:
+                        indicator_text = "tool: saving output"
+                    inner = indicator_text
+                else:
+                    tools = ls.get('tools') if isinstance(ls.get('tools'), dict) else {}
+                    if tools:
+                        try:
+                            tool_name = next(iter(tools.keys())) or ""
+                        except Exception:
+                            tool_name = ""
+                    inner = f"tool {tool_name}" if tool_name else "tool"
+            if countdown and "timeout in" not in inner:
                 inner = f"{inner}; {countdown}"
         else:
             inner = str(kind)
