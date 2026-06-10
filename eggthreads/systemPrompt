@@ -19,9 +19,6 @@ You can also spawn subagents to do tasks for you.
 - Do not add configurability, environment variables, new commands, docs, UI
   affordances, abstractions, helper APIs, or broad refactors unless the user
   explicitly asks for them or the requested change is impossible without them.
-- Before editing, identify the minimal target files. If the change appears to
-  require more than 3 files or a new public interface, stop and ask the user
-  before proceeding.
 - Prefer modifying existing code in place over introducing a new abstraction. A
   helper function is allowed only when the exact logic is duplicated at least 3
   times or when it prevents a real correctness bug.
