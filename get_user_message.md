@@ -106,15 +106,21 @@ Rationale:
   - ordinary user message still triggers RA1;
   - consumed message is not hidden from snapshots.
 
-## Phase 4 — `wait` semantics while the tool is actively waiting
+## Phase 4 — manager-facing wait/status semantics while the tool is actively waiting
 
 - [ ] Add a narrow `wait_for_threads` special case for an active, non-expired open stream whose executing TC3 tool is `get_user_message_while_preserving_llm_turn` and whose assistant note has been appended.
-- [ ] Return `finished=True`, `state='waiting_user'`, and the assistant note as `last_assistant_message` in this state.
-- [ ] Do not report finished if a user reply already exists after the note and is not yet consumed.
+- [ ] Ensure the model-callable `wait` tool inherits the same behavior through `wait_for_threads`.
+- [ ] Return `finished=True`, `state='waiting_user'`, and the assistant note as `last_assistant_message` for `wait_for_threads` / `wait` while the tool is genuinely waiting for user input.
+- [ ] Add matching `get_child_status` behavior for the same active waiting-tool state so manager-facing status does not misleadingly look like an ordinary running tool stream.
+  - Surface that the child is waiting for user input / blocked on a user reply.
+  - Expose the assistant note through existing `assistant_notes` / status fields when appropriate.
+- [ ] Do not report waiting-for-user if a user reply already exists after the note and has not yet been consumed; prefer running/in-progress in that in-between state to avoid a false second “waiting user” result.
 - [ ] Tests:
   - `wait_for_threads(..., timeout_sec=0)` finishes for active waiting-user tool and returns the note;
+  - model-callable `wait` reports the same waiting-user note behavior;
+  - `get_child_status` reports the active waiting-user state and assistant note instead of ordinary running;
   - normal active tool stream still returns unfinished/running;
-  - after a user message arrives but before it is consumed, wait does not falsely report finished.
+  - after a user message arrives but before it is consumed, `wait_for_threads` / `wait` / `get_child_status` do not falsely report waiting for user input.
 
 ## Phase 5 — End-to-end runner behavior
 
