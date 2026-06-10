@@ -28,7 +28,11 @@ class CompactThreadApprovalPolicy:
     name: str = "compact_thread"
 
     def evaluate(self, request: ApprovalRequest) -> ApprovalVerdict:
-        if request.tool_name in {"compact_thread", "answer_user_while_preserving_llm_turn"}:
+        if request.tool_name in {
+            "compact_thread",
+            "answer_user_while_preserving_llm_turn",
+            "get_user_message_while_preserving_llm_turn",
+        }:
             return ApprovalVerdict(APPROVAL_ALLOW, reason=f"{request.tool_name} is safe to auto-approve", policy=self.name)
         return ApprovalVerdict(APPROVAL_ABSTAIN, reason="Not an auto-approved control tool", policy=self.name)
 

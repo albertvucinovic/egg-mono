@@ -9,7 +9,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .db import ThreadsDB
 
 
-AUTO_APPROVED_TOOL_NAMES = {"compact_thread", "answer_user_while_preserving_llm_turn"}
+AUTO_APPROVED_TOOL_NAMES = {
+    "compact_thread",
+    "answer_user_while_preserving_llm_turn",
+    "get_user_message_while_preserving_llm_turn",
+}
 
 
 def _utcnow_iso() -> str:

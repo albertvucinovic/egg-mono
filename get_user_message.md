@@ -74,24 +74,24 @@ Rationale:
 
 ## Phase 1 — Tool registration and naming
 
-- [ ] Add/register `get_user_message_while_preserving_llm_turn` alongside `answer_user_while_preserving_llm_turn`.
-- [ ] Expose it in the default tool registry/tool schema with required `assistant_note`.
-- [ ] Add it to deterministic/constant auto-approval for safe control tools.
-- [ ] Tests:
+- [x] Add/register `get_user_message_while_preserving_llm_turn` alongside `answer_user_while_preserving_llm_turn`.
+- [x] Expose it in the default tool registry/tool schema with required `assistant_note`.
+- [x] Add it to deterministic/constant auto-approval for safe control tools.
+- [x] Tests:
   - default registry includes the new tool;
   - schema requires `assistant_note`;
   - approval policy / `AUTO_APPROVED_TOOL_NAMES` covers it.
 
 ## Phase 2 — Async tool implementation
 
-- [ ] Implement a context-aware async tool function.
-- [ ] Append the assistant note with preserve-turn metadata and create a snapshot.
-- [ ] Wait indefinitely for the next normal user `msg.create` after the note.
-- [ ] On cancellation/lease loss, return a structured interrupted result rather than hanging forever.
-- [ ] When input is found, mark it consumed with `msg.edit`, refresh snapshot, and return the input text.
-- [ ] Tests:
+- [x] Implement a context-aware async tool function.
+- [x] Append the assistant note with preserve-turn metadata and create a snapshot.
+- [x] Wait indefinitely for the next normal user `msg.create` after the note.
+- [x] On cancellation/lease loss, return a structured interrupted result rather than hanging forever.
+- [x] When input is found, mark it consumed with `msg.edit`, refresh snapshot, and return the input text.
+- [x] Tests:
   - tool appends assistant note with metadata;
-  - tool immediately returns a pre-appended later user message in an async test;
+  - tool immediately returns a later user message in an async test;
   - consumed user message remains visible in snapshot but has consumed/no_api/keep_user_turn flags;
   - cancellation path does not hang.
 
@@ -137,3 +137,4 @@ Rationale:
 ## Status notes
 
 - 2026-06-05: Plan created after researching `answer_user` plugin, `ToolContext`, RA2 execution, reducer RA1 scanning, snapshots, and `wait_for_threads`. Next: implement Phase 1–2 in a focused worker slice.
+- 2026-06-10: Phase 1/2 implemented in a focused slice: registered `get_user_message_while_preserving_llm_turn`, added deterministic auto-approval, implemented the async note/wait/consume tool path, and added direct registry/schema/approval/metadata/wait/consume/cancel tests. Phase 3/4 reducer and `wait_for_threads` semantics intentionally not implemented in this slice.

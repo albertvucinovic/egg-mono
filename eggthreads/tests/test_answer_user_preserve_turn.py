@@ -4,9 +4,14 @@ import asyncio
 import json
 
 import eggthreads as ts
+from eggthreads.approval import APPROVAL_ALLOW, ApprovalRequest, create_approval_policy_registry
 from eggthreads.command_catalog import CommandContext, create_default_command_registry
 from eggthreads.runner import ThreadRunner
-from eggthreads.tools import create_tool_registry
+from eggthreads.tool_state import AUTO_APPROVED_TOOL_NAMES
+from eggthreads.tools import ToolExecutionResult, ToolStreamContext, create_tool_registry
+
+
+GET_USER_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
 
 
 def _new_thread(tmp_path):
@@ -27,12 +32,52 @@ def _tool_message(db, tid, tool_call_id):
     return None
 
 
+async def _wait_for_message(db, tid, predicate, timeout=1.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        for msg in _messages(db, tid):
+            if predicate(msg):
+                return msg
+        await asyncio.sleep(0.01)
+    raise AssertionError("message was not appended before timeout")
+
+
 def test_default_tool_registry_includes_answer_user_preserve_turn_tool():
     registry = create_tool_registry()
 
     assert "answer_user_while_preserving_llm_turn" in registry._tools
     spec = registry._tools["answer_user_while_preserving_llm_turn"]["spec"]["function"]
     assert spec["parameters"]["required"] == ["message"]
+
+
+def test_default_tool_registry_includes_get_user_message_preserve_turn_tool():
+    registry = create_tool_registry()
+
+    assert GET_USER_TOOL_NAME in registry._tools
+    exposed_names = [spec["function"]["name"] for spec in registry.tools_spec()]
+    assert GET_USER_TOOL_NAME in exposed_names
+    spec = registry._tools[GET_USER_TOOL_NAME]["spec"]["function"]
+    assert spec["parameters"]["required"] == ["assistant_note"]
+    assert spec["parameters"]["additionalProperties"] is False
+    assert "assistant_note" in spec["parameters"]["properties"]
+    assert GET_USER_TOOL_NAME in AUTO_APPROVED_TOOL_NAMES
+
+
+def test_default_approval_policy_allows_get_user_message_preserve_turn_tool():
+    registry = create_approval_policy_registry()
+
+    verdict = registry.get("compact_thread").evaluate(
+        ApprovalRequest(
+            db=None,
+            thread_id="tid",
+            tool_call_id="tcid",
+            tool_name=GET_USER_TOOL_NAME,
+            origin="assistant",
+            parent_role="assistant",
+        )
+    )
+
+    assert verdict.decision == APPROVAL_ALLOW
 
 
 def test_answer_user_tool_appends_interim_assistant_message(tmp_path):
@@ -53,6 +98,106 @@ def test_answer_user_tool_appends_interim_assistant_message(tmp_path):
     assert msg["content"] == "Still working, but here is the short answer."
     assert msg["answer_user_preserve_turn"] is True
     assert msg["model_key"] == "model-test"
+
+
+def test_get_user_message_tool_appends_note_with_metadata_and_cancels(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    registry = create_tool_registry()
+    cancelled = {"value": False}
+
+    async def run():
+        task = asyncio.create_task(
+            registry.execute_async(
+                GET_USER_TOOL_NAME,
+                {"assistant_note": "What should I use for the title?"},
+                thread_id=tid,
+                db=db,
+                initial_model_key="model-test",
+                cancel_check=lambda: cancelled["value"],
+                stream=ToolStreamContext(
+                    db=db,
+                    thread_id=tid,
+                    invoke_id="invoke-get-user",
+                    tool_call_id="call-get-user",
+                    tool_name=GET_USER_TOOL_NAME,
+                ),
+                preserve_tool_result=True,
+            )
+        )
+
+        note = await _wait_for_message(
+            db,
+            tid,
+            lambda msg: msg.get("content") == "What should I use for the title?",
+        )
+        assert note["role"] == "assistant"
+        assert note["answer_user_preserve_turn"] is True
+        assert note["model_key"] == "model-test"
+        assert note["source_tool_name"] == GET_USER_TOOL_NAME
+        assert note["tool_call_id"] == "call-get-user"
+        assert note["awaiting_user_message_tool_call_id"] == "call-get-user"
+
+        cancelled["value"] = True
+        result = await asyncio.wait_for(task, timeout=1)
+        assert isinstance(result, ToolExecutionResult)
+        assert result.reason == "interrupted"
+        assert "INTERRUPTED" in result.output
+
+    asyncio.run(run())
+
+
+def test_get_user_message_tool_returns_later_user_message_and_marks_it_consumed(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    registry = create_tool_registry()
+
+    async def run():
+        task = asyncio.create_task(
+            registry.execute_async(
+                GET_USER_TOOL_NAME,
+                {"assistant_note": "Please provide the missing title."},
+                thread_id=tid,
+                db=db,
+                initial_model_key="model-test",
+                stream=ToolStreamContext(
+                    db=db,
+                    thread_id=tid,
+                    invoke_id="invoke-get-user",
+                    tool_call_id="call-get-user",
+                    tool_name=GET_USER_TOOL_NAME,
+                ),
+            )
+        )
+        await _wait_for_message(
+            db,
+            tid,
+            lambda msg: msg.get("content") == "Please provide the missing title.",
+        )
+
+        user_msg_id = ts.append_message(db, tid, "user", "The Practical Guide")
+        result = await asyncio.wait_for(task, timeout=1)
+
+        assert result == "The Practical Guide"
+        messages = _messages(db, tid)
+        user_msg = next(msg for msg in messages if msg.get("msg_id") == user_msg_id)
+        assert user_msg["role"] == "user"
+        assert user_msg["content"] == "The Practical Guide"
+        assert user_msg["no_api"] is True
+        assert user_msg["keep_user_turn"] is True
+        assert user_msg["consumed_by_tool_call_id"] == "call-get-user"
+        assert user_msg["consumed_by_tool_name"] == GET_USER_TOOL_NAME
+
+        edit_row = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND msg_id=? AND type='msg.edit' ORDER BY event_seq DESC LIMIT 1",
+            (tid, user_msg_id),
+        ).fetchone()
+        assert edit_row is not None
+        edit_payload = json.loads(edit_row[0])
+        assert edit_payload["no_api"] is True
+        assert edit_payload["keep_user_turn"] is True
+        assert edit_payload["consumed_by_tool_call_id"] == "call-get-user"
+        assert edit_payload["consumed_by_tool_name"] == GET_USER_TOOL_NAME
+
+    asyncio.run(run())
 
 
 def test_answer_user_tool_call_publishes_hidden_keep_turn_result(tmp_path):
