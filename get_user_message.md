@@ -97,11 +97,11 @@ Rationale:
 
 ## Phase 3 — Reducer and RA1 trigger semantics for consumed user messages
 
-- [ ] Add a small shared helper or local reducer logic to collect message ids consumed by `get_user_message_while_preserving_llm_turn` from `msg.edit` events.
-- [ ] Teach cached reducer RA1 scanning to ignore consumed messages.
-- [ ] Teach uncached/public RA1 scanning paths to ignore consumed messages where still used.
-- [ ] Teach wait trigger logic (`_latest_api_trigger_seq`) to ignore consumed messages.
-- [ ] Tests:
+- [x] Add a small shared helper or local reducer logic to collect message ids consumed by `get_user_message_while_preserving_llm_turn` from `msg.edit` events.
+- [x] Teach cached reducer RA1 scanning to ignore consumed messages.
+- [x] Teach uncached/public RA1 scanning paths to ignore consumed messages where still used.
+- [x] Teach wait trigger logic (`_latest_api_trigger_seq`) to ignore consumed messages.
+- [x] Tests:
   - consumed user message does not trigger RA1 after tool result publication;
   - ordinary user message still triggers RA1;
   - consumed message is not hidden from snapshots.
@@ -138,3 +138,4 @@ Rationale:
 
 - 2026-06-05: Plan created after researching `answer_user` plugin, `ToolContext`, RA2 execution, reducer RA1 scanning, snapshots, and `wait_for_threads`. Next: implement Phase 1–2 in a focused worker slice.
 - 2026-06-10: Phase 1/2 implemented in commit `2b85cb7`: registered `get_user_message_while_preserving_llm_turn`, added deterministic auto-approval, implemented the async note/wait/consume tool path, and added direct registry/schema/approval/metadata/wait/consume/cancel tests. Phase 3/4 reducer and `wait_for_threads` semantics intentionally not implemented in this slice.
+- 2026-06-10: Phase 3 implemented in a focused slice: reducer/public RA1 scans, `wait_for_threads` trigger completion, and `get_child_status` state reporting now ignore user messages consumed by `get_user_message_while_preserving_llm_turn` while keeping them visible in snapshots/UI. Phase 4 active waiting-tool wait semantics intentionally not implemented.

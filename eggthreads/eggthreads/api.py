@@ -833,13 +833,14 @@ def _compaction_summary_request_extra(*, created_by: str) -> Dict[str, Any]:
 
 def _normal_user_messages_after_seq(db: ThreadsDB, thread_id: str, after_seq: int) -> List[Dict[str, Any]]:
     skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    consumed = _consumed_get_user_message_msg_ids(db, thread_id)
     cur = db.conn.execute(
         "SELECT event_seq, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
         (thread_id, int(after_seq)),
     )
     out: List[Dict[str, Any]] = []
     for event_seq, msg_id, payload_json in cur.fetchall():
-        if msg_id and (str(msg_id) in skipped or str(msg_id) in deleted):
+        if msg_id and (str(msg_id) in skipped or str(msg_id) in deleted or str(msg_id) in consumed):
             continue
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
@@ -903,6 +904,32 @@ def _compaction_skipped_and_deleted_msg_ids(db: ThreadsDB, thread_id: str) -> tu
         if isinstance(payload, dict) and payload.get('skipped_on_continue'):
             skipped.add(str(msg_id))
     return skipped, deleted
+
+
+def _consumed_get_user_message_msg_ids(db: ThreadsDB, thread_id: str) -> set[str]:
+    from .tool_state import _is_consumed_get_user_message_edit
+
+    consumed: set[str] = set()
+    try:
+        cur = db.conn.execute(
+            "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for msg_id, payload_json in rows:
+        if not msg_id:
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        if _is_consumed_get_user_message_edit(payload):
+            consumed.add(str(msg_id))
+    return consumed
 
 
 def list_thread_compactions(db: ThreadsDB, thread_id: str) -> List[Dict[str, Any]]:
@@ -4622,6 +4649,7 @@ def _latest_api_trigger_seq(db: ThreadsDB, thread_id: str) -> int:
     """Return the last message event_seq that should trigger an LLM turn."""
 
     skipped = _wait_skipped_msg_ids(db, thread_id)
+    consumed = _consumed_get_user_message_msg_ids(db, thread_id)
     latest = -1
     try:
         cur = db.conn.execute(
@@ -4633,6 +4661,8 @@ def _latest_api_trigger_seq(db: ThreadsDB, thread_id: str) -> int:
         rows = []
     for event_seq, msg_id, payload_json in rows:
         if msg_id and str(msg_id) in skipped:
+            continue
+        if msg_id and str(msg_id) in consumed:
             continue
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})

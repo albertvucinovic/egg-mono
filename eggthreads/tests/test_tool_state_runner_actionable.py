@@ -362,6 +362,158 @@ def _assert_reducer_matches_public_state(db, tid: str) -> None:
     )
 
 
+def _append_consumed_get_user_message_edit(db, tid: str, msg_id: str) -> None:
+    _append_event(
+        db,
+        tid,
+        "msg.edit",
+        {
+            "content": "consumed reply",
+            "no_api": True,
+            "keep_user_turn": True,
+            "consumed_by_tool_call_id": "call-get-user",
+            "consumed_by_tool_name": "get_user_message_while_preserving_llm_turn",
+        },
+        msg_id=msg_id,
+    )
+
+
+def test_consumed_get_user_message_does_not_trigger_ra1_and_remains_visible(tmp_path):
+    from eggthreads.tool_state import discover_runner_actionable_cached
+
+    db = _make_db(tmp_path)
+    tid = "thread-consumed-user-no-ra1"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-assistant", tid, "msg.create", {"role": "assistant", "content": "answer"}, msg_id="m-assistant")
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "consumed reply"}, msg_id="m-user")
+    _append_consumed_get_user_message_edit(db, tid, "m-user")
+
+    eggthreads.create_snapshot(db, tid)
+
+    assert discover_runner_actionable_cached(db, tid) is None
+    assert eggthreads.discover_runner_actionable(db, tid) is None
+    _assert_reducer_matches_public_state(db, tid)
+
+    snap = eggthreads.create_snapshot(db, tid)
+    user_msg = next(msg for msg in snap["messages"] if msg.get("msg_id") == "m-user")
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == "consumed reply"
+    assert user_msg["no_api"] is True
+    assert user_msg["keep_user_turn"] is True
+    assert user_msg["consumed_by_tool_call_id"] == "call-get-user"
+    assert user_msg["consumed_by_tool_name"] == "get_user_message_while_preserving_llm_turn"
+
+
+def test_consumed_get_user_message_does_not_displace_tool_result_ra1(tmp_path):
+    from eggthreads.tool_state import discover_runner_actionable_cached
+
+    db = _make_db(tmp_path)
+    tid = "thread-consumed-user-tool-result"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event(
+        "msg-tool-call",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-get-user",
+                    "type": "function",
+                    "function": {
+                        "name": "get_user_message_while_preserving_llm_turn",
+                        "arguments": json.dumps({"assistant_note": "Title?"}),
+                    },
+                }
+            ],
+        },
+        msg_id="m-tool-call",
+    )
+    db.append_event(
+        "msg-note",
+        tid,
+        "msg.create",
+        {
+            "role": "assistant",
+            "content": "Title?",
+            "answer_user_preserve_turn": True,
+            "source_tool_name": "get_user_message_while_preserving_llm_turn",
+            "tool_call_id": "call-get-user",
+            "awaiting_user_message_tool_call_id": "call-get-user",
+        },
+        msg_id="m-note",
+    )
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "consumed reply"}, msg_id="m-user")
+    _append_consumed_get_user_message_edit(db, tid, "m-user")
+    _append_event(db, tid, "tool_call.execution_started", {"tool_call_id": "call-get-user"}, invoke_id="inv-get-user")
+    _append_event(
+        db,
+        tid,
+        "tool_call.finished",
+        {"tool_call_id": "call-get-user", "reason": "success", "output": "consumed reply"},
+        invoke_id="inv-get-user",
+    )
+    _append_event(
+        db,
+        tid,
+        "tool_call.output_approval",
+        {"tool_call_id": "call-get-user", "decision": "whole", "preview": "consumed reply"},
+    )
+    db.append_event(
+        "msg-tool",
+        tid,
+        "msg.create",
+        {"role": "tool", "tool_call_id": "call-get-user", "content": "consumed reply"},
+        msg_id="m-tool",
+    )
+
+    ra = discover_runner_actionable_cached(db, tid)
+    assert ra is not None
+    assert ra.kind == "RA1_llm"
+    assert ra.msg_id == "m-tool"
+
+    db.append_event("msg-final", tid, "msg.create", {"role": "assistant", "content": "handled"}, msg_id="m-final")
+    assert discover_runner_actionable_cached(db, tid) is None
+
+
+def test_ordinary_user_message_still_triggers_ra1(tmp_path):
+    from eggthreads.tool_state import discover_runner_actionable_cached
+
+    db = _make_db(tmp_path)
+    tid = "thread-ordinary-user-ra1"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+
+    db.append_event("msg-assistant", tid, "msg.create", {"role": "assistant", "content": "answer"}, msg_id="m-assistant")
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "ordinary reply"}, msg_id="m-user")
+
+    ra_cached = discover_runner_actionable_cached(db, tid)
+    ra_public = eggthreads.discover_runner_actionable(db, tid)
+
+    assert ra_cached is not None
+    assert ra_cached.kind == "RA1_llm"
+    assert ra_cached.msg_id == "m-user"
+    assert _ra_signature(ra_cached) == _ra_signature(ra_public)
+
+
+def test_wait_for_threads_ignores_consumed_user_message_trigger(tmp_path):
+    db = _make_db(tmp_path)
+    tid = eggthreads.create_root_thread(db, name="root")
+    eggthreads.append_message(db, tid, "assistant", "answer")
+    user_msg_id = eggthreads.append_message(db, tid, "user", "consumed reply")
+    _append_consumed_get_user_message_edit(db, tid, user_msg_id)
+    eggthreads.create_snapshot(db, tid)
+
+    results = eggthreads.wait_for_threads(db, [tid], timeout_sec=0)
+    result = results[tid]
+
+    assert result.finished is True
+    assert result.state == "waiting_user"
+    assert result.last_assistant_message == "answer"
+
+
 def test_thread_event_reducer_matches_simple_user_ra1(tmp_path):
     db = _make_db(tmp_path)
     tid = "thread-reducer-ra1"

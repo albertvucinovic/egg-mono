@@ -101,6 +101,49 @@ def test_get_child_status_tool_uses_current_thread_context(tmp_path, monkeypatch
     assert payload["children"][0]["compaction"] == {"compacted": False, "raw_marker_count": 0}
 
 
+def test_get_child_status_tool_ignores_consumed_get_user_message_for_state(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(
+        db,
+        child,
+        "assistant",
+        "Title?",
+        extra={
+            "answer_user_preserve_turn": True,
+            "source_tool_name": "get_user_message_while_preserving_llm_turn",
+            "tool_call_id": "call-get-user",
+            "awaiting_user_message_tool_call_id": "call-get-user",
+        },
+    )
+    user_msg = ts.append_message(db, child, "user", "consumed reply")
+    ts.edit_message(
+        db,
+        child,
+        user_msg,
+        "consumed reply",
+        extra={
+            "no_api": True,
+            "keep_user_turn": True,
+            "consumed_by_tool_call_id": "call-get-user",
+            "consumed_by_tool_name": "get_user_message_while_preserving_llm_turn",
+        },
+    )
+    ts.create_snapshot(db, child)
+
+    out = create_default_tools().execute("get_child_status", {"child_thread_ids": [child]}, thread_id=parent)
+    payload = json.loads(out)
+    child_status = payload["children"][0]
+
+    assert child_status["thread_id"] == child
+    assert child_status["state"] == "waiting_user"
+    assert child_status["assistant_notes"][0]["content"] == "Title?"
+    assert child_status["assistant_notes"][0]["tool_call_id"] == "call-get-user"
+
+
 def test_get_child_status_reports_active_assistant_notes(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")

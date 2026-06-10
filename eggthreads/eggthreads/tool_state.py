@@ -9,11 +9,23 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from .db import ThreadsDB
 
 
+GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
+
 AUTO_APPROVED_TOOL_NAMES = {
     "compact_thread",
     "answer_user_while_preserving_llm_turn",
-    "get_user_message_while_preserving_llm_turn",
+    GET_USER_MESSAGE_TOOL_NAME,
 }
+
+
+def _is_consumed_get_user_message_edit(payload: Dict[str, Any]) -> bool:
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("consumed_by_tool_name") == GET_USER_MESSAGE_TOOL_NAME
+        and payload.get("consumed_by_tool_call_id")
+        and payload.get("no_api")
+        and payload.get("keep_user_turn")
+    )
 
 
 def _utcnow_iso() -> str:
@@ -96,6 +108,7 @@ class _ThreadEventReduction:
     thread_id: str
     max_event_seq: int
     skipped_msg_ids: set[str]
+    consumed_user_msg_ids: set[str]
     last_llm_boundary_seq: int
     messages_after_boundary: List[Dict[str, Any]]
     tool_call_states: Dict[str, ToolCallState]
@@ -383,6 +396,7 @@ def _try_reduce_thread_events_incrementally(
         return None
 
     skipped_msg_ids = set(previous.skipped_msg_ids)
+    consumed_user_msg_ids = set(previous.consumed_user_msg_ids)
     llm_invokes = set(previous._llm_invokes)
     user_seqs = list(previous._user_seqs)
     current_global_start = previous._current_global_start
@@ -607,6 +621,7 @@ def _try_reduce_thread_events_incrementally(
         thread_id,
         tool_call_states,
         messages_after_records,
+        consumed_user_msg_ids,
     )
     if next_runner_actionable is not None:
         coarse_state = "running"
@@ -621,6 +636,7 @@ def _try_reduce_thread_events_incrementally(
         thread_id=thread_id,
         max_event_seq=max_seq,
         skipped_msg_ids=skipped_msg_ids,
+        consumed_user_msg_ids=consumed_user_msg_ids,
         last_llm_boundary_seq=last_llm_boundary_seq,
         messages_after_boundary=messages_after_boundary,
         tool_call_states=tool_call_states,
@@ -685,6 +701,7 @@ def _reduce_loaded_thread_events(
     records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
 
     skipped_msg_ids: set[str] = set()
+    consumed_user_msg_ids: set[str] = set()
     msg_seq_by_id: Dict[str, int] = {}
     user_seqs: list[int] = []
     latest_interrupt_seq: Optional[int] = None
@@ -696,6 +713,8 @@ def _reduce_loaded_thread_events(
             msg_id = ev.get("msg_id")
             if msg_id and payload.get("skipped_on_continue"):
                 skipped_msg_ids.add(str(msg_id))
+            if msg_id and _is_consumed_get_user_message_edit(payload):
+                consumed_user_msg_ids.add(str(msg_id))
             continue
         if ev_type == "control.interrupt":
             latest_interrupt_seq = ev_seq
@@ -894,12 +913,18 @@ def _reduce_loaded_thread_events(
         if ev.get("type") == "msg.create"
         and ev_seq > last_llm_boundary_seq
         and not (ev.get("msg_id") and str(ev.get("msg_id")) in skipped_msg_ids)
+        and not (
+            payload.get("role") == "user"
+            and ev.get("msg_id")
+            and str(ev.get("msg_id")) in consumed_user_msg_ids
+        )
     ]
     messages_after_boundary = [ev for ev, _payload_obj, _ev_seq in messages_after_records]
     next_runner_actionable = _next_runner_actionable_from_reduction(
         thread_id,
         states,
         messages_after_records,
+        consumed_user_msg_ids,
     )
     if next_runner_actionable is not None:
         coarse_state = "running"
@@ -914,6 +939,7 @@ def _reduce_loaded_thread_events(
         thread_id=thread_id,
         max_event_seq=max_event_seq,
         skipped_msg_ids=skipped_msg_ids,
+        consumed_user_msg_ids=consumed_user_msg_ids,
         last_llm_boundary_seq=last_llm_boundary_seq,
         messages_after_boundary=messages_after_boundary,
         tool_call_states=states,
@@ -1003,7 +1029,9 @@ def _next_runner_actionable_from_reduction(
     thread_id: str,
     states: Dict[str, ToolCallState],
     messages_after_records: List[Tuple[Dict[str, Any], Dict[str, Any], int]],
+    consumed_user_msg_ids: set[str] | None = None,
 ) -> Optional[RunnerActionable]:
+    consumed_user_msg_ids = consumed_user_msg_ids or set()
     user_tcs = [
         tc for tc in states.values()
         if tc.parent_role == "user" and tc.state in ("TC2.1", "TC2.2", "TC5")
@@ -1048,6 +1076,8 @@ def _next_runner_actionable_from_reduction(
     for ev, payload, ev_seq in messages_after_records:
         msg_id = ev.get("msg_id") or ""
         role = payload.get("role")
+        if role == "user" and msg_id and str(msg_id) in consumed_user_msg_ids:
+            continue
         keep_user_turn = bool(payload.get("keep_user_turn"))
         no_api = bool(payload.get("no_api"))
         tool_calls = payload.get("tool_calls") or []
@@ -1291,9 +1321,14 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
     This function respects the skipped_on_continue flag: messages that have
     been marked as skipped (via a msg.edit event) are not yielded. This allows
     continue_thread to effectively "reset" the conversation to an earlier point.
+
+    User messages consumed by get_user_message_while_preserving_llm_turn are
+    also omitted from this provider-trigger scan, while remaining visible in
+    snapshots/UI.
     """
-    # First, collect msg_ids that have been marked as skipped
+    # First, collect msg_ids that have been marked as skipped/consumed.
     skipped_msg_ids: set = set()
+    consumed_user_msg_ids: set = set()
     cur_edit = db.conn.execute(
         "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit' ORDER BY event_seq ASC",
         (thread_id,),
@@ -1306,6 +1341,8 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
             payload = {}
         if payload.get('skipped_on_continue'):
             skipped_msg_ids.add(msg_id)
+        if _is_consumed_get_user_message_edit(payload):
+            consumed_user_msg_ids.add(msg_id)
 
     cur = db.conn.execute(
         "SELECT * FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
@@ -1317,6 +1354,13 @@ def _iter_messages_after(db: ThreadsDB, thread_id: str, after_seq: int) -> Itera
         # Skip messages that have been marked as skipped_on_continue
         if msg_id and msg_id in skipped_msg_ids:
             continue
+        if msg_id and msg_id in consumed_user_msg_ids:
+            try:
+                payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict) and payload.get("role") == "user":
+                continue
         yield ev
 
 
