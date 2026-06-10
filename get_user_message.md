@@ -108,14 +108,14 @@ Rationale:
 
 ## Phase 4 — manager-facing wait/status semantics while the tool is actively waiting
 
-- [ ] Add a narrow `wait_for_threads` special case for an active, non-expired open stream whose executing TC3 tool is `get_user_message_while_preserving_llm_turn` and whose assistant note has been appended.
-- [ ] Ensure the model-callable `wait` tool inherits the same behavior through `wait_for_threads`.
-- [ ] Return `finished=True`, `state='waiting_user'`, and the assistant note as `last_assistant_message` for `wait_for_threads` / `wait` while the tool is genuinely waiting for user input.
-- [ ] Add matching `get_child_status` behavior for the same active waiting-tool state so manager-facing status does not misleadingly look like an ordinary running tool stream.
+- [x] Add a narrow `wait_for_threads` special case for an active, non-expired open stream whose executing TC3 tool is `get_user_message_while_preserving_llm_turn` and whose assistant note has been appended.
+- [x] Ensure the model-callable `wait` tool inherits the same behavior through `wait_for_threads`.
+- [x] Return `finished=True`, `state='waiting_user'`, and the assistant note as `last_assistant_message` for `wait_for_threads` / `wait` while the tool is genuinely waiting for user input.
+- [x] Add matching `get_child_status` behavior for the same active waiting-tool state so manager-facing status does not misleadingly look like an ordinary running tool stream.
   - Surface that the child is waiting for user input / blocked on a user reply.
   - Expose the assistant note through existing `assistant_notes` / status fields when appropriate.
-- [ ] Do not report waiting-for-user if a user reply already exists after the note and has not yet been consumed; prefer running/in-progress in that in-between state to avoid a false second “waiting user” result.
-- [ ] Tests:
+- [x] Do not report waiting-for-user if a user reply already exists after the note and has not yet been consumed; prefer running/in-progress in that in-between state to avoid a false second “waiting user” result.
+- [x] Tests:
   - `wait_for_threads(..., timeout_sec=0)` finishes for active waiting-user tool and returns the note;
   - model-callable `wait` reports the same waiting-user note behavior;
   - `get_child_status` reports the active waiting-user state and assistant note instead of ordinary running;
@@ -145,3 +145,4 @@ Rationale:
 - 2026-06-05: Plan created after researching `answer_user` plugin, `ToolContext`, RA2 execution, reducer RA1 scanning, snapshots, and `wait_for_threads`. Next: implement Phase 1–2 in a focused worker slice.
 - 2026-06-10: Phase 1/2 implemented in commit `2b85cb7`: registered `get_user_message_while_preserving_llm_turn`, added deterministic auto-approval, implemented the async note/wait/consume tool path, and added direct registry/schema/approval/metadata/wait/consume/cancel tests. Phase 3/4 reducer and `wait_for_threads` semantics intentionally not implemented in this slice.
 - 2026-06-10: Phase 3 implemented in a focused slice: reducer/public RA1 scans, `wait_for_threads` trigger completion, and `get_child_status` state reporting now ignore user messages consumed by `get_user_message_while_preserving_llm_turn` while keeping them visible in snapshots/UI. Phase 4 active waiting-tool wait semantics intentionally not implemented.
+- 2026-06-10: Phase 4 implemented in a focused slice: `wait_for_threads` / model-callable `wait` and `get_child_status` now report active `get_user_message_while_preserving_llm_turn` waits as manager-facing `waiting_user` with the assistant note, while ordinary active tools and post-reply/pre-consumption states remain running/in-progress.

@@ -4014,6 +4014,124 @@ def _active_assistant_notes(db: ThreadsDB, thread_id: str, *, limit: int = 5) ->
     return notes[-limit:]
 
 
+def _normal_user_reply_exists_after_note(db: ThreadsDB, thread_id: str, note_event_seq: int) -> bool:
+    try:
+        skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    except Exception:
+        skipped, deleted = set(), set()
+    try:
+        cur = db.conn.execute(
+            "SELECT event_seq, ts, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
+            (thread_id, int(note_event_seq)),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        try:
+            msg_id = str(row["msg_id"] or "")
+        except Exception:
+            msg_id = ""
+        if msg_id and (msg_id in skipped or msg_id in deleted):
+            continue
+        payload = _event_payload_from_row(row)
+        if payload.get("role") != "user":
+            continue
+        if payload.get("tool_calls") or payload.get("no_api") or payload.get("keep_user_turn"):
+            continue
+        return True
+    return False
+
+
+def _active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the active get-user-message assistant note when it is waiting.
+
+    This is intentionally narrow: only an active non-expired tool stream whose
+    TC3 tool is ``get_user_message_while_preserving_llm_turn`` and whose
+    assistant note has been appended is treated as manager-visible
+    ``waiting_user``. If a normal user reply already exists after the note,
+    the tool is in-flight rather than still waiting for user input.
+    """
+
+    try:
+        open_row = db.current_open(thread_id)
+    except Exception:
+        open_row = None
+    if open_row is None:
+        return None
+
+    try:
+        if str(open_row["lease_until"] or "") <= _utcnow_iso():
+            return None
+        if str(open_row["purpose"] or "") != "tool":
+            return None
+        invoke_id = str(open_row["invoke_id"] or "")
+    except Exception:
+        return None
+    if not invoke_id:
+        return None
+
+    try:
+        from .tool_state import GET_USER_MESSAGE_TOOL_NAME, build_tool_call_states
+
+        active_tool = None
+        for tc in build_tool_call_states(db, thread_id).values():
+            if (
+                tc.name == GET_USER_MESSAGE_TOOL_NAME
+                and tc.state == "TC3"
+                and tc.owner_invoke_id == invoke_id
+            ):
+                active_tool = tc
+                break
+    except Exception:
+        active_tool = None
+    if active_tool is None:
+        return None
+
+    try:
+        skipped, deleted = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    except Exception:
+        skipped, deleted = set(), set()
+
+    note: Optional[Dict[str, Any]] = None
+    try:
+        cur = db.conn.execute(
+            "SELECT event_seq, ts, msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    for row in rows:
+        try:
+            msg_id = str(row["msg_id"] or "")
+            event_seq = int(row["event_seq"])
+        except Exception:
+            continue
+        if msg_id and (msg_id in skipped or msg_id in deleted):
+            continue
+        payload = _event_payload_from_row(row)
+        if payload.get("role") != "assistant":
+            continue
+        if not payload.get("answer_user_preserve_turn"):
+            continue
+        if payload.get("awaiting_user_message_tool_call_id") != active_tool.tool_call_id:
+            continue
+        note = {
+            "event_seq": event_seq,
+            "ts": row["ts"],
+            "msg_id": msg_id,
+            "content": str(payload.get("content") or ""),
+            "tool_call_id": active_tool.tool_call_id,
+        }
+
+    if note is None:
+        return None
+    if _normal_user_reply_exists_after_note(db, thread_id, int(note["event_seq"])):
+        return None
+    return note
+
+
 def _last_event_meta(db: ThreadsDB, thread_id: str) -> tuple[int, Optional[str]]:
     try:
         row = db.conn.execute(
@@ -4078,12 +4196,16 @@ def get_child_thread_status(
     if not is_descendant_thread(db, manager, child):
         raise ValueError("target thread must be a child or descendant of the calling thread")
 
-    try:
-        from .tool_state import thread_state
+    waiting_note = _active_get_user_message_waiting_note(db, child)
+    if waiting_note is not None:
+        state = "waiting_user"
+    else:
+        try:
+            from .tool_state import thread_state
 
-        state = thread_state(db, child)
-    except Exception:
-        state = "unknown"
+            state = thread_state(db, child)
+        except Exception:
+            state = "unknown"
 
     context_tokens = 0
     full_thread_tokens = 0
@@ -4764,6 +4886,16 @@ def _thread_wait_poll_once(
             thread_id=thread_id,
             finished=False,
             state='not_found',
+        ), None
+
+    waiting_note = _active_get_user_message_waiting_note(db, thread_id)
+    if waiting_note is not None:
+        return ThreadWaitResult(
+            thread_id=thread_id,
+            finished=True,
+            state='waiting_user',
+            last_assistant_message=str(waiting_note.get("content") or ""),
+            short_recap=row.short_recap,
         ), None
 
     cheap_state = _thread_wait_state_after_cheap_checks(db, thread_id, row)
