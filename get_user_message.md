@@ -137,4 +137,4 @@ Rationale:
 ## Status notes
 
 - 2026-06-05: Plan created after researching `answer_user` plugin, `ToolContext`, RA2 execution, reducer RA1 scanning, snapshots, and `wait_for_threads`. Next: implement Phase 1–2 in a focused worker slice.
-- 2026-06-10: Phase 1/2 implemented in a focused slice: registered `get_user_message_while_preserving_llm_turn`, added deterministic auto-approval, implemented the async note/wait/consume tool path, and added direct registry/schema/approval/metadata/wait/consume/cancel tests. Phase 3/4 reducer and `wait_for_threads` semantics intentionally not implemented in this slice.
+- 2026-06-10: Phase 1/2 implemented in commit `2b85cb7`: registered `get_user_message_while_preserving_llm_turn`, added deterministic auto-approval, implemented the async note/wait/consume tool path, and added direct registry/schema/approval/metadata/wait/consume/cancel tests. Phase 3/4 reducer and `wait_for_threads` semantics intentionally not implemented in this slice.
