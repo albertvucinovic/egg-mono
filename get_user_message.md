@@ -124,15 +124,15 @@ Rationale:
 
 ## Phase 5 — End-to-end runner behavior
 
-- [ ] Add an end-to-end runner test with a fake LLM:
+- [x] Add an end-to-end runner test with a fake LLM:
   1. user asks something;
   2. LLM emits `get_user_message_while_preserving_llm_turn({assistant_note: ...})`;
   3. tool appends note and waits;
   4. a user message is appended;
   5. tool returns that text as tool result;
   6. LLM receives the tool result and produces a follow-up assistant message.
-- [ ] Verify the consumed user message does not trigger an extra independent RA1.
-- [ ] Verify `wait` sees the assistant note while waiting.
+- [x] Verify the consumed user message does not trigger an extra independent RA1.
+- [x] Verify `wait` sees the assistant note while waiting.
 
 ## Phase 6 — Review and cleanup
 
@@ -146,3 +146,4 @@ Rationale:
 - 2026-06-10: Phase 1/2 implemented in commit `2b85cb7`: registered `get_user_message_while_preserving_llm_turn`, added deterministic auto-approval, implemented the async note/wait/consume tool path, and added direct registry/schema/approval/metadata/wait/consume/cancel tests. Phase 3/4 reducer and `wait_for_threads` semantics intentionally not implemented in this slice.
 - 2026-06-10: Phase 3 implemented in a focused slice: reducer/public RA1 scans, `wait_for_threads` trigger completion, and `get_child_status` state reporting now ignore user messages consumed by `get_user_message_while_preserving_llm_turn` while keeping them visible in snapshots/UI. Phase 4 active waiting-tool wait semantics intentionally not implemented.
 - 2026-06-10: Phase 4 implemented in a focused slice: `wait_for_threads` / model-callable `wait` and `get_child_status` now report active `get_user_message_while_preserving_llm_turn` waits as manager-facing `waiting_user` with the assistant note, while ordinary active tools and post-reply/pre-consumption states remain running/in-progress.
+- 2026-06-10: Phase 5 implemented in a focused end-to-end test: fake LLM requests `get_user_message_while_preserving_llm_turn`, the tool appends a note and waits, manager-facing wait sees the note, the user reply is consumed and returned as the tool result, the tool message is published, and the follow-up RA1 receives only the tool result before producing the final assistant response.

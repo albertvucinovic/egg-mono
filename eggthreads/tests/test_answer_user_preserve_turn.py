@@ -292,6 +292,105 @@ def test_model_can_answer_user_with_tool_then_continue_to_final_message(tmp_path
     assert any(msg.get("role") == "tool" and msg.get("tool_call_id") == "call-answer-note" for msg in llm.calls[1])
 
 
+def test_model_can_get_user_message_with_tool_then_continue_to_final_message(tmp_path):
+    db, tid = _new_thread(tmp_path)
+    ts.append_message(db, tid, "user", "Ask me for a title, then continue.")
+    ts.create_snapshot(db, tid)
+
+    class LLM:
+        current_model_key = "test-model"
+
+        def __init__(self):
+            self.calls = []
+
+        async def astream_chat(self, messages, tools=None, **kwargs):
+            self.calls.append([dict(msg) for msg in messages])
+            if len(self.calls) == 1:
+                yield {
+                    "type": "done",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-get-user-e2e",
+                                "type": "function",
+                                "function": {
+                                    "name": GET_USER_TOOL_NAME,
+                                    "arguments": json.dumps({"assistant_note": "What title should I use?"}),
+                                },
+                            }
+                        ],
+                    },
+                }
+            else:
+                assert any(
+                    msg.get("role") == "tool"
+                    and msg.get("tool_call_id") == "call-get-user-e2e"
+                    and msg.get("content") == "The Practical Guide"
+                    for msg in messages
+                )
+                assert not any(
+                    msg.get("role") == "user" and msg.get("content") == "The Practical Guide"
+                    for msg in messages
+                )
+                assert all(not msg.get("answer_user_preserve_turn") for msg in messages)
+                yield {
+                    "type": "done",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Final response using The Practical Guide.",
+                    },
+                }
+
+    async def run():
+        llm = LLM()
+        runner = ThreadRunner(db, tid, llm=llm, tools=create_tool_registry())
+
+        assert await runner.run_once() is True
+
+        waiting_task = asyncio.create_task(runner.run_once())
+        note = await _wait_for_message(
+            db,
+            tid,
+            lambda msg: msg.get("awaiting_user_message_tool_call_id") == "call-get-user-e2e",
+        )
+        assert note["content"] == "What title should I use?"
+
+        wait_result = ts.wait_for_threads(db, [tid], timeout_sec=0)[tid]
+        assert wait_result.finished is True
+        assert wait_result.state == "waiting_user"
+        assert wait_result.last_assistant_message == "What title should I use?"
+
+        user_msg_id = ts.append_message(db, tid, "user", "The Practical Guide")
+        assert await asyncio.wait_for(waiting_task, timeout=2) is True
+
+        messages = _messages(db, tid)
+        consumed_user = next(msg for msg in messages if msg.get("msg_id") == user_msg_id)
+        assert consumed_user["role"] == "user"
+        assert consumed_user["content"] == "The Practical Guide"
+        assert consumed_user["no_api"] is True
+        assert consumed_user["keep_user_turn"] is True
+        assert consumed_user["consumed_by_tool_call_id"] == "call-get-user-e2e"
+        assert consumed_user["consumed_by_tool_name"] == GET_USER_TOOL_NAME
+
+        assert await runner.run_once() is True
+        tool_msg = _tool_message(db, tid, "call-get-user-e2e")
+        assert tool_msg is not None
+        assert tool_msg["content"] == "The Practical Guide"
+
+        assert await runner.run_once() is True
+        assert await runner.run_once() is False
+
+        messages = _messages(db, tid)
+        assert messages[-1]["role"] == "assistant"
+        assert messages[-1]["content"] == "Final response using The Practical Guide."
+        assert len(llm.calls) == 2
+        assert ts.discover_runner_actionable(db, tid) is None
+
+    asyncio.run(run())
+
+
 def test_btw_command_appends_request_and_starts_scheduler(tmp_path):
     db, tid = _new_thread(tmp_path)
     started = []
