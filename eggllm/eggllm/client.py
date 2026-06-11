@@ -275,13 +275,14 @@ class LLMClient:
             """Sanitize messages before sending to the provider.
 
             We always strip internal bookkeeping keys such as
-            ``model_key`` and ``local_tool``.  Reasoning/thinking
+            ``model_key``, ``local_tool``, and usage audit metadata.
+            Reasoning/thinking
             content is already shaped by eggthreads according to the
             per-model thinking options; at this layer we simply avoid
             deleting an arbitrary thinking key.
             """
             sanitized = []
-            keys_to_remove = {"model_key", "local_tool"}
+            keys_to_remove = {"model_key", "local_tool", "api_usage", "provider_usage"}
             for m in msgs:
                 if not isinstance(m, dict):
                     continue
@@ -342,7 +343,7 @@ class LLMClient:
 
         def _sanitize(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             sanitized = []
-            keys_to_remove = {"model_key", "local_tool"}
+            keys_to_remove = {"model_key", "local_tool", "api_usage", "provider_usage"}
             for m in msgs:
                 if not isinstance(m, dict):
                     continue
@@ -403,7 +404,7 @@ class LLMClient:
         provider_name, base_url, headers = self.current_provider_and_url()
 
         def _sanitize(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            keys_to_remove = {"model_key", "local_tool"}
+            keys_to_remove = {"model_key", "local_tool", "api_usage", "provider_usage"}
             out: List[Dict[str, Any]] = []
             for m in msgs:
                 if not isinstance(m, dict):

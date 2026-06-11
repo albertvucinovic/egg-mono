@@ -81,9 +81,9 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 
 ## Phase 2 — Persistence and provider-sanitization
 
-- [ ] Ensure `ThreadRunner` persists provider usage metadata on assistant `msg.create` events.
-- [ ] Strip local usage metadata before future provider requests in both relevant sanitization layers.
-- [ ] Tests: runner/sanitization tests proving usage metadata is stored locally but not sent back to the provider.
+- [x] Ensure `ThreadRunner` persists provider usage metadata on assistant `msg.create` events.
+- [x] Strip local usage metadata before future provider requests in both relevant sanitization layers.
+- [x] Tests: runner/sanitization tests proving usage metadata is stored locally but not sent back to the provider.
 
 ## Phase 3 — Exact token stats and cost calculation
 
@@ -126,3 +126,4 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 
 - 2026-06-11: Created after research. No implementation yet. Current branch had tracked files clean before this file, with only pre-existing untracked `count-lines.sh`.
 - 2026-06-11: Phase 1 implemented in eggllm. Normalized usage is stored on final assistant messages as `api_usage`; raw provider usage is stored as `provider_usage`. Focused test run: `python -m pytest eggllm/tests -q` (54 passed). Phase 2 remains persistence and provider-sanitization.
+- 2026-06-11: Phase 2 implemented. `ThreadRunner` intentionally preserves usage metadata on local assistant messages and strips `api_usage`/`provider_usage` before provider requests; eggllm client sanitization strips the same fields before sync/async/context-only provider payloads. Focused test runs: `python -m pytest eggthreads/tests/test_usage_metadata_sanitization.py eggthreads/tests/test_reasoning_summary_display_only.py eggthreads/tests/test_tool_message_format.py eggthreads/tests/test_tool_call_id_normalization.py eggthreads/tests/test_toolcall_protocol_enforcement.py eggllm/tests/test_client_sanitize.py -q` (37 passed), `python -m pytest eggllm/tests -q` (57 passed). Phase 3 remains exact token stats/cost aggregation.

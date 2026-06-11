@@ -1838,6 +1838,9 @@ class ThreadRunner:
             # Gemini thought signatures). We do not interpret these fields
             # here; we simply persist them so that the next provider request
             # can round-trip them when required by the model/protocol.
+            # Local usage metadata (api_usage/provider_usage) is intentionally
+            # persisted for audit/cost accounting, then stripped by
+            # _sanitize_messages_for_api before future provider requests.
             for k, v in final.items():
                 if k in passthrough_skip_keys:
                     continue
@@ -2210,6 +2213,8 @@ class ThreadRunner:
             if not isinstance(m, dict):
                 continue
             m2 = dict(m)
+            m2.pop("api_usage", None)
+            m2.pop("provider_usage", None)
             if m2.get("answer_user_preserve_turn"):
                 continue
             role = m2.get("role")
