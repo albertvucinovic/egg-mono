@@ -86,6 +86,7 @@ class LLMClient:
                       "cost": {
                         "input_tokens": 2.50,
                         "cached_input": 0.50,
+                        "cache_creation_input": 2.50,
                         "output_tokens": 10.00
                       }
                     }
@@ -116,6 +117,9 @@ class LLMClient:
         out = {
             "input_tokens": _raw_cost(cost.get("input_tokens") or 0.0),
             "cached_input": _raw_cost(cost.get("cached_input") or 0.0),
+            "cache_creation_input": _raw_cost(cost.get("cache_creation_input") or 0.0),
+            "cache_creation_5m_input": _raw_cost(cost.get("cache_creation_5m_input") or 0.0),
+            "cache_creation_1h_input": _raw_cost(cost.get("cache_creation_1h_input") or 0.0),
             "output_tokens": _raw_cost(cost.get("output_tokens") or 0.0),
         }
         return out
@@ -152,12 +156,18 @@ class LLMClient:
             # Heuristic estimate of how many of those input tokens
             # were served from KV cache rather than re-sent in full.
             ccached = int(api_usage.get("cached_input_tokens") or 0)
+            ccreation = int(api_usage.get("cache_creation_input_tokens") or 0)
+            ccreation_5m = int(api_usage.get("cache_creation_5m_input_tokens") or 0)
+            ccreation_1h = int(api_usage.get("cache_creation_1h_input_tokens") or 0)
         except Exception:
-            cin_total = cout = ccached = 0
+            cin_total = cout = ccached = ccreation = ccreation_5m = ccreation_1h = 0
 
         cost_cfg = self.current_model_cost_config(model_key)
         pin = float(cost_cfg.get("input_tokens") or 0.0)
         pcached = float(cost_cfg.get("cached_input") or 0.0)
+        pcreation = float(cost_cfg.get("cache_creation_input") or 0.0)
+        pcreation_5m = float(cost_cfg.get("cache_creation_5m_input") or 0.0)
+        pcreation_1h = float(cost_cfg.get("cache_creation_1h_input") or 0.0)
         pout = float(cost_cfg.get("output_tokens") or 0.0)
 
         def _usd(tokens: int, price_per_1M: float) -> float:
@@ -166,17 +176,27 @@ class LLMClient:
             return float(tokens/1_000_000.) * price_per_1M
 
         # To avoid double-counting, we treat cached input tokens as a
-        # separate, cheaper tier. The remaining "new" tokens are
-        # billed at the full input rate.
-        new_input_tokens = max(cin_total - ccached, 0)
+        # separate, cheaper tier. Cache-creation tokens are also billed
+        # separately when present. The remaining "new" tokens are billed at
+        # the full input rate.
+        split_creation = ccreation_5m + ccreation_1h
+        generic_creation = max(ccreation - split_creation, 0)
+        billable_creation = generic_creation + ccreation_5m + ccreation_1h
+        new_input_tokens = max(cin_total - ccached - billable_creation, 0)
 
         c_in = _usd(new_input_tokens, pin)
         c_cached = _usd(ccached, pcached)
+        c_creation = _usd(generic_creation, pcreation or pin)
+        c_creation_5m = _usd(ccreation_5m, pcreation_5m or pcreation or pin)
+        c_creation_1h = _usd(ccreation_1h, pcreation_1h or pcreation or pin)
         c_out = _usd(cout, pout)
-        total = c_in + c_cached + c_out
+        total = c_in + c_cached + c_creation + c_creation_5m + c_creation_1h + c_out
         return {
             "input": c_in,
             "cached": c_cached,
+            "cache_creation": c_creation + c_creation_5m + c_creation_1h,
+            "cache_creation_5m": c_creation_5m,
+            "cache_creation_1h": c_creation_1h,
             "output": c_out,
             "total": total,
         }

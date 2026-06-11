@@ -87,22 +87,22 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 
 ## Phase 3 — Exact token stats and cost calculation
 
-- [ ] Update token stats aggregation to prefer per-assistant actual `api_usage` when present.
-- [ ] Preserve heuristic accounting for assistant messages without actual usage.
-- [ ] Aggregate actual fields into existing totals:
+- [x] Update token stats aggregation to prefer per-assistant actual `api_usage` when present.
+- [x] Preserve heuristic accounting for assistant messages without actual usage.
+- [x] Aggregate actual fields into existing totals:
   - `total_input_tokens`
   - `cached_input_tokens`
   - `cache_creation_input_tokens` when present
   - `total_output_tokens`
   - `total_reasoning_tokens`
   - `by_model`
-- [ ] Add actual-vs-estimated call counters so `/cost` can show whether totals are API-confirmed.
-- [ ] Extend cost calculation to handle cache-creation tiers when configured:
+- [x] Add actual-vs-estimated call counters so `/cost` can show whether totals are API-confirmed.
+- [x] Extend cost calculation to handle cache-creation tiers when configured:
   - `cache_creation_input`
   - optional `cache_creation_5m_input`
   - optional `cache_creation_1h_input`
   - fallback cache-creation pricing to normal input if no tier is configured.
-- [ ] Tests: token-count and cost tests covering exact OpenAI-style cached usage and fallback heuristic usage.
+- [x] Tests: token-count and cost tests covering exact OpenAI-style cached usage and fallback heuristic usage.
 
 ## Phase 4 — Config and visibility
 
@@ -127,3 +127,4 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 - 2026-06-11: Created after research. No implementation yet. Current branch had tracked files clean before this file, with only pre-existing untracked `count-lines.sh`.
 - 2026-06-11: Phase 1 implemented in eggllm. Normalized usage is stored on final assistant messages as `api_usage`; raw provider usage is stored as `provider_usage`. Focused test run: `python -m pytest eggllm/tests -q` (54 passed). Phase 2 remains persistence and provider-sanitization.
 - 2026-06-11: Phase 2 implemented. `ThreadRunner` intentionally preserves usage metadata on local assistant messages and strips `api_usage`/`provider_usage` before provider requests; eggllm client sanitization strips the same fields before sync/async/context-only provider payloads. Focused test runs: `python -m pytest eggthreads/tests/test_usage_metadata_sanitization.py eggthreads/tests/test_reasoning_summary_display_only.py eggthreads/tests/test_tool_message_format.py eggthreads/tests/test_tool_call_id_normalization.py eggthreads/tests/test_toolcall_protocol_enforcement.py eggllm/tests/test_client_sanitize.py -q` (37 passed), `python -m pytest eggllm/tests -q` (57 passed). Phase 3 remains exact token stats/cost aggregation.
+- 2026-06-11: Phase 3 implemented. Token stats prefer per-assistant `api_usage` when present, keep heuristic fallback for estimated calls, aggregate `cache_creation_input_tokens` and actual/estimated call counters at top level and per-model, and cost calculation now handles cache-creation tiers with fallback to normal input pricing. Focused tests added in `eggthreads/tests/test_token_count_public.py` and eggllm cost helper coverage. Test runs: `python -m pytest eggthreads/tests/test_token_count_public.py eggthreads/tests/test_command_registry.py eggllm/tests/test_client_sanitize.py -q` (48 passed), `python -m pytest eggllm/tests -q` (58 passed), `python -m pytest eggthreads/tests -q` (615 passed), `python -m pytest egg/tests/test_formatting.py egg/tests/test_commands_utility.py -q` (64 passed). Phase 4 remains config and visibility.

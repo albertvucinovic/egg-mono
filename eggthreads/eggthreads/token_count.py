@@ -428,6 +428,43 @@ def _model_key_from_message(msg: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+_API_USAGE_TOKEN_FIELDS = {
+    "total_input_tokens",
+    "cached_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_creation_5m_input_tokens",
+    "cache_creation_1h_input_tokens",
+    "total_output_tokens",
+    "total_reasoning_tokens",
+}
+
+
+def _usage_int(value: Any) -> int:
+    try:
+        iv = int(value or 0)
+    except Exception:
+        return 0
+    return max(iv, 0)
+
+
+def _message_api_usage(msg: Dict[str, Any]) -> Optional[Dict[str, int]]:
+    raw = msg.get("api_usage")
+    if not isinstance(raw, dict):
+        return None
+    if not any(k in raw for k in _API_USAGE_TOKEN_FIELDS):
+        return None
+
+    out: Dict[str, int] = {}
+    for key in _API_USAGE_TOKEN_FIELDS:
+        if key in raw:
+            out[key] = _usage_int(raw.get(key))
+
+    split_creation = _usage_int(out.get("cache_creation_5m_input_tokens")) + _usage_int(out.get("cache_creation_1h_input_tokens"))
+    if split_creation > _usage_int(out.get("cache_creation_input_tokens")):
+        out["cache_creation_input_tokens"] = split_creation
+    return out
+
+
 def _token_stats_for_messages(
     messages: List[Dict[str, Any]],
     *,
@@ -511,9 +548,14 @@ def _token_stats_for_messages(
     total_output_tokens = 0
     total_reasoning_tokens = 0  # Subset of output tokens (for display, not cost)
     approx_call_count = 0
+    actual_call_count = 0
+    estimated_call_count = 0
     cached_tokens = 0
 
     cached_input_tokens = 0
+    cache_creation_input_tokens = 0
+    cache_creation_5m_input_tokens = 0
+    cache_creation_1h_input_tokens = 0
 
     # Track the last observed input token count per model so we can
     # estimate cached tokens even when models switch and later switch
@@ -547,9 +589,14 @@ def _token_stats_for_messages(
             by_model[k] = {
                 "total_input_tokens": 0,
                 "cached_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_creation_5m_input_tokens": 0,
+                "cache_creation_1h_input_tokens": 0,
                 "total_output_tokens": 0,
                 "total_reasoning_tokens": 0,  # Subset of output tokens
                 "approx_call_count": 0,
+                "actual_call_count": 0,
+                "estimated_call_count": 0,
             }
         return by_model[k]
 
@@ -569,38 +616,70 @@ def _token_stats_for_messages(
         # Input tokens for this call ~= base_context_tokens + context tokens
         # from this list up to the previous message.
         input_tok = int(base_context_tokens) + (prefix_ctx[idx - 1] if idx > 0 else 0)
-        total_input_tokens += input_tok
 
         # Determine the model key for attribution.
         mk = _model_key_from_message(m)
-
-        # Cached-input heuristic: compare against the most recent prior call
-        # for the *same model*.
-        cached_for_call = 0
-        if mk:
-            prev_for_model = last_input_tokens_by_model.get(mk)
-            if isinstance(prev_for_model, int) and prev_for_model > 0:
-                cached_for_call = min(int(prev_for_model), int(input_tok))
-                cached_input_tokens += cached_for_call
-            last_input_tokens_by_model[mk] = int(input_tok)
 
         msg_id = m.get("msg_id")
         if not isinstance(msg_id, str) or not msg_id:
             msg_id = f"idx-{int(base_index) + idx}"
         msg_stats = per_message.get(msg_id, {})
-        out_tok = int(msg_stats.get("total_tokens", 0))
-        reason_tok = int(msg_stats.get("reasoning_tokens", 0))
+        heuristic_out_tok = int(msg_stats.get("total_tokens", 0))
+        heuristic_reason_tok = int(msg_stats.get("reasoning_tokens", 0))
+
+        actual_usage = _message_api_usage(m)
+        if actual_usage is not None:
+            actual_call_count += 1
+            input_for_call = int(actual_usage.get("total_input_tokens", input_tok))
+            out_tok = int(actual_usage.get("total_output_tokens", heuristic_out_tok))
+            reason_tok = int(actual_usage.get("total_reasoning_tokens", heuristic_reason_tok))
+            cached_for_call = int(actual_usage.get("cached_input_tokens", 0))
+            creation_for_call = int(actual_usage.get("cache_creation_input_tokens", 0))
+            creation_5m_for_call = int(actual_usage.get("cache_creation_5m_input_tokens", 0))
+            creation_1h_for_call = int(actual_usage.get("cache_creation_1h_input_tokens", 0))
+            if mk:
+                last_input_tokens_by_model[mk] = int(input_for_call)
+        else:
+            estimated_call_count += 1
+            input_for_call = int(input_tok)
+            out_tok = int(heuristic_out_tok)
+            reason_tok = int(heuristic_reason_tok)
+            creation_for_call = 0
+            creation_5m_for_call = 0
+            creation_1h_for_call = 0
+
+            # Cached-input heuristic: compare against the most recent prior
+            # call for the *same model*.
+            cached_for_call = 0
+            if mk:
+                prev_for_model = last_input_tokens_by_model.get(mk)
+                if isinstance(prev_for_model, int) and prev_for_model > 0:
+                    cached_for_call = min(int(prev_for_model), int(input_for_call))
+                last_input_tokens_by_model[mk] = int(input_for_call)
+
+        total_input_tokens += input_for_call
         total_output_tokens += out_tok
         total_reasoning_tokens += reason_tok
+        cached_input_tokens += cached_for_call
+        cache_creation_input_tokens += creation_for_call
+        cache_creation_5m_input_tokens += creation_5m_for_call
+        cache_creation_1h_input_tokens += creation_1h_for_call
 
-        cached_tokens = input_tok
-        last_call_input_tokens = input_tok
+        cached_tokens = input_for_call
+        last_call_input_tokens = input_for_call
         last_call_model_key = mk
 
         bm = _bm(mk)
         bm["approx_call_count"] += 1
-        bm["total_input_tokens"] += int(input_tok)
+        if actual_usage is not None:
+            bm["actual_call_count"] += 1
+        else:
+            bm["estimated_call_count"] += 1
+        bm["total_input_tokens"] += int(input_for_call)
         bm["cached_input_tokens"] += int(cached_for_call)
+        bm["cache_creation_input_tokens"] += int(creation_for_call)
+        bm["cache_creation_5m_input_tokens"] += int(creation_5m_for_call)
+        bm["cache_creation_1h_input_tokens"] += int(creation_1h_for_call)
         bm["total_output_tokens"] += int(out_tok)
         bm["total_reasoning_tokens"] += int(reason_tok)
 
@@ -610,7 +689,12 @@ def _token_stats_for_messages(
         "total_reasoning_tokens": int(total_reasoning_tokens),  # Subset of output
         "cached_tokens": int(cached_tokens),
         "approx_call_count": int(approx_call_count),
+        "actual_call_count": int(actual_call_count),
+        "estimated_call_count": int(estimated_call_count),
         "cached_input_tokens": int(cached_input_tokens),
+        "cache_creation_input_tokens": int(cache_creation_input_tokens),
+        "cache_creation_5m_input_tokens": int(cache_creation_5m_input_tokens),
+        "cache_creation_1h_input_tokens": int(cache_creation_1h_input_tokens),
         "by_model": by_model,
         # Helper fields to allow streaming_token_stats to chain cache
         # accounting across snapshot->tail boundaries.
@@ -1158,7 +1242,24 @@ def _merge_token_stats_with_boundary(
     total_output = _int(au_a.get("total_output_tokens")) + _int(au_b.get("total_output_tokens"))
     total_reasoning = _int(au_a.get("total_reasoning_tokens")) + _int(au_b.get("total_reasoning_tokens"))
     cached_in = _int(au_a.get("cached_input_tokens")) + _int(au_b.get("cached_input_tokens"))
+    cache_creation_in = _int(au_a.get("cache_creation_input_tokens")) + _int(au_b.get("cache_creation_input_tokens"))
+    cache_creation_5m_in = _int(au_a.get("cache_creation_5m_input_tokens")) + _int(au_b.get("cache_creation_5m_input_tokens"))
+    cache_creation_1h_in = _int(au_a.get("cache_creation_1h_input_tokens")) + _int(au_b.get("cache_creation_1h_input_tokens"))
     call_count = _int(au_a.get("approx_call_count")) + _int(au_b.get("approx_call_count"))
+
+    def _actual_calls(usage: Dict[str, Any]) -> int:
+        return _int(usage.get("actual_call_count"))
+
+    def _estimated_calls(usage: Dict[str, Any]) -> int:
+        est = _int(usage.get("estimated_call_count"))
+        actual = _int(usage.get("actual_call_count"))
+        approx = _int(usage.get("approx_call_count"))
+        if est == 0 and actual == 0 and approx > 0 and "estimated_call_count" not in usage and "actual_call_count" not in usage:
+            return approx
+        return est
+
+    actual_count = _actual_calls(au_a) + _actual_calls(au_b)
+    estimated_count = _estimated_calls(au_a) + _estimated_calls(au_b)
 
     # cached_tokens should reflect the most recent call.
     cached_tokens = au_b.get("cached_tokens") if _int(au_b.get("approx_call_count")) > 0 else au_a.get("cached_tokens")
@@ -1188,13 +1289,29 @@ def _merge_token_stats_with_boundary(
                 continue
             bm = by_model.setdefault(
                 mk,
-                {"total_input_tokens": 0, "cached_input_tokens": 0, "total_output_tokens": 0, "total_reasoning_tokens": 0, "approx_call_count": 0},
+                {
+                    "total_input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_creation_5m_input_tokens": 0,
+                    "cache_creation_1h_input_tokens": 0,
+                    "total_output_tokens": 0,
+                    "total_reasoning_tokens": 0,
+                    "approx_call_count": 0,
+                    "actual_call_count": 0,
+                    "estimated_call_count": 0,
+                },
             )
             bm["total_input_tokens"] += _int(usage.get("total_input_tokens"))
             bm["cached_input_tokens"] += _int(usage.get("cached_input_tokens"))
+            bm["cache_creation_input_tokens"] += _int(usage.get("cache_creation_input_tokens"))
+            bm["cache_creation_5m_input_tokens"] += _int(usage.get("cache_creation_5m_input_tokens"))
+            bm["cache_creation_1h_input_tokens"] += _int(usage.get("cache_creation_1h_input_tokens"))
             bm["total_output_tokens"] += _int(usage.get("total_output_tokens"))
             bm["total_reasoning_tokens"] += _int(usage.get("total_reasoning_tokens"))
             bm["approx_call_count"] += _int(usage.get("approx_call_count"))
+            bm["actual_call_count"] += _actual_calls(usage)
+            bm["estimated_call_count"] += _estimated_calls(usage)
 
     out["api_usage"] = {
         "total_input_tokens": int(total_input),
@@ -1202,7 +1319,12 @@ def _merge_token_stats_with_boundary(
         "total_reasoning_tokens": int(total_reasoning),  # Subset of output tokens
         "cached_tokens": int(_int(cached_tokens)),
         "approx_call_count": int(call_count),
+        "actual_call_count": int(actual_count),
+        "estimated_call_count": int(estimated_count),
         "cached_input_tokens": int(cached_in),
+        "cache_creation_input_tokens": int(cache_creation_in),
+        "cache_creation_5m_input_tokens": int(cache_creation_5m_in),
+        "cache_creation_1h_input_tokens": int(cache_creation_1h_in),
         "by_model": by_model,
         "last_call_input_tokens": last_call_input_tokens,
         "last_call_model_key": last_call_model_key,
@@ -1217,7 +1339,7 @@ def _cost_for_usage(usage: Dict[str, Any], *, model_key: str, llm: Any) -> Dict[
 
     We rely only on the public eggllm API:
       llm.current_model_cost_config(model_key) ->
-        {input_tokens, cached_input, output_tokens} in USD per 1M tokens.
+        {input_tokens, cached_input, output_tokens, ...} in USD per 1M tokens.
     """
 
     if llm is None:
@@ -1244,8 +1366,11 @@ def _cost_for_usage(usage: Dict[str, Any], *, model_key: str, llm: Any) -> Dict[
         pin = float((cfg or {}).get("input_tokens") or 0.0)
         pcached = float((cfg or {}).get("cached_input") or 0.0)
         pout = float((cfg or {}).get("output_tokens") or 0.0)
+        pcreation = float((cfg or {}).get("cache_creation_input") or 0.0)
+        pcreation_5m = float((cfg or {}).get("cache_creation_5m_input") or 0.0)
+        pcreation_1h = float((cfg or {}).get("cache_creation_1h_input") or 0.0)
     except Exception:
-        pin = pcached = pout = 0.0
+        pin = pcached = pout = pcreation = pcreation_5m = pcreation_1h = 0.0
 
     def _usd(tokens: int, price_per_1M: float) -> float:
         if tokens <= 0 or price_per_1M <= 0.0:
@@ -1255,15 +1380,34 @@ def _cost_for_usage(usage: Dict[str, Any], *, model_key: str, llm: Any) -> Dict[
     try:
         cin_total = int(usage.get("total_input_tokens") or 0)
         ccached = int(usage.get("cached_input_tokens") or 0)
+        ccreation = int(usage.get("cache_creation_input_tokens") or 0)
+        ccreation_5m = int(usage.get("cache_creation_5m_input_tokens") or 0)
+        ccreation_1h = int(usage.get("cache_creation_1h_input_tokens") or 0)
         cout = int(usage.get("total_output_tokens") or 0)
     except Exception:
-        cin_total = ccached = cout = 0
+        cin_total = ccached = ccreation = ccreation_5m = ccreation_1h = cout = 0
 
-    new_in = max(cin_total - ccached, 0)
+    split_creation = ccreation_5m + ccreation_1h
+    generic_creation = max(ccreation - split_creation, 0)
+    billable_creation = generic_creation + ccreation_5m + ccreation_1h
+
+    new_in = max(cin_total - ccached - billable_creation, 0)
     c_in = _usd(new_in, pin)
     c_cached = _usd(ccached, pcached)
+    c_creation = _usd(generic_creation, pcreation or pin)
+    c_creation_5m = _usd(ccreation_5m, pcreation_5m or pcreation or pin)
+    c_creation_1h = _usd(ccreation_1h, pcreation_1h or pcreation or pin)
     c_out = _usd(cout, pout)
-    return {"input": c_in, "cached": c_cached, "output": c_out, "total": c_in + c_cached + c_out}
+    total = c_in + c_cached + c_creation + c_creation_5m + c_creation_1h + c_out
+    return {
+        "input": c_in,
+        "cached": c_cached,
+        "cache_creation": c_creation + c_creation_5m + c_creation_1h,
+        "cache_creation_5m": c_creation_5m,
+        "cache_creation_1h": c_creation_1h,
+        "output": c_out,
+        "total": total,
+    }
 
 
 def _attach_costs(stats: Dict[str, Any], *, llm: Any = None) -> Dict[str, Any]:
@@ -1305,6 +1449,9 @@ def _attach_costs(stats: Dict[str, Any], *, llm: Any = None) -> Dict[str, Any]:
                 has_any = bool(
                     float((cfg or {}).get('input_tokens') or 0.0)
                     or float((cfg or {}).get('cached_input') or 0.0)
+                    or float((cfg or {}).get('cache_creation_input') or 0.0)
+                    or float((cfg or {}).get('cache_creation_5m_input') or 0.0)
+                    or float((cfg or {}).get('cache_creation_1h_input') or 0.0)
                     or float((cfg or {}).get('output_tokens') or 0.0)
                 )
                 if not has_any:

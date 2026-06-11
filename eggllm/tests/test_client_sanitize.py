@@ -4,6 +4,7 @@ from eggllm.catalog import AllModelsCatalog
 
 from pathlib import Path
 import json
+import pytest
 
 # Minimal in-memory setup for sanitizer behavior via client internals
 
@@ -134,3 +135,45 @@ def test_send_context_only_strips_usage_metadata_from_provider_payload(tmp_path:
     sent_messages = payloads[0]["messages"]
     assert all("api_usage" not in m for m in sent_messages)
     assert all("provider_usage" not in m for m in sent_messages)
+
+
+def test_approximate_thread_cost_uses_cache_creation_tiers(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    models = {
+        "providers": {
+            "openai": {
+                "api_base": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+                "models": {
+                    "Test": {
+                        "model_name": "gpt-test",
+                        "cost": {
+                            "input_tokens": 1.0,
+                            "cached_input": 0.1,
+                            "cache_creation_input": 2.0,
+                            "cache_creation_5m_input": 3.0,
+                            "output_tokens": 4.0,
+                        },
+                    }
+                },
+            }
+        }
+    }
+    mpath = tmp_path / "models.json"
+    apath = tmp_path / "all-models.json"
+    mpath.write_text(json.dumps(models))
+    apath.write_text(json.dumps({"providers": {}}))
+    client = LLMClient(models_path=mpath, all_models_path=apath)
+
+    cost = client.approximate_thread_cost({
+        "total_input_tokens": 1000,
+        "cached_input_tokens": 600,
+        "cache_creation_input_tokens": 100,
+        "cache_creation_5m_input_tokens": 40,
+        "total_output_tokens": 50,
+    })
+
+    assert cost["input"] == pytest.approx(300 / 1_000_000)
+    assert cost["cached"] == pytest.approx(600 * 0.1 / 1_000_000)
+    assert cost["cache_creation"] == pytest.approx(((60 * 2.0) + (40 * 3.0)) / 1_000_000)
+    assert cost["output"] == pytest.approx(50 * 4.0 / 1_000_000)

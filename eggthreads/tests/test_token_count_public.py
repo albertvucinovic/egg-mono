@@ -1,11 +1,14 @@
 from eggthreads import ThreadsDB, create_root_thread
 from eggthreads.token_count import (
+    _cost_for_usage,
     count_text_tokens,
     extend_snapshot_token_stats,
     live_llm_tps_for_invoke,
     snapshot_token_stats,
     thread_token_stats,
 )
+
+import pytest
 
 
 def test_count_text_tokens_zero_for_empty_string():
@@ -132,3 +135,112 @@ def test_full_api_usage_sums_compaction_epochs_not_raw_full_prompt(tmp_path):
     assert segmented["approx_call_count"] == 2
     assert segmented["total_output_tokens"] == raw_full["total_output_tokens"]
     assert segmented["total_input_tokens"] < raw_full["total_input_tokens"]
+
+
+def test_snapshot_token_stats_prefers_actual_assistant_api_usage():
+    snapshot = {
+        "messages": [
+            {"msg_id": "u1", "role": "user", "content": "hello"},
+            {
+                "msg_id": "a1",
+                "role": "assistant",
+                "content": "short local text should not determine output usage",
+                "model_key": "m",
+                "api_usage": {
+                    "total_input_tokens": 1000,
+                    "cached_input_tokens": 600,
+                    "cache_creation_input_tokens": 40,
+                    "total_output_tokens": 50,
+                    "total_reasoning_tokens": 7,
+                },
+            },
+        ]
+    }
+
+    usage = snapshot_token_stats(snapshot)["api_usage"]
+
+    assert usage["total_input_tokens"] == 1000
+    assert usage["cached_input_tokens"] == 600
+    assert usage["cache_creation_input_tokens"] == 40
+    assert usage["total_output_tokens"] == 50
+    assert usage["total_reasoning_tokens"] == 7
+    assert usage["approx_call_count"] == 1
+    assert usage["actual_call_count"] == 1
+    assert usage["estimated_call_count"] == 0
+    assert usage["cached_tokens"] == 1000
+    assert usage["last_call_input_tokens"] == 1000
+    assert usage["by_model"]["m"]["actual_call_count"] == 1
+    assert usage["by_model"]["m"]["estimated_call_count"] == 0
+    assert usage["by_model"]["m"]["cache_creation_input_tokens"] == 40
+
+
+def test_snapshot_token_stats_preserves_heuristic_usage_without_api_usage():
+    messages = [
+        {"msg_id": "u1", "role": "user", "content": "hello"},
+        {"msg_id": "a1", "role": "assistant", "content": "answer", "model_key": "m"},
+        {"msg_id": "u2", "role": "user", "content": "next"},
+        {"msg_id": "a2", "role": "assistant", "content": "second", "model_key": "m"},
+    ]
+
+    usage = snapshot_token_stats({"messages": messages})["api_usage"]
+
+    input_1 = count_text_tokens("hello")
+    input_2 = input_1 + count_text_tokens("answer") + count_text_tokens("next")
+    output_total = count_text_tokens("answer") + count_text_tokens("second")
+    assert usage["total_input_tokens"] == input_1 + input_2
+    assert usage["total_output_tokens"] == output_total
+    assert usage["cached_input_tokens"] == min(input_1, input_2)
+    assert usage["approx_call_count"] == 2
+    assert usage["actual_call_count"] == 0
+    assert usage["estimated_call_count"] == 2
+    assert usage["by_model"]["m"]["estimated_call_count"] == 2
+
+
+class _CostLLM:
+    def __init__(self, cost):
+        self.cost = cost
+
+    def current_model_cost_config(self, model_key):
+        return self.cost
+
+
+def test_cost_calculation_uses_cached_and_cache_creation_tiers():
+    usage = {
+        "total_input_tokens": 1000,
+        "cached_input_tokens": 600,
+        "cache_creation_input_tokens": 100,
+        "cache_creation_5m_input_tokens": 40,
+        "total_output_tokens": 50,
+    }
+    llm = _CostLLM({
+        "input_tokens": 1.0,
+        "cached_input": 0.1,
+        "cache_creation_input": 2.0,
+        "cache_creation_5m_input": 3.0,
+        "output_tokens": 4.0,
+    })
+
+    cost = _cost_for_usage(usage, model_key="m", llm=llm)
+
+    assert cost["input"] == pytest.approx(300 / 1_000_000)
+    assert cost["cached"] == pytest.approx(600 * 0.1 / 1_000_000)
+    assert cost["cache_creation"] == pytest.approx(((60 * 2.0) + (40 * 3.0)) / 1_000_000)
+    assert cost["output"] == pytest.approx(50 * 4.0 / 1_000_000)
+    assert cost["total"] == pytest.approx(cost["input"] + cost["cached"] + cost["cache_creation"] + cost["output"])
+
+
+def test_cache_creation_cost_falls_back_to_input_price():
+    usage = {
+        "total_input_tokens": 1000,
+        "cached_input_tokens": 600,
+        "cache_creation_input_tokens": 100,
+        "total_output_tokens": 0,
+    }
+    llm = _CostLLM({"input_tokens": 1.0, "cached_input": 0.1, "output_tokens": 4.0})
+
+    cost = _cost_for_usage(usage, model_key="m", llm=llm)
+
+    assert cost["input"] == pytest.approx(300 / 1_000_000)
+    assert cost["cached"] == pytest.approx(600 * 0.1 / 1_000_000)
+    assert cost["cache_creation"] == pytest.approx(100 / 1_000_000)
+    assert cost["total"] == pytest.approx((300 + 60 + 100) / 1_000_000)
