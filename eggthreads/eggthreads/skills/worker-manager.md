@@ -8,6 +8,10 @@ This is the authoritative Worker Manager skill. In repository checkouts it may b
 
 The manager stays responsible for direction, scope, review, and user-facing synthesis. The worker does focused implementation slices.
 
+For manager/worker communication, use the `infinite-turn` skill in the worker. The worker should not end each slice with a normal final assistant message; instead, its would-be final status goes in `get_user_message_while_preserving_llm_turn(assistant_note=...)`, and the manager's next instruction becomes the tool result that lets the same worker continue. Mid-turn manager messages should be answered with `answer_user_while_preserving_llm_turn`.
+
+When `wait` returns because the worker is waiting in `get_user_message_while_preserving_llm_turn`, treat the visible assistant note as the worker's slice status. Review it, then use `send_message_to_child` with the next manager instruction; that message answers the worker's get-user tool call and continues the same worker turn. If there is no next slice, send a brief stop/stand-by instruction instead of leaving the worker expecting more guidance.
+
 If the user gives a time budget, e.g. “work on this for 4 hours,” that budget belongs to the **manager**, not the worker. The manager should not tell the worker “work for 4 hours.” Instead, the manager should assign one smaller concrete slice, wait for it to finish, review it, then send the next smaller concrete slice to the same worker until the requested manager-side budget is used, the work is complete, or a stop condition is reached.
 
 Worker threads are treated as **infinite** for this workflow: they have auto-compaction plus summarization and can keep useful project context across phases. Therefore, the manager should normally create **one primary worker thread for the task** and keep sending it the next slice.
@@ -97,6 +101,7 @@ Suggested template:
 
 ```text
 Continue <project/task> implementation as the primary long-lived worker. Read ./<todo-file> first.
+Use the `infinite-turn` skill for manager/worker handoffs: when your slice is done, put your full status in get_user_message_while_preserving_llm_turn(assistant_note=...) instead of sending a normal final answer.
 Run git status --short before editing.
 Current relevant commits: <commit list or latest hash>.
 Your task now: <one small slice>.
