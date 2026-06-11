@@ -288,6 +288,51 @@ class ApprovalMixin:
                     continue
 
                 tool_call_id = str(tcid)
+                name = getattr(tc, 'name', '') or tool_call_id
+                get_user_wait_interrupted = (
+                    name == 'get_user_message_while_preserving_llm_turn'
+                    and (
+                        tc.state == 'TC3'
+                        or (
+                            tc.state in ('TC4', 'TC5')
+                            and str(getattr(tc, 'finished_reason', '') or '').lower() == 'interrupted'
+                        )
+                    )
+                )
+                if get_user_wait_interrupted:
+                    content = 'User interrupted get_user_message_while_preserving_llm_turn.'
+                    self.db.append_event(
+                        event_id=os.urandom(10).hex(),
+                        thread_id=self.current_thread,
+                        type_='tool_call.output_approval',
+                        msg_id=None,
+                        invoke_id=None,
+                        payload={
+                            'tool_call_id': tool_call_id,
+                            'decision': 'whole',
+                            'reason': 'Cancelled by user via Ctrl+C',
+                            'preview': content,
+                        },
+                    )
+                    if getattr(tc, 'parent_role', None) == 'assistant':
+                        payload = {
+                            'role': 'tool',
+                            'content': content,
+                            'tool_call_id': tool_call_id,
+                            'name': name,
+                            'keep_user_turn': True,
+                        }
+                        self.db.append_event(
+                            event_id=os.urandom(10).hex(),
+                            thread_id=self.current_thread,
+                            type_='msg.create',
+                            msg_id=os.urandom(10).hex(),
+                            invoke_id=None,
+                            payload=payload,
+                        )
+                        any_tool_msg = True
+                    continue
+
                 # TC1: needs approval -> deny execution entirely.
                 if tc.state == 'TC1':
                     approve_tool_calls_for_thread(
@@ -302,7 +347,6 @@ class ApprovalMixin:
                     # message with tool_calls has a corresponding tool
                     # message, even though execution never ran.
                     if getattr(tc, 'parent_role', None) == 'assistant':
-                        name = getattr(tc, 'name', '') or tool_call_id
                         content = (
                             f"Tool call '{name}' was cancelled before it ran. "
                             "Reason: cancelled by user via Ctrl+C."
@@ -344,7 +388,6 @@ class ApprovalMixin:
                     # holds and future LLM calls do not fail with
                     # missing responses for tool_call_ids.
                     if getattr(tc, 'parent_role', None) == 'assistant':
-                        name = getattr(tc, 'name', '') or tool_call_id
                         content = (
                             f"Tool call '{name}' was interrupted and its output was omitted. "
                             "Reason: cancelled by user via Ctrl+C."

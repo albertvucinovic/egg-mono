@@ -378,6 +378,7 @@ def test_model_can_get_user_message_with_tool_then_continue_to_final_message(tmp
         tool_msg = _tool_message(db, tid, "call-get-user-e2e")
         assert tool_msg is not None
         assert tool_msg["content"] == "The Practical Guide"
+        assert tool_msg.get("keep_user_turn") is not True
 
         assert await runner.run_once() is True
         assert await runner.run_once() is False

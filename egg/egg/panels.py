@@ -651,6 +651,8 @@ class PanelsMixin:
 
     def update_panels(self) -> None:
         """Update all UI panels with current state."""
+        self._update_get_user_message_input_mode()
+
         try:
             input_active = (
                 getattr(self.input_panel, '_cached_render', None) is not None
@@ -859,6 +861,42 @@ class PanelsMixin:
         else:
             # Empty content makes the panel effectively invisible
             self.approval_panel.set_content("")
+
+    def _update_get_user_message_input_mode(self) -> None:
+        """Style input when the current thread is answering get-user tool."""
+
+        try:
+            from eggthreads import get_active_get_user_message_waiting_note
+
+            waiting_note = get_active_get_user_message_waiting_note(self.db, self.current_thread)
+        except Exception:
+            waiting_note = None
+
+        try:
+            if not hasattr(self, '_normal_input_panel_title'):
+                self._normal_input_panel_title = self.input_panel.title
+                self._normal_input_border_style = self.input_panel.style.border_style
+                self._normal_input_title_style = self.input_panel.style.title_style
+            if waiting_note is not None:
+                title = "Message Input (get answer tool)"
+                border = "magenta"
+                title_style = "bold magenta"
+            else:
+                title = self._normal_input_panel_title
+                border = self._normal_input_border_style
+                title_style = self._normal_input_title_style
+            changed = (
+                self.input_panel.title != title
+                or self.input_panel.style.border_style != border
+                or self.input_panel.style.title_style != title_style
+            )
+            if changed:
+                self.input_panel.title = title
+                self.input_panel.style.border_style = border
+                self.input_panel.style.title_style = title_style
+                self.input_panel.mark_dirty()
+        except Exception:
+            pass
 
     def _current_stream_header_part(self, *, include_tps: bool = True) -> str:
         """Return a compact live-streaming suffix for the System title.

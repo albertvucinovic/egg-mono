@@ -136,13 +136,15 @@ Rationale:
 
 ## Phase 6 — UI/control behavior for active get-user waits
 
-- [ ] While `get_user_message_while_preserving_llm_turn` is actively waiting for user input on the current thread, make the UI input visibly indicate that the user is answering that tool call rather than sending an ordinary message.
+- [x] While `get_user_message_while_preserving_llm_turn` is actively waiting for user input on the current thread, make the UI input visibly indicate that the user is answering that tool call rather than sending an ordinary message.
   - Suggested affordance: different colored Message Input border.
   - Suggested header: `Message Input (get answer tool)`.
-- [ ] Ensure a user reply entered in this state is routed/understood as the answer to the waiting tool call, not as an independent normal user turn.
-- [ ] Ctrl+C in this state should stop/cancel the waiting tool call, restore the normal Message Input UI, and close/publish the tool call with an interrupted result such as `User interrupted`.
-- [ ] Ctrl+C cancellation must preserve/keep the user's turn: do not treat Ctrl+C itself as a normal user answer and do not trigger a normal LLM turn from the interruption.
-- [ ] Tests:
+- [x] Ensure a user reply entered in this state is routed/understood as the answer to the waiting tool call, not as an independent normal user turn.
+- [x] Ctrl+C in this state should stop/cancel the waiting tool call, restore the normal Message Input UI, and close/publish the tool call with an interrupted result such as `User interrupted`.
+- [x] Ctrl+C cancellation must preserve/keep the user's turn: do not treat Ctrl+C itself as a normal user answer and do not trigger a normal LLM turn from the interruption.
+- [x] On normal successful `get_user_message_while_preserving_llm_turn` completion, keep Phase 5 semantics: publish a normal provider-visible tool result without `keep_user_turn`, so the assistant turn continues.
+- [x] On Ctrl+C/interrupted get-user cancellation, publish the special interrupted tool result with `keep_user_turn=True`, so cancellation itself does not trigger an automatic follow-up assistant turn.
+- [x] Tests:
   - UI/status state exposes enough information for the input component to render the get-answer mode;
   - Ctrl+C cancels the waiting get-user tool and publishes an interrupted tool result;
   - cancellation restores ordinary input semantics and does not create a normal user-triggered RA1.
@@ -161,3 +163,4 @@ Rationale:
 - 2026-06-10: Phase 4 implemented in a focused slice: `wait_for_threads` / model-callable `wait` and `get_child_status` now report active `get_user_message_while_preserving_llm_turn` waits as manager-facing `waiting_user` with the assistant note, while ordinary active tools and post-reply/pre-consumption states remain running/in-progress.
 - 2026-06-10: Phase 5 implemented in a focused end-to-end test: fake LLM requests `get_user_message_while_preserving_llm_turn`, the tool appends a note and waits, manager-facing wait sees the note, the user reply is consumed and returned as the tool result, the tool message is published, and the follow-up RA1 receives only the tool result before producing the final assistant response.
 - 2026-06-10: Added Phase 6 TODOs for future UI input affordance and Ctrl+C cancellation semantics while a get-user tool is actively waiting. Not implemented in the Phase 5 slice.
+- 2026-06-10: Phase 6 implemented in a focused UI/control slice: active get-user waits switch the current Message Input title/border to get-answer mode, normal mode is restored once the active wait ends or a reply is pending consumption, Ctrl+C publishes an interrupted get-user tool message with `keep_user_turn=True`, and successful get-user tool results remain normal provider-visible tool messages without `keep_user_turn`.

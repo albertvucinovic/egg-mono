@@ -4132,6 +4132,13 @@ def _active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Opti
     return note
 
 
+def get_active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return active get-user waiting note metadata for status/UI callers."""
+
+    note = _active_get_user_message_waiting_note(db, thread_id)
+    return dict(note) if note is not None else None
+
+
 def _last_event_meta(db: ThreadsDB, thread_id: str) -> tuple[int, Optional[str]]:
     try:
         row = db.conn.execute(
