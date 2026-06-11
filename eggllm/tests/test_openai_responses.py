@@ -871,3 +871,143 @@ class TestResponsesIncompleteMetadata:
         assert out[-1]["message"]["incomplete"] is True
         assert out[-1]["message"]["incomplete_reason"] == "response.incomplete: max_output_tokens"
         assert out[-1]["message"]["incomplete_details"] == {"reason": "max_output_tokens"}
+
+class TestOpenAICompatUsageCapture:
+    """OpenAI Chat Completions streaming usage is attached to the final message."""
+
+    class _FakeResponse:
+        def __init__(self, chunks):
+            self._chunks = chunks
+
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            for chunk in self._chunks:
+                if isinstance(chunk, str):
+                    yield chunk.encode("utf-8")
+                else:
+                    yield ("data: " + json.dumps(chunk)).encode("utf-8")
+
+    class _FakeSession:
+        def __init__(self, chunks):
+            self.chunks = chunks
+
+        def post(self, *args, **kwargs):
+            return TestOpenAICompatUsageCapture._FakeResponse(self.chunks)
+
+    def test_empty_choices_usage_chunk_is_attached_to_done_message(self):
+        adapter = OpenAICompatAdapter()
+        usage = {
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "total_tokens": 15,
+            "prompt_tokens_details": {"cached_tokens": 7},
+            "completion_tokens_details": {"reasoning_tokens": 2},
+        }
+        chunks = [
+            {"choices": [{"delta": {"content": "Hi"}}]},
+            {"choices": [], "usage": usage},
+            "data: [DONE]",
+        ]
+
+        out = list(adapter.stream(
+            "https://example.test/v1/chat/completions",
+            {},
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "Hi"}]},
+            session=self._FakeSession(chunks),
+        ))
+
+        assert out[-1] == {
+            "type": "done",
+            "message": {
+                "role": "assistant",
+                "content": "Hi",
+                "api_usage": {
+                    "total_input_tokens": 12,
+                    "total_output_tokens": 3,
+                    "cached_input_tokens": 7,
+                    "total_reasoning_tokens": 2,
+                },
+                "provider_usage": usage,
+            },
+        }
+
+
+class TestResponsesUsageCapture:
+    """Responses API completed/done usage is attached to the final message."""
+
+    class _FakeResponse:
+        def __init__(self, events):
+            self._events = events
+
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            for event in self._events:
+                yield ("data: " + json.dumps(event)).encode("utf-8")
+
+    class _FakeSession:
+        def __init__(self, events):
+            self.events = events
+
+        def post(self, *args, **kwargs):
+            return TestResponsesUsageCapture._FakeResponse(self.events)
+
+    def test_response_completed_usage_is_attached_to_done_message(self):
+        adapter = OpenAIResponsesAdapter()
+        usage = {
+            "input_tokens": 20,
+            "output_tokens": 5,
+            "total_tokens": 25,
+            "input_tokens_details": {"cached_tokens": 11},
+            "output_tokens_details": {"reasoning_tokens": 4},
+        }
+        events = [
+            {"type": "response.output_text.delta", "delta": "Final answer."},
+            {"type": "response.completed", "response": {"usage": usage}},
+        ]
+
+        out = list(adapter.stream(
+            "https://example.test/v1/responses",
+            {},
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "Hi"}]},
+            session=self._FakeSession(events),
+        ))
+
+        assert out[-1] == {
+            "type": "done",
+            "message": {
+                "role": "assistant",
+                "content": "Final answer.",
+                "api_usage": {
+                    "total_input_tokens": 20,
+                    "total_output_tokens": 5,
+                    "cached_input_tokens": 11,
+                    "total_reasoning_tokens": 4,
+                },
+                "provider_usage": usage,
+            },
+        }
+
+    def test_response_done_usage_is_attached_to_done_message(self):
+        adapter = OpenAIResponsesAdapter()
+        usage = {"input_tokens": 2, "output_tokens": 1}
+        events = [
+            {"type": "response.output_text.delta", "delta": "Done."},
+            {"type": "response.done", "response": {"usage": usage}},
+        ]
+
+        out = list(adapter.stream(
+            "https://example.test/v1/responses",
+            {},
+            {"model": "gpt-test", "messages": [{"role": "user", "content": "Hi"}]},
+            session=self._FakeSession(events),
+        ))
+
+        assert out[-1]["message"]["api_usage"] == {
+            "total_input_tokens": 2,
+            "total_output_tokens": 1,
+        }
+        assert out[-1]["message"]["provider_usage"] == usage

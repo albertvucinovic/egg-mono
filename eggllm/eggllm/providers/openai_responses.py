@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional, List
 
 import requests
 
-from .base import ProviderAdapter
+from .base import ProviderAdapter, attach_provider_usage
 
 
 class OpenAIResponsesAdapter(ProviderAdapter):
@@ -243,6 +243,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         tool_calls_buf: Dict[int, Dict[str, Any]] = {}
         current_output_index: int = -1
         incomplete_metadata: Dict[str, Any] = {}
+        provider_usage: Optional[Dict[str, Any]] = None
 
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
@@ -262,6 +263,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 continue
 
             event_type = event_data.get("type", "")
+
+            if event_type in ("response.completed", "response.done"):
+                response = event_data.get("response") if isinstance(event_data.get("response"), dict) else {}
+                usage = response.get("usage") if isinstance(response, dict) else None
+                if not isinstance(usage, dict):
+                    usage = event_data.get("usage")
+                if isinstance(usage, dict):
+                    provider_usage = usage
 
             # Handle different Responses API event types
             if event_type == "response.output_item.added":
@@ -394,6 +403,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if reasoning.strip():
             final_message["reasoning_content"] = reasoning
         final_message.update(incomplete_metadata)
+        attach_provider_usage(final_message, provider_usage)
 
         yield {"type": "done", "message": final_message}
 
@@ -437,6 +447,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         tool_calls_buf: Dict[int, Dict[str, Any]] = {}
         current_output_index: int = -1
         incomplete_metadata: Dict[str, Any] = {}
+        provider_usage: Optional[Dict[str, Any]] = None
 
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
@@ -464,6 +475,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         continue
 
                     event_type = event_data.get("type", "")
+
+                    if event_type in ("response.completed", "response.done"):
+                        response = event_data.get("response") if isinstance(event_data.get("response"), dict) else {}
+                        usage = response.get("usage") if isinstance(response, dict) else None
+                        if not isinstance(usage, dict):
+                            usage = event_data.get("usage")
+                        if isinstance(usage, dict):
+                            provider_usage = usage
 
                     if event_type == "response.output_item.added":
                         item = event_data.get("item", {})
@@ -587,5 +606,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if reasoning.strip():
             final_message["reasoning_content"] = reasoning
         final_message.update(incomplete_metadata)
+        attach_provider_usage(final_message, provider_usage)
 
         yield {"type": "done", "message": final_message}

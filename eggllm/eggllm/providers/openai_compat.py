@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 import os
 import requests
 
-from .base import ProviderAdapter
+from .base import ProviderAdapter, attach_provider_usage
 
 
 class OpenAICompatAdapter(ProviderAdapter):
@@ -29,6 +29,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         # Provider-specific message-level fields that we do not interpret
         # but must preserve (e.g. Gemini thought signatures).
         extra_message_fields: Dict[str, Any] = {}
+        provider_usage: Optional[Dict[str, Any]] = None
 
         def tool_calls_values():
             # Preserve insertion order of indices
@@ -50,14 +51,18 @@ class OpenAICompatAdapter(ProviderAdapter):
                 # non-JSON keep-alives or comments.
                 continue
 
+            if isinstance(payload.get("usage"), dict):
+                provider_usage = payload["usage"]
+
             # Some providers occasionally send streaming events with an
             # empty "choices" list. Our previous implementation assumed
             # at least one element (choices[0]) which caused an IndexError
             # ("list index out of range") and bubbled up as a runner
             # error. To make Egg robust against such deviations, we now
             # explicitly check that choices is a non-empty list before
-            # attempting to read choices[0]. Events with no choices are
-            # simply ignored.
+            # attempting to read choices[0]. Events with no choices may
+            # still carry usage, which was captured above, but otherwise
+            # have no assistant delta to apply.
             choices = payload.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue
@@ -137,6 +142,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         for k, v in extra_message_fields.items():
             if k not in final_message and v is not None:
                 final_message[k] = v
+        attach_provider_usage(final_message, provider_usage)
 
         yield {"type": "done", "message": final_message}
 
@@ -198,6 +204,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         reasoning_parts: list[str] = []
         tool_calls_buf: Dict[int, Dict[str, Any]] = {}
         extra_message_fields: Dict[str, Any] = {}
+        provider_usage: Optional[Dict[str, Any]] = None
 
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
@@ -226,9 +233,13 @@ class OpenAICompatAdapter(ProviderAdapter):
                         # blank comments/keep-alives in the SSE channel.
                         continue
 
+                    if isinstance(pj.get("usage"), dict):
+                        provider_usage = pj["usage"]
+
                     # See synchronous stream() above for rationale. We
                     # must guard against empty "choices" arrays to avoid
-                    # IndexError when accessing choices[0].
+                    # IndexError when accessing choices[0]. They may still
+                    # carry usage, which was captured above.
                     choices = pj.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
@@ -295,6 +306,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         for k, v in extra_message_fields.items():
             if k not in final_message and v is not None:
                 final_message[k] = v
+        attach_provider_usage(final_message, provider_usage)
 
         yield {"type": "done", "message": final_message}
 

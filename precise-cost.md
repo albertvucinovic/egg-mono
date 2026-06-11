@@ -57,27 +57,27 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 
 ## Phase 1 — Provider usage capture
 
-- [ ] Add a small normalization helper for provider usage shapes.
-  - [ ] Normalize OpenAI Chat Completions usage:
+- [x] Add a small normalization helper for provider usage shapes.
+  - [x] Normalize OpenAI Chat Completions usage:
     - `prompt_tokens` -> `total_input_tokens`
     - `completion_tokens` -> `total_output_tokens`
     - `prompt_tokens_details.cached_tokens` -> `cached_input_tokens`
     - `completion_tokens_details.reasoning_tokens` -> `total_reasoning_tokens`
-  - [ ] Normalize OpenAI Responses usage:
+  - [x] Normalize OpenAI Responses usage:
     - `input_tokens` -> `total_input_tokens`
     - `output_tokens` -> `total_output_tokens`
     - `input_tokens_details.cached_tokens` -> `cached_input_tokens`
     - `output_tokens_details.reasoning_tokens` -> `total_reasoning_tokens`
-  - [ ] Normalize Anthropic-style usage if encountered:
+  - [x] Normalize Anthropic-style usage if encountered:
     - `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` -> `total_input_tokens`
     - `cache_read_input_tokens` -> `cached_input_tokens`
     - `cache_creation_input_tokens` -> `cache_creation_input_tokens`
     - `output_tokens` -> `total_output_tokens`
-- [ ] Parse streaming Chat Completions usage chunks, including chunks with empty `choices`.
-- [ ] Parse Responses `response.completed` / `response.done` usage.
-- [ ] Attach normalized usage to the final assistant message returned by eggllm.
-- [ ] Preserve raw provider usage in a small debug/audit field.
-- [ ] Tests: eggllm adapter/unit tests for OpenAI Chat Completions and Responses usage parsing.
+- [x] Parse streaming Chat Completions usage chunks, including chunks with empty `choices`.
+- [x] Parse Responses `response.completed` / `response.done` usage.
+- [x] Attach normalized usage to the final assistant message returned by eggllm.
+- [x] Preserve raw provider usage in a small debug/audit field.
+- [x] Tests: eggllm adapter/unit tests for OpenAI Chat Completions and Responses usage parsing.
 
 ## Phase 2 — Persistence and provider-sanitization
 
@@ -125,3 +125,4 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 ## Status notes
 
 - 2026-06-11: Created after research. No implementation yet. Current branch had tracked files clean before this file, with only pre-existing untracked `count-lines.sh`.
+- 2026-06-11: Phase 1 implemented in eggllm. Normalized usage is stored on final assistant messages as `api_usage`; raw provider usage is stored as `provider_usage`. Focused test run: `python -m pytest eggllm/tests -q` (54 passed). Phase 2 remains persistence and provider-sanitization.
