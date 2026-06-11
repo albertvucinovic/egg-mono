@@ -415,14 +415,42 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
             "api_usage": {
                 "total_input_tokens": 5,
                 "cached_input_tokens": 1,
+                "cache_creation_input_tokens": 2,
                 "total_output_tokens": 2,
                 "approx_call_count": 1,
+                "actual_call_count": 1,
+                "estimated_call_count": 0,
+                "by_model": {
+                    "test-model": {
+                        "total_input_tokens": 5,
+                        "cached_input_tokens": 1,
+                        "cache_creation_input_tokens": 2,
+                        "total_output_tokens": 2,
+                        "approx_call_count": 1,
+                        "actual_call_count": 1,
+                        "estimated_call_count": 0,
+                    }
+                },
+                "cost_usd": {
+                    "total": 0.10,
+                    "by_model": {
+                        "test-model": {
+                            "input": 0.01,
+                            "cached": 0.02,
+                            "cache_creation": 0.03,
+                            "output": 0.04,
+                            "total": 0.10,
+                        }
+                    },
+                },
             },
             "api_usage_since_compaction": {
                 "total_input_tokens": 3,
                 "cached_input_tokens": 1,
                 "total_output_tokens": 2,
                 "approx_call_count": 1,
+                "actual_call_count": 0,
+                "estimated_call_count": 1,
             },
         }
 
@@ -440,6 +468,15 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
     assert "Current provider context usage (after last compaction):" in cost_text
     assert "total_input_tokens:    5" in cost_text
     assert "total_input_tokens:    3" in cost_text
+    assert "cached_input_hit_rate: 20.0%" in cost_text
+    assert "cache_creation_input_tokens: 2" in cost_text
+    assert "actual_call_count:     1 API-confirmed" in cost_text
+    assert "estimated_call_count:  0" in cost_text
+    assert "actual_call_count:     0 API-confirmed" in cost_text
+    assert "estimated_call_count:  1" in cost_text
+    assert "cache_creation: $0.0300" in cost_text
+    assert "calls=1 (actual=1, estimated=0)" in cost_text
+    assert "cache_creation_in=2" in cost_text
 
 
 def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:

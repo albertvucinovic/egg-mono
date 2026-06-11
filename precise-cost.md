@@ -106,14 +106,14 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 
 ## Phase 4 — Config and visibility
 
-- [ ] Request Chat Completions streaming usage for the official OpenAI provider via `models.json` config (`stream_options.include_usage`).
-- [ ] Ensure the `openai-pro` provider requests `prompt_cache_retention: "24h"` alongside `store: false` and configured `prompt_cache_key` routing.
-- [ ] Update `/cost` output to show:
+- [x] Request Chat Completions streaming usage for the official OpenAI provider via `models.json` config (`stream_options.include_usage`).
+- [x] Ensure the `openai-pro` provider requests `prompt_cache_retention: "24h"` alongside `store: false` and configured `prompt_cache_key` routing.
+- [x] Update `/cost` output to show:
   - cached input totals and hit rate;
   - actual/API-confirmed call count vs estimated call count;
   - cache-creation tokens/cost when nonzero.
-- [ ] Keep the header compact; do not add detailed cache diagnostics there unless already natural.
-- [ ] Tests: focused command/formatting tests for the new `/cost` lines.
+- [x] Keep the header compact; do not add detailed cache diagnostics there unless already natural.
+- [x] Tests: focused command/formatting tests for the new `/cost` lines.
 
 ## Phase 5 — Final verification
 
@@ -128,3 +128,4 @@ Hierarchical TODO for API-confirmed cache usage and precise cost accounting.
 - 2026-06-11: Phase 1 implemented in eggllm. Normalized usage is stored on final assistant messages as `api_usage`; raw provider usage is stored as `provider_usage`. Focused test run: `python -m pytest eggllm/tests -q` (54 passed). Phase 2 remains persistence and provider-sanitization.
 - 2026-06-11: Phase 2 implemented. `ThreadRunner` intentionally preserves usage metadata on local assistant messages and strips `api_usage`/`provider_usage` before provider requests; eggllm client sanitization strips the same fields before sync/async/context-only provider payloads. Focused test runs: `python -m pytest eggthreads/tests/test_usage_metadata_sanitization.py eggthreads/tests/test_reasoning_summary_display_only.py eggthreads/tests/test_tool_message_format.py eggthreads/tests/test_tool_call_id_normalization.py eggthreads/tests/test_toolcall_protocol_enforcement.py eggllm/tests/test_client_sanitize.py -q` (37 passed), `python -m pytest eggllm/tests -q` (57 passed). Phase 3 remains exact token stats/cost aggregation.
 - 2026-06-11: Phase 3 implemented. Token stats prefer per-assistant `api_usage` when present, keep heuristic fallback for estimated calls, aggregate `cache_creation_input_tokens` and actual/estimated call counters at top level and per-model, and cost calculation now handles cache-creation tiers with fallback to normal input pricing. Focused tests added in `eggthreads/tests/test_token_count_public.py` and eggllm cost helper coverage. Test runs: `python -m pytest eggthreads/tests/test_token_count_public.py eggthreads/tests/test_command_registry.py eggllm/tests/test_client_sanitize.py -q` (48 passed), `python -m pytest eggllm/tests -q` (58 passed), `python -m pytest eggthreads/tests -q` (615 passed), `python -m pytest egg/tests/test_formatting.py egg/tests/test_commands_utility.py -q` (64 passed). Phase 4 remains config and visibility.
+- 2026-06-11: Phase 4 implemented. Packaged/example OpenAI config requests streaming usage, `openai-pro` provider parameters now include `prompt_cache_retention: "24h"` with existing `store: false` and `prompt_cache_key`, and `/cost` shows cached input hit rate, actual/estimated calls, and cache-creation tokens/cost when present. Header was left unchanged. Focused test runs: `python -m pytest eggthreads/tests/test_command_registry.py eggllm/tests/test_client_sanitize.py -q` (38 passed), `python -m pytest egg/tests/test_formatting.py egg/tests/test_commands_utility.py -q` (64 passed). Phase 5 remains final verification.

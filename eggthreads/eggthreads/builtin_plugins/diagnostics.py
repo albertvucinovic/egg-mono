@@ -92,13 +92,30 @@ def cost_command(context: Any, arg: str):
         to = usage.get("total_output_tokens") or 0
         cached_ctx = usage.get("cached_tokens") or 0
         cached_in = usage.get("cached_input_tokens") or 0
+        cache_creation_in = usage.get("cache_creation_input_tokens") or 0
         calls = usage.get("approx_call_count") or 0
+        actual_calls = usage.get("actual_call_count") or 0
+        estimated_calls = usage.get("estimated_call_count")
+        if estimated_calls is None:
+            try:
+                estimated_calls = max(int(calls) - int(actual_calls), 0)
+            except Exception:
+                estimated_calls = 0
+        try:
+            cached_hit_rate = (float(cached_in) / float(ti) * 100.0) if float(ti) > 0 else 0.0
+        except Exception:
+            cached_hit_rate = 0.0
         lines.append(title)
         lines.append(f"  total_input_tokens:    {ti} ({_fmt_tok(ti)})")
         lines.append(f"  cached_input_tokens:   {cached_in} ({_fmt_tok(cached_in)})")
+        lines.append(f"  cached_input_hit_rate: {cached_hit_rate:.1f}%")
+        if cache_creation_in:
+            lines.append(f"  cache_creation_input_tokens: {cache_creation_in} ({_fmt_tok(cache_creation_in)})")
         lines.append(f"  cached_tokens (last):  {cached_ctx} ({_fmt_tok(cached_ctx)})")
         lines.append(f"  total_output_tokens:   {to} ({_fmt_tok(to)})")
         lines.append(f"  approx_call_count:     {calls}")
+        lines.append(f"  actual_call_count:     {actual_calls} API-confirmed")
+        lines.append(f"  estimated_call_count:  {estimated_calls}")
         cu = usage.get("cost_usd") if isinstance(usage.get("cost_usd"), dict) else {}
         if cu:
             total_cost = float(cu.get("total") or 0.0)
@@ -121,8 +138,14 @@ def cost_command(context: Any, arg: str):
     cu = api.get("cost_usd") if isinstance(api.get("cost_usd"), dict) else {}
     total_cost = float(cu.get("total") or 0.0)
     cost_lines.append(f"  total:   ${total_cost:.4f}")
-    by_model_usage = api.get("by_model") if isinstance(api.get("by_model"), dict) else {}
     by_model_cost = cu.get("by_model") if isinstance(cu.get("by_model"), dict) else {}
+    cache_creation_cost = 0.0
+    for c in by_model_cost.values():
+        if isinstance(c, dict):
+            cache_creation_cost += float(c.get("cache_creation") or 0.0)
+    if cache_creation_cost > 0.0:
+        cost_lines.append(f"  cache_creation: ${cache_creation_cost:.4f}")
+    by_model_usage = api.get("by_model") if isinstance(api.get("by_model"), dict) else {}
     warnings = cu.get("warnings") if isinstance(cu.get("warnings"), list) else []
     if by_model_usage or by_model_cost:
         cost_lines.append("")
@@ -133,13 +156,34 @@ def cost_command(context: Any, arg: str):
             c = by_model_cost.get(mk) if isinstance(by_model_cost.get(mk), dict) else {}
             tin = int(u.get("total_input_tokens") or 0)
             tcached = int(u.get("cached_input_tokens") or 0)
+            tcreation = int(u.get("cache_creation_input_tokens") or 0)
             tout = int(u.get("total_output_tokens") or 0)
             mcalls = int(u.get("approx_call_count") or 0)
+            mactual = int(u.get("actual_call_count") or 0)
+            mestimated = u.get("estimated_call_count")
+            if mestimated is None:
+                mestimated = max(mcalls - mactual, 0)
             cost_lines.append(f"  {mk}:")
-            cost_lines.append(f"    calls={mcalls}  in={tin}({_fmt_tok(tin)})  cached_in={tcached}({_fmt_tok(tcached)})  out={tout}({_fmt_tok(tout)})")
-            cost_lines.append(
-                f"    cost: input=${float(c.get('input') or 0.0):.4f}  cached=${float(c.get('cached') or 0.0):.4f}  output=${float(c.get('output') or 0.0):.4f}  total=${float(c.get('total') or 0.0):.4f}"
-            )
+            usage_parts = [
+                f"calls={mcalls} (actual={mactual}, estimated={mestimated})",
+                f"in={tin}({_fmt_tok(tin)})",
+                f"cached_in={tcached}({_fmt_tok(tcached)})",
+            ]
+            if tcreation:
+                usage_parts.append(f"cache_creation_in={tcreation}({_fmt_tok(tcreation)})")
+            usage_parts.append(f"out={tout}({_fmt_tok(tout)})")
+            cost_lines.append("    " + "  ".join(usage_parts))
+            cost_parts = [
+                f"input=${float(c.get('input') or 0.0):.4f}",
+                f"cached=${float(c.get('cached') or 0.0):.4f}",
+            ]
+            if float(c.get('cache_creation') or 0.0) > 0.0:
+                cost_parts.append(f"cache_creation=${float(c.get('cache_creation') or 0.0):.4f}")
+            cost_parts.extend([
+                f"output=${float(c.get('output') or 0.0):.4f}",
+                f"total=${float(c.get('total') or 0.0):.4f}",
+            ])
+            cost_lines.append("    cost: " + "  ".join(cost_parts))
     if warnings:
         cost_lines.append("")
         for warning in warnings[:10]:

@@ -177,3 +177,27 @@ def test_approximate_thread_cost_uses_cache_creation_tiers(tmp_path: Path, monke
     assert cost["cached"] == pytest.approx(600 * 0.1 / 1_000_000)
     assert cost["cache_creation"] == pytest.approx(((60 * 2.0) + (40 * 3.0)) / 1_000_000)
     assert cost["output"] == pytest.approx(50 * 4.0 / 1_000_000)
+
+
+def test_packaged_openai_configs_request_streaming_usage():
+    import importlib.resources as resources
+
+    with resources.files("eggconfig.eggconfig.data").joinpath("models.json").open("r", encoding="utf-8") as f:
+        packaged = json.load(f)
+    example = json.loads(Path("eggllm/models.json.example").read_text())
+
+    for data in (packaged, example):
+        openai_params = data["providers"]["openai"].get("parameters") or {}
+        assert openai_params["stream_options"]["include_usage"] is True
+
+
+def test_packaged_openai_pro_requests_cache_retention_with_store_false():
+    import importlib.resources as resources
+
+    with resources.files("eggconfig.eggconfig.data").joinpath("models.json").open("r", encoding="utf-8") as f:
+        packaged = json.load(f)
+
+    params = packaged["providers"]["openai-pro"]["parameters"]
+    assert params["store"] is False
+    assert params["prompt_cache_key"] == "prompt_cache_key"
+    assert params["prompt_cache_retention"] == "24h"

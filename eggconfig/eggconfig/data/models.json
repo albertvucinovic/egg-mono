@@ -3,6 +3,11 @@
     "openai": {
       "api_base": "https://api.openai.com/v1/chat/completions",
       "api_key_env": "OPENAI_API_KEY",
+      "parameters": {
+        "stream_options": {
+          "include_usage": true
+        }
+      },
       "models": {
         "GPT 5.3 Codex high": {
           "model_name": "gpt-5.3-codex",
@@ -132,7 +137,8 @@
       "auth_type": "chatgpt_oauth",
       "parameters": {
         "store": false,
-        "prompt_cache_key": "prompt_cache_key"
+        "prompt_cache_key": "prompt_cache_key",
+        "prompt_cache_retention": "24h"
       },
       "models": {
         "Pro: GPT-5.3 Codex high": {
