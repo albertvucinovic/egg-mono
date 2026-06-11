@@ -151,9 +151,9 @@ Rationale:
 
 ## Phase 7 — Review and cleanup
 
-- [ ] Keep changes minimal and local; no scheduler redesign unless Phase 3/4 proves impossible without it.
-- [ ] Run focused tests first, then package tests that touch runner/tool/wait behavior.
-- [ ] Update this TODO with status notes and commit hashes before each implementation commit.
+- [x] Keep changes minimal and local; no scheduler redesign unless Phase 3/4 proves impossible without it.
+- [x] Run focused tests first, then package tests that touch runner/tool/wait behavior.
+- [x] Update this TODO with status notes and commit hashes before each implementation commit.
 
 ## Status notes
 
@@ -164,3 +164,4 @@ Rationale:
 - 2026-06-10: Phase 5 implemented in a focused end-to-end test: fake LLM requests `get_user_message_while_preserving_llm_turn`, the tool appends a note and waits, manager-facing wait sees the note, the user reply is consumed and returned as the tool result, the tool message is published, and the follow-up RA1 receives only the tool result before producing the final assistant response.
 - 2026-06-10: Added Phase 6 TODOs for future UI input affordance and Ctrl+C cancellation semantics while a get-user tool is actively waiting. Not implemented in the Phase 5 slice.
 - 2026-06-10: Phase 6 implemented in a focused UI/control slice: active get-user waits switch the current Message Input title/border to get-answer mode, normal mode is restored once the active wait ends or a reply is pending consumption, Ctrl+C publishes an interrupted get-user tool message with `keep_user_turn=True`, and successful get-user tool results remain normal provider-visible tool messages without `keep_user_turn`.
+- 2026-06-11: Phase 7 review complete. Ran the combined focused regression set across get-user tool flow, wait/status behavior, UI/input/Ctrl+C, approval, panels, reducer, generic wait, and child status: `245 passed`. No cleanup changes were needed beyond this TODO update.
