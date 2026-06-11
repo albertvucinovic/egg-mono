@@ -617,7 +617,9 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="send_message_to_child",
         description=(
-            "Append a normal user message to a child or descendant thread so it can continue from its existing context. "
+            "Append a message to a child or descendant thread so it can continue from its existing context. "
+            "If the child is currently waiting in get_user_message_while_preserving_llm_turn, this answers that tool call; "
+            "otherwise it behaves like a normal child user message. "
             "Use this for manager/worker guidance loops after a child has produced an initial response. "
             "The target must be a descendant of the calling thread. This tool does not wait; call wait afterwards."
         ),

@@ -3495,7 +3495,12 @@ def send_message_to_child_thread(
     *,
     require_idle: bool = True,
 ) -> str:
-    """Append a normal user message from a manager to a descendant thread.
+    """Append a manager message to a descendant thread.
+
+    If the child is actively waiting in
+    ``get_user_message_while_preserving_llm_turn``, the appended message is the
+    answer to that tool call and will be consumed as its tool result. Otherwise
+    this behaves like the historical normal child user-message append.
 
     This is intentionally a small primitive: it does not wait for the child,
     grant tools, alter scheduling, or implement a manager framework.  The target
@@ -3518,8 +3523,15 @@ def send_message_to_child_thread(
         raise ValueError(f"child thread not found: {child}")
     if not is_descendant_thread(db, manager, child):
         raise ValueError("target thread must be a child or descendant of the calling thread")
+    active_get_user_wait = False
+    if require_idle:
+        try:
+            active_get_user_wait = _active_get_user_message_waiting_note(db, child) is not None
+        except Exception:
+            active_get_user_wait = False
+
     status = get_thread_status(db, child)
-    if require_idle and status != "idle":
+    if require_idle and status != "idle" and not active_get_user_wait:
         raise ValueError(f"target thread is not idle (status={status}); wait for it before sending guidance")
     msg_id = append_message(
         db,
