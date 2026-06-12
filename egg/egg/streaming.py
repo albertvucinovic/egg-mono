@@ -29,6 +29,15 @@ STREAM_STYLE_TOOL_SUMMARY: Optional[str] = "dim yellow"
 # coalesce renderer appends to a modest frame rate.
 STREAM_RENDER_FLUSH_SEC = 0.05
 STREAM_RENDER_MAX_BUFFER_CHARS = 64_000
+TOOL_TIMEOUT_KEYS = (
+    'timeout',
+    'timeout_sec',
+    'timeout_seconds',
+    'timeout_secs',
+    'timeout_s',
+    '_tool_timeout_sec',
+    '_egg_tool_timeout_sec',
+)
 
 
 def _new_tool_stream_indicator() -> Dict[str, Any]:
@@ -37,6 +46,14 @@ def _new_tool_stream_indicator() -> Dict[str, Any]:
 
 def _new_tool_summary() -> Dict[str, Any]:
     return {"active": False, "name": "", "text": ""}
+
+
+def _timeout_from_mapping(args: Dict[str, Any]) -> Optional[float]:
+    for key in TOOL_TIMEOUT_KEYS:
+        timeout = _positive_timeout(args.get(key))
+        if timeout is not None:
+            return timeout
+    return None
 
 
 def _timeout_from_tool_call_payload(payload: Dict[str, Any]) -> Optional[float]:
@@ -56,11 +73,7 @@ def _timeout_from_tool_call_payload(payload: Dict[str, Any]) -> Optional[float]:
                 args = {}
         if not isinstance(args, dict):
             return None
-        value = args.get('timeout_sec') or args.get('_tool_timeout_sec')
-        if value is None:
-            return None
-        timeout = float(value)
-        return timeout if timeout > 0 else None
+        return _timeout_from_mapping(args)
     except Exception:
         return None
 
@@ -426,7 +439,7 @@ class StreamingMixin:
             except Exception:
                 payload = {}
             if isinstance(payload, dict):
-                timeout = _positive_timeout(payload.get('timeout_sec'))
+                timeout = _timeout_from_mapping(payload)
                 if timeout is not None:
                     self._live_state['timeout_sec'] = timeout
         elif t == 'tool_call.summary':

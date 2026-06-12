@@ -386,12 +386,11 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
 def register_execution_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="bash",
-        description="Execute a bash script and return combined stdout/stderr. Use timeout_sec to limit execution time.",
+        description="Execute a bash script and return combined stdout/stderr. Use timeout to limit execution time.",
         parameters_schema={
             "type": "object",
             "properties": {
                 "script": {"type": "string", "description": "The bash script to execute."},
-                "timeout_sec": {"type": "number", "description": "Maximum seconds to allow the script to run before killing it."},
             },
             "required": ["script"],
         },
@@ -402,12 +401,11 @@ def register_execution_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         name="python",
-        description="Execute a Python script and return combined stdout/stderr. Use timeout_sec to limit execution time.",
+        description="Execute a Python script and return combined stdout/stderr. Use timeout to limit execution time.",
         parameters_schema={
             "type": "object",
             "properties": {
                 "script": {"type": "string", "description": "The Python script to execute."},
-                "timeout_sec": {"type": "number", "description": "Maximum seconds to allow the script to run before killing it."},
             },
         },
         impl=execute_python_tool,

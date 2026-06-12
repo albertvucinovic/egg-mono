@@ -19,6 +19,7 @@ from .tools import (
     ToolRegistry,
     ToolStreamContext,
     create_default_tools,
+    resolve_tool_timeout_arg,
 )
 from .tool_state import (
     ToolCallState,
@@ -573,8 +574,8 @@ def resolve_tool_timeout_sec(
 
     Priority is intentionally shared by bash and non-bash execution paths:
 
-    1. LLM/tool-call supplied ``timeout_sec`` when it parses as a positive
-       number.
+    1. LLM/tool-call supplied ``timeout`` or legacy timeout aliases when they
+       parse as a positive number.
     2. ``RunnerConfig.tool_timeout_sec`` when set to a positive number.
     3. Global default timeout when set to a positive number.
 
@@ -583,16 +584,13 @@ def resolve_tool_timeout_sec(
     the intent documented in the tool schemas and avoids misleading countdowns.
     """
     args = parse_tool_arguments(arguments)
-    candidates = (args.get('timeout_sec'), config_timeout_sec, default_timeout_sec)
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        try:
-            value = float(candidate)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
+    timeout = resolve_tool_timeout_arg(args)
+    if timeout is not None:
+        return timeout
+    for candidate in (config_timeout_sec, default_timeout_sec):
+        timeout = resolve_tool_timeout_arg({'timeout': candidate})
+        if timeout is not None:
+            return timeout
     return None
 
 
@@ -2639,7 +2637,7 @@ class ThreadRunner:
                 )
                 started_payload: Dict[str, Any] = {'tool_call_id': tc.tool_call_id}
                 if tool_timeout_sec is not None:
-                    started_payload['timeout_sec'] = tool_timeout_sec
+                    started_payload['timeout'] = tool_timeout_sec
                 self.db.append_event(
                     event_id=os.urandom(10).hex(),
                     thread_id=self.thread_id,

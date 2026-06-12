@@ -55,7 +55,8 @@ def test_python_repl_tool_registered():
     specs = {spec["function"]["name"]: spec for spec in tools.tools_spec()}
     assert "python_repl" in specs
     props = specs["python_repl"]["function"]["parameters"]["properties"]
-    assert "timeout_sec" in props
+    assert "timeout" in props
+    assert "timeout_sec" not in props
     assert "drive_runtime_tools" not in props
     names = set(specs)
     assert "session_status" not in names

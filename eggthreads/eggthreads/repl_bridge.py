@@ -153,11 +153,11 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
     # whose file-RPC envelope carries timeout_sec outside the JSON arguments.
     if effective_timeout_value is not None:
         try:
-            current_arg_timeout = float(args.get("timeout_sec")) if args.get("timeout_sec") is not None else None
+            current_arg_timeout = float(args.get("timeout")) if args.get("timeout") is not None else None
         except Exception:
             current_arg_timeout = None
         if current_arg_timeout is None or current_arg_timeout <= 0:
-            args["timeout_sec"] = effective_timeout_value
+            args["timeout"] = effective_timeout_value
 
     from .api import enqueue_user_tool_call, wait_for_tool_call_result
 

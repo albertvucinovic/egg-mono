@@ -1,7 +1,7 @@
 """Tests for tool execution timeout behavior.
 
 Tests verify that:
-1. LLM-specified timeout_sec parameter works for bash and python tools
+1. LLM-specified timeout parameter works for bash and python tools
 2. Config-based _tool_timeout_sec works as fallback
 3. LLM-specified timeout takes priority over config timeout
 4. Timeout returns appropriate error message to LLM
@@ -44,14 +44,14 @@ class TestToolTimeout:
     """Tests for bash and python tool timeout behavior."""
 
     def test_bash_tool_llm_timeout_kills_long_running_command(self, tmp_path, monkeypatch):
-        """Bash tool should timeout when LLM specifies timeout_sec."""
+        """Bash tool should timeout when LLM specifies timeout."""
         eggthreads = _import_eggthreads(monkeypatch, tmp_path)
         tools = eggthreads.create_default_tools()
 
         # Run a sleep command with a 1-second timeout
         result = tools.execute(
             "bash",
-            {"script": "sleep 10", "timeout_sec": 1},
+            {"script": "sleep 10", "timeout": 1},
         )
 
         assert "TIMEOUT" in result
@@ -64,21 +64,21 @@ class TestToolTimeout:
 
         result = tools.execute(
             "bash",
-            {"script": "echo hello", "timeout_sec": 10},
+            {"script": "echo hello", "timeout": 10},
         )
 
         assert "TIMEOUT" not in result
         assert "hello" in result
 
     def test_python_tool_llm_timeout_kills_long_running_script(self, tmp_path, monkeypatch):
-        """Python tool should timeout when LLM specifies timeout_sec."""
+        """Python tool should timeout when LLM specifies timeout."""
         eggthreads = _import_eggthreads(monkeypatch, tmp_path)
         tools = eggthreads.create_default_tools()
 
         # Run an infinite loop with a 1-second timeout
         result = tools.execute(
             "python",
-            {"script": "import time; time.sleep(10)", "timeout_sec": 1},
+            {"script": "import time; time.sleep(10)", "timeout": 1},
         )
 
         assert "TIMEOUT" in result
@@ -91,7 +91,7 @@ class TestToolTimeout:
 
         result = tools.execute(
             "python",
-            {"script": "print('hello')", "timeout_sec": 10},
+            {"script": "print('hello')", "timeout": 10},
         )
 
         assert "TIMEOUT" not in result
@@ -104,7 +104,7 @@ class TestToolTimeout:
 
         result = tools.execute(
             "python",
-            {"script": "import sys; sys.stdout.write('x' * 100_000)", "timeout_sec": 3},
+            {"script": "import sys; sys.stdout.write('x' * 100_000)", "timeout": 3},
         )
 
         assert "TIMEOUT" not in result
@@ -138,14 +138,14 @@ class TestToolTimeout:
         assert "TIMEOUT" in result
 
     def test_llm_timeout_overrides_config_timeout(self, tmp_path, monkeypatch):
-        """LLM-specified timeout_sec should take priority over config _tool_timeout_sec."""
+        """LLM-specified timeout should take priority over config _tool_timeout_sec."""
         eggthreads = _import_eggthreads(monkeypatch, tmp_path)
         tools = eggthreads.create_default_tools()
 
         # Config says 1 second, LLM says 10 seconds - command should complete
         result = tools.execute(
             "bash",
-            {"script": "sleep 2", "timeout_sec": 10},  # LLM: 10s
+            {"script": "sleep 2", "timeout": 10},  # LLM: 10s
             tool_timeout_sec=1,  # Config: 1s (should be overridden)
         )
 
@@ -161,7 +161,7 @@ class TestToolTimeout:
         # Config says 60 seconds, LLM says 1 second
         result = tools.execute(
             "bash",
-            {"script": "sleep 10", "timeout_sec": 1},  # LLM: 1s
+            {"script": "sleep 10", "timeout": 1},  # LLM: 1s
             tool_timeout_sec=60,  # Config: 60s
         )
 
@@ -190,7 +190,7 @@ class TestToolTimeout:
 
         result = tools.execute(
             "bash",
-            {"script": "sleep 10", "timeout_sec": 1},
+            {"script": "sleep 10", "timeout": 1},
         )
 
         # Message should clearly indicate timeout occurred
@@ -493,6 +493,14 @@ class TestToolTimeout:
         assert state.state == "TC5"
         assert state.finished_reason == "timeout"
         assert "TIMEOUT" in (state.finished_output or "")
+        started_payload = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.execution_started'",
+            (tid,),
+        ).fetchone()
+        assert started_payload is not None
+        started = json.loads(started_payload[0])
+        assert started["timeout"] == 1.5
+        assert "timeout_sec" not in started
 
 
     def test_streaming_bash_coalesces_tiny_live_chunks(self, tmp_path, monkeypatch):
@@ -562,7 +570,7 @@ class TestToolTimeoutInvalidInput:
 
         result = tools.execute(
             "bash",
-            {"script": "sleep 10", "timeout_sec": "invalid"},  # Invalid
+            {"script": "sleep 10", "timeout": "invalid"},  # Invalid
             tool_timeout_sec=1,  # Config fallback
         )
 
@@ -577,7 +585,7 @@ class TestToolTimeoutInvalidInput:
         # Negative timeout - should use config
         result = tools.execute(
             "bash",
-            {"script": "sleep 5", "timeout_sec": -1},
+            {"script": "sleep 5", "timeout": -1},
             tool_timeout_sec=1,
         )
 
@@ -684,19 +692,21 @@ class TestRunnerToolTimeoutResolution:
     def test_shared_resolver_uses_llm_timeout_before_config_default(self):
         from eggthreads.runner import resolve_tool_timeout_sec
 
-        assert resolve_tool_timeout_sec({"timeout_sec": 5}, 30, 60) == 5.0
+        assert resolve_tool_timeout_sec({"timeout": 5}, 30, 60) == 5.0
+        assert resolve_tool_timeout_sec({"timeout_sec": 6}, 30, 60) == 6.0
 
     def test_shared_resolver_falls_back_for_invalid_or_non_positive_llm_timeout(self):
         from eggthreads.runner import resolve_tool_timeout_sec
 
-        assert resolve_tool_timeout_sec({"timeout_sec": "bad"}, 7, 30) == 7.0
-        assert resolve_tool_timeout_sec({"timeout_sec": -1}, 7, 30) == 7.0
+        assert resolve_tool_timeout_sec({"timeout": "bad"}, 7, 30) == 7.0
+        assert resolve_tool_timeout_sec({"timeout": -1}, 7, 30) == 7.0
         assert resolve_tool_timeout_sec({}, None, 30) == 30.0
         assert resolve_tool_timeout_sec({}, 0, None) is None
 
     def test_tool_registry_timeout_resolver_is_shared_by_bash_and_python_tools(self):
         from eggthreads.tools import resolve_tool_timeout_arg
 
-        assert resolve_tool_timeout_arg({"timeout_sec": 2, "_tool_timeout_sec": 30}) == 2.0
-        assert resolve_tool_timeout_arg({"timeout_sec": "bad", "_tool_timeout_sec": 30}) == 30.0
-        assert resolve_tool_timeout_arg({"timeout_sec": -1, "_tool_timeout_sec": 30}) == 30.0
+        assert resolve_tool_timeout_arg({"timeout": 2, "_tool_timeout_sec": 30}) == 2.0
+        assert resolve_tool_timeout_arg({"timeout_sec": 3, "_tool_timeout_sec": 30}) == 3.0
+        assert resolve_tool_timeout_arg({"timeout": "bad", "_tool_timeout_sec": 30}) == 30.0
+        assert resolve_tool_timeout_arg({"timeout": -1, "_tool_timeout_sec": 30}) == 30.0

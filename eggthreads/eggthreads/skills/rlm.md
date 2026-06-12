@@ -101,20 +101,20 @@ def chunk_list(items: Sequence[Any], *, n: Optional[int] = None, max_items: Opti
     return [seq[i:i + size] for i in range(0, len(seq), size)]
 
 
-def llm_query(prompt: str, *, label: str = "llm_query", timeout_sec: Optional[float] = None,
+def llm_query(prompt: str, *, label: str = "llm_query", timeout: Optional[float] = None,
               auto: bool = True, **kwargs: Any) -> str:
     """Run a child LM query and return wait(...) output."""
     spawn = spawn_agent_auto if auto else spawn_agent
     tid = spawn(str(prompt), label=label, **kwargs)
-    return wait([tid], timeout_sec=timeout_sec)
+    return wait([tid], timeout=timeout)
 
 
-def llm_query_batched(prompts: Iterable[str], *, label: str = "llm_query", timeout_sec: Optional[float] = None,
+def llm_query_batched(prompts: Iterable[str], *, label: str = "llm_query", timeout: Optional[float] = None,
                       auto: bool = True, **kwargs: Any) -> str:
     """Run many child LM queries concurrently and return combined wait(...) output."""
     spawn = spawn_agent_auto if auto else spawn_agent
     tids = [spawn(str(prompt), label=f"{label}_{i}", **kwargs) for i, prompt in enumerate(prompts)]
-    return wait(tids, timeout_sec=timeout_sec) if tids else ""
+    return wait(tids, timeout=timeout) if tids else ""
 ```
 
 ## Patterns
@@ -154,7 +154,7 @@ prompts = [
     "Return compact bullets only.\n\n" + chunk
     for chunk in chunks
 ]
-partials = llm_query_batched(prompts, label="log_chunk", timeout_sec=600)
+partials = llm_query_batched(prompts, label="log_chunk", timeout=600)
 print(preview(partials))
 ```
 
@@ -164,7 +164,7 @@ Then combine in the parent REPL:
 final = llm_query(
     "Synthesize these chunk findings into a concise root-cause analysis:\n" + partials,
     label="synthesis",
-    timeout_sec=600,
+    timeout=600,
 )
 print(final)
 ```
@@ -193,9 +193,9 @@ for i in range(len(chunks)):
         share_repl=True,
         allowed_tools=["python_repl"],
     ))
-print(wait(tids, timeout_sec=600))
+print(wait(tids, timeout=600))
 summary_input = "\n\n".join(f"Chunk {i}: {partials.get(i, '')}" for i in range(len(chunks)))
-print(llm_query("Synthesize:\n" + summary_input, timeout_sec=600))
+print(llm_query("Synthesize:\n" + summary_input, timeout=600))
 ```
 
 ### 5. Recursive query over context
@@ -210,7 +210,7 @@ answer = llm_query(
     "do not print raw context. Find the likely root cause and cite evidence.\n\n"
     + preview(log, max_lines=200, max_chars=20000),
     label="rlm_query",
-    timeout_sec=600,
+    timeout=600,
     allowed_tools=["python_repl", "bash_repl"],
 )
 print(answer)
@@ -245,7 +245,7 @@ for question in manager_state["open_questions"]:
     )
     manager_state["workers"][tid] = {"question": question, "status": "started"}
 
-result_text = wait(list(manager_state["workers"]), timeout_sec=900)
+result_text = wait(list(manager_state["workers"]), timeout=900)
 manager_state["findings"].append(result_text)
 
 # Poll status without blocking when you need budget/error visibility.  The JSON
@@ -261,7 +261,7 @@ send_message_to_child(
     worker_id,
     "Please refine your answer: focus only on root causes that are supported by tests or code evidence.",
 )
-followup = wait([worker_id], timeout_sec=600)
+followup = wait([worker_id], timeout=600)
 manager_state["findings"].append(followup)
 ```
 

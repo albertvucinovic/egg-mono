@@ -45,13 +45,15 @@ def _coerce_positive_timeout(value: Any) -> Optional[float]:
     return timeout if timeout > 0 else None
 
 
-def tool(name: str, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
+def tool(name: str, timeout: Optional[float] = None, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
     """Call an Egg tool through the host bridge and return its string result."""
 
     bridge = _bridge_dir()
     req_id = uuid.uuid4().hex
     req_path = bridge / f"tool_{req_id}.req.json"
     res_path = bridge / f"tool_{req_id}.res.json"
+    if timeout is not None:
+        timeout_sec = timeout
     if timeout_sec is None:
         try:
             timeout_sec = float(os.environ.get("EGG_TOOL_TIMEOUT", "30"))
@@ -102,6 +104,10 @@ def _load_generated_wrappers() -> None:
 
 
 def _pop_timeout_arg(kwargs: Dict[str, Any]) -> Optional[float]:
+    timeout = _coerce_positive_timeout(kwargs.pop("timeout", None))
+    if timeout is not None:
+        kwargs.pop("timeout_sec", None)
+        return timeout
     return _coerce_positive_timeout(kwargs.pop("timeout_sec", None))
 
 

@@ -195,7 +195,7 @@ def test_tool_timeout_countdown_is_calculated_without_summary_events(tmp_path, m
         app.ingest_event_for_live(
             {
                 "type": "tool_call.execution_started",
-                "payload_json": json.dumps({"tool_call_id": "call-wait", "timeout_sec": 300}),
+                "payload_json": json.dumps({"tool_call_id": "call-wait", "timeout": 300}),
             },
             tid,
         )

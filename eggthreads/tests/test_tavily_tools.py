@@ -117,9 +117,9 @@ def test_fetch_url_is_exposed_in_tool_spec(tools):
 
     assert 'fetch_url' in by_name
     props = by_name['fetch_url']['function']['parameters']['properties']
-    assert props == {
-        'url': {'type': 'string', 'description': 'URL to fetch.'},
-    }
+    assert props['url'] == {'type': 'string', 'description': 'URL to fetch.'}
+    assert props['timeout']['type'] == 'number'
+    assert 'timeout_sec' not in props
     assert by_name['fetch_url']['function']['parameters']['required'] == ['url']
 
 

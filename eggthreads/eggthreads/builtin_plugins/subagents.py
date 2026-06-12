@@ -690,7 +690,7 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         description=(
             "Wait for one or more threads to finish and return their last "
             "assistant message. A thread is considered finished when its "
-            "state is 'waiting_user'. Optional timeout_sec limits how long to wait."
+            "state is 'waiting_user'. Optional timeout limits how long to wait."
         ),
         parameters_schema={
             "type": "object",
@@ -699,10 +699,6 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "List of thread_ids to wait for.",
-                },
-                "timeout_sec": {
-                    "type": "number",
-                    "description": "Maximum seconds to wait before returning.",
                 },
             },
             "required": ["thread_ids"],

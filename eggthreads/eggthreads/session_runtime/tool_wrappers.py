@@ -44,9 +44,9 @@ def generate_tool_wrappers_source(tool_schemas: Iterable[Dict[str, Any]]) -> str
     The generated functions have explicit keyword-friendly signatures derived
     from each tool's JSON-schema properties.  Required fields are positional-or-
     keyword parameters; optional fields default to ``None`` and are omitted from
-    the tool payload when left unset.  ``timeout_sec`` is intercepted and
-    passed to ``eggtools.tool`` as the bridge/tool-call timeout instead of being
-    duplicated in the JSON payload.
+    the tool payload when left unset.  ``timeout`` is intercepted as the
+    bridge/tool-call timeout instead of being duplicated in the JSON payload;
+    legacy ``timeout_sec`` is still accepted through ``**kwargs``.
     """
 
     blocks: List[str] = [
@@ -93,11 +93,13 @@ def generate_tool_wrappers_source(tool_schemas: Iterable[Dict[str, Any]]) -> str
             lines.append(f"    if {name} is not _MISSING:")
             lines.append(f"        args[{name!r}] = {name}")
         lines.extend([
-            "    timeout_sec = args.pop('timeout_sec', None)",
+            "    timeout = args.pop('timeout', None)",
             "    args.update(kwargs)",
-            "    if 'timeout_sec' in args:",
-            "        timeout_sec = args.pop('timeout_sec')",
-            f"    return tool({tool_name!r}, timeout_sec=timeout_sec, **args)",
+            "    if 'timeout' in args:",
+            "        timeout = args.pop('timeout')",
+            "    if timeout is None and 'timeout_sec' in args:",
+            "        timeout = args.pop('timeout_sec')",
+            f"    return tool({tool_name!r}, timeout_sec=timeout, **args)",
             "",
         ])
         blocks.append("\n".join(lines))

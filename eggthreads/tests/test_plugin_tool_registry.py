@@ -144,6 +144,20 @@ def test_tool_capabilities_are_registry_metadata_not_tool_schema() -> None:
     assert "capabilities" not in spec
 
 
+def test_tool_registry_adds_canonical_timeout_to_all_tool_schemas() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        "timeout_tool",
+        "Timeout tool",
+        {"type": "object", "properties": {"value": {"type": "string"}}},
+        lambda args: "ok",
+    )
+
+    props = registry.tools_spec()[0]["function"]["parameters"]["properties"]
+    assert "timeout" in props
+    assert "timeout_sec" not in props
+
+
 def test_execution_tools_advertise_current_capabilities() -> None:
     registry = create_tool_registry()
 

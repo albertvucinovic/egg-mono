@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 from dataclasses import dataclass, field
@@ -8,6 +9,19 @@ from typing import Any, Callable, Dict, List, Mapping
 
 
 _TOOL_SUMMARY_EMIT_INTERVAL_SEC = 5.0
+
+TOOL_TIMEOUT_ARGUMENT_NAMES = (
+    "timeout",
+    "timeout_sec",
+    "timeout_seconds",
+    "timeout_secs",
+    "timeout_s",
+)
+TOOL_INTERNAL_TIMEOUT_ARGUMENT_NAMES = ("_tool_timeout_sec", "_egg_tool_timeout_sec")
+TOOL_TIMEOUT_SCHEMA: Dict[str, Any] = {
+    "type": "number",
+    "description": "Optional maximum seconds to allow this tool call to run.",
+}
 
 
 def _should_emit_tool_summary(
@@ -33,12 +47,20 @@ def resolve_tool_timeout_arg(
 ) -> float | None:
     """Resolve tool subprocess timeout from decoded tool arguments.
 
-    Priority matches the runner helper: LLM/tool-call ``timeout_sec`` first,
-    then the runner-injected config/default timeout under ``config_key``.
+    ``timeout`` is the canonical public argument.  Legacy/public aliases such
+    as ``timeout_sec`` and runner/bridge-internal keys are accepted so old
+    transcripts, generated wrappers, and programmatic callers keep working.
     Invalid or non-positive values are treated as absent, so callers get a
     single, consistent interpretation across tool implementations.
     """
-    for candidate in (args.get('timeout_sec'), args.get(config_key)):
+    keys = [*TOOL_TIMEOUT_ARGUMENT_NAMES]
+    if config_key:
+        keys.append(config_key)
+    for key in TOOL_INTERNAL_TIMEOUT_ARGUMENT_NAMES:
+        if key not in keys:
+            keys.append(key)
+    for key in keys:
+        candidate = args.get(key)
         if candidate is None:
             continue
         try:
@@ -48,6 +70,28 @@ def resolve_tool_timeout_arg(
         if value > 0:
             return value
     return None
+
+
+def with_canonical_timeout_parameter(parameters_schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a JSON schema copy with the canonical cross-cutting timeout arg.
+
+    Tool implementations can still accept legacy aliases, but the schema shown
+    to models and generated REPL wrappers should advertise one public name:
+    ``timeout``.
+    """
+
+    schema = copy.deepcopy(parameters_schema) if isinstance(parameters_schema, dict) else {}
+    schema.setdefault("type", "object")
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        props = {}
+        schema["properties"] = props
+    legacy_timeout = props.pop("timeout_sec", None)
+    props.setdefault("timeout", legacy_timeout if isinstance(legacy_timeout, dict) else TOOL_TIMEOUT_SCHEMA)
+    required = schema.get("required")
+    if isinstance(required, list):
+        schema["required"] = ["timeout" if item == "timeout_sec" else item for item in required]
+    return schema
 
 
 
@@ -172,6 +216,7 @@ class ToolRegistry:
                 metadata only; it is not exposed in the LLM tool schema.
         """
         tool_capabilities = ToolCapabilities.from_value(capabilities)
+        parameters_schema = with_canonical_timeout_parameter(parameters_schema)
         self._tools[name] = {
             "spec": {
                 "type": "function",

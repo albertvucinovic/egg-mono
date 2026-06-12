@@ -141,7 +141,7 @@ Wait in bounded increments so the manager can retain control and handle failures
 Default pattern:
 
 ```text
-wait(worker, timeout_sec=300)
+wait(worker, timeout=300)
 if not finished:
     get_child_status(worker)
     wait again
@@ -167,7 +167,7 @@ Repair pattern:
 ```text
 get_child_status(worker)
 continue_subthread(worker)
-wait(worker, timeout_sec=300)
+wait(worker, timeout=300)
 ```
 
 Guidelines:

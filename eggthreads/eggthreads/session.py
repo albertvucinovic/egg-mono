@@ -1511,6 +1511,10 @@ def _make_eggtools_module(eval_token: str):
     mod = types.ModuleType("eggtools")
 
     def _tool_timeout(args: Dict[str, Any]) -> Optional[float]:
+        timeout = _coerce_positive_timeout(args.get("timeout"))
+        if timeout is not None:
+            args.setdefault("_egg_tool_timeout_sec", timeout)
+            return timeout
         timeout_sec = _coerce_positive_timeout(args.get("timeout_sec"))
         if timeout_sec is not None:
             args.setdefault("_egg_tool_timeout_sec", timeout_sec)
@@ -1522,6 +1526,10 @@ def _make_eggtools_module(eval_token: str):
         return repl_bridge.call_tool(eval_token, name, args, timeout_sec=_tool_timeout(args))
 
     def _pop_timeout_arg(args: Dict[str, Any]) -> Optional[float]:
+        timeout = _coerce_positive_timeout(args.pop("timeout", None))
+        if timeout is not None:
+            args.pop("timeout_sec", None)
+            return timeout
         return _coerce_positive_timeout(args.pop("timeout_sec", None))
 
     def _install_generated_wrappers() -> None:

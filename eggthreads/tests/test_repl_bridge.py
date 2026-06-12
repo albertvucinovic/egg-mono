@@ -56,7 +56,8 @@ def test_repl_bridge_call_tool_enqueues_ra3_and_direct_drives(tmp_path, monkeypa
     assert payload["no_api"] is True
     assert payload["tool_calls"][0]["function"]["arguments"]
     call_args = json.loads(payload["tool_calls"][0]["function"]["arguments"])
-    assert call_args["timeout_sec"] == 5.0
+    assert call_args["timeout"] == 5.0
+    assert "timeout_sec" not in call_args
 
 
 def test_python_repl_eggtools_bash_uses_runtime_thread(tmp_path, monkeypatch):
