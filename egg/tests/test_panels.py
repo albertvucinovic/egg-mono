@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 
 import pytest
 from rich.console import Console
@@ -969,6 +971,23 @@ class TestPrintStaticViewCurrent:
 
         titles = [str(getattr(arg, "title", "")) for args, _kw in printed for arg in args]
         assert any(f"msg_id: {msg_id}" in title for title in titles)
+
+    def test_static_message_header_timestamps_use_local_timezone(self, egg_app, monkeypatch):
+        """Static terminal message headers show UTC event timestamps in local time."""
+        if not hasattr(time, "tzset"):
+            pytest.skip("time.tzset is required to change local timezone for this test")
+
+        old_tz = os.environ.get("TZ")
+        monkeypatch.setenv("TZ", "Europe/Prague")
+        time.tzset()
+        try:
+            assert egg_app._static_transcript_ts_text("2026-01-01T12:00:00.000Z") == "2026-01-01 13:00:00"
+        finally:
+            if old_tz is None:
+                monkeypatch.delenv("TZ", raising=False)
+            else:
+                monkeypatch.setenv("TZ", old_tz)
+            time.tzset()
 
     def test_full_screen_static_view_renders_full_history(self, egg_app, monkeypatch):
         from eggthreads import append_message, create_snapshot

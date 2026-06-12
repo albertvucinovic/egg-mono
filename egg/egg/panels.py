@@ -5,7 +5,7 @@ import io
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from rich.console import Console, Group
@@ -1287,14 +1287,15 @@ class PanelsMixin:
         if not val:
             return ""
         s = str(val)
-        # SQLite ts is typically ISO-like (e.g. '2024-01-01T12:34:56.789Z')
-        # Try a few common formats; fall back to raw string on failure.
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-            try:
-                dt = datetime.strptime(s, fmt)
-                return dt.strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                continue
+        # SQLite event timestamps are UTC. Show them in the user's current
+        # local timezone for panel headers.
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
         return s
 
     def _static_transcript_message_token_counts(self, msg_id: Any) -> Dict[str, int]:
