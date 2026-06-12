@@ -436,9 +436,9 @@ class TestToolCalls:
         # Check tool state changed
         response = client.get(f"/api/threads/{thread_id}/tools")
         tools = response.json()
-        # After approval, state should advance (TC2 = approved, waiting execution)
+        # After approval, state should advance (TC2.1 = approved, waiting execution)
         assert len(tools) == 1
-        assert tools[0]["state"] in ["TC2", "TC3", "TC4", "TC5"]  # Advanced from TC1
+        assert tools[0]["state"] in ["TC2.1", "TC3", "TC4", "TC5"]  # Advanced from TC1
 
 
 class TestAutoApproval:
