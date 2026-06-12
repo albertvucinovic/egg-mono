@@ -167,11 +167,55 @@ def test_snapshot_token_stats_prefers_actual_assistant_api_usage():
     assert usage["approx_call_count"] == 1
     assert usage["actual_call_count"] == 1
     assert usage["estimated_call_count"] == 0
+    assert usage["api_confirmed_usage"]["actual_call_count"] == 1
+    assert usage["api_confirmed_usage"]["total_input_tokens"] == 1000
+    assert usage["api_confirmed_usage"]["cached_input_tokens"] == 600
+    assert usage["api_confirmed_usage"]["cache_creation_input_tokens"] == 40
+    assert usage["api_confirmed_usage"]["total_output_tokens"] == 50
+    assert usage["api_confirmed_usage"]["field_call_counts"]["total_input_tokens"] == 1
     assert usage["cached_tokens"] == 1000
     assert usage["last_call_input_tokens"] == 1000
     assert usage["by_model"]["m"]["actual_call_count"] == 1
     assert usage["by_model"]["m"]["estimated_call_count"] == 0
     assert usage["by_model"]["m"]["cache_creation_input_tokens"] == 40
+
+
+def test_thread_token_stats_recomputes_old_cached_stats_for_confirmed_usage(tmp_path):
+    import json
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "answer",
+        extra={
+            "model_key": "m",
+            "api_usage": {
+                "total_input_tokens": 10,
+                "cached_input_tokens": 4,
+                "total_output_tokens": 2,
+            },
+        },
+    )
+    snap = ts.create_snapshot(db, tid)
+    old_stats = dict(snap["token_stats"])
+    old_stats["api_usage"] = {k: v for k, v in old_stats["api_usage"].items() if k != "api_confirmed_usage"}
+    snap["token_stats"] = old_stats
+    db.conn.execute(
+        "UPDATE threads SET snapshot_json=? WHERE thread_id=?",
+        (json.dumps(snap), tid),
+    )
+
+    usage = thread_token_stats(db, tid)["api_usage"]
+
+    assert usage["api_confirmed_usage"]["total_input_tokens"] == 10
+    assert usage["api_confirmed_usage"]["cached_input_tokens"] == 4
+    assert usage["api_confirmed_usage"]["total_output_tokens"] == 2
 
 
 def test_snapshot_token_stats_preserves_heuristic_usage_without_api_usage():
@@ -193,6 +237,7 @@ def test_snapshot_token_stats_preserves_heuristic_usage_without_api_usage():
     assert usage["approx_call_count"] == 2
     assert usage["actual_call_count"] == 0
     assert usage["estimated_call_count"] == 2
+    assert usage["api_confirmed_usage"] == {"actual_call_count": 0, "field_call_counts": {}}
     assert usage["by_model"]["m"]["estimated_call_count"] == 2
 
 

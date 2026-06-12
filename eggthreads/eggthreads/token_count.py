@@ -438,6 +438,8 @@ _API_USAGE_TOKEN_FIELDS = {
     "total_reasoning_tokens",
 }
 
+_API_CONFIRMED_USAGE_FIELDS = tuple(sorted(_API_USAGE_TOKEN_FIELDS))
+
 
 def _usage_int(value: Any) -> int:
     try:
@@ -462,6 +464,40 @@ def _message_api_usage(msg: Dict[str, Any]) -> Optional[Dict[str, int]]:
     split_creation = _usage_int(out.get("cache_creation_5m_input_tokens")) + _usage_int(out.get("cache_creation_1h_input_tokens"))
     if split_creation > _usage_int(out.get("cache_creation_input_tokens")):
         out["cache_creation_input_tokens"] = split_creation
+    return out
+
+
+def _empty_api_confirmed_usage() -> Dict[str, Any]:
+    return {"actual_call_count": 0, "field_call_counts": {}}
+
+
+def _record_api_confirmed_usage(out: Dict[str, Any], usage: Dict[str, int]) -> None:
+    out["actual_call_count"] = _usage_int(out.get("actual_call_count")) + 1
+    field_counts = out.get("field_call_counts")
+    if not isinstance(field_counts, dict):
+        field_counts = {}
+        out["field_call_counts"] = field_counts
+    for field in _API_CONFIRMED_USAGE_FIELDS:
+        if field not in usage:
+            continue
+        out[field] = _usage_int(out.get(field)) + _usage_int(usage.get(field))
+        field_counts[field] = _usage_int(field_counts.get(field)) + 1
+
+
+def _merge_api_confirmed_usage(a: Any, b: Any) -> Dict[str, Any]:
+    a_dict = a if isinstance(a, dict) else {}
+    b_dict = b if isinstance(b, dict) else {}
+    out = _empty_api_confirmed_usage()
+    out["actual_call_count"] = _usage_int(a_dict.get("actual_call_count")) + _usage_int(b_dict.get("actual_call_count"))
+    out_counts = out["field_call_counts"]
+    a_counts = a_dict.get("field_call_counts") if isinstance(a_dict.get("field_call_counts"), dict) else {}
+    b_counts = b_dict.get("field_call_counts") if isinstance(b_dict.get("field_call_counts"), dict) else {}
+    for field in _API_CONFIRMED_USAGE_FIELDS:
+        count = _usage_int(a_counts.get(field)) + _usage_int(b_counts.get(field))
+        if count <= 0:
+            continue
+        out[field] = _usage_int(a_dict.get(field)) + _usage_int(b_dict.get(field))
+        out_counts[field] = count
     return out
 
 
@@ -556,6 +592,7 @@ def _token_stats_for_messages(
     cache_creation_input_tokens = 0
     cache_creation_5m_input_tokens = 0
     cache_creation_1h_input_tokens = 0
+    api_confirmed_usage = _empty_api_confirmed_usage()
 
     # Track the last observed input token count per model so we can
     # estimate cached tokens even when models switch and later switch
@@ -630,6 +667,7 @@ def _token_stats_for_messages(
         actual_usage = _message_api_usage(m)
         if actual_usage is not None:
             actual_call_count += 1
+            _record_api_confirmed_usage(api_confirmed_usage, actual_usage)
             input_for_call = int(actual_usage.get("total_input_tokens", input_tok))
             out_tok = int(actual_usage.get("total_output_tokens", heuristic_out_tok))
             reason_tok = int(actual_usage.get("total_reasoning_tokens", heuristic_reason_tok))
@@ -695,6 +733,7 @@ def _token_stats_for_messages(
         "cache_creation_input_tokens": int(cache_creation_input_tokens),
         "cache_creation_5m_input_tokens": int(cache_creation_5m_input_tokens),
         "cache_creation_1h_input_tokens": int(cache_creation_1h_input_tokens),
+        "api_confirmed_usage": api_confirmed_usage,
         "by_model": by_model,
         # Helper fields to allow streaming_token_stats to chain cache
         # accounting across snapshot->tail boundaries.
@@ -926,6 +965,10 @@ def extend_snapshot_token_stats(snapshot: Dict[str, Any], tail_messages: List[Di
     if not isinstance(base, dict):
         old_len = max(0, len(messages) - len(tail_messages))
         base = _token_stats_for_messages([m for m in messages[:old_len] if isinstance(m, dict)])
+    else:
+        base_api = base.get("api_usage") if isinstance(base.get("api_usage"), dict) else {}
+        if "api_confirmed_usage" not in base_api:
+            return snapshot_token_stats(snapshot)
 
     au = base.get("api_usage") if isinstance(base.get("api_usage"), dict) else {}
     base_prev_by_model = au.get("last_call_input_tokens_by_model") if isinstance(au.get("last_call_input_tokens_by_model"), dict) else None
@@ -1260,6 +1303,10 @@ def _merge_token_stats_with_boundary(
 
     actual_count = _actual_calls(au_a) + _actual_calls(au_b)
     estimated_count = _estimated_calls(au_a) + _estimated_calls(au_b)
+    api_confirmed_usage = _merge_api_confirmed_usage(
+        au_a.get("api_confirmed_usage"),
+        au_b.get("api_confirmed_usage"),
+    )
 
     # cached_tokens should reflect the most recent call.
     cached_tokens = au_b.get("cached_tokens") if _int(au_b.get("approx_call_count")) > 0 else au_a.get("cached_tokens")
@@ -1325,6 +1372,7 @@ def _merge_token_stats_with_boundary(
         "cache_creation_input_tokens": int(cache_creation_in),
         "cache_creation_5m_input_tokens": int(cache_creation_5m_in),
         "cache_creation_1h_input_tokens": int(cache_creation_1h_in),
+        "api_confirmed_usage": api_confirmed_usage,
         "by_model": by_model,
         "last_call_input_tokens": last_call_input_tokens,
         "last_call_model_key": last_call_model_key,
@@ -1545,7 +1593,9 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
                 has_stale_skipped = bool(skipped_msg_ids & snap_msg_ids)
 
                 ts = snap.get("token_stats")
-                if isinstance(ts, dict) and not has_stale_skipped:
+                ts_api = ts.get("api_usage") if isinstance(ts, dict) and isinstance(ts.get("api_usage"), dict) else {}
+                has_stale_usage_shape = isinstance(ts, dict) and "api_confirmed_usage" not in ts_api
+                if isinstance(ts, dict) and not has_stale_skipped and not has_stale_usage_shape:
                     # Use cached token_stats (for performance) when accurate.
                     snap_stats = ts
                 else:

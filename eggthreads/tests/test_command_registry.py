@@ -420,6 +420,19 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
                 "approx_call_count": 1,
                 "actual_call_count": 1,
                 "estimated_call_count": 0,
+                "api_confirmed_usage": {
+                    "actual_call_count": 1,
+                    "total_input_tokens": 5,
+                    "cached_input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "total_output_tokens": 2,
+                    "field_call_counts": {
+                        "total_input_tokens": 1,
+                        "cached_input_tokens": 1,
+                        "cache_creation_input_tokens": 1,
+                        "total_output_tokens": 1,
+                    },
+                },
                 "by_model": {
                     "test-model": {
                         "total_input_tokens": 5,
@@ -451,6 +464,7 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
                 "approx_call_count": 1,
                 "actual_call_count": 0,
                 "estimated_call_count": 1,
+                "api_confirmed_usage": {"actual_call_count": 0, "field_call_counts": {}},
             },
         }
 
@@ -472,8 +486,16 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
     assert "cache_creation_input_tokens: 2" in cost_text
     assert "actual_call_count:     1 API-confirmed" in cost_text
     assert "estimated_call_count:  0" in cost_text
+    assert "API-confirmed usage:" in cost_text
+    assert "input_tokens: 5" in cost_text
+    assert "cached_input_tokens: 1" in cost_text
+    assert "output_tokens: 2" in cost_text
+    assert "cache_creation_input_tokens: 2" in cost_text
     assert "actual_call_count:     0 API-confirmed" in cost_text
     assert "estimated_call_count:  1" in cost_text
+    assert "input_tokens: Not available" in cost_text
+    assert "cached_input_tokens: Not available" in cost_text
+    assert "output_tokens: Not available" in cost_text
     assert "cache_creation: $0.0300" in cost_text
     assert "calls=1 (actual=1, estimated=0)" in cost_text
     assert "cache_creation_in=2" in cost_text

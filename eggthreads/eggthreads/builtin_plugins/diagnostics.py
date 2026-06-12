@@ -87,6 +87,13 @@ def cost_command(context: Any, arg: str):
             return str(n)
         return str(n) if n < 1000 else f"{n/1000:.2f}k"
 
+    def _confirmed_token_line(confirmed: Dict[str, Any], field: str, label: str) -> str:
+        counts = confirmed.get("field_call_counts") if isinstance(confirmed.get("field_call_counts"), dict) else {}
+        if int(counts.get(field) or 0) <= 0:
+            return f"    {label}: Not available"
+        value = confirmed.get(field) or 0
+        return f"    {label}: {value} ({_fmt_tok(value)})"
+
     def _append_usage_section(lines: List[str], title: str, usage: Dict[str, Any]) -> None:
         ti = usage.get("total_input_tokens") or 0
         to = usage.get("total_output_tokens") or 0
@@ -116,6 +123,13 @@ def cost_command(context: Any, arg: str):
         lines.append(f"  approx_call_count:     {calls}")
         lines.append(f"  actual_call_count:     {actual_calls} API-confirmed")
         lines.append(f"  estimated_call_count:  {estimated_calls}")
+        confirmed = usage.get("api_confirmed_usage") if isinstance(usage.get("api_confirmed_usage"), dict) else {}
+        lines.append("  API-confirmed usage:")
+        lines.append(_confirmed_token_line(confirmed, "total_input_tokens", "input_tokens"))
+        lines.append(_confirmed_token_line(confirmed, "cached_input_tokens", "cached_input_tokens"))
+        lines.append(_confirmed_token_line(confirmed, "total_output_tokens", "output_tokens"))
+        if (confirmed.get("cache_creation_input_tokens") or 0):
+            lines.append(_confirmed_token_line(confirmed, "cache_creation_input_tokens", "cache_creation_input_tokens"))
         cu = usage.get("cost_usd") if isinstance(usage.get("cost_usd"), dict) else {}
         if cu:
             total_cost = float(cu.get("total") or 0.0)
