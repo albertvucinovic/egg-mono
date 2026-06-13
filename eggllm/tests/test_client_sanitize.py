@@ -191,7 +191,7 @@ def test_packaged_openai_configs_request_streaming_usage():
         assert openai_params["stream_options"]["include_usage"] is True
 
 
-def test_packaged_openai_pro_requests_cache_retention_with_store_false():
+def test_packaged_openai_pro_requests_cache_key_with_store_false():
     import importlib.resources as resources
 
     with resources.files("eggconfig.eggconfig.data").joinpath("models.json").open("r", encoding="utf-8") as f:
@@ -200,4 +200,4 @@ def test_packaged_openai_pro_requests_cache_retention_with_store_false():
     params = packaged["providers"]["openai-pro"]["parameters"]
     assert params["store"] is False
     assert params["prompt_cache_key"] == "prompt_cache_key"
-    assert params["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_retention" not in params
