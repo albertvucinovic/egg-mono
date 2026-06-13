@@ -539,6 +539,107 @@ class TestTokenStats:
         assert "context_tokens" in data
         assert "full_thread_tokens" in data
 
+    def test_stats_exposes_precise_usage_fields(self, client, monkeypatch):
+        """Stats keeps legacy fields and adds detailed usage/cost fields."""
+        create_resp = client.post("/api/threads", json={"name": "Detailed Stats"})
+        thread_id = create_resp.json()["id"]
+
+        def fake_thread_token_stats(db, tid, llm=None):
+            assert tid == thread_id
+            return {
+                "context_tokens": 10,
+                "full_thread_tokens": 30,
+                "api_usage": {
+                    "total_input_tokens": 20,
+                    "cached_input_tokens": 5,
+                    "cache_creation_input_tokens": 3,
+                    "cache_creation_5m_input_tokens": 1,
+                    "cache_creation_1h_input_tokens": 2,
+                    "cached_tokens": 12,
+                    "total_output_tokens": 7,
+                    "total_reasoning_tokens": 2,
+                    "approx_call_count": 4,
+                    "actual_call_count": 1,
+                    "estimated_call_count": 3,
+                    "api_confirmed_usage": {
+                        "actual_call_count": 1,
+                        "total_input_tokens": 20,
+                        "cached_input_tokens": 5,
+                        "total_output_tokens": 7,
+                        "field_call_counts": {
+                            "total_input_tokens": 1,
+                            "cached_input_tokens": 1,
+                            "total_output_tokens": 1,
+                        },
+                    },
+                    "by_model": {"test-model": {"total_input_tokens": 20}},
+                    "cost_usd": {
+                        "total": 0.1234,
+                        "by_model": {"test-model": {"total": 0.1234}},
+                        "warnings": ["note"],
+                    },
+                },
+                "api_usage_since_compaction": {
+                    "total_input_tokens": 9,
+                    "cached_input_tokens": 1,
+                    "total_output_tokens": 2,
+                    "approx_call_count": 1,
+                    "actual_call_count": 0,
+                    "estimated_call_count": 1,
+                },
+            }
+
+        monkeypatch.setattr("eggw.routes.stats.thread_token_stats", fake_thread_token_stats)
+
+        response = client.get(f"/api/threads/{thread_id}/stats")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["input_tokens"] == 20
+        assert data["output_tokens"] == 7
+        assert data["cached_tokens"] == 5
+        assert data["context_tokens"] == 10
+        assert data["full_thread_tokens"] == 30
+        assert data["current_provider_context_tokens"] == 10
+        assert data["full_thread_context_tokens"] == 30
+        assert data["compacted_away_tokens"] == 20
+        assert data["cached_input_tokens"] == 5
+        assert data["cached_tokens_last"] == 12
+        assert data["cached_input_hit_rate"] == 25.0
+        assert data["cache_creation_input_tokens"] == 3
+        assert data["cache_creation_5m_input_tokens"] == 1
+        assert data["cache_creation_1h_input_tokens"] == 2
+        assert data["approx_call_count"] == 4
+        assert data["actual_call_count"] == 1
+        assert data["estimated_call_count"] == 3
+        assert data["cost_usd"] == 0.1234
+        assert data["cost_total_usd"] == 0.1234
+        assert data["cost_warnings"] == ["note"]
+        assert data["api_confirmed_usage"]["actual_call_count"] == 1
+        assert data["api_usage"]["cache_creation_input_tokens"] == 3
+        assert data["api_usage_since_compaction"]["total_input_tokens"] == 9
+        assert data["by_model"] == {"test-model": {"total_input_tokens": 20}}
+
+    def test_stats_reports_live_llm_tps_for_active_stream(self, client, monkeypatch):
+        """Stats route can compute live TPS for an active LLM stream."""
+        create_resp = client.post("/api/threads", json={"name": "Live TPS"})
+        thread_id = create_resp.json()["id"]
+        invoke_id = "invoke-live-tps"
+
+        assert core_state.db.try_open_stream(
+            thread_id,
+            invoke_id,
+            "2999-01-01 00:00:00",
+            owner="test",
+            purpose="llm",
+        )
+        monkeypatch.setattr("eggw.routes.stats.live_llm_tps_for_invoke", lambda db, inv: 12.5)
+
+        response = client.get(f"/api/threads/{thread_id}/stats")
+
+        assert response.status_code == 200
+        assert response.json()["streaming_tps"] == 12.5
+
 
 class TestSSEEvents:
     """Test Server-Sent Events streaming."""
@@ -553,6 +654,106 @@ class TestSSEEvents:
 
 class TestCommands:
     """Test slash commands."""
+
+    def test_cost_command_matches_shared_diagnostics_format(self, client, monkeypatch):
+        """EggW /cost uses the shared rich diagnostics formatter."""
+        create_resp = client.post("/api/threads", json={"name": "Cost Command"})
+        thread_id = create_resp.json()["id"]
+
+        def fake_thread_token_stats(db, tid, llm=None):
+            assert tid == thread_id
+            return {
+                "context_tokens": 10,
+                "full_thread_tokens": 30,
+                "api_usage": {
+                    "total_input_tokens": 5,
+                    "cached_input_tokens": 1,
+                    "cache_creation_input_tokens": 2,
+                    "cached_tokens": 5,
+                    "total_output_tokens": 2,
+                    "approx_call_count": 1,
+                    "actual_call_count": 1,
+                    "estimated_call_count": 0,
+                    "api_confirmed_usage": {
+                        "actual_call_count": 1,
+                        "total_input_tokens": 5,
+                        "cached_input_tokens": 1,
+                        "cache_creation_input_tokens": 2,
+                        "total_output_tokens": 2,
+                        "field_call_counts": {
+                            "total_input_tokens": 1,
+                            "cached_input_tokens": 1,
+                            "cache_creation_input_tokens": 1,
+                            "total_output_tokens": 1,
+                        },
+                    },
+                    "by_model": {
+                        "test-model": {
+                            "total_input_tokens": 5,
+                            "cached_input_tokens": 1,
+                            "cache_creation_input_tokens": 2,
+                            "total_output_tokens": 2,
+                            "approx_call_count": 1,
+                            "actual_call_count": 1,
+                            "estimated_call_count": 0,
+                        }
+                    },
+                    "cost_usd": {
+                        "total": 0.10,
+                        "by_model": {
+                            "test-model": {
+                                "input": 0.01,
+                                "cached": 0.02,
+                                "cache_creation": 0.03,
+                                "output": 0.04,
+                                "total": 0.10,
+                            }
+                        },
+                    },
+                },
+                "api_usage_since_compaction": {
+                    "total_input_tokens": 3,
+                    "cached_input_tokens": 1,
+                    "total_output_tokens": 2,
+                    "approx_call_count": 1,
+                    "actual_call_count": 0,
+                    "estimated_call_count": 1,
+                    "api_confirmed_usage": {"actual_call_count": 0, "field_call_counts": {}},
+                },
+            }
+
+        monkeypatch.setattr("eggw.commands.utility.thread_token_stats", fake_thread_token_stats)
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/cost"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        cost_text = data["message"]
+        assert "full_thread_context_tokens:       30" in cost_text
+        assert "current_provider_context_tokens:  10" in cost_text
+        assert "compacted_away_tokens:            20" in cost_text
+        assert "Full context usage (full effective history):" in cost_text
+        assert "Current provider context usage (after last compaction):" in cost_text
+        assert "cached_input_hit_rate: 20.0%" in cost_text
+        assert "actual_call_count:     1 API-confirmed" in cost_text
+        assert "estimated_call_count:  0" in cost_text
+        assert "API-confirmed usage:" in cost_text
+        assert "input_tokens: 5" in cost_text
+        assert "cached_input_tokens: 1" in cost_text
+        assert "cache_creation_input_tokens: 2" in cost_text
+        assert "actual_call_count:     0 API-confirmed" in cost_text
+        assert "input_tokens: Not available" in cost_text
+        assert "cache_creation: $0.0300" in cost_text
+        assert "calls=1 (actual=1, estimated=0)" in cost_text
+        assert "cache_creation_in=2" in cost_text
+        assert data["data"]["actual_call_count"] == 1
+        assert data["data"]["estimated_call_count"] == 0
+        assert data["data"]["compacted_away_tokens"] == 20
+        assert data["data"]["cache_creation_input_tokens"] == 2
 
     def test_display_verbosity_command_returns_frontend_action(self, client):
         """eggw supports the UI-only /displayVerbosity command."""

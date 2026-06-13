@@ -99,6 +99,25 @@ class ThreadTokenStats(BaseModel):
     context_tokens: int = 0
     full_thread_tokens: int = 0
     streaming_tps: Optional[float] = None
+    current_provider_context_tokens: int = 0
+    full_thread_context_tokens: int = 0
+    compacted_away_tokens: int = 0
+    cached_input_tokens: int = 0
+    cached_tokens_last: int = 0
+    cached_input_hit_rate: float = 0.0
+    cache_creation_input_tokens: int = 0
+    cache_creation_5m_input_tokens: int = 0
+    cache_creation_1h_input_tokens: int = 0
+    approx_call_count: int = 0
+    actual_call_count: int = 0
+    estimated_call_count: int = 0
+    cost_total_usd: Optional[float] = None
+    cost_usd_details: Optional[Dict[str, Any]] = None
+    cost_warnings: List[str] = []
+    api_confirmed_usage: Optional[Dict[str, Any]] = None
+    api_usage: Optional[Dict[str, Any]] = None
+    api_usage_since_compaction: Optional[Dict[str, Any]] = None
+    by_model: Optional[Dict[str, Any]] = None
 
 
 class ModelInfo(BaseModel):

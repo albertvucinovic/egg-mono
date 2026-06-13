@@ -50,32 +50,18 @@ def schedulers_command(context: Any, arg: str):
     return CommandResult(clear_input=True)
 
 
-def cost_command(context: Any, arg: str):
-    from ..command_catalog import CommandResult
+def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
+    """Format token/cost statistics for diagnostic UIs."""
 
-    target = _target(context, "cost")
-    if target is None:
-        return CommandResult(clear_input=False)
-    db, thread_id = target
-    try:
-        llm = context.llm_client if getattr(context, "llm_client", None) is not None else getattr(getattr(context, "app", None), "llm_client", None)
-        stats = thread_token_stats(db, thread_id, llm=llm)
-        ctx_tokens = stats.get("context_tokens")
-        full_thread_tokens = stats.get("full_thread_tokens")
-        api = stats.get("api_usage", stats)
-        since_api = stats.get("api_usage_since_compaction")
-    except Exception as e:
-        _log(context, f"/cost error: {e}")
-        return CommandResult(clear_input=False)
-    if not (isinstance(ctx_tokens, int) or (isinstance(api, dict) and api)):
-        _log(context, "No snapshot/token statistics available for this thread yet; send a message first.")
-        return CommandResult(clear_input=False)
+    ctx_tokens = stats.get("context_tokens")
+    full_thread_tokens = stats.get("full_thread_tokens")
+    api = stats.get("api_usage", stats)
+    since_api = stats.get("api_usage_since_compaction")
     if not isinstance(api, dict):
         api = {}
     if not isinstance(since_api, dict):
         since_api = None
 
-    target_thread = context.current_thread or thread_id
     compacted_away_tokens = None
     if isinstance(ctx_tokens, int) and isinstance(full_thread_tokens, int):
         compacted_away_tokens = max(0, full_thread_tokens - ctx_tokens)
@@ -203,7 +189,29 @@ def cost_command(context: Any, arg: str):
         for warning in warnings[:10]:
             cost_lines.append(f"  note: {warning}")
 
-    block = "\n".join(lines + cost_lines)
+    return "\n".join(lines + cost_lines)
+
+
+def cost_command(context: Any, arg: str):
+    from ..command_catalog import CommandResult
+
+    target = _target(context, "cost")
+    if target is None:
+        return CommandResult(clear_input=False)
+    db, thread_id = target
+    try:
+        llm = context.llm_client if getattr(context, "llm_client", None) is not None else getattr(getattr(context, "app", None), "llm_client", None)
+        stats = thread_token_stats(db, thread_id, llm=llm)
+        ctx_tokens = stats.get("context_tokens")
+        api = stats.get("api_usage", stats)
+    except Exception as e:
+        _log(context, f"/cost error: {e}")
+        return CommandResult(clear_input=False)
+    if not (isinstance(ctx_tokens, int) or (isinstance(api, dict) and api)):
+        _log(context, "No snapshot/token statistics available for this thread yet; send a message first.")
+        return CommandResult(clear_input=False)
+
+    block = format_cost_report(stats, context.current_thread or thread_id)
     _log(context, "Token usage / cost for current thread (see console for full details).")
     _print_block(context, "Cost", block, border_style="green")
     return CommandResult(clear_input=True)
@@ -382,6 +390,7 @@ class DiagnosticsPlugin:
 __all__ = [
     "DiagnosticsPlugin",
     "cost_command",
+    "format_cost_report",
     "register_diagnostics_commands",
     "schedulers_command",
     "set_context_limit_command",

@@ -25,6 +25,7 @@ from eggthreads import (
     append_message,
     create_snapshot,
 )
+from eggthreads.builtin_plugins.diagnostics import format_cost_report
 
 from ..models import CommandResponse
 from .. import core
@@ -286,79 +287,57 @@ async def cmd_skill(thread_id: str, name: str) -> CommandResponse:
 
 
 async def cmd_cost(thread_id: str) -> CommandResponse:
-    """Handle /cost command - show token usage and cost (matches egg.py format)."""
+    """Handle /cost command - show token usage and cost."""
     stats = thread_token_stats(core.db, thread_id, llm=core.llm_client)
-    api = stats.get("api_usage", {})
-    ctx_tokens = stats.get("context_tokens", 0)
-    full_thread_tokens = stats.get("full_thread_tokens", ctx_tokens)
+    api = stats.get("api_usage", stats)
+    ctx_tokens = stats.get("context_tokens")
 
-    if not api:
+    if not (isinstance(ctx_tokens, int) or (isinstance(api, dict) and api)):
         return CommandResponse(
             success=False,
-            message="No token statistics available for this thread yet; send a message first."
+            message="No snapshot/token statistics available for this thread yet; send a message first."
         )
+    if not isinstance(api, dict):
+        api = {}
 
     ti = api.get("total_input_tokens", 0) or 0
     to = api.get("total_output_tokens", 0) or 0
     tr = api.get("total_reasoning_tokens", 0) or 0
     cached_last = api.get("cached_tokens", 0) or 0  # Most recent call
     cached_total = api.get("cached_input_tokens", 0) or 0  # Total across all calls
+    cache_creation_in = api.get("cache_creation_input_tokens", 0) or 0
     calls = api.get("approx_call_count", 0) or 0
+    actual_calls = api.get("actual_call_count", 0) or 0
+    estimated_calls = api.get("estimated_call_count")
+    if estimated_calls is None:
+        estimated_calls = max(int(calls) - int(actual_calls), 0)
 
-    def fmt_tok(n: int) -> str:
-        if n < 1000:
-            return str(n)
-        return f"{n/1000:.2f}k"
-
-    lines = [
-        f"Thread {thread_id[-8:]} token usage:",
-        f"  context_tokens:        {ctx_tokens} ({fmt_tok(ctx_tokens)})",
-        f"  full_thread_tokens:    {full_thread_tokens} ({fmt_tok(full_thread_tokens)})",
-        f"  total_input_tokens:    {ti} ({fmt_tok(ti)})",
-        f"  cached_input_tokens:   {cached_total} ({fmt_tok(cached_total)})",
-        f"  cached_tokens (last):  {cached_last} ({fmt_tok(cached_last)})",
-        f"  total_output_tokens:   {to} ({fmt_tok(to)})",
-        f"  total_reasoning_tokens: {tr} ({fmt_tok(tr)})",
-        f"  approx_call_count:     {calls}",
-    ]
-
-    # Cost breakdown
     cu = api.get("cost_usd", {}) if isinstance(api.get("cost_usd"), dict) else {}
     total_cost = float(cu.get("total", 0) or 0)
-
-    lines.append("")
-    lines.append(f"Approximate cost (USD): ${total_cost:.4f}")
-
-    # Per-model breakdown if available
-    by_model_cost = cu.get("by_model", {}) if isinstance(cu.get("by_model"), dict) else {}
-    by_model_usage = api.get("by_model", {}) if isinstance(api.get("by_model"), dict) else {}
-
-    if by_model_usage or by_model_cost:
-        lines.append("")
-        lines.append("Per-model breakdown:")
-        model_keys = set(by_model_usage.keys()) | set(by_model_cost.keys())
-        for mk in sorted(model_keys, key=lambda k: -float((by_model_cost.get(k, {}).get("total") or 0))):
-            u = by_model_usage.get(mk, {})
-            c = by_model_cost.get(mk, {})
-            m_in = u.get("total_input_tokens", 0) or 0
-            m_out = u.get("total_output_tokens", 0) or 0
-            m_cached = u.get("cached_input_tokens", 0) or 0
-            m_cost = float(c.get("total", 0) or 0)
-            lines.append(f"  {mk}: {fmt_tok(m_in)} in, {fmt_tok(m_out)} out, {fmt_tok(m_cached)} cached, ${m_cost:.4f}")
+    full_thread_tokens = stats.get("full_thread_tokens", ctx_tokens if isinstance(ctx_tokens, int) else 0) or 0
+    compacted_away_tokens = max(0, int(full_thread_tokens) - int(ctx_tokens or 0))
 
     return CommandResponse(
         success=True,
-        message="\n".join(lines),
+        message=format_cost_report(stats, thread_id),
         data={
             "context_tokens": ctx_tokens,
             "full_thread_tokens": full_thread_tokens,
+            "current_provider_context_tokens": ctx_tokens,
+            "full_thread_context_tokens": full_thread_tokens,
+            "compacted_away_tokens": compacted_away_tokens,
             "input_tokens": ti,
             "output_tokens": to,
             "reasoning_tokens": tr,
             "cached_input_tokens": cached_total,
             "cached_tokens_last": cached_last,
+            "cache_creation_input_tokens": cache_creation_in,
             "approx_call_count": calls,
+            "actual_call_count": actual_calls,
+            "estimated_call_count": estimated_calls,
             "cost_usd": total_cost,
+            "api_usage": api,
+            "api_usage_since_compaction": stats.get("api_usage_since_compaction") if isinstance(stats.get("api_usage_since_compaction"), dict) else None,
         },
     )
 

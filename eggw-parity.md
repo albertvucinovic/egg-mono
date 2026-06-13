@@ -34,23 +34,23 @@ Reference files:
 - EggW stats model/route: `eggw/eggw/models.py`, `eggw/eggw/routes/stats.py`
 
 Tasks:
-- [ ] Reuse or mirror the shared `/cost` formatting in EggW so output includes:
-  - [ ] full effective history usage;
-  - [ ] current provider context usage after last compaction;
-  - [ ] compacted-away token count;
-  - [ ] cached input hit rate;
-  - [ ] actual API-confirmed call count;
-  - [ ] estimated call count;
-  - [ ] `API-confirmed usage:` section with `Not available` when absent;
-  - [ ] cache-creation input tokens;
-  - [ ] cache-creation cost;
-  - [ ] richer per-model breakdown.
-- [ ] Expand EggW stats API/model enough for browser header/system display to consume precise fields without losing existing fields.
-- [ ] Fix EggW live streaming TPS bug in `eggw/eggw/routes/stats.py` (`datetime` is used but not imported).
-- [ ] Add focused tests for EggW `/cost` output and `/stats` shape.
+- [x] Reuse or mirror the shared `/cost` formatting in EggW so output includes:
+  - [x] full effective history usage;
+  - [x] current provider context usage after last compaction;
+  - [x] compacted-away token count;
+  - [x] cached input hit rate;
+  - [x] actual API-confirmed call count;
+  - [x] estimated call count;
+  - [x] `API-confirmed usage:` section with `Not available` when absent;
+  - [x] cache-creation input tokens;
+  - [x] cache-creation cost;
+  - [x] richer per-model breakdown.
+- [x] Expand EggW stats API/model enough for browser header/system display to consume precise fields without losing existing fields.
+- [x] Fix EggW live streaming TPS bug in `eggw/eggw/routes/stats.py` (`datetime` is used but not imported).
+- [x] Add focused tests for EggW `/cost` output and `/stats` shape.
 
 Status notes:
-- Pending.
+- 2026-06-13: Implemented in one Phase 1 slice. Shared diagnostics now exposes a small `format_cost_report()` helper reused by EggW `/cost`; EggW stats preserves legacy fields and adds detailed context, cache, call-count, cost, API-confirmed, per-model, and since-compaction fields; focused backend tests cover `/cost` text parity and `/stats` response shape.
 
 ## Phase 2 — Tool timeout countdown/header parity
 
