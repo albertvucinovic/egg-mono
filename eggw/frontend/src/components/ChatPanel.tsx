@@ -35,13 +35,15 @@ function preprocessLatex(content: string): string {
 
   // Convert [ ... ] when it starts with a LaTeX command (common AI output format)
   // This handles multiline content like [ \begin{aligned} ... \end{aligned} ]
-  // Match [ followed by whitespace and backslash, capture until closing ]
+  // Match a standalone [ followed by whitespace and backslash, capture until
+  // closing ]. Do not treat brackets that are part of LaTeX commands (for
+  // example \left[ ... \right]) as markdown math delimiters.
   processed = processed.replace(
-    /\[\s*(\\[\s\S]*?)\s*\]/g,
-    (match, math) => {
+    /(^|[^\w\\])\[\s*(\\[\s\S]*?)\s*\]/g,
+    (match, prefix, math) => {
       // Only convert if it looks like LaTeX (contains common LaTeX commands)
       if (/\\(?:begin|end|frac|sum|int|prod|lim|nabla|partial|sqrt|text|mathbf|mathrm|left|right|aligned|equation|matrix|cases)/.test(math)) {
-        return `$$${math}$$`;
+        return `${prefix}$$${math}$$`;
       }
       return match; // Keep original if not LaTeX
     }
