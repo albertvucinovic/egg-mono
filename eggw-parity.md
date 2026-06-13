@@ -61,15 +61,15 @@ Reference files:
 - EggW event/store/rendering: `eggw/frontend/src/hooks/useSSE.ts`, `eggw/frontend/src/lib/store.ts`, `eggw/frontend/src/components/ChatPanel.tsx`, `eggw/frontend/src/components/SystemPanel.tsx`
 
 Tasks:
-- [ ] Store tool execution start time and resolved timeout when EggW receives `tool_call.execution_started`.
-- [ ] Accept canonical and legacy timeout payload keys: `timeout`, `timeout_sec`, `timeout_seconds`, `timeout_secs`, `timeout_s`, `_tool_timeout_sec`, `_egg_tool_timeout_sec`.
-- [ ] Render a dynamic `timeout in Ns (limit Ns)` indicator for active tool streams/status, analogous to terminal Egg.
-- [ ] Ensure timeout remains visible when tool summary/suppressed-output status is also visible.
-- [ ] Ensure timeout display survives pending user messages / message invalidations while the tool remains active.
-- [ ] Add frontend/unit/e2e coverage where practical.
+- [x] Store tool execution start time and resolved timeout when EggW receives `tool_call.execution_started`.
+- [x] Accept canonical and legacy timeout payload keys: `timeout`, `timeout_sec`, `timeout_seconds`, `timeout_secs`, `timeout_s`, `_tool_timeout_sec`, `_egg_tool_timeout_sec`.
+- [x] Render a dynamic `timeout in Ns (limit Ns)` indicator for active tool streams/status, analogous to terminal Egg.
+- [x] Ensure timeout remains visible when tool summary/suppressed-output status is also visible.
+- [x] Ensure timeout display survives pending user messages / message invalidations while the tool remains active.
+- [x] Add frontend/unit/e2e coverage where practical.
 
 Status notes:
-- Pending.
+- 2026-06-13: Implemented in one Phase 2 slice. EggW stores active tool timeout metadata from `tool_call.execution_started`, resolves canonical and legacy timeout aliases, includes SSE event timestamps so reconnect/replay countdowns use event start time, and renders a local dynamic countdown in the active tool streaming block/header alongside summaries and suppressed-output indicators. Frontend typecheck and EggW backend tests pass; no frontend unit harness exists beyond Playwright e2e, so coverage for this slice is type-level plus existing backend regression coverage.
 
 ## Phase 3 — `get_user_message_while_preserving_llm_turn` web UX/status/cancel parity
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, type ReactNode, type WheelEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode, type WheelEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -11,7 +11,7 @@ import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { fetchMessages } from "@/lib/api";
-import { useAppStore, type Message, type DisplayVerbosity } from "@/lib/store";
+import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
 
@@ -56,6 +56,16 @@ function toolStreamSavingText(name: string, frames: number = 0): string {
   const framesList = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   const glyph = framesList[Math.max(0, frames) % framesList.length] || "…";
   return `${glyph} tool${name ? ` ${name}` : ""}: preview limit reached; saving output only`;
+}
+
+function toolTimeoutCountdown(timeout: StreamingToolTimeout | undefined, nowMs: number): string | null {
+  if (!timeout) return null;
+  const limit = Number(timeout.timeoutSec);
+  const startedAtMs = Number(timeout.startedAtMs);
+  if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(startedAtMs) || startedAtMs <= 0) return null;
+  const elapsedSec = Math.max(0, (nowMs - startedAtMs) / 1000);
+  const remainingSec = Math.max(0, limit - elapsedSec);
+  return `timeout in ${remainingSec.toFixed(0)}s (limit ${limit.toFixed(0)}s)`;
 }
 
 type HiddenDetailKind = "reasoning" | "tool_calls" | "tool_results";
@@ -559,6 +569,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
   const lastReasoningIndexRef = useRef(0);
   const lastReasoningSummaryIndexRef = useRef(0);
   const lastToolOutputIndexRef = useRef<Record<string, number>>({});
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const {
     currentThreadId,
@@ -572,6 +583,17 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
     scrollTrigger,
     displayVerbosity,
   } = useAppStore();
+  const hasActiveToolTimeout = Object.values(streamingToolOutputs).some((tool) => Boolean(tool.timeout));
+  const primaryToolTimeoutText = Object.values(streamingToolOutputs)
+    .map((tool) => toolTimeoutCountdown(tool.timeout, nowMs))
+    .find((text): text is string => Boolean(text));
+
+  useEffect(() => {
+    if (!hasActiveToolTimeout) return;
+    setNowMs(Date.now());
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [hasActiveToolTimeout]);
 
   // Stick-to-bottom scrolling: track if user intentionally scrolled away
   const stickToBottomRef = useRef(true);
@@ -961,6 +983,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                       <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
                     )}
                     <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                    {streamingKind === "tool" && primaryToolTimeoutText && (
+                      <span data-testid="streaming-tool-timeout-header" className="ml-2" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+                        {primaryToolTimeoutText}
+                      </span>
+                    )}
                   </div>
 
                   {displayVerbosity === "min" ? (
@@ -970,6 +997,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                           {Object.keys(streamingToolCalls).length > 0 && <div>Tool call streaming…</div>}
                           {Object.keys(streamingToolOutputs).length > 0 && <div>Tool output streaming…</div>}
                           {Object.keys(streamingToolCalls).length === 0 && Object.keys(streamingToolOutputs).length === 0 && <div>Tool output streaming…</div>}
+                          {primaryToolTimeoutText && <div data-testid="streaming-tool-timeout-min">{primaryToolTimeoutText}</div>}
                         </>
                       ) : (
                         <>
@@ -1028,50 +1056,67 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
                       {/* Streaming tool output preview */}
                       {Object.keys(streamingToolOutputs).length > 0 && (
                       <div className="mt-2 space-y-2">
-                        {Object.entries(streamingToolOutputs).map(([toolId, tool]) => (
-                          <details
-                            key={toolId}
-                            open
-                            className={`rounded ${showBorders ? 'border' : ''}`}
-                            style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
-                          >
-                            <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                              <span className="font-medium" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>{tool.name || "tool"}</span>
-                              <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-                                {toolId.slice(-8)}
-                              </span>
-                              <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
-                            </summary>
-                            <div className="px-2 pb-2">
-                              {tool.summary && (
-                                <div
-                                  data-testid="streaming-tool-summary"
-                                  className="mb-2 text-xs animate-pulse"
-                                  style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
-                                >
-                                  {tool.summary}
-                                </div>
-                              )}
-                              <pre
-                                ref={(el) => {
-                                  streamingToolOutputRefs.current[toolId] = el;
-                                }}
-                                data-testid="streaming-tool-output"
-                                className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words"
-                                style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}
-                              />
-                              {tool.suppressed && (
-                                <div
-                                  data-testid="streaming-tool-output-suppressed"
-                                  className="mt-2 text-xs animate-pulse"
-                                  style={{ color: "var(--muted)" }}
-                                >
-                                  {toolStreamSavingText(tool.name, tool.suppressedFrames)}
-                                </div>
-                              )}
-                            </div>
-                          </details>
-                        ))}
+                        {Object.entries(streamingToolOutputs).map(([toolId, tool]) => {
+                          const timeoutText = toolTimeoutCountdown(tool.timeout, nowMs);
+                          return (
+                            <details
+                              key={toolId}
+                              open
+                              className={`rounded ${showBorders ? 'border' : ''}`}
+                              style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
+                            >
+                              <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm flex-wrap">
+                                <span className="font-medium" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>{tool.name || "tool"}</span>
+                                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                                  {toolId.slice(-8)}
+                                </span>
+                                <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
+                                {timeoutText && (
+                                  <span data-testid="streaming-tool-timeout-summary" className="text-xs" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+                                    {timeoutText}
+                                  </span>
+                                )}
+                              </summary>
+                              <div className="px-2 pb-2">
+                                {timeoutText && (
+                                  <div
+                                    data-testid="streaming-tool-timeout"
+                                    className="mb-2 text-xs"
+                                    style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                                  >
+                                    {timeoutText}
+                                  </div>
+                                )}
+                                {tool.summary && (
+                                  <div
+                                    data-testid="streaming-tool-summary"
+                                    className="mb-2 text-xs animate-pulse"
+                                    style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                                  >
+                                    {tool.summary}
+                                  </div>
+                                )}
+                                <pre
+                                  ref={(el) => {
+                                    streamingToolOutputRefs.current[toolId] = el;
+                                  }}
+                                  data-testid="streaming-tool-output"
+                                  className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words"
+                                  style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}
+                                />
+                                {tool.suppressed && (
+                                  <div
+                                    data-testid="streaming-tool-output-suppressed"
+                                    className="mt-2 text-xs animate-pulse"
+                                    style={{ color: "var(--muted)" }}
+                                  >
+                                    {toolStreamSavingText(tool.name, tool.suppressedFrames)}
+                                  </div>
+                                )}
+                              </div>
+                            </details>
+                          );
+                        })}
                       </div>
                       )}
 

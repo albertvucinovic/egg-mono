@@ -42,12 +42,18 @@ export interface ToolCall {
 
 export type DisplayVerbosity = "max" | "medium" | "min";
 
+export interface StreamingToolTimeout {
+  startedAtMs: number;
+  timeoutSec: number;
+}
+
 export interface StreamingToolOutput {
   id: string;
   name: string;
   suppressed: boolean;
   suppressedFrames: number;
   summary?: string;
+  timeout?: StreamingToolTimeout;
 }
 
 export interface SystemLog {
@@ -91,6 +97,8 @@ interface AppState {
   streamingToolOutputs: Record<string, StreamingToolOutput>;
   setStreamingToolOutputs: (outputs: Record<string, StreamingToolOutput>) => void;
   upsertStreamingToolOutput: (id: string, name: string, suppressed?: boolean, summary?: string) => void;
+  markStreamingToolStarted: (id: string, name: string, startedAtMs: number, timeoutSec: number) => void;
+  clearStreamingToolTimeout: (id: string) => void;
 
   // Tool calls
   pendingTools: ToolCall[];
@@ -229,7 +237,40 @@ export const useAppStore = create<AppState>((set) => ({
             suppressed: existing.suppressed || suppressed,
             suppressedFrames: existing.suppressedFrames + (suppressed ? 1 : 0),
             summary: summary !== undefined ? summary : existing.summary,
+            timeout: existing.timeout,
           },
+        },
+      };
+    }),
+  markStreamingToolStarted: (id, name, startedAtMs, timeoutSec) =>
+    set((state) => {
+      const existing = state.streamingToolOutputs[id] || {
+        id,
+        name: "",
+        suppressed: false,
+        suppressedFrames: 0,
+        summary: undefined,
+      };
+      return {
+        streamingToolOutputs: {
+          ...state.streamingToolOutputs,
+          [id]: {
+            ...existing,
+            name: name || existing.name,
+            timeout: { startedAtMs, timeoutSec },
+          },
+        },
+      };
+    }),
+  clearStreamingToolTimeout: (id) =>
+    set((state) => {
+      const existing = state.streamingToolOutputs[id];
+      if (!existing || !existing.timeout) return {};
+      const { timeout: _timeout, ...withoutTimeout } = existing;
+      return {
+        streamingToolOutputs: {
+          ...state.streamingToolOutputs,
+          [id]: withoutTimeout,
         },
       };
     }),

@@ -113,6 +113,7 @@ async def stream_events(thread_id: str):
                     event_data = {
                         "event_seq": row["event_seq"],
                         "event_type": event_type,
+                        "ts": row["ts"] if "ts" in row.keys() else None,
                         "msg_id": row["msg_id"] if "msg_id" in row.keys() else None,
                         "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
                         "payload": payload,
@@ -136,6 +137,7 @@ async def stream_events(thread_id: str):
                         event_data = {
                             "event_seq": row["event_seq"],
                             "event_type": event_type,
+                            "ts": row["ts"] if "ts" in row.keys() else None,
                             "msg_id": row["msg_id"] if "msg_id" in row.keys() else None,
                             "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
                             "payload": payload,

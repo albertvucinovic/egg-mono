@@ -6,6 +6,37 @@ import { useAppStore } from "@/lib/store";
 import { streamingBuffer } from "@/lib/streamingBuffer";
 import { useQueryClient } from "@tanstack/react-query";
 
+const TOOL_TIMEOUT_KEYS = [
+  "timeout",
+  "timeout_sec",
+  "timeout_seconds",
+  "timeout_secs",
+  "timeout_s",
+  "_tool_timeout_sec",
+  "_egg_tool_timeout_sec",
+];
+
+function positiveTimeout(value: unknown): number | null {
+  const timeout = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(timeout) && timeout > 0 ? timeout : null;
+}
+
+function timeoutFromPayload(payload: Record<string, unknown>): number | null {
+  for (const key of TOOL_TIMEOUT_KEYS) {
+    const timeout = positiveTimeout(payload[key]);
+    if (timeout !== null) return timeout;
+  }
+  return null;
+}
+
+function eventStartedAtMs(value: unknown): number {
+  if (typeof value !== "string" || !value.trim()) return Date.now();
+  const raw = value.trim();
+  const normalized = raw.includes("T") ? raw : `${raw.replace(" ", "T")}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
 export function useSSE(threadId: string | null) {
   const eventSourceRef = useRef<EventSource | null>(null);
   const queryClient = useQueryClient();
@@ -13,6 +44,8 @@ export function useSSE(threadId: string | null) {
     setStreamingToolCalls,
     setStreamingToolOutputs,
     upsertStreamingToolOutput,
+    markStreamingToolStarted,
+    clearStreamingToolTimeout,
     appendToolCallArguments,
     setIsStreaming,
     setStreamingModelKey,
@@ -173,8 +206,15 @@ export function useSSE(threadId: string | null) {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
-        addSystemLog(`Tool executing: ${payload.name || payload.tool_call_id || "unknown"}`, "info");
+        const toolId = payload.tool_call_id || payload.id || payload.name || "tool";
+        const toolName = payload.name || payload.tool_name || "tool";
+        const timeoutSec = timeoutFromPayload(payload);
+        addSystemLog(`Tool executing: ${toolName || "unknown"}`, "info");
         setStreamingKind("tool");
+        setIsStreaming(true);
+        if (toolId && timeoutSec !== null) {
+          markStreamingToolStarted(String(toolId), String(toolName || "tool"), eventStartedAtMs(data.ts), timeoutSec);
+        }
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
@@ -200,8 +240,14 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool_call.finished
-    es.addEventListener("tool_call.finished", () => {
+    es.addEventListener("tool_call.finished", (e) => {
       try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const toolId = payload.tool_call_id || payload.id || payload.name;
+        if (toolId) {
+          clearStreamingToolTimeout(String(toolId));
+        }
         addSystemLog("Tool finished", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
@@ -281,6 +327,8 @@ export function useSSE(threadId: string | null) {
     setStreamingToolCalls,
     setStreamingToolOutputs,
     upsertStreamingToolOutput,
+    markStreamingToolStarted,
+    clearStreamingToolTimeout,
     appendToolCallArguments,
     setIsStreaming,
     setStreamingModelKey,
