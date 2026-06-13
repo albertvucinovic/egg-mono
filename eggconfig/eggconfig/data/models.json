@@ -138,7 +138,6 @@
       "parameters": {
         "store": false,
         "prompt_cache_key": "prompt_cache_key",
-        "prompt_cache_retention": "24h"
       },
       "models": {
         "Pro: GPT-5.3 Codex high": {
