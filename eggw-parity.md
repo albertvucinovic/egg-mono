@@ -200,13 +200,13 @@ Reference files:
 - EggW: `eggw/eggw/commands/thread.py`, `eggw/eggw/routes/threads.py`
 
 Tasks:
-- [ ] Confirm current EggW root-thread behavior with a focused test.
-- [ ] Append the correct system prompt for new EggW root threads.
-- [ ] Ensure `/newThread` and API-created root threads match.
-- [ ] Avoid duplicating system prompts on child threads or reload.
+- [x] Confirm current EggW root-thread behavior with a focused test.
+- [x] Append the correct system prompt for new EggW root threads.
+- [x] Ensure `/newThread` and API-created root threads match.
+- [x] Avoid duplicating system prompts on child threads or reload.
 
 Status notes:
-- Pending.
+- 2026-06-14: Implemented new-root system prompt parity. EggW now appends the loaded Egg system prompt, including the skill index when available, to newly created root threads from both `POST /api/threads` and `/newThread`, then snapshots so `/messages` shows it. Child thread creation remains unchanged and does not receive an extra root prompt. Focused backend tests cover API roots, `/newThread` roots, child creation, and opening an existing thread without duplicating the prompt.
 
 ## Phase 10 — Final parity verification
 

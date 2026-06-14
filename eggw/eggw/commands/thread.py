@@ -31,6 +31,7 @@ from ..core import (
     get_thread_root_id,
     ensure_scheduler_for,
 )
+from ..system_prompt import append_root_system_prompt
 
 
 async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
@@ -71,6 +72,7 @@ async def cmd_new_thread(name: str) -> CommandResponse:
         initial_model_key=model_key,
         models_path=models_path,
     )
+    append_root_system_prompt(core.db, thread_id)
 
     return CommandResponse(
         success=True,

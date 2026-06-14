@@ -92,6 +92,12 @@ class TestHealthAndBasics:
 class TestThreadOperations:
     """Test thread CRUD operations."""
 
+    @staticmethod
+    def _system_messages(client, thread_id):
+        response = client.get(f"/api/threads/{thread_id}/messages")
+        assert response.status_code == 200
+        return [m for m in response.json() if m["role"] == "system"]
+
     def test_create_thread(self, client):
         """Test creating a new thread."""
         response = client.post("/api/threads", json={"name": "Test Thread"})
@@ -100,6 +106,51 @@ class TestThreadOperations:
         assert "id" in data
         assert len(data["id"]) > 0
         return data["id"]
+
+    def test_api_created_root_thread_has_one_system_prompt(self, client, monkeypatch):
+        """EggW API-created root threads include the loaded system prompt once."""
+        monkeypatch.setattr("eggw.system_prompt.load_system_prompt", lambda: "EGGW TEST SYSTEM PROMPT")
+
+        response = client.post("/api/threads", json={"name": "System Prompt Root"})
+        thread_id = response.json()["id"]
+
+        system_messages = self._system_messages(client, thread_id)
+        assert [m["content"] for m in system_messages] == ["EGGW TEST SYSTEM PROMPT"]
+
+        open_resp = client.post(f"/api/threads/{thread_id}/open")
+        assert open_resp.status_code == 200
+        system_messages = self._system_messages(client, thread_id)
+        assert [m["content"] for m in system_messages] == ["EGGW TEST SYSTEM PROMPT"]
+
+    def test_command_created_root_thread_has_one_system_prompt(self, client, monkeypatch):
+        """EggW /newThread-created roots include the loaded system prompt once."""
+        monkeypatch.setattr("eggw.system_prompt.load_system_prompt", lambda: "EGGW COMMAND SYSTEM PROMPT")
+        create_resp = client.post("/api/threads", json={"name": "Current Root"})
+        current_thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{current_thread_id}/command",
+            json={"command": "/newThread Command Root"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        new_thread_id = data["data"]["thread_id"]
+        system_messages = self._system_messages(client, new_thread_id)
+        assert [m["content"] for m in system_messages] == ["EGGW COMMAND SYSTEM PROMPT"]
+
+    def test_api_created_child_thread_does_not_get_root_system_prompt(self, client, monkeypatch):
+        """Root prompt insertion is limited to new root threads."""
+        monkeypatch.setattr("eggw.system_prompt.load_system_prompt", lambda: "EGGW ROOT ONLY PROMPT")
+        parent_resp = client.post("/api/threads", json={"name": "Parent Root"})
+        parent_id = parent_resp.json()["id"]
+
+        child_resp = client.post("/api/threads", json={"name": "Child", "parent_id": parent_id})
+        child_id = child_resp.json()["id"]
+
+        assert [m["content"] for m in self._system_messages(client, parent_id)] == ["EGGW ROOT ONLY PROMPT"]
+        assert self._system_messages(client, child_id) == []
 
     def test_get_thread(self, client):
         """Test getting thread details."""
@@ -1242,7 +1293,9 @@ class TestCommands:
             "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'",
             (thread_id,),
         ).fetchall()
-        assert not rows
+        payloads = [json.loads(row[0]) for row in rows]
+        assert not [payload for payload in payloads if payload.get("tool_calls")]
+        assert not [payload for payload in payloads if payload.get("user_command_type") == "/wait"]
 
     def test_compact_command_sets_provider_context_start(self, client):
         """eggw supports the shared /compact command."""

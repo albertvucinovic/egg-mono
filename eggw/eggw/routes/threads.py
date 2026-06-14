@@ -23,6 +23,7 @@ from eggthreads import (
 from ..models import ThreadInfo, CreateThreadRequest
 from .. import core
 from ..core import get_thread_root_id
+from ..system_prompt import append_root_system_prompt
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
@@ -163,6 +164,7 @@ async def create_thread(request: CreateThreadRequest):
             initial_model_key=model_key,
             models_path=models_path,
         )
+        append_root_system_prompt(core.db, thread_id)
 
     t = core.db.get_thread(thread_id)
     return ThreadInfo(
