@@ -1,4 +1,8 @@
 """Command handlers for eggw backend."""
+from eggthreads import append_message, create_snapshot
+from eggthreads.builtin_plugins.answer_user import btw_command
+from eggthreads.command_catalog import CommandContext
+
 from .thread import (
     cmd_spawn,
     cmd_new_thread,
@@ -65,6 +69,8 @@ from .utility import (
 )
 
 from ..models import CommandResponse
+from .. import core
+from ..core import ensure_scheduler_for
 
 __all__ = [
     # Thread commands
@@ -168,6 +174,22 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_new_thread(command_arg)
         elif command_name == "help":
             return cmd_help()
+        elif command_name == "btw":
+            result = btw_command(
+                CommandContext(
+                    db=core.db,
+                    current_thread=thread_id,
+                    start_scheduler=ensure_scheduler_for,
+                    append_message=append_message,
+                    create_snapshot=create_snapshot,
+                ),
+                command_arg,
+            )
+            return CommandResponse(
+                success=bool(result.clear_input),
+                message=result.message or "/btw completed.",
+                data={"start_schedulers": list(result.start_schedulers)} if result.start_schedulers else None,
+            )
         elif command_name == "skills":
             return await cmd_skills(thread_id, command_arg)
         elif command_name == "skill":

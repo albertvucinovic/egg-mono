@@ -999,6 +999,30 @@ class TestCommands:
         assert "/compactWithSummary" in data["message"]
         assert "/setAutoCompactThreshold" in data["message"]
 
+    def test_btw_command_uses_shared_preserve_turn_handler(self, client, monkeypatch):
+        """EggW /btw queues the shared preserve-turn request for the assistant."""
+        started: list[str] = []
+        monkeypatch.setattr("eggw.commands.ensure_scheduler_for", lambda tid: started.append(tid))
+        create_resp = client.post("/api/threads", json={"name": "BTW Command"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/btw please update me"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["message"] == "Queued /btw request for the assistant."
+        assert started == [thread_id]
+
+        messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        request = messages[-1]
+        assert request["role"] == "user"
+        assert "answer_user_while_preserving_llm_turn" in request["content"]
+        assert "please update me" in request["content"]
+
     def test_compact_command_sets_provider_context_start(self, client):
         """eggw supports the shared /compact command."""
         create_resp = client.post("/api/threads", json={"name": "Compact Command"})
