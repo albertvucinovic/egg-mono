@@ -1,7 +1,6 @@
 """Command handlers for eggw backend."""
 from eggthreads import append_message, create_snapshot
-from eggthreads.builtin_plugins.answer_user import btw_command
-from eggthreads.command_catalog import CommandContext
+from eggthreads.command_catalog import CommandContext, create_default_command_registry
 
 from .thread import (
     cmd_spawn,
@@ -71,6 +70,32 @@ from .utility import (
 from ..models import CommandResponse
 from .. import core
 from ..core import ensure_scheduler_for
+
+_SHARED_COMMAND_ADAPTER_COMMANDS = {"btw"}
+
+
+def _execute_shared_command(thread_id: str, command_name: str, command_arg: str) -> CommandResponse:
+    """Execute selected shared CommandRegistry handlers for EggW."""
+    if command_name not in _SHARED_COMMAND_ADAPTER_COMMANDS:
+        return CommandResponse(success=False, message=f"Unsupported shared command adapter: /{command_name}")
+
+    result = create_default_command_registry().execute(
+        command_name,
+        CommandContext(
+            db=core.db,
+            current_thread=thread_id,
+            start_scheduler=ensure_scheduler_for,
+            append_message=append_message,
+            create_snapshot=create_snapshot,
+        ),
+        command_arg,
+    )
+    data = {"start_schedulers": list(result.start_schedulers)} if result.start_schedulers else None
+    return CommandResponse(
+        success=bool(result.clear_input),
+        message=result.message or f"/{command_name} completed.",
+        data=data,
+    )
 
 __all__ = [
     # Thread commands
@@ -175,21 +200,7 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
         elif command_name == "help":
             return cmd_help()
         elif command_name == "btw":
-            result = btw_command(
-                CommandContext(
-                    db=core.db,
-                    current_thread=thread_id,
-                    start_scheduler=ensure_scheduler_for,
-                    append_message=append_message,
-                    create_snapshot=create_snapshot,
-                ),
-                command_arg,
-            )
-            return CommandResponse(
-                success=bool(result.clear_input),
-                message=result.message or "/btw completed.",
-                data={"start_schedulers": list(result.start_schedulers)} if result.start_schedulers else None,
-            )
+            return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "skills":
             return await cmd_skills(thread_id, command_arg)
         elif command_name == "skill":

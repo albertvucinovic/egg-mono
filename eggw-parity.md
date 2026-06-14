@@ -109,8 +109,8 @@ Reference files:
 - EggW dispatcher/help: `eggw/eggw/commands/__init__.py`, `eggw/eggw/commands/utility.py`
 
 Tasks:
-- [ ] Decide and implement a thin EggW adapter around `CommandRegistry` for commands that can use shared handlers.
-- [ ] Keep web-only commands explicit: `/theme`, `/rename`, `/spawn` alias, browser-specific `/redraw`/`/displayMode` no-ops if still desired.
+- [x] Decide and implement a thin EggW adapter around `CommandRegistry` for commands that can use shared handlers.
+- [x] Keep web-only commands explicit: `/theme`, `/rename`, `/spawn` alias, browser-specific `/redraw`/`/displayMode` no-ops if still desired.
 - [x] Add `/btw` support in EggW.
 - [x] Make EggW `/help` generated from the shared registry plus web-only commands.
 - [x] Add parity tests ensuring commands advertised by autocomplete/help are executable or intentionally web-only/terminal-only.
@@ -120,6 +120,7 @@ Status notes:
 - 2026-06-14: Implemented the first narrow Phase 4 slice. EggW now dispatches `/btw` through the shared `eggthreads.builtin_plugins.answer_user.btw_command`, so the web command queues the same preserve-turn interim-answer request and starts the thread scheduler. Focused backend coverage verifies the queued request. The broader shared-registry adapter and generated `/help` work remain pending.
 - 2026-06-14: Implemented generated `/help` parity slice. EggW `/help` now renders the shared `CommandRegistry` help and appends explicit EggW-only entries for `/spawn`, `/rename`, and `/theme`, plus EggW behavior notes for `/redraw` and `/displayMode`. Focused backend coverage verifies shared commands (`/btw`, `/cost`) and EggW-only entries appear. Full dispatch adapter and command-advertisement parity tests remain pending.
 - 2026-06-14: Added command-advertisement parity tests and fixed the tiny exposed drift by adding `/rename` to EggW command completions. Tests now ensure shared registry command names are covered by EggW dispatch and autocomplete names are either shared or explicit EggW-only commands. The full shared dispatch adapter and duplicate command-behavior revisit remain pending.
+- 2026-06-14: Implemented the final narrow adapter slice. EggW now has a tiny allowlisted shared `CommandRegistry` adapter and routes only `/btw` through it; other duplicated commands remain explicit because they currently need EggW-specific structured response data, browser behavior, or later phase review. Web-only `/theme`, `/rename`, `/spawn`, `/redraw`, and `/displayMode` behavior stays explicit. Duplicated thread command behavior remains pending for a separate review.
 
 ## Phase 5 — `/waitForThreads` parity
 
