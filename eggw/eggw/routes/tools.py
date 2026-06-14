@@ -87,29 +87,45 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
         if output_decision == "whole":
             preview = full_output
         elif output_decision == "partial":
-            preview = shorten_output_preview(full_output)
+            try:
+                from eggthreads.runner import stash_tool_output_and_build_preview
+
+                preview, artifact_path = stash_tool_output_and_build_preview(
+                    core.db,
+                    thread_id,
+                    request.tool_call_id,
+                    full_output,
+                )
+            except Exception:
+                preview = shorten_output_preview(full_output)
+                artifact_path = ""
         else:  # omit
             preview = "Output omitted."
+            artifact_path = ""
 
         # Compute stats for the payload
         line_count = len(full_output.splitlines()) if full_output else 0
         char_count = len(full_output)
 
         # Emit tool_call.output_approval event
+        payload = {
+            'tool_call_id': request.tool_call_id,
+            'decision': output_decision,
+            'reason': 'User decided in web UI',
+            'preview': preview,
+            'line_count': line_count,
+            'char_count': char_count,
+        }
+        if output_decision == "partial":
+            payload['artifact_path'] = artifact_path
+
         core.db.append_event(
             event_id=os.urandom(10).hex(),
             thread_id=thread_id,
             type_='tool_call.output_approval',
             msg_id=None,
             invoke_id=None,
-            payload={
-                'tool_call_id': request.tool_call_id,
-                'decision': output_decision,
-                'reason': 'User decided in web UI',
-                'preview': preview,
-                'line_count': line_count,
-                'char_count': char_count,
-            },
+            payload=payload,
         )
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")

@@ -630,6 +630,92 @@ class TestToolCalls:
         assert len(tools) == 1
         assert tools[0]["state"] in ["TC2.1", "TC3", "TC4", "TC5"]  # Advanced from TC1
 
+    def test_partial_output_approval_stashes_full_output_artifact(self, client, monkeypatch, tmp_path):
+        """Partial output approval preserves full output as a readable artifact."""
+        from eggthreads import append_message, build_tool_call_states
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("eggw.routes.tools.ensure_scheduler_for", lambda tid: None)
+        create_resp = client.post("/api/threads", json={"name": "Partial Output Approval"})
+        thread_id = create_resp.json()["id"]
+        tool_call_id = "call-partial-output-web"
+        full_output = "\n".join(f"line {i:03d} " + ("x" * 40) for i in range(250))
+
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": json.dumps({"script": "long"})},
+                    }
+                ]
+            },
+        )
+        core_state.db.append_event(
+            event_id="approve-partial-output-web",
+            thread_id=thread_id,
+            type_="tool_call.approval",
+            payload={"tool_call_id": tool_call_id, "decision": "granted"},
+        )
+        core_state.db.append_event(
+            event_id="start-partial-output-web",
+            thread_id=thread_id,
+            type_="tool_call.execution_started",
+            payload={"tool_call_id": tool_call_id},
+        )
+        core_state.db.append_event(
+            event_id="finish-partial-output-web",
+            thread_id=thread_id,
+            type_="tool_call.finished",
+            payload={"tool_call_id": tool_call_id, "reason": "success", "output": full_output},
+        )
+        assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"
+
+        response = client.post(
+            f"/api/threads/{thread_id}/tools/approve",
+            json={"tool_call_id": tool_call_id, "approved": True, "output_decision": "partial"},
+        )
+
+        assert response.status_code == 200
+        row = core_state.db.conn.execute(
+            """
+            SELECT payload_json FROM events
+             WHERE thread_id=? AND type='tool_call.output_approval'
+             ORDER BY event_seq DESC LIMIT 1
+            """,
+            (thread_id,),
+        ).fetchone()
+        payload = json.loads(row[0])
+        assert payload["tool_call_id"] == tool_call_id
+        assert payload["decision"] == "partial"
+        assert payload["line_count"] == len(full_output.splitlines())
+        assert payload["char_count"] == len(full_output)
+
+        preview = payload["preview"]
+        assert "Preview only" in preview
+        assert "Artifact id:" in preview
+        assert "read_long_tool_output(" in preview
+
+        artifact_path = Path(payload["artifact_path"])
+        assert artifact_path.is_dir()
+        assert str(artifact_path) not in preview
+
+        metadata_path = artifact_path / "metadata.json"
+        chunk_path = artifact_path / "chunk-0001.txt"
+        assert metadata_path.is_file()
+        assert chunk_path.is_file()
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert metadata["thread_id"] == thread_id
+        assert metadata["tool_call_id"] == tool_call_id
+        assert metadata["original_line_count"] == len(full_output.splitlines())
+        assert metadata["original_char_count"] == len(full_output)
+        assert chunk_path.read_text(encoding="utf-8").startswith("line 000")
+
 
 class TestAutoApproval:
     """Test auto-approval toggle via command."""

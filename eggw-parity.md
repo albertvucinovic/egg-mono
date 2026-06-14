@@ -149,13 +149,13 @@ Reference files:
 - Shared/terminal long-output handling: `eggthreads/eggthreads/builtin_plugins/long_output.py`, `egg/egg/approval.py`
 
 Tasks:
-- [ ] Inspect shared long-output approval payload conventions.
-- [ ] Make EggW partial approval preserve artifact/readback metadata or use the same helper as terminal.
-- [ ] Ensure UI copy explains how to read full output if partial is approved.
-- [ ] Add regression tests.
+- [x] Inspect shared long-output approval payload conventions.
+- [x] Make EggW partial approval preserve artifact/readback metadata or use the same helper as terminal.
+- [x] Ensure UI copy explains how to read full output if partial is approved.
+- [x] Add regression tests.
 
 Status notes:
-- Pending.
+- 2026-06-14: Implemented the manual REST partial-output approval parity slice. EggW now reuses `eggthreads.runner.stash_tool_output_and_build_preview()` for `output_decision: "partial"`, preserving full tool output as a thread-owned artifact and sending the same LLM-facing preview/readback instructions as terminal Egg. Existing `whole` and `omit` behavior is unchanged. The preview text itself carries the read instructions, so no frontend copy change was needed. Focused backend coverage verifies partial decisions, full-output line/char counts, artifact metadata/chunks, `read_long_tool_output(...)` instructions, and that filesystem artifact paths are not leaked in the preview.
 
 ## Phase 7 — Persisted streamed-tool metadata parity
 
