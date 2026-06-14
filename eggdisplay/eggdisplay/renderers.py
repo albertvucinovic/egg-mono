@@ -22,7 +22,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional, Protocol, Sequence
+from typing import Any, List, Optional, Protocol, Sequence
 
 from rich.console import Console
 
@@ -105,8 +105,9 @@ class _DiffRendererBase:
     )
     _CSI_SGR_RE = re.compile(r"\x1b\[[0-?]*[ -/]*m")
 
-    def __init__(self, *, console: Optional[Console] = None):
+    def __init__(self, *, console: Optional[Console] = None, theme: Optional[Any] = None):
         self.console = console or Console()
+        self.theme = theme
         self._color_system: Optional[str] = None
 
     def _term_width(self) -> int:
@@ -115,15 +116,21 @@ class _DiffRendererBase:
     def _term_height(self) -> int:
         return shutil.get_terminal_size(fallback=(100, 24)).lines
 
+    def _render_console_kwargs(self, file, width: int) -> dict:
+        kwargs = {
+            "file": file,
+            "width": width,
+            "force_terminal": True,
+            "color_system": self._color_system or "truecolor",
+        }
+        if self.theme is not None:
+            kwargs["theme"] = self.theme
+        return kwargs
+
     def _render_to_lines(self, renderable) -> tuple:
         width = self._term_width()
         buf = io.StringIO()
-        c = Console(
-            file=buf,
-            width=width,
-            force_terminal=True,
-            color_system=self._color_system or "truecolor",
-        )
+        c = Console(**self._render_console_kwargs(buf, width))
         c.print(renderable, end="")
         safe = self._sanitize_rendered_ansi(buf.getvalue())
         lines = safe.split("\n")
@@ -134,12 +141,7 @@ class _DiffRendererBase:
     def _rich_print_to_str(self, *objects, **kwargs) -> str:
         width = getattr(self, "_width", 0) or getattr(self, "_viewport_w", 0) or self._term_width()
         buf = io.StringIO()
-        c = Console(
-            file=buf,
-            width=width,
-            force_terminal=True,
-            color_system=self._color_system or "truecolor",
-        )
+        c = Console(**self._render_console_kwargs(buf, width))
         c.print(*objects, **kwargs)
         return self._sanitize_rendered_ansi(buf.getvalue())
 
@@ -209,8 +211,9 @@ class InlineDiffRenderer(_DiffRendererBase):
     """
 
     def __init__(self, initial=None, *, console: Optional[Console] = None,
-                 refresh_per_second: int = 30, screen: bool = False, **_):
-        super().__init__(console=console)
+                 refresh_per_second: int = 30, screen: bool = False,
+                 theme: Optional[Any] = None, **_):
+        super().__init__(console=console, theme=theme)
         self._initial = initial
         self._prev_lines: List[str] = []
         self._width: int = 0
@@ -387,8 +390,9 @@ class FullScreenDiffRenderer(_DiffRendererBase):
                  refresh_per_second: int = 30, screen: bool = False,
                  alt_screen: bool = True,
                  scrollback_source: Optional[FullScreenScrollbackSource] = None,
+                 theme: Optional[Any] = None,
                  **_):
-        super().__init__(console=console)
+        super().__init__(console=console, theme=theme)
         self._initial = initial
         self._alt_screen = bool(alt_screen)
         # Scrollback: permanent history rows appended via print_above.

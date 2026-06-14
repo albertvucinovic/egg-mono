@@ -73,6 +73,7 @@ from .panels import PanelsMixin
 from .approval import ApprovalMixin
 from .streaming import StreamingMixin
 from .input import InputMixin
+from .theme import apply_theme as apply_terminal_theme, register_theme_command
 from .commands import (
     ModelCommandsMixin,
     ThreadCommandsMixin,
@@ -118,6 +119,8 @@ class EggDisplayApp(
 
     def __init__(self):
         self.console = Console()
+        self._theme = "default"
+        self._rich_theme = None
         self.db = ThreadsDB()
         self.db.init_schema()
 
@@ -164,6 +167,7 @@ class EggDisplayApp(
         self._sandbox_status: Dict[str, Any] = {}
         self._reload_requested: bool = False
         self.command_registry = create_default_command_registry()
+        register_theme_command(self.command_registry, self)
         self.input_prefix_registry = create_default_input_prefix_registry()
         reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
         reloaded_existing_thread = False
@@ -249,7 +253,7 @@ class EggDisplayApp(
         # Input panel with autocomplete via completion module
         io_mode = os.environ.get("EGG_IO_MODE", "threaded").strip().lower()
         def _adapter(line: str, row: int, col: int):
-            return get_autocomplete_items(line, col, self.db, lambda: self.current_thread, self.llm_client)
+            return get_autocomplete_items(line, col, self.db, lambda: self.current_thread, self.llm_client, self.command_registry)
         # Input panel (no footer/status line; keep it visually clean).
         try:
             from eggdisplay import InputPanel as _InputPanel  # type: ignore
@@ -324,6 +328,29 @@ class EggDisplayApp(
         self._pending_prompt: Dict[str, Any] = {}
         # Last time we refreshed the children tree panel (sec since epoch)
         self._last_children_refresh: float = time.time()
+
+    def apply_theme(self, theme_name: str) -> str:
+        """Apply a terminal theme and mark live panels for repaint."""
+        applied = apply_terminal_theme(self, theme_name)
+        renderer = getattr(self, '_renderer', None)
+        if renderer is not None:
+            try:
+                renderer.console = self.console
+                renderer.theme = self._rich_theme
+            except Exception:
+                pass
+        for panel in (
+            getattr(self, 'chat_output', None),
+            getattr(self, 'system_output', None),
+            getattr(self, 'children_output', None),
+            getattr(self, 'approval_panel', None),
+            getattr(self, 'input_panel', None),
+        ):
+            try:
+                panel.mark_dirty()
+            except Exception:
+                pass
+        return applied
 
     def _build_chat_output_for_mode(self) -> None:
         """(Re)construct the Chat Messages panel for the current display mode.
@@ -568,7 +595,7 @@ class EggDisplayApp(
                 self._build_chat_output_for_mode()
                 mode_name = 'inline' if self._display_is_inline else 'full'
                 self._renderer = DiffRenderer(
-                    self.render_group(), console=self.console, mode=mode_name,
+                    self.render_group(), console=self.console, mode=mode_name, theme=self._rich_theme,
                 )
                 if not self._display_is_inline:
                     self._install_transcript_scrollback_source(self._renderer)

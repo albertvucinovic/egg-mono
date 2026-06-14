@@ -43,6 +43,7 @@ Commands:
   Display:
     /togglePanel (chat|children|system)
     /toggleBorders
+    /theme [name]
     /redraw
     /displayMode (full-screen|inline) — full-screen uses alt-screen with
       in-app scrolling + streaming-as-static; inline uses the terminal's

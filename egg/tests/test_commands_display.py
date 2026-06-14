@@ -206,3 +206,56 @@ class TestCmdDisplayVerbosity:
             "/displayVerbosity <max|medium|min>" in msg and "current: min" in msg
             for msg in egg_app._system_log
         )
+
+
+class TestCmdTheme:
+    """Tests for terminal Egg /theme."""
+
+    def test_theme_command_is_egg_app_local(self, egg_app):
+        from eggthreads.command_catalog import create_default_command_registry
+
+        assert "theme" not in create_default_command_registry().names()
+        assert "theme" in egg_app.command_registry.names()
+
+    def test_no_argument_lists_themes(self, egg_app):
+        egg_app.handle_command("/theme")
+
+        assert egg_app._theme == "default"
+        assert any("Available themes:" in msg and "current: default" in msg for msg in egg_app._system_log)
+        assert any("mono" in msg and "light-mono" in msg for msg in egg_app._system_log)
+
+    def test_sets_theme_and_redraws(self, egg_app, monkeypatch):
+        redrawn = []
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: redrawn.append(reason))
+
+        egg_app.handle_command("/theme matrix")
+
+        assert egg_app._theme == "matrix"
+        assert egg_app._rich_theme is not None
+        assert any("Theme changed to: matrix" in msg for msg in egg_app._system_log)
+        assert redrawn == ["theme changed"]
+
+    def test_background_variant_aliases_to_terminal_palette(self, egg_app, monkeypatch):
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+
+        egg_app.handle_command("/theme dark-background")
+
+        assert egg_app._theme == "dark"
+
+    def test_black_and_white_themes_from_eggw_are_supported(self, egg_app, monkeypatch):
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+
+        egg_app.handle_command("/theme mono")
+        assert egg_app._theme == "mono"
+
+        egg_app.handle_command("/theme light-mono")
+        assert egg_app._theme == "light-mono"
+
+    def test_invalid_theme_reports_error_without_changing_state(self, egg_app, monkeypatch):
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
+        egg_app.handle_command("/theme matrix")
+
+        egg_app.handle_command("/theme no-such-theme")
+
+        assert egg_app._theme == "matrix"
+        assert any("Unknown theme: no-such-theme" in msg for msg in egg_app._system_log)

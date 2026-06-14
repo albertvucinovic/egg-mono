@@ -513,7 +513,7 @@ class EggCompleter(Completer):
 
 
 # -------- eggdisplay autocomplete adapter ------------------------------------
-def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm: Any | None) -> List[Dict[str, str]]:
+def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm: Any | None, command_registry: Any | None = None) -> List[Dict[str, str]]:
     """Return a list of autocomplete items for eggdisplay InputPanel.
 
     Each item: {display: str, insert: str, optional replace: int}
@@ -524,7 +524,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         prefix = line[:col]
     except Exception:
         prefix = line
-    command_registry = create_default_command_registry()
+    command_registry = command_registry or create_default_command_registry()
 
     def _last_token(s: str) -> str:
         # Strip trailing whitespace to find the last token even if cursor is after a space

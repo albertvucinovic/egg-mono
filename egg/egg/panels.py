@@ -302,6 +302,7 @@ class TranscriptScrollbackSource:
             color_system = self._panels.console.color_system
         except Exception:
             color_system = 'truecolor'
+        theme = getattr(self._panels, '_rich_theme', None)
 
         fallback = item.fallback
         if fallback is None:
@@ -309,12 +310,15 @@ class TranscriptScrollbackSource:
         for renderable in (item.renderable, fallback):
             try:
                 buf = io.StringIO()
-                console = Console(
-                    file=buf,
-                    width=width,
-                    force_terminal=True,
-                    color_system=color_system or 'truecolor',
-                )
+                kwargs = {
+                    'file': buf,
+                    'width': width,
+                    'force_terminal': True,
+                    'color_system': color_system or 'truecolor',
+                }
+                if theme is not None:
+                    kwargs['theme'] = theme
+                console = Console(**kwargs)
                 console.print(renderable)
                 text = self._sanitize_rendered_ansi(buf.getvalue())
                 lines = text.split('\n')
