@@ -54,6 +54,12 @@ def _tool_call_args_stream_style(app: Any) -> Optional[str]:
     return STREAM_STYLE_TOOL_CALL_ARGS
 
 
+def _assistant_stream_style(app: Any) -> Optional[str]:
+    if getattr(app, '_rich_theme', None) is not None:
+        return "egg.assistant"
+    return STREAM_STYLE_TEXT
+
+
 def _timeout_from_mapping(args: Dict[str, Any]) -> Optional[float]:
     for key in TOOL_TIMEOUT_KEYS:
         timeout = _positive_timeout(args.get(key))
@@ -385,7 +391,7 @@ class StreamingMixin:
             txt = payload.get('text') or payload.get('content') or payload.get('delta')
             if isinstance(txt, str) and txt:
                 self._live_state['content'] = (self._live_state.get('content') or '') + txt
-                self._stream_append_on_renderer(txt, style=STREAM_STYLE_TEXT)
+                self._stream_append_on_renderer(txt, style=_assistant_stream_style(self))
             rs = payload.get('reason')
             if isinstance(rs, str) and rs:
                 self._live_state['reason'] = (self._live_state.get('reason') or '') + rs
@@ -651,7 +657,7 @@ class StreamingMixin:
             self._stream_append_on_renderer(reason, style=STREAM_STYLE_REASON)
         content = ls.get('content') or ''
         if isinstance(content, str) and content:
-            self._stream_append_on_renderer(content, style=STREAM_STYLE_TEXT)
+            self._stream_append_on_renderer(content, style=_assistant_stream_style(self))
         for name, txt in (ls.get('tools') or {}).items():
             if isinstance(txt, str) and txt:
                 self._stream_append_on_renderer(txt, style=STREAM_STYLE_TOOL_OUTPUT)

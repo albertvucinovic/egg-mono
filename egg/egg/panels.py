@@ -1375,6 +1375,19 @@ class PanelsMixin:
             return themed.get(variant, themed["body"])
         return fallback.get(variant, fallback["body"])
 
+    def _assistant_body_style(self, *, markdown: bool = False, note: bool = False) -> Optional[str]:
+        """Return assistant body style without changing the default theme."""
+        if getattr(self, '_rich_theme', None) is not None:
+            return "egg.reasoning" if note else "egg.assistant"
+        if markdown or note:
+            return None
+        return "white"
+
+    def _assistant_border_style(self, *, note: bool = False) -> str:
+        if getattr(self, '_rich_theme', None) is not None:
+            return "egg.reasoning" if note else "egg.assistant"
+        return 'bright_magenta' if note else 'cyan'
+
     def _static_transcript_message_renderables(
         self,
         m: Dict[str, Any],
@@ -1458,6 +1471,7 @@ class PanelsMixin:
         if role == 'assistant':
             is_assistant_note = bool(m.get('answer_user_preserve_turn'))
             title = '[bold bright_magenta]Assistant Note[/bold bright_magenta]' if is_assistant_note else '[bold cyan]Assistant[/bold cyan]'
+            assistant_border = self._assistant_border_style(note=is_assistant_note)
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
             if pm_tokens["content"]:
@@ -1492,12 +1506,14 @@ class PanelsMixin:
             if content:
                 if verbosity == 'min':
                     append_hidden_details()
+                assistant_markdown_style = self._assistant_body_style(markdown=True, note=is_assistant_note)
+                assistant_text_style = self._assistant_body_style(markdown=False, note=is_assistant_note)
                 if is_assistant_note:
-                    panel(Markdown(content), title, 'bright_magenta')
+                    panel(Markdown(content, style=assistant_markdown_style or 'none'), title, assistant_border)
                 elif looks_markdown(content):
-                    panel(Markdown(content), title, 'cyan')
+                    panel(Markdown(content, style=assistant_markdown_style or 'none'), title, assistant_border)
                 else:
-                    panel(Text(content, no_wrap=False, overflow='fold', style='white'), title, 'cyan')
+                    panel(Text(content, no_wrap=False, overflow='fold', style=assistant_text_style or ''), title, assistant_border)
             # Tool-calls summary if present
             tcs = m.get('tool_calls')
             if isinstance(tcs, list) and tcs:

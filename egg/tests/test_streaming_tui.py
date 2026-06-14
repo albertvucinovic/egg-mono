@@ -556,6 +556,50 @@ def test_streaming_tool_call_arguments_use_theme_style(tmp_path, monkeypatch):
     assert "Tool Call Args: bash" in rendered
 
 
+def test_streaming_assistant_text_uses_theme_style(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    app.apply_theme("ocean")
+
+    tid = app.current_thread
+    invoke_id = _uid()
+    calls = []
+
+    class Renderer:
+        def stream_begin(self):
+            pass
+
+        def stream_append(self, payload):
+            calls.append(payload)
+
+    app._renderer = Renderer()
+
+    async def scenario():
+        await app.ingest_event_for_live(
+            {
+                "type": "stream.open",
+                "invoke_id": invoke_id,
+                "ts": "2024-01-01 00:00:00",
+                "payload_json": json.dumps({"stream_kind": "llm"}),
+            },
+            tid,
+        )
+        calls.clear()
+        await app.ingest_event_for_live(
+            {
+                "type": "stream.delta",
+                "invoke_id": invoke_id,
+                "payload_json": json.dumps({"text": "assistant text"}),
+            },
+            tid,
+        )
+        app._flush_stream_render_buffer_now(force=True)
+
+    asyncio.run(scenario())
+
+    rendered = "".join(calls)
+    assert "[egg.assistant]assistant text[/egg.assistant]" in rendered
+
+
 def test_stream_delta_only_batch_does_not_recompute_pending_prompt(tmp_path, monkeypatch):
     """Tool stream chunks should not rescan approval state for every batch."""
     app = _make_app(tmp_path, monkeypatch)

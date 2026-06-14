@@ -595,6 +595,43 @@ class TestConsolePrintMessage:
         # Should print multiple panels (reasoning + content)
         assert len(printed) >= 2
 
+    def test_themed_assistant_text_uses_assistant_style(self, egg_app):
+        egg_app.apply_theme("ocean")
+
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'assistant',
+            'content': 'Plain assistant response',
+        })
+
+        assistant_panels = [item.renderable for item in items if 'Assistant' in str(getattr(item.renderable, 'title', ''))]
+        assert assistant_panels
+        assert getattr(assistant_panels[0].renderable, 'style', None) == 'egg.assistant'
+        assert str(assistant_panels[0].border_style) == 'egg.assistant'
+
+    def test_themed_assistant_markdown_uses_assistant_style(self, egg_app):
+        egg_app.apply_theme("ocean")
+
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'assistant',
+            'content': '# Heading\n\n- item',
+        })
+
+        assistant_panels = [item.renderable for item in items if 'Assistant' in str(getattr(item.renderable, 'title', ''))]
+        assert assistant_panels
+        assert getattr(assistant_panels[0].renderable, 'style', None) == 'egg.assistant'
+        assert str(assistant_panels[0].border_style) == 'egg.assistant'
+
+    def test_default_assistant_markdown_keeps_default_markdown_style(self, egg_app):
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'assistant',
+            'content': '# Heading\n\n- item',
+        })
+
+        assistant_panels = [item.renderable for item in items if 'Assistant' in str(getattr(item.renderable, 'title', ''))]
+        assert assistant_panels
+        assert getattr(assistant_panels[0].renderable, 'style', None) == 'none'
+        assert str(assistant_panels[0].border_style) == 'cyan'
+
     def test_prints_tps_in_reasoning_and_assistant_titles(self, egg_app, monkeypatch):
         """Reasoning and assistant panels should show TPS when present."""
         printed = []
