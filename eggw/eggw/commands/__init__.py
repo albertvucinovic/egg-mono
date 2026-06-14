@@ -1,5 +1,5 @@
 """Command handlers for eggw backend."""
-from eggthreads import append_message, create_snapshot
+from eggthreads import append_message, approve_tool_calls_for_thread, create_snapshot
 from eggthreads.command_catalog import CommandContext, create_default_command_registry
 
 from .thread import (
@@ -71,7 +71,7 @@ from ..models import CommandResponse
 from .. import core
 from ..core import ensure_scheduler_for
 
-_SHARED_COMMAND_ADAPTER_COMMANDS = {"btw"}
+_SHARED_COMMAND_ADAPTER_COMMANDS = {"btw", "waitForThreads"}
 
 
 def _execute_shared_command(thread_id: str, command_name: str, command_arg: str) -> CommandResponse:
@@ -86,6 +86,7 @@ def _execute_shared_command(thread_id: str, command_name: str, command_arg: str)
             current_thread=thread_id,
             start_scheduler=ensure_scheduler_for,
             append_message=append_message,
+            approve_tool_calls=approve_tool_calls_for_thread,
             create_snapshot=create_snapshot,
         ),
         command_arg,
@@ -280,7 +281,7 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
         elif command_name == "toolsSecrets":
             return await cmd_tools_secrets(thread_id, command_arg)
         elif command_name == "waitForThreads":
-            return await cmd_wait_for_threads(thread_id, command_arg)
+            return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "togglePanel":
             return cmd_toggle_panel(command_arg)
         # P3 Commands

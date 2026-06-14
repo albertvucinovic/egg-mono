@@ -1065,6 +1065,72 @@ class TestCommands:
         assert "answer_user_while_preserving_llm_turn" in request["content"]
         assert "please update me" in request["content"]
 
+    def test_wait_for_threads_command_queues_shared_wait_tool(self, client, monkeypatch):
+        """EggW /waitForThreads queues the shared wait tool call instead of blocking."""
+        from eggthreads import build_tool_call_states, create_child_thread
+
+        started: list[str] = []
+        monkeypatch.setattr("eggw.commands.ensure_scheduler_for", lambda tid: started.append(tid))
+        create_resp = client.post("/api/threads", json={"name": "Wait Manager"})
+        thread_id = create_resp.json()["id"]
+        child_a = create_child_thread(core_state.db, thread_id, name="Wait Child A")
+        child_b = create_child_thread(core_state.db, thread_id, name="Wait Child B")
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": f"/waitForThreads {child_a[-8:]},{child_b}"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "Queued /wait" in data["message"]
+        assert data["data"] == {"start_schedulers": [thread_id]}
+        assert started == [thread_id]
+
+        row = core_state.db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        payload = json.loads(row[0])
+        assert payload["role"] == "user"
+        assert payload["keep_user_turn"] is True
+        assert payload["user_command_type"] == "/wait"
+
+        tool_call = payload["tool_calls"][0]
+        assert tool_call["function"]["name"] == "wait"
+        args = json.loads(tool_call["function"]["arguments"])
+        assert args["thread_ids"] == [child_a, child_b]
+
+        states = build_tool_call_states(core_state.db, thread_id)
+        tc = states[tool_call["id"]]
+        assert tc.approval_decision == "granted"
+        assert tc.state == "TC2.1"
+
+    def test_wait_for_threads_unknown_selector_fails_without_queueing(self, client, monkeypatch):
+        """Unknown /waitForThreads selectors report a useful error before queueing."""
+        started: list[str] = []
+        monkeypatch.setattr("eggw.commands.ensure_scheduler_for", lambda tid: started.append(tid))
+        create_resp = client.post("/api/threads", json={"name": "Wait Manager"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/waitForThreads definitely-missing"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "no thread matches selector 'definitely-missing'" in data["message"]
+        assert started == []
+
+        rows = core_state.db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'",
+            (thread_id,),
+        ).fetchall()
+        assert not rows
+
     def test_compact_command_sets_provider_context_start(self, client):
         """eggw supports the shared /compact command."""
         create_resp = client.post("/api/threads", json={"name": "Compact Command"})

@@ -132,13 +132,13 @@ Reference files:
 - EggW: `eggw/eggw/commands/utility.py`
 
 Tasks:
-- [ ] Change EggW `/waitForThreads` to use the shared wait-tool-call behavior or an equivalent queued tool call.
-- [ ] Match selector resolution with shared behavior.
-- [ ] Ensure get-user waiting threads are treated as waiting-user, not indefinitely running.
-- [ ] Add focused tests.
+- [x] Change EggW `/waitForThreads` to use the shared wait-tool-call behavior or an equivalent queued tool call.
+- [x] Match selector resolution with shared behavior.
+- [x] Ensure get-user waiting threads are treated as waiting-user, not indefinitely running.
+- [x] Add focused tests.
 
 Status notes:
-- Pending.
+- 2026-06-14: Implemented the queued wait-tool slice. EggW `/waitForThreads` now routes through the allowlisted shared `CommandRegistry` adapter, using shared selector resolution and queuing a user-originated approved `wait` tool call with `keep_user_turn` instead of blocking in the HTTP command handler. The command creates a snapshot, requests the current thread scheduler, and returns the shared queued message promptly. Get-user waiting semantics are inherited from the shared `wait` tool/`wait_for_threads`, which treats active get-user waits as `waiting_user`. Focused backend tests cover queued wait arguments, approval, command payload flags, scheduler start, suffix/comma selector resolution, and unknown selector failure.
 
 ## Phase 6 — Output approval and long-output parity
 
