@@ -6,6 +6,8 @@ Run with: pytest test_api.py -v
 """
 
 import asyncio
+import ast
+import inspect
 import json
 import os
 import sqlite3
@@ -843,6 +845,38 @@ class TestSSEEvents:
 class TestCommands:
     """Test slash commands."""
 
+    def test_eggw_dispatch_covers_shared_registry_commands(self):
+        """Shared command catalog entries should have EggW dispatch coverage."""
+        from eggthreads.command_catalog import create_default_command_registry
+        from eggw.commands import dispatch_command
+
+        tree = ast.parse(inspect.getsource(dispatch_command))
+        dispatched_names: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            left = node.left
+            for op, comparator in zip(node.ops, node.comparators):
+                if isinstance(op, ast.Eq):
+                    if (
+                        isinstance(left, ast.Name)
+                        and left.id == "command_name"
+                        and isinstance(comparator, ast.Constant)
+                        and isinstance(comparator.value, str)
+                    ):
+                        dispatched_names.add(comparator.value)
+                    if (
+                        isinstance(comparator, ast.Name)
+                        and comparator.id == "command_name"
+                        and isinstance(left, ast.Constant)
+                        and isinstance(left.value, str)
+                    ):
+                        dispatched_names.add(left.value)
+                left = comparator
+
+        shared_names = set(create_default_command_registry().names(include_aliases=True))
+        assert shared_names - dispatched_names == set()
+
     def test_cost_command_matches_shared_diagnostics_format(self, client, monkeypatch):
         """EggW /cost uses the shared rich diagnostics formatter."""
         create_resp = client.post("/api/threads", json={"name": "Cost Command"})
@@ -1319,6 +1353,24 @@ class TestSessionCommands:
 
 class TestAutocomplete:
     """Test backend autocomplete for session/RLM commands."""
+
+    def test_command_autocomplete_advertises_only_shared_or_eggw_only_commands(self, client):
+        """Command autocomplete should not drift from shared or explicit EggW-only commands."""
+        from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, create_default_command_registry
+
+        eggw_only = {"spawn", "rename", "theme"}
+        assert {f"/{name}" for name in eggw_only} <= set(EGGW_COMMAND_COMPLETIONS)
+
+        advertised_names = {cmd.removeprefix("/") for cmd in EGGW_COMMAND_COMPLETIONS}
+        allowed_names = set(create_default_command_registry().names(include_aliases=True)) | eggw_only
+        assert advertised_names - allowed_names == set()
+
+        for name in eggw_only:
+            line = f"/{name[:3]}"
+            response = client.get("/api/autocomplete", params={"line": line, "cursor": len(line)})
+            assert response.status_code == 200
+            displays = {s["display"] for s in response.json()["suggestions"]}
+            assert f"/{name}" in displays
 
     def test_session_command_autocomplete(self, client):
         response = client.get("/api/autocomplete", params={"line": "/session", "cursor": 8})

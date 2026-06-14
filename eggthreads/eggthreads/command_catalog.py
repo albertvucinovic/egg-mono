@@ -412,6 +412,7 @@ EGGW_COMMAND_COMPLETIONS: List[str] = [
     *EGG_COMMAND_COMPLETIONS,
     # Web-only aliases/options.
     '/spawn',
+    '/rename',
     '/theme',
 ]
 
