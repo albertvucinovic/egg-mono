@@ -211,14 +211,14 @@ Status notes:
 ## Phase 10 — Final parity verification
 
 Tasks:
-- [ ] Run focused EggW backend tests.
-- [ ] Run focused EggW frontend typecheck/tests.
-- [ ] Run relevant shared `eggthreads` and terminal Egg tests for touched shared behavior.
-- [ ] Verify tracked working tree clean except known unrelated untracked files.
-- [ ] Summarize remaining intentional differences:
+- [x] Run focused EggW backend tests.
+- [x] Run focused EggW frontend typecheck/tests.
+- [x] Run relevant shared `eggthreads` and terminal Egg tests for touched shared behavior.
+- [x] Verify tracked working tree clean except known unrelated untracked files.
+- [x] Summarize remaining intentional differences:
   - terminal-only `/displayMode`;
   - web-only `/theme` and browser layout behavior;
   - `/redraw` no-op in EggW unless future browser refresh behavior is desired.
 
 Status notes:
-- Pending.
+- 2026-06-14: Final verification passed. Commands run: `pytest eggw/tests/test_api.py -q` → 48 passed, 2 skipped, 1 pre-existing warning about `test_create_thread` returning a string; `cd eggw/frontend && npx tsc --noEmit` → passed; `pytest eggthreads/tests/test_command_registry.py eggthreads/tests/test_output_policies.py egg/tests/test_formatting.py egg/tests/test_utils.py -q` → 106 passed. Tracked working tree was clean after commits except known unrelated `?? count-lines.sh`. Remaining intentional differences: `/displayMode` remains terminal-only with EggW browser-layout note; `/theme`, `/rename`, and `/spawn` alias remain explicit web behavior; `/redraw` remains an EggW no-op because the browser UI updates automatically.
