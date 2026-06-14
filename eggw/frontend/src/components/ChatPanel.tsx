@@ -73,6 +73,8 @@ type HiddenDetailKind = "reasoning" | "tool_calls" | "tool_results";
 interface HiddenDetail {
   kind: HiddenDetailKind;
   header: string;
+  name?: string;
+  tokens?: number;
 }
 
 function oneLinePreview(value: unknown, maxChars = 160): string {
@@ -171,18 +173,25 @@ function isImportantSystemMessage(message: Message): boolean {
     content.startsWith("/");
 }
 
+function plural(count: number, singular: string, pluralText?: string): string {
+  return `${count} ${count === 1 ? singular : (pluralText || `${singular}s`)}`;
+}
+
 function hiddenSummaryText(details: HiddenDetail[]): string {
   const counts: Record<HiddenDetailKind, number> = { reasoning: 0, tool_calls: 0, tool_results: 0 };
   details.forEach((detail) => { counts[detail.kind] += 1; });
-  const specs: Array<[HiddenDetailKind, string]> = [
-    ["tool_calls", "tool call"],
-    ["tool_results", "tool result"],
-    ["reasoning", "reasoning block"],
-  ];
-  const parts = specs
-    .filter(([kind]) => counts[kind] > 0)
-    .map(([kind, singular]) => `${counts[kind]} ${counts[kind] === 1 ? singular : `${singular}s`}`);
-  return `Hidden details: ${parts.join(", ")}.`;
+  const parts: string[] = [];
+  if (counts.tool_calls > 0) parts.push(`Executed ${plural(counts.tool_calls, "tool")}`);
+  if (counts.tool_results > 0) parts.push(`got ${plural(counts.tool_results, "tool result")}`);
+  if (counts.reasoning > 0) parts.push(plural(counts.reasoning, "reasoning block"));
+  const tokenTotal = details.reduce((total, detail) => total + (Number.isFinite(detail.tokens || 0) ? Math.max(0, Math.trunc(detail.tokens || 0)) : 0), 0);
+  if (tokenTotal > 0) parts.push(`total tokens ${tokenTotal.toLocaleString()}`);
+  const toolNames = details
+    .map((detail) => detail.name)
+    .filter((name): name is string => Boolean(name));
+  const uniqueToolNames = Array.from(new Set(toolNames));
+  const summary = parts.join(", ") || "Hidden details";
+  return uniqueToolNames.length ? `${summary}. Tools: ${uniqueToolNames.join(", ")}.` : `${summary}.`;
 }
 
 function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
@@ -264,9 +273,10 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
   };
 
   const displayRole = message.answer_user_preserve_turn && message.role === "assistant" ? "assistant_note" : message.role;
-  const roleLabel = message.recovery_notice && message.role === "system"
+  const baseRoleLabel = message.recovery_notice && message.role === "system"
     ? "Continue Status"
     : roleLabels[displayRole] || displayRole;
+  const roleLabel = message.role === "tool" && message.name ? `${baseRoleLabel}: ${message.name}` : baseRoleLabel;
 
   // Check if this is a shell command (starts with $ or $$)
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
@@ -568,32 +578,46 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
 
 function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   const details: HiddenDetail[] = [];
+  let availableTokens = typeof message.tokens === "number" && Number.isFinite(message.tokens) ? message.tokens : undefined;
+  const takeTokens = () => {
+    const tokens = availableTokens;
+    availableTokens = undefined;
+    return tokens;
+  };
   if (message.reasoning) {
-    details.push({ kind: "reasoning", header: messageMetadataText(message, "Reasoning") });
+    details.push({ kind: "reasoning", header: messageMetadataText(message, "Reasoning"), tokens: takeTokens() });
   }
   if (message.tool_calls?.length) {
     message.tool_calls.forEach((tc: any) => {
       const tcId = tc?.id || tc?.tool_call_id || "";
       const idText = tcId ? ` | tool_call_id: ${tcId}` : "";
+      const name = toolCallName(tc);
       details.push({
         kind: "tool_calls",
-        header: `${messageMetadataText(message, "ToolCall")}${idText} | ${toolCallName(tc)} | ${oneLinePreview(toolCallArgs(tc))}`,
+        name,
+        tokens: takeTokens(),
+        header: `${messageMetadataText(message, "ToolCall")}${idText} | ${name} | ${oneLinePreview(toolCallArgs(tc))}`,
       });
     });
   }
   if (message.role === "tool") {
     const label = message.content ? `Tool Result (${message.content.length.toLocaleString()} chars)` : "Tool Result";
-    details.push({ kind: "tool_results", header: messageMetadataText(message, label) });
+    const name = message.name || "tool";
+    details.push({ kind: "tool_results", name, tokens: takeTokens(), header: messageMetadataText(message, `${label}: ${name}`) });
   }
   stringRecordEntries(message.tool_stream).forEach(([name, text]) => {
     details.push({
       kind: "tool_results",
+      name,
+      tokens: takeTokens(),
       header: streamedMetadataHiddenHeader(message, `Tool Output: ${name}`, text),
     });
   });
   stringRecordEntries(message.tool_calls_stream).forEach(([streamKey, text]) => {
     details.push({
       kind: "tool_calls",
+      name: streamKey,
+      tokens: takeTokens(),
       header: streamedMetadataHiddenHeader(message, `Tool Call Args: ${streamKey}`, text),
     });
   });
@@ -623,15 +647,19 @@ function renderMessagesForVerbosity(messages: Message[], displayVerbosity: Displ
       return;
     }
 
+    const hiddenDetails = collectHiddenDetailsForMessage(msg);
     const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean((msg.content || "").trim());
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
+      const beforeVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind === "reasoning") : [];
+      const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;
+      hidden.push(...beforeVisibleDetails);
       flushHidden(`before-${msg.id || idx}`);
       nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" />);
-      hidden.push(...collectHiddenDetailsForMessage(msg));
+      hidden.push(...afterVisibleDetails);
       return;
     }
 
-    hidden.push(...collectHiddenDetailsForMessage(msg));
+    hidden.push(...hiddenDetails);
   });
 
   flushHidden("end");

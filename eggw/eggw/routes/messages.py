@@ -222,6 +222,7 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
             tool_stream=msg.get("tool_stream") if isinstance(msg.get("tool_stream"), dict) else None,
             tool_calls_stream=msg.get("tool_calls_stream") if isinstance(msg.get("tool_calls_stream"), dict) else None,
             tool_call_id=msg.get("tool_call_id"),
+            name=msg.get("name"),
             model_key=msg.get("model_key"),
             timestamp=timestamp,
             tokens=total_tokens,

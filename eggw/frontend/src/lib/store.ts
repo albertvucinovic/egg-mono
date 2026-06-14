@@ -23,6 +23,7 @@ export interface Message {
   tool_stream?: Record<string, any>;
   tool_calls_stream?: Record<string, any>;
   tool_call_id?: string;
+  name?: string;
   model_key?: string;
   timestamp?: string;  // ISO datetime string
   tokens?: number;     // Per-message token count

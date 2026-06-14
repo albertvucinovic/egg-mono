@@ -183,13 +183,13 @@ Reference files:
 - EggW: `eggw/frontend/src/components/ChatPanel.tsx`
 
 Tasks:
-- [ ] Align hidden reasoning/tool call/tool result summaries with terminal semantics.
-- [ ] Include token totals/tool names where available.
-- [ ] Match ordering of hidden-detail summaries relative to visible messages where feasible.
-- [ ] Add focused frontend tests if practical.
+- [x] Align hidden reasoning/tool call/tool result summaries with terminal semantics.
+- [x] Include token totals/tool names where available.
+- [x] Match ordering of hidden-detail summaries relative to visible messages where feasible.
+- [x] Add focused frontend tests if practical.
 
 Status notes:
-- Pending.
+- 2026-06-14: Implemented a focused EggW min/medium verbosity parity slice without a broad renderer refactor. Min hidden-detail summaries now use terminal-like wording (`Executed N tools`, `got M tool results`, `K reasoning blocks`, `total tokens X`) and list known tool names from tool calls, tool results, and persisted streamed metadata. Tool message names are preserved through the message API. Min ordering now flushes hidden reasoning before a visible assistant answer and keeps post-answer tool activity summarized before the next visible item, closer to terminal Egg. No frontend unit harness exists, so no new framework was added; frontend typecheck covers the helper/rendering changes.
 
 ## Phase 9 — New-thread system prompt parity
 
