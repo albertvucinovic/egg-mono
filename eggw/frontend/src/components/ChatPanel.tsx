@@ -90,6 +90,29 @@ function oneLinePreview(value: unknown, maxChars = 160): string {
   return preview.length > maxChars ? `${preview.slice(0, maxChars - 3).trimEnd()}...` : preview;
 }
 
+function stringRecordEntries(value: Record<string, unknown> | undefined): Array<[string, string]> {
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value)
+    .map(([key, raw]) => {
+      let text: string;
+      if (typeof raw === "string") {
+        text = raw;
+      } else {
+        try {
+          text = JSON.stringify(raw, null, 2);
+        } catch {
+          text = String(raw ?? "");
+        }
+      }
+      return [key, text] as [string, string];
+    })
+    .filter(([, text]) => text.length > 0);
+}
+
+function streamedMetadataHiddenHeader(message: Message, label: string, text: string): string {
+  return `${messageMetadataText(message, label)} | ${text.length.toLocaleString()} chars`;
+}
+
 function toolCallName(tc: any): string {
   return tc?.name || tc?.function?.name || "unknown";
 }
@@ -263,11 +286,14 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
   const tokenText = formatTokenCount(message.tokens);
   const contentText = message.content || "";
   const toolCalls = message.tool_calls || [];
+  const toolStreamEntries = stringRecordEntries(message.tool_stream);
+  const toolCallStreamEntries = stringRecordEntries(message.tool_calls_stream);
   const showReasoningBlock = Boolean(message.reasoning) && displayVerbosity !== "min";
   const hideReasoningBody = displayVerbosity === "medium";
   const hideToolBody = (displayVerbosity === "medium" || displayVerbosity === "min") && message.role === "tool";
   const showContent = Boolean(contentText) && !hideToolBody;
   const showToolCalls = toolCalls.length > 0 && displayVerbosity !== "min";
+  const showStreamedMetadata = displayVerbosity !== "min" && (toolStreamEntries.length > 0 || toolCallStreamEntries.length > 0);
 
   return (
     <div
@@ -489,6 +515,53 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
           })}
         </div>
       )}
+
+      {/* Persisted streamed tool metadata (historical/reloaded transcript) */}
+      {showStreamedMetadata && (
+        <div className="mt-2 space-y-2">
+          {toolStreamEntries.map(([name, text]) => (
+            <div
+              key={`tool-stream-${name}`}
+              className={`rounded p-2 ${showBorders ? 'border' : ''}`}
+              style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
+            >
+              <div className="text-sm font-medium font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+                {displayVerbosity === "medium"
+                  ? messageMetadataText(message, `Tool Output: ${name}`)
+                  : `Tool Output: ${name}`}
+              </div>
+              {displayVerbosity === "max" && (
+                <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
+                  {text}
+                </pre>
+              )}
+            </div>
+          ))}
+
+          {toolCallStreamEntries.map(([streamKey, text]) => (
+            <div
+              key={`tool-call-stream-${streamKey}`}
+              className={`rounded p-2 ${showBorders ? 'border' : ''}`}
+              style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
+            >
+              <div className="text-sm font-medium font-mono" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>
+                {displayVerbosity === "medium"
+                  ? messageMetadataText(message, `Tool Call Args: ${streamKey}`)
+                  : `Tool Call Args: ${streamKey}`}
+              </div>
+              {displayVerbosity === "max" ? (
+                <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                  {text}
+                </pre>
+              ) : (
+                <div className="mt-1 text-xs font-mono" style={{ color: "var(--foreground)" }}>
+                  {oneLinePreview(text)}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -512,6 +585,18 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     const label = message.content ? `Tool Result (${message.content.length.toLocaleString()} chars)` : "Tool Result";
     details.push({ kind: "tool_results", header: messageMetadataText(message, label) });
   }
+  stringRecordEntries(message.tool_stream).forEach(([name, text]) => {
+    details.push({
+      kind: "tool_results",
+      header: streamedMetadataHiddenHeader(message, `Tool Output: ${name}`, text),
+    });
+  });
+  stringRecordEntries(message.tool_calls_stream).forEach(([streamKey, text]) => {
+    details.push({
+      kind: "tool_calls",
+      header: streamedMetadataHiddenHeader(message, `Tool Call Args: ${streamKey}`, text),
+    });
+  });
   return details;
 }
 

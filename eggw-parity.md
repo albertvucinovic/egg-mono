@@ -166,13 +166,13 @@ Reference files:
 - EggW API/frontend: `eggw/eggw/models.py`, `eggw/eggw/routes/messages.py`, `eggw/frontend/src/components/ChatPanel.tsx`
 
 Tasks:
-- [ ] Extend EggW message model/API to include persisted streamed-tool metadata.
-- [ ] Render historical streamed tool-call args/output summaries in max/medium/min display modes.
-- [ ] Include tool-call IDs and names consistently with terminal Egg.
-- [ ] Add tests for reload/history display.
+- [x] Extend EggW message model/API to include persisted streamed-tool metadata.
+- [x] Render historical streamed tool-call args/output summaries in max/medium/min display modes.
+- [x] Include tool-call IDs and names consistently with terminal Egg.
+- [x] Add tests for reload/history display.
 
 Status notes:
-- Pending.
+- 2026-06-14: Implemented persisted streamed-tool metadata parity. EggW message API/model now returns snapshot `tool_stream` and `tool_calls_stream`; the frontend `Message` type and `ChatPanel` render historical streamed tool output and streamed tool-call args after reload. Max shows bodies with clear headers, medium preserves stream keys/ids and concise streamed-args previews, and min folds bodies into hidden-detail summaries. Focused backend coverage proves `/messages` preserves both metadata fields. Frontend typecheck was run for the renderer changes.
 
 ## Phase 8 — Display verbosity parity
 

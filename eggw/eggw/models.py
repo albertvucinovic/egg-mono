@@ -29,6 +29,8 @@ class MessageContent(BaseModel):
     created_by: Optional[str] = None
     reasoning: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_stream: Optional[Dict[str, Any]] = None
+    tool_calls_stream: Optional[Dict[str, Any]] = None
     tool_call_id: Optional[str] = None
     timestamp: Optional[datetime] = None
     tokens: Optional[int] = None

@@ -219,6 +219,8 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
             content=msg.get("content"),
             reasoning=msg.get("reasoning"),
             tool_calls=msg.get("tool_calls"),
+            tool_stream=msg.get("tool_stream") if isinstance(msg.get("tool_stream"), dict) else None,
+            tool_calls_stream=msg.get("tool_calls_stream") if isinstance(msg.get("tool_calls_stream"), dict) else None,
             tool_call_id=msg.get("tool_call_id"),
             model_key=msg.get("model_key"),
             timestamp=timestamp,

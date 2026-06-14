@@ -449,6 +449,33 @@ class TestMessageOperations:
         assert message["role"] == "assistant"
         assert message["answer_user_preserve_turn"] is True
 
+    def test_get_messages_preserves_persisted_streamed_tool_metadata(self, client):
+        """Historical message API returns persisted tool stream metadata."""
+        from eggthreads import append_message, create_snapshot
+
+        create_resp = client.post("/api/threads", json={"name": "Stream Metadata UI"})
+        thread_id = create_resp.json()["id"]
+
+        msg_id = append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "assistant answer",
+            extra={
+                "tool_stream": {"bash": "streamed tool output body"},
+                "tool_calls_stream": {"call_full_1234567890": "streamed arg body"},
+            },
+        )
+        create_snapshot(core_state.db, thread_id)
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        data = response.json()
+        message = next(m for m in data if m["id"] == msg_id)
+        assert message["tool_stream"] == {"bash": "streamed tool output body"}
+        assert message["tool_calls_stream"] == {"call_full_1234567890": "streamed arg body"}
+
     def test_web_continue_appends_recovery_notice(self, client):
         """Eggw /continue persists a local recovery notice after success."""
         from eggthreads import append_message

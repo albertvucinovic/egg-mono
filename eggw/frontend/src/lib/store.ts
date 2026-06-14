@@ -20,6 +20,8 @@ export interface Message {
   created_by?: string;
   reasoning?: string;
   tool_calls?: any[];
+  tool_stream?: Record<string, any>;
+  tool_calls_stream?: Record<string, any>;
   tool_call_id?: string;
   model_key?: string;
   timestamp?: string;  // ISO datetime string
