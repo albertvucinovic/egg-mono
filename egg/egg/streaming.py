@@ -48,6 +48,12 @@ def _new_tool_summary() -> Dict[str, Any]:
     return {"active": False, "name": "", "text": ""}
 
 
+def _tool_call_args_stream_style(app: Any) -> Optional[str]:
+    if getattr(app, '_rich_theme', None) is not None:
+        return "egg.tool_call_dim"
+    return STREAM_STYLE_TOOL_CALL_ARGS
+
+
 def _timeout_from_mapping(args: Dict[str, Any]) -> Optional[float]:
     for key in TOOL_TIMEOUT_KEYS:
         timeout = _positive_timeout(args.get(key))
@@ -421,9 +427,9 @@ class StreamingMixin:
                     if raw_key not in order:
                         order.append(raw_key)
                         label = name_map.get(raw_key) or raw_key
-                        self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=STREAM_STYLE_TOOL_CALL_ARGS)
+                        self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=_tool_call_args_stream_style(self))
                     text_map[raw_key] = text_map.get(raw_key, '') + frag
-                    self._stream_append_on_renderer(frag, style=STREAM_STYLE_TOOL_CALL_ARGS)
+                    self._stream_append_on_renderer(frag, style=_tool_call_args_stream_style(self))
         elif t == 'msg.create':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
@@ -654,6 +660,6 @@ class StreamingMixin:
             t = (ls.get('tc_text') or {}).get(k, '')
             if isinstance(t, str) and t:
                 label = (ls.get('tc_names') or {}).get(k) or k
-                self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=STREAM_STYLE_TOOL_CALL_ARGS)
-                self._stream_append_on_renderer(t, style=STREAM_STYLE_TOOL_CALL_ARGS)
+                self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=_tool_call_args_stream_style(self))
+                self._stream_append_on_renderer(t, style=_tool_call_args_stream_style(self))
         self._flush_stream_render_buffer_now(force=True)

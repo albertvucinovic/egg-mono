@@ -75,6 +75,8 @@ def rich_theme_for(name: str) -> Theme:
             "egg.tool": colors["tool"],
             "egg.reasoning": colors["reasoning"],
             "egg.tool_call": colors["tool_call"],
+            "egg.tool_call_dim": f"dim {colors['tool_call']}",
+            "egg.tool_call_title": f"bold {colors['tool_call']}",
             "egg.accent": colors["accent"],
             "egg.foreground": colors["foreground"],
             "egg.muted": colors["muted"],

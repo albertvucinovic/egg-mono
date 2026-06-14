@@ -644,6 +644,36 @@ class TestConsolePrintMessage:
 
         assert any('5.5 tps' in t for t in tool_call_titles)
 
+    def test_themed_tool_call_arguments_use_tool_call_style(self, egg_app):
+        """Tool call argument panels should use the distinct theme tool-call color."""
+        egg_app.apply_theme("cyberpunk")
+
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{'function': {'name': 'bash', 'arguments': {'cmd': 'ls'}}}],
+        })
+
+        tool_call_panels = [item.renderable for item in items if 'Tool Calls' in str(getattr(item.renderable, 'title', ''))]
+        assert tool_call_panels
+        renderable = tool_call_panels[0].renderable
+        assert getattr(renderable, 'style', None) == 'egg.tool_call'
+        assert str(tool_call_panels[0].border_style) == 'egg.tool_call'
+
+    def test_themed_streamed_tool_call_arguments_use_tool_call_style(self, egg_app):
+        egg_app.apply_theme("cyberpunk")
+
+        items = egg_app._static_transcript_message_renderables({
+            'role': 'assistant',
+            'content': '',
+            'tool_calls_stream': {'bash': '{"script":"echo hi"}'},
+        })
+
+        panels = [item.renderable for item in items if 'Tool Call Args' in str(getattr(item.renderable, 'title', ''))]
+        assert panels
+        assert getattr(panels[0].renderable, 'style', None) == 'egg.tool_call'
+        assert str(panels[0].border_style) == 'egg.tool_call'
+
     def test_prints_tps_in_tool_message_title(self, egg_app, monkeypatch):
         """Tool message panel should show TPS when present."""
         printed = []

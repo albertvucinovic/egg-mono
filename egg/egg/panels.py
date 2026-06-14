@@ -1355,6 +1355,26 @@ class PanelsMixin:
             panel_renderable = fallback
         return _StaticTranscriptRenderable(panel_renderable, fallback)
 
+    def _tool_call_style(self, variant: str = "body") -> str:
+        """Return the terminal style for tool-call arguments.
+
+        Custom themes provide a distinct tool-call color. Without an active
+        Egg theme, keep the historical Rich yellow styling.
+        """
+        themed = {
+            "body": "egg.tool_call",
+            "dim": "egg.tool_call_dim",
+            "title": "egg.tool_call_title",
+        }
+        fallback = {
+            "body": "yellow",
+            "dim": "dim yellow",
+            "title": "bold yellow",
+        }
+        if getattr(self, '_rich_theme', None) is not None:
+            return themed.get(variant, themed["body"])
+        return fallback.get(variant, fallback["body"])
+
     def _static_transcript_message_renderables(
         self,
         m: Dict[str, Any],
@@ -1504,7 +1524,10 @@ class PanelsMixin:
                         suffix = f" {preview}" if preview else ""
                         lines.append(f"{name}{tc_id_text}{suffix}")
                 # Build consistent title bar like other boxes
-                tc_title_parts = ['[bold yellow]Tool Calls[/bold yellow]']
+                tool_call_title_style = self._tool_call_style("title")
+                tool_call_body_style = self._tool_call_style("body")
+                tool_call_border_style = self._tool_call_style("body")
+                tc_title_parts = [f'[{tool_call_title_style}]Tool Calls[/{tool_call_title_style}]']
                 if model_key:
                     tc_title_parts.append(f"[dim](model: {model_key})[/dim]")
                 if pm_tokens["tool_calls"]:
@@ -1532,9 +1555,9 @@ class PanelsMixin:
                         )
                 else:
                     items.append(self._static_transcript_panel_renderable(
-                        Text("\n".join(lines), no_wrap=False, overflow='fold', style='bold yellow'),
+                        Text("\n".join(lines), no_wrap=False, overflow='fold', style=tool_call_body_style),
                         tc_title,
-                        'yellow',
+                        tool_call_border_style,
                     ))
             # Streamed-only metadata if present in snapshot (optional)
             tstream = m.get('tool_stream') or {}
@@ -1584,12 +1607,15 @@ class PanelsMixin:
             if isinstance(tc_stream, dict) and tc_stream:
                 for nm, txt in tc_stream.items():
                     if txt:
-                        call_title = f'[bold yellow]Tool Call Args (streamed): {nm}[/bold yellow]'
+                        tool_call_title_style = self._tool_call_style("title")
+                        tool_call_body_style = self._tool_call_style("body")
+                        tool_call_border_style = self._tool_call_style("body")
+                        call_title = f'[{tool_call_title_style}]Tool Call Args (streamed): {nm}[/{tool_call_title_style}]'
                         if verbosity == 'max':
                             items.append(self._static_transcript_panel_renderable(
-                                Text(txt, no_wrap=False, overflow='fold', style='yellow'),
+                                Text(txt, no_wrap=False, overflow='fold', style=tool_call_body_style),
                                 call_title,
-                                'yellow',
+                                tool_call_border_style,
                             ))
                         elif verbosity == 'medium':
                             preview = self._panel_one_line_preview(txt)
@@ -1603,9 +1629,9 @@ class PanelsMixin:
                             if msg_id:
                                 title_parts.append(f"[dim]msg_id: {msg_id}[/dim]")
                             items.append(self._static_transcript_panel_renderable(
-                                Text(preview, no_wrap=False, overflow='fold', style='yellow'),
+                                Text(preview, no_wrap=False, overflow='fold', style=tool_call_body_style),
                                 " | ".join(title_parts),
-                                'yellow',
+                                tool_call_border_style,
                             ))
                         else:
                             title_parts = [call_title]
