@@ -3,6 +3,19 @@ from __future__ import annotations
 from eggdisplay import OutputPanel
 
 
+def test_output_panel_title_uses_border_style_as_base_color() -> None:
+    panel = OutputPanel(
+        title="Output",
+        style=OutputPanel.PanelStyle(border_style="cyan", title_style="bold cyan"),
+    )
+
+    rendered = panel.render()
+
+    assert rendered.title.plain == "Output"
+    assert rendered.title.style == "cyan"
+    assert any(span.style == "bold" for span in rendered.title.spans)
+
+
 def test_output_panel_plain_mode_preserves_square_brackets() -> None:
     panel = OutputPanel(style=OutputPanel.PanelStyle(markup=False))
     panel.set_content("[Assistant (streaming)]\nThe [test] token stays visible")

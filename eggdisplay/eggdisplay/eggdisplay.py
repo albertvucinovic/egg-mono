@@ -28,6 +28,47 @@ import asyncio
 from dataclasses import dataclass
 
 
+_PANEL_TITLE_MODIFIERS = {
+    "bold",
+    "dim",
+    "italic",
+    "underline",
+    "blink",
+    "blink2",
+    "reverse",
+    "conceal",
+    "strike",
+}
+
+
+def _panel_title_text(title: str, *, base_style: str, title_style: str) -> Optional[Text]:
+    """Build a panel title that inherits the panel color.
+
+    Rich does not theme compound style strings such as ``"bold cyan"`` the
+    same way it themes the standalone ``"cyan"`` style.  When the title style
+    only adds modifiers to the panel border color, use the border style as the
+    title's base color, then apply modifiers such as bold/italic on top, so the
+    header line follows the active panel/theme color.
+    """
+    if not title:
+        return None
+    title_style = str(title_style or "")
+    title_style_tokens = title_style.split()
+    modifier_tokens = [token for token in title_style_tokens if token in _PANEL_TITLE_MODIFIERS]
+    color_tokens = [token for token in title_style_tokens if token not in _PANEL_TITLE_MODIFIERS]
+    base_style_tokens = set(str(base_style or "").split())
+    use_base_style = not color_tokens or all(token in base_style_tokens for token in color_tokens)
+    style = base_style if use_base_style else title_style
+    try:
+        text = Text.from_markup(str(title), style=style or "")
+    except MarkupError:
+        text = Text(str(title), style=style or "")
+    if use_base_style:
+        for token in modifier_tokens:
+            text.stylize(token)
+    return text
+
+
 @dataclass
 class Cursor:
     """Cursor position in the editor."""
@@ -1479,7 +1520,11 @@ class OutputPanel:
             except MarkupError:
                 content_text.append(Text("No content"))
 
-        panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
+        panel_title = _panel_title_text(
+            self.title,
+            base_style=self.style.border_style,
+            title_style=self.style.title_style,
+        )
         result = Panel(
             content_text,
             title=panel_title,
@@ -1905,7 +1950,11 @@ class InputPanel:
             if i != len(rows) - 1:
                 editor_content.append("\n")
 
-        panel_title = f"[{self.style.title_style}]{self.title}[/{self.style.title_style}]" if self.title else None
+        panel_title = _panel_title_text(
+            self.title,
+            base_style=self.style.border_style,
+            title_style=self.style.title_style,
+        )
         result = Panel(
             editor_content,
             title=panel_title,

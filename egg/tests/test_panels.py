@@ -607,6 +607,7 @@ class TestConsolePrintMessage:
         assert assistant_panels
         assert getattr(assistant_panels[0].renderable, 'style', None) == 'egg.assistant'
         assert str(assistant_panels[0].border_style) == 'egg.assistant'
+        assert getattr(assistant_panels[0].title, 'style', None) == 'egg.assistant'
 
     def test_themed_assistant_markdown_uses_assistant_style(self, egg_app):
         egg_app.apply_theme("ocean")
@@ -620,6 +621,22 @@ class TestConsolePrintMessage:
         assert assistant_panels
         assert getattr(assistant_panels[0].renderable, 'style', None) == 'egg.assistant'
         assert str(assistant_panels[0].border_style) == 'egg.assistant'
+
+    def test_themed_static_panel_titles_use_semantic_theme_style(self, egg_app):
+        egg_app.apply_theme("sunset")
+
+        cases = [
+            ({'role': 'user', 'content': 'hi'}, 'User', 'egg.user'),
+            ({'role': 'system', 'content': 'status'}, 'System', 'egg.system'),
+            ({'role': 'assistant', 'content': 'answer'}, 'Assistant', 'egg.assistant'),
+            ({'role': 'assistant', 'content': 'answer', 'answer_user_preserve_turn': True}, 'Assistant Note', 'egg.reasoning'),
+            ({'role': 'tool', 'name': 'bash', 'content': 'out'}, 'bash', 'egg.tool'),
+        ]
+
+        for message, title_text, style in cases:
+            items = egg_app._static_transcript_message_renderables(message)
+            panel = next(item.renderable for item in items if title_text in str(getattr(item.renderable, 'title', '')))
+            assert any(span.style == style for span in panel.title.spans)
 
     def test_default_assistant_markdown_keeps_default_markdown_style(self, egg_app):
         items = egg_app._static_transcript_message_renderables({

@@ -1345,9 +1345,13 @@ class PanelsMixin:
         if fallback is None:
             fallback = f"[{border}]{title}[/] {getattr(renderable, 'plain', str(renderable))}"
         try:
+            panel_title = Text.from_markup(str(title), style=border)
+        except Exception:
+            panel_title = title
+        try:
             panel_renderable = Panel(
                 renderable,
-                title=title,
+                title=panel_title,
                 border_style=border,
                 box=self._get_static_box(),
             )
@@ -1387,6 +1391,21 @@ class PanelsMixin:
         if getattr(self, '_rich_theme', None) is not None:
             return "egg.reasoning" if note else "egg.assistant"
         return 'bright_magenta' if note else 'cyan'
+
+    def _semantic_title_label(self, label: str, *, semantic: str, default_style: str) -> str:
+        """Return a styled panel-title label for the active terminal theme."""
+        if getattr(self, '_rich_theme', None) is not None:
+            themed_styles = {
+                "user": "egg.user",
+                "assistant": "egg.assistant",
+                "system": "egg.system",
+                "tool": "egg.tool",
+                "reasoning": "egg.reasoning",
+            }
+            style = themed_styles.get(semantic, default_style)
+        else:
+            style = default_style
+        return f"[{style}]{rich_escape(str(label))}[/{style}]"
 
     def _static_transcript_message_renderables(
         self,
@@ -1439,7 +1458,15 @@ class PanelsMixin:
 
         if role == 'system':
             is_recovery_notice = bool(m.get('recovery_notice'))
-            title = '[bold magenta]Continue Status[/bold magenta]' if is_recovery_notice else '[bold blue]System[/bold blue]'
+            title = self._semantic_title_label(
+                'Continue Status',
+                semantic='reasoning',
+                default_style='bold magenta',
+            ) if is_recovery_notice else self._semantic_title_label(
+                'System',
+                semantic='system',
+                default_style='bold blue',
+            )
             style = 'magenta' if is_recovery_notice else 'blue'
             if isinstance(content, str) and content.lower().startswith('llm error:'):
                 title = '[bold red]Error[/bold red]'
@@ -1457,7 +1484,7 @@ class PanelsMixin:
         if role == 'user':
             if verbosity == 'min':
                 append_hidden_details()
-            title = '[bold green]User[/bold green]'
+            title = self._semantic_title_label('User', semantic='user', default_style='bold green')
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
             # Attach content token count if available
@@ -1470,7 +1497,15 @@ class PanelsMixin:
 
         if role == 'assistant':
             is_assistant_note = bool(m.get('answer_user_preserve_turn'))
-            title = '[bold bright_magenta]Assistant Note[/bold bright_magenta]' if is_assistant_note else '[bold cyan]Assistant[/bold cyan]'
+            title = self._semantic_title_label(
+                'Assistant Note',
+                semantic='reasoning',
+                default_style='bold bright_magenta',
+            ) if is_assistant_note else self._semantic_title_label(
+                'Assistant',
+                semantic='assistant',
+                default_style='bold cyan',
+            )
             assistant_border = self._assistant_border_style(note=is_assistant_note)
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
@@ -1483,7 +1518,7 @@ class PanelsMixin:
             # Prefer to show reasoning first if present
             reas = m.get('reasoning') or m.get('reasoning_content')
             if not is_assistant_note and isinstance(reas, str) and reas.strip():
-                reason_title = '[bold magenta]Reasoning[/bold magenta]'
+                reason_title = self._semantic_title_label('Reasoning', semantic='reasoning', default_style='bold magenta')
                 if model_key:
                     reason_title += f" [dim](model: {model_key})[/dim]"
                 if pm_tokens["reasoning"]:
@@ -1580,7 +1615,11 @@ class PanelsMixin:
             if isinstance(tstream, dict) and tstream:
                 for nm, txt in tstream.items():
                     if txt:
-                        out_title = f'[bold yellow]Tool Output: {nm}[/bold yellow]'
+                        out_title = self._semantic_title_label(
+                            f'Tool Output: {nm}',
+                            semantic='tool',
+                            default_style='bold yellow',
+                        )
                         if verbosity == 'max':
                             items.append(self._static_transcript_panel_renderable(
                                 Text(txt, no_wrap=False, overflow='fold', style='yellow'),
@@ -1672,10 +1711,10 @@ class PanelsMixin:
         if role == 'tool':
             name = m.get('name') or 'Tool'
             if verbosity == 'max':
-                title = f'[bold yellow]{name}[/bold yellow]'
+                title = self._semantic_title_label(str(name), semantic='tool', default_style='bold yellow')
             else:
                 label_name = f"User Tool: {name}" if m.get('user_tool_call') else str(name)
-                title = f'[bold yellow]{label_name}[/bold yellow]'
+                title = self._semantic_title_label(label_name, semantic='tool', default_style='bold yellow')
             if model_key:
                 title += f" [dim](model: {model_key})[/dim]"
             # For tool messages, content tokens are the primary signal.
