@@ -446,10 +446,10 @@ def spawn_child_thread_command(context: Any, arg: str):
             },
         )
     except Exception as e:
-        _command_log(context, f"/spawn error: {e}")
+        _command_log(context, f"/spawnChildThread error: {e}")
         return CommandResult(clear_input=False)
     if not isinstance(child, str):
-        _command_log(context, f"/spawn returned non-string thread id: {child!r}")
+        _command_log(context, f"/spawnChildThread returned non-string thread id: {child!r}")
         return CommandResult(clear_input=False)
 
     _command_start_scheduler(context, child)

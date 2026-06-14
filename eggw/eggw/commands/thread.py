@@ -35,7 +35,7 @@ from ..system_prompt import append_root_system_prompt
 
 
 async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
-    """Handle /spawn or /spawnChildThread command."""
+    """Handle /spawnChildThread command."""
     models_path = str(MODELS_PATH)
 
     # Get parent's model

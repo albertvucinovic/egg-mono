@@ -194,7 +194,7 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
         # Dispatch to command handlers
         if command_name == "model":
             return await cmd_model(thread_id, command_arg)
-        elif command_name == "spawn" or command_name == "spawnChildThread":
+        elif command_name == "spawnChildThread":
             return await cmd_spawn(thread_id, command_arg)
         elif command_name == "newThread":
             return await cmd_new_thread(command_arg)

@@ -1198,10 +1198,16 @@ class TestCommands:
         assert "/setAutoCompactThreshold" in data["message"]
         assert "/btw <message>" in data["message"]
         assert "/cost" in data["message"]
+        assert "Threads/Agents/Subagents:" in data["message"]
+        assert "/spawnChildThread <text>" in data["message"]
+        assert "/spawnAutoApprovedChildThread <text>" in data["message"]
+        assert "/waitForThreads <threads>" in data["message"]
+        assert "/setThreadPriority ..." in data["message"]
+        assert "/schedulers" in data["message"]
         assert "EggW-only commands:" in data["message"]
         assert "/theme [name]" in data["message"]
         assert "/rename <name>" in data["message"]
-        assert "/spawn <context>" in data["message"]
+        assert "/spawn <context>" not in data["message"]
         assert "/redraw — No-op in EggW" in data["message"]
         assert "/displayMode — Terminal-only" in data["message"]
 
@@ -1228,6 +1234,21 @@ class TestCommands:
         assert request["role"] == "user"
         assert "answer_user_while_preserving_llm_turn" in request["content"]
         assert "please update me" in request["content"]
+
+    def test_spawn_alias_is_not_supported(self, client):
+        """EggW should use /spawnChildThread, not the old /spawn alias."""
+        create_resp = client.post("/api/threads", json={"name": "No Spawn Alias"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/spawn"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert data["message"] == "Unknown command: /spawn"
 
     def test_wait_for_threads_command_queues_shared_wait_tool(self, client, monkeypatch):
         """EggW /waitForThreads queues the shared wait tool call instead of blocking."""
@@ -1590,8 +1611,9 @@ class TestAutocomplete:
         """Command autocomplete should not drift from shared or explicit EggW-only commands."""
         from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, create_default_command_registry
 
-        eggw_only = {"spawn", "rename", "theme"}
+        eggw_only = {"rename", "theme"}
         assert {f"/{name}" for name in eggw_only} <= set(EGGW_COMMAND_COMPLETIONS)
+        assert "/spawn" not in EGGW_COMMAND_COMPLETIONS
 
         advertised_names = {cmd.removeprefix("/") for cmd in EGGW_COMMAND_COMPLETIONS}
         allowed_names = set(create_default_command_registry().names(include_aliases=True)) | eggw_only
@@ -1603,6 +1625,12 @@ class TestAutocomplete:
             assert response.status_code == 200
             displays = {s["display"] for s in response.json()["suggestions"]}
             assert f"/{name}" in displays
+
+        response = client.get("/api/autocomplete", params={"line": "/spawn", "cursor": len("/spawn")})
+        assert response.status_code == 200
+        displays = {s["display"] for s in response.json()["suggestions"]}
+        assert "/spawnChildThread" in displays
+        assert "/spawn" not in displays
 
     def test_session_command_autocomplete(self, client):
         response = client.get("/api/autocomplete", params={"line": "/session", "cursor": 8})

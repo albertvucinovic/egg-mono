@@ -208,7 +208,7 @@ async def get_autocomplete(
                         "meta": skill.description,
                     })
 
-            elif cmd in ('/spawn', '/spawnAutoApprovedChildThread'):
+            elif cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
                 # Filesystem path suggestions
                 if arg_tok:
                     expanded = os.path.expanduser(arg_tok)

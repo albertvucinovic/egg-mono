@@ -21,14 +21,13 @@ COMMANDS_TEXT = """
 Commands:
   Model handling:
     /model <key>, /updateAllModels <provider>
-  Thread management basic:
+  Threads/Agents/Subagents:
     /spawnChildThread <text>, /spawnAutoApprovedChildThread <text>, /waitForThreads <threads>
-  Thread management other:
     /parentThread, /listChildren, /threads, /thread <selector>
     /deleteThread <selector>, /newThread <name>, /duplicateThread <name>
     /continue [msg_id], /context, /compact [msg_id|last_user|last_llm]
     /compactWithSummary, /setAutoCompactThreshold <tokens>
-    /schedulers
+    /setThreadPriority ..., /schedulers
   Tool management:
     /toggleAutoApproval, /toolsOn, /toolsOff, /disableTool <name>, /enableTool <name>
     /toggleSandboxing, /setSandboxConfiguration <file.json>

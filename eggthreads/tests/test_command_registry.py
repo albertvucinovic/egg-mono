@@ -910,3 +910,22 @@ def test_render_command_registry_help_uses_metadata() -> None:
 
     assert "Plugins:" in text
     assert "/example <arg> (aliases: /ex) — Example command." in text
+
+
+def test_default_help_groups_threads_agents_and_subagents() -> None:
+    text = render_command_registry_help(create_default_command_registry())
+
+    lines = text.splitlines()
+    assert "  Threads:" not in lines
+    assert "  Subagents:" not in lines
+    assert "Threads/Agents/Subagents:" in text
+    section = text.split("Threads/Agents/Subagents:", 1)[1].split("\n  Diagnostics:", 1)[0]
+    for command in [
+        "/threads",
+        "/spawnChildThread <text>",
+        "/spawnAutoApprovedChildThread <text>",
+        "/waitForThreads <threads>",
+        "/setThreadPriority ...",
+        "/schedulers",
+    ]:
+        assert command in section

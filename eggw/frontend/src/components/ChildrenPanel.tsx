@@ -45,7 +45,7 @@ export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
         <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>Loading...</div>
       ) : children.length === 0 ? (
         <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>
-          No children. Use /spawn to create one.
+          No children. Use /spawnChildThread to create one.
         </div>
       ) : (
         <div className="max-h-32 overflow-auto">

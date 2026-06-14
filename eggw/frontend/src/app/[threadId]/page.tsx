@@ -204,7 +204,7 @@ export default function ThreadPage() {
     // Ctrl/Cmd + S - Spawn child thread (stays on parent)
     if ((e.ctrlKey || e.metaKey) && e.key === "s" && threadId) {
       e.preventDefault();
-      executeCommand(threadId, "/spawn").then((result) => {
+      executeCommand(threadId, "/spawnChildThread").then((result) => {
         if (result.success && result.data?.child_id) {
           queryClient.invalidateQueries({ queryKey: ["threadChildren", threadId] });
           // Don't navigate to child - stay on parent
@@ -330,7 +330,7 @@ export default function ThreadPage() {
             </div>
             <div className="mt-4 pt-4 border-t border-[var(--panel-border)] text-sm" style={{ color: "var(--muted)" }}>
               <p className="font-medium mb-2" style={{ color: "var(--foreground)" }}>Commands:</p>
-              <p>/model, /updateAllModels, /spawn, /spawnAutoApprovedChildThread</p>
+              <p>/model, /updateAllModels, /spawnChildThread, /spawnAutoApprovedChildThread</p>
               <p>/skills, /skill</p>
               <p>/newThread, /threads, /thread, /rename, /waitForThreads</p>
               <p>/parentThread, /listChildren, /deleteThread, /duplicateThread</p>

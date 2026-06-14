@@ -144,7 +144,7 @@ class EggCompleter(Completer):
       - '/updateAllModels ' provider names
       - '/thread ' thread ids with name/recap meta
       - '/child ' direct children ids with meta
-      - '/spawn ' filesystem paths and conversation words
+      - '/spawnChildThread ' filesystem paths and conversation words
       - For plain user text: filesystem paths and conversation words
     """
 
@@ -741,7 +741,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         if cmd == '/waitForThreads':
             return _thread_arg_items(arg_tok)
 
-        # /spawn and /spawn_auto -> filesystem suggestions for arg
+        # /spawnChildThread and /spawnAutoApprovedChildThread -> filesystem suggestions for arg
         if cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
             return _mk_items(_fs_suggestions(arg_tok), arg_tok)
 

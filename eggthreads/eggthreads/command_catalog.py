@@ -204,7 +204,10 @@ def render_command_registry_help(registry: CommandRegistry) -> str:
     lines: List[str] = ["Commands:"]
     categories: dict[str, list[CommandSpec]] = {}
     for spec in registry.specs():
-        categories.setdefault(spec.category or "general", []).append(spec)
+        category = spec.category or "general"
+        if category in {"threads", "subagents"} or spec.name in {"schedulers", "setThreadPriority"}:
+            category = "threads/agents/subagents"
+        categories.setdefault(category, []).append(spec)
 
     for category, specs in categories.items():
         lines.append(f"  {category.replace('_', ' ').title()}:")
@@ -410,8 +413,7 @@ EGG_COMMAND_COMPLETIONS: List[str] = command_completion_names()
 
 EGGW_COMMAND_COMPLETIONS: List[str] = [
     *EGG_COMMAND_COMPLETIONS,
-    # Web-only aliases/options.
-    '/spawn',
+    # Web-only options.
     '/rename',
     '/theme',
 ]
