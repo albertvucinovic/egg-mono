@@ -26,6 +26,7 @@ from eggthreads import (
     create_snapshot,
 )
 from eggthreads.builtin_plugins.diagnostics import format_cost_report
+from eggthreads.command_catalog import create_default_command_registry, render_command_registry_help
 
 from ..models import CommandResponse
 from .. import core
@@ -437,80 +438,21 @@ async def execute_bash_command_handler(thread_id: str, script: str, hidden: bool
 
 def cmd_help() -> CommandResponse:
     """Handle /help command."""
-    help_text = """Available commands:
+    help_text = render_command_registry_help(create_default_command_registry())
+    help_text += """
 
-Thread Management:
-  /newThread [name]              - Create a new root thread
-  /spawn <context>               - Spawn a child thread
-  /thread <selector>             - Switch to a thread by ID/name/recap
-  /threads                       - List all threads
-  /listChildren                  - List children of current thread
-  /parentThread                  - Switch to parent thread
-  /deleteThread [selector]       - Delete thread (and subtree)
-  /duplicateThread [name] [msg_id] - Duplicate thread
-  /continue [msg_id]             - Continue thread from point
-  /context                       - Show context and compaction status
-  /compact [msg_id|last_user|last_llm] - Set provider context start
-  /compactWithSummary            - Ask assistant to summarize, then compact
-  /setAutoCompactThreshold <tokens> - Set auto-compaction threshold (0 disables)
-  /rename <name>                 - Rename current thread
+EggW-only commands:
+    /spawn <context> — Alias for /spawnChildThread.
+    /rename <name> — Rename the current thread.
+    /theme [name] — List or switch browser themes.
 
-Model:
-  /model [name]                  - Get or set model for thread
-  /updateAllModels <provider>    - Update model catalog
-
-Skills:
-  /skills [query]                - List/search packaged skills
-  /skill <name>                  - Show and load a skill document
-
-Tools:
-  /toolsOn                       - Enable all tools
-  /toolsOff                      - Disable all tools
-  /toolsStatus                   - Show tools status and available tools
-  /toolInfo <name>               - Show tool description (JSON spec)
-  /disableTool <name>            - Disable specific tool
-  /enableTool <name>             - Enable specific tool
-  /toolsSecrets <on|off>         - Toggle raw output
-
-Sandbox:
-  /toggleSandboxing              - Toggle sandbox on/off
-  /setSandboxConfiguration <cfg> - Apply sandbox config
-  /getSandboxingConfig           - Show sandbox config
-
-Persistent REPL Sessions:
-  /sessionStatus                 - Show session/runtime status
-  /sessionOn [provider=...]      - Enable persistent session
-  /sessionOff                    - Disable session config
-  /sessionStop [python|bash|all] - Stop session runtime
-  /sessionReset [python|bash|all]- Reset session state
-  /sessionCleanup [stopped|all] [older_than=1h] - Remove Docker session containers
-  /pythonRepl <code>             - Execute persistent Python REPL code
-  /bashRepl <script>             - Execute persistent Bash REPL script
-
-Utility:
-  /cost                          - Show token usage and cost
-  /toggleAutoApproval            - Toggle auto-approve tools
-  /toggleAutoContinueOnError     - Toggle auto-continue after errors
-  /schedulers                    - Show active schedulers
-  /waitForThreads <ids...>       - Wait for threads to complete
-  /setContextLimit [limit]       - Set or show max context tokens
-  /setThreadPriority [opts]      - Set/show scheduler priority/timeouts
-  /theme [name]                  - List or switch themes
-  /displayVerbosity <max|medium|min> - Set transcript display verbosity
-  /togglePanel <name>            - Show/hide a panel
-  /toggleBorders                 - Toggle panel borders
-  /enterMode <send|newline>      - Set Enter key behavior
-  /reload                        - Restart eggw and reopen this thread
-  /authStatus                    - Show ChatGPT OAuth status
-  /login                         - Start ChatGPT OAuth login
-  /logout                        - Clear ChatGPT OAuth token
-  /startSearxng                  - Start local SearXNG container
-  /stopSearxng                   - Stop local SearXNG container
-  /help                          - Show this help
+EggW behavior notes:
+    /redraw — No-op in EggW; the browser UI updates automatically.
+    /displayMode — Terminal-only; EggW uses the browser layout.
 
 Shell:
-  $ <command>                    - Run visible bash command
-  $$ <command>                   - Run hidden bash command"""
+    $ <command> — Run visible bash command.
+    $$ <command> — Run hidden bash command."""
 
     return CommandResponse(
         success=True,

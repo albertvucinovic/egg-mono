@@ -992,12 +992,20 @@ class TestCommands:
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
-        assert "Available commands" in data["message"]
+        assert "Commands:" in data["message"]
         assert "/reload" in data["message"]
         assert "/context" in data["message"]
         assert "/compact" in data["message"]
         assert "/compactWithSummary" in data["message"]
         assert "/setAutoCompactThreshold" in data["message"]
+        assert "/btw <message>" in data["message"]
+        assert "/cost" in data["message"]
+        assert "EggW-only commands:" in data["message"]
+        assert "/theme [name]" in data["message"]
+        assert "/rename <name>" in data["message"]
+        assert "/spawn <context>" in data["message"]
+        assert "/redraw — No-op in EggW" in data["message"]
+        assert "/displayMode — Terminal-only" in data["message"]
 
     def test_btw_command_uses_shared_preserve_turn_handler(self, client, monkeypatch):
         """EggW /btw queues the shared preserve-turn request for the assistant."""

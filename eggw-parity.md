@@ -111,12 +111,13 @@ Tasks:
 - [ ] Decide and implement a thin EggW adapter around `CommandRegistry` for commands that can use shared handlers.
 - [ ] Keep web-only commands explicit: `/theme`, `/rename`, `/spawn` alias, browser-specific `/redraw`/`/displayMode` no-ops if still desired.
 - [x] Add `/btw` support in EggW.
-- [ ] Make EggW `/help` generated from the shared registry plus web-only commands.
+- [x] Make EggW `/help` generated from the shared registry plus web-only commands.
 - [ ] Add parity tests ensuring commands advertised by autocomplete/help are executable or intentionally web-only/terminal-only.
 - [ ] Revisit duplicated thread command behavior after registry adapter exists.
 
 Status notes:
 - 2026-06-14: Implemented the first narrow Phase 4 slice. EggW now dispatches `/btw` through the shared `eggthreads.builtin_plugins.answer_user.btw_command`, so the web command queues the same preserve-turn interim-answer request and starts the thread scheduler. Focused backend coverage verifies the queued request. The broader shared-registry adapter and generated `/help` work remain pending.
+- 2026-06-14: Implemented generated `/help` parity slice. EggW `/help` now renders the shared `CommandRegistry` help and appends explicit EggW-only entries for `/spawn`, `/rename`, and `/theme`, plus EggW behavior notes for `/redraw` and `/displayMode`. Focused backend coverage verifies shared commands (`/btw`, `/cost`) and EggW-only entries appear. Full dispatch adapter and command-advertisement parity tests remain pending.
 
 ## Phase 5 — `/waitForThreads` parity
 
