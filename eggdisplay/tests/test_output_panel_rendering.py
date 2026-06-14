@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from eggdisplay import OutputPanel
+from rich.console import Console
+import io
 
 
 def test_output_panel_title_uses_border_style_as_base_color() -> None:
@@ -14,6 +16,21 @@ def test_output_panel_title_uses_border_style_as_base_color() -> None:
     assert rendered.title.plain == "Output"
     assert rendered.title.style == "cyan"
     assert any(span.style == "bold" for span in rendered.title.spans)
+
+
+def test_output_panel_title_preserves_inline_markup_colors() -> None:
+    panel = OutputPanel(
+        title="[red]Sandboxing[OFF][/red]  [green]Autoapproval[Off][/green]",
+        style=OutputPanel.PanelStyle(border_style="blue", title_style="bold"),
+    )
+
+    rendered = panel.render()
+    buf = io.StringIO()
+    Console(file=buf, width=100, force_terminal=True, color_system="truecolor").print(rendered)
+    first_line = buf.getvalue().splitlines()[0]
+
+    assert "\x1b[1;31mSandboxing[OFF]" in first_line
+    assert "\x1b[1;32mAutoapproval[Off]" in first_line
 
 
 def test_output_panel_plain_mode_preserves_square_brackets() -> None:

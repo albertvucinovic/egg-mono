@@ -41,7 +41,7 @@ _PANEL_TITLE_MODIFIERS = {
 }
 
 
-def _panel_title_text(title: str, *, base_style: str, title_style: str) -> Optional[Text]:
+def _panel_title_text(title: str, *, base_style: str, title_style: str) -> Any:
     """Build a panel title that inherits the panel color.
 
     Rich does not theme compound style strings such as ``"bold cyan"`` the
@@ -52,17 +52,32 @@ def _panel_title_text(title: str, *, base_style: str, title_style: str) -> Optio
     """
     if not title:
         return None
+    title = str(title)
     title_style = str(title_style or "")
     title_style_tokens = title_style.split()
     modifier_tokens = [token for token in title_style_tokens if token in _PANEL_TITLE_MODIFIERS]
     color_tokens = [token for token in title_style_tokens if token not in _PANEL_TITLE_MODIFIERS]
     base_style_tokens = set(str(base_style or "").split())
     use_base_style = not color_tokens or all(token in base_style_tokens for token in color_tokens)
+
+    try:
+        parsed_title = Text.from_markup(title)
+        has_inline_markup = bool(parsed_title.spans)
+    except MarkupError:
+        has_inline_markup = False
+
+    if has_inline_markup:
+        wrapper_tokens = modifier_tokens if use_base_style else title_style_tokens
+        wrapper_style = " ".join(wrapper_tokens)
+        if wrapper_style:
+            return f"[{wrapper_style}]{title}[/{wrapper_style}]"
+        return title
+
     style = base_style if use_base_style else title_style
     try:
-        text = Text.from_markup(str(title), style=style or "")
+        text = Text.from_markup(title, style=style or "")
     except MarkupError:
-        text = Text(str(title), style=style or "")
+        text = Text(title, style=style or "")
     if use_base_style:
         for token in modifier_tokens:
             text.stylize(token)
