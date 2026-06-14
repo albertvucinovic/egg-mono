@@ -251,6 +251,29 @@ class TestCmdTheme:
         egg_app.handle_command("/theme light-mono")
         assert egg_app._theme == "light-mono"
 
+    def test_large_content_theme_styles_are_not_underlined(self):
+        from egg.theme import THEMES, rich_theme_for
+
+        large_content_styles = [
+            "green",
+            "cyan",
+            "blue",
+            "yellow",
+            "magenta",
+            "egg.user",
+            "egg.assistant",
+            "egg.system",
+            "egg.tool",
+            "egg.reasoning",
+            "egg.tool_call",
+            "egg.tool_call_dim",
+        ]
+
+        for name in THEMES:
+            styles = rich_theme_for(name).styles
+            for style_name in large_content_styles:
+                assert not styles[style_name].underline, (name, style_name)
+
     def test_invalid_theme_reports_error_without_changing_state(self, egg_app, monkeypatch):
         monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: None)
         egg_app.handle_command("/theme matrix")
