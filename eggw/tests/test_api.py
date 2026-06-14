@@ -240,6 +240,99 @@ class TestThreadOperations:
         state_after_answer = client.get(f"/api/threads/{thread_id}/state").json()
         assert state_after_answer["active_get_user_wait"] is False
 
+    def test_interrupt_cancels_active_get_user_wait_with_tool_result(self, client):
+        """Web interrupt closes an active get-user wait with preserved turn semantics."""
+        from eggthreads import append_message, build_tool_call_states, create_snapshot
+
+        get_user_tool_name = "get_user_message_while_preserving_llm_turn"
+        create_resp = client.post("/api/threads", json={"name": "Cancel Get User Wait"})
+        thread_id = create_resp.json()["id"]
+        invoke_id = "invoke-get-user-cancel-web"
+        tool_call_id = "call-get-user-cancel-web"
+        interrupted = "User interrupted get_user_message_while_preserving_llm_turn."
+
+        assert core_state.db.try_open_stream(
+            thread_id,
+            invoke_id,
+            "2999-01-01 00:00:00",
+            owner="test",
+            purpose="tool",
+        )
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": get_user_tool_name,
+                            "arguments": json.dumps({"assistant_note": "Need user input"}),
+                        },
+                    }
+                ]
+            },
+        )
+        core_state.db.append_event(
+            event_id="started-get-user-cancel-web",
+            thread_id=thread_id,
+            type_="tool_call.execution_started",
+            invoke_id=invoke_id,
+            payload={"tool_call_id": tool_call_id},
+        )
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "Need user input",
+            extra={
+                "answer_user_preserve_turn": True,
+                "source_tool_name": get_user_tool_name,
+                "tool_call_id": tool_call_id,
+                "awaiting_user_message_tool_call_id": tool_call_id,
+            },
+        )
+        create_snapshot(core_state.db, thread_id)
+
+        assert client.get(f"/api/threads/{thread_id}/state").json()["active_get_user_wait"] is True
+
+        response = client.post(f"/api/threads/{thread_id}/interrupt")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "interrupted"
+        assert body["invoke_id"] == invoke_id
+        assert body["get_user_cancelled"] is True
+        assert core_state.db.current_open(thread_id) is None
+
+        state = client.get(f"/api/threads/{thread_id}/state").json()
+        assert state["active_get_user_wait"] is False
+
+        rows = core_state.db.conn.execute(
+            "SELECT type, payload_json FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+        payloads_by_type = [(row["type"], json.loads(row["payload_json"])) for row in rows]
+        approvals = [payload for typ, payload in payloads_by_type if typ == "tool_call.output_approval"]
+        assert approvals[-1]["tool_call_id"] == tool_call_id
+        assert approvals[-1]["decision"] == "whole"
+        assert approvals[-1]["preview"] == interrupted
+
+        tool_messages = [payload for typ, payload in payloads_by_type if typ == "msg.create" and payload.get("role") == "tool"]
+        assert len(tool_messages) == 1
+        tool_msg = tool_messages[0]
+        assert tool_msg["content"] == interrupted
+        assert tool_msg["tool_call_id"] == tool_call_id
+        assert tool_msg["name"] == get_user_tool_name
+        assert tool_msg["keep_user_turn"] is True
+
+        tc = build_tool_call_states(core_state.db, thread_id)[tool_call_id]
+        assert tc.published is True
+        assert tc.state == "TC6"
+
 
 class TestMessageOperations:
     """Test message sending and retrieval."""

@@ -176,6 +176,9 @@ export default function ThreadPage() {
           setIsStreaming(false);
           // Refetch messages to get the saved partial content from backend
           queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+          queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
+          queryClient.invalidateQueries({ queryKey: ["threadSettings", threadId] });
+          queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
           addSystemLog("Streaming cancelled (Escape)", "info");
         });
       }

@@ -88,14 +88,15 @@ Tasks:
   - [x] status text explaining that the next normal message answers the tool.
 - [x] Allow normal input submission while the thread is in active get-user wait even if an LLM/tool stream is otherwise considered active.
 - [x] Route that normal message so it answers the active tool call using shared core semantics rather than creating an unrelated user turn.
-- [ ] Implement cancel behavior equivalent to terminal Ctrl+C:
-  - [ ] close the get-user tool call with `User interrupted...`;
-  - [ ] publish a tool result with `keep_user_turn` where needed;
-  - [ ] return UI to normal input mode.
-- [ ] Add tests for state, input mode, answer submission, and cancel.
+- [x] Implement cancel behavior equivalent to terminal Ctrl+C:
+  - [x] close the get-user tool call with `User interrupted...`;
+  - [x] publish a tool result with `keep_user_turn` where needed;
+  - [x] return UI to normal input mode.
+- [x] Add tests for state, input mode, answer submission, and cancel.
 
 Status notes:
 - 2026-06-13 Phase 3A: Implemented active get-user wait state and answer submission/input affordance only. EggW now exposes shared `get_active_get_user_message_waiting_note()` metadata on thread state/settings, shows a distinct get-answer input mode, allows normal messages while that wait is active, and relies on the existing normal message append path for the waiting tool to consume the answer. Focused backend tests cover state/settings exposure and normal answer submission; frontend typecheck covers the input affordance wiring. Cancel parity remains pending for Phase 3B.
+- 2026-06-13 Phase 3B: Implemented get-user cancel parity in EggW interrupt handling. Active get-user waits now synthesize the same clear interrupted tool result text as terminal Egg, publish an assistant-originated tool message with `keep_user_turn`, clear UI get-answer mode through normal state/message/tool invalidations, and keep generic interrupt behavior for normal tools/LLM streams. Focused backend tests cover cancel output/state; frontend typecheck covers UI wiring.
 
 ## Phase 4 — Slash-command parity / shared command registry
 

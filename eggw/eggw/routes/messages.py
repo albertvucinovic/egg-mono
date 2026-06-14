@@ -15,6 +15,8 @@ from eggthreads import (
     ThreadsDB,
     append_message,
     build_tool_call_states,
+    create_snapshot,
+    get_active_get_user_message_waiting_note,
     interrupt_thread,
 )
 
@@ -23,6 +25,61 @@ from .. import core
 from ..core import ensure_scheduler_for, get_thread_root_id
 
 router = APIRouter(prefix="/api/threads", tags=["messages"])
+
+GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
+GET_USER_INTERRUPT_CONTENT = "User interrupted get_user_message_while_preserving_llm_turn."
+
+
+def _cancel_active_get_user_wait(thread_id: str, waiting_note: dict | None) -> bool:
+    """Publish the terminal-equivalent interrupted result for an active get-user wait."""
+    if not core.db or not isinstance(waiting_note, dict):
+        return False
+    tool_call_id = str(waiting_note.get("tool_call_id") or "")
+    if not tool_call_id:
+        return False
+
+    try:
+        tc = build_tool_call_states(core.db, thread_id).get(tool_call_id)
+    except Exception:
+        tc = None
+    if tc is None or getattr(tc, "published", False):
+        return False
+    name = str(getattr(tc, "name", "") or tool_call_id)
+    if name != GET_USER_MESSAGE_TOOL_NAME:
+        return False
+
+    core.db.append_event(
+        event_id=os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_="tool_call.output_approval",
+        msg_id=None,
+        invoke_id=None,
+        payload={
+            "tool_call_id": tool_call_id,
+            "decision": "whole",
+            "reason": "Cancelled by user via web interrupt",
+            "preview": GET_USER_INTERRUPT_CONTENT,
+        },
+    )
+
+    if getattr(tc, "parent_role", None) == "assistant":
+        core.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="msg.create",
+            msg_id=os.urandom(10).hex(),
+            invoke_id=None,
+            payload={
+                "role": "tool",
+                "content": GET_USER_INTERRUPT_CONTENT,
+                "tool_call_id": tool_call_id,
+                "name": name,
+                "keep_user_turn": True,
+            },
+        )
+        create_snapshot(core.db, thread_id)
+
+    return True
 
 
 def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> MessageContent:
@@ -252,8 +309,12 @@ async def interrupt_thread_endpoint(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
+    get_user_waiting_note = get_active_get_user_message_waiting_note(core.db, thread_id)
+
     # Interrupt the thread
     result = interrupt_thread(core.db, thread_id, reason="user")
+
+    get_user_cancelled = _cancel_active_get_user_wait(thread_id, get_user_waiting_note)
 
     # Auto-approve output for any interrupted tool calls so they get published
     # and don't block further interaction. The runner will add an "interrupted" note.
@@ -290,4 +351,5 @@ async def interrupt_thread_endpoint(thread_id: str):
         "status": "interrupted",
         "thread_id": thread_id,
         "invoke_id": result,
+        "get_user_cancelled": get_user_cancelled,
     }
