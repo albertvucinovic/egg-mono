@@ -114,13 +114,14 @@ Tasks:
 - [x] Add `/btw` support in EggW.
 - [x] Make EggW `/help` generated from the shared registry plus web-only commands.
 - [x] Add parity tests ensuring commands advertised by autocomplete/help are executable or intentionally web-only/terminal-only.
-- [ ] Revisit duplicated thread command behavior after registry adapter exists.
+- [x] Revisit duplicated thread command behavior after registry adapter exists.
 
 Status notes:
 - 2026-06-14: Implemented the first narrow Phase 4 slice. EggW now dispatches `/btw` through the shared `eggthreads.builtin_plugins.answer_user.btw_command`, so the web command queues the same preserve-turn interim-answer request and starts the thread scheduler. Focused backend coverage verifies the queued request. The broader shared-registry adapter and generated `/help` work remain pending.
 - 2026-06-14: Implemented generated `/help` parity slice. EggW `/help` now renders the shared `CommandRegistry` help and appends explicit EggW-only entries for `/spawn`, `/rename`, and `/theme`, plus EggW behavior notes for `/redraw` and `/displayMode`. Focused backend coverage verifies shared commands (`/btw`, `/cost`) and EggW-only entries appear. Full dispatch adapter and command-advertisement parity tests remain pending.
 - 2026-06-14: Added command-advertisement parity tests and fixed the tiny exposed drift by adding `/rename` to EggW command completions. Tests now ensure shared registry command names are covered by EggW dispatch and autocomplete names are either shared or explicit EggW-only commands. The full shared dispatch adapter and duplicate command-behavior revisit remain pending.
 - 2026-06-14: Implemented the final narrow adapter slice. EggW now has a tiny allowlisted shared `CommandRegistry` adapter and routes only `/btw` through it; other duplicated commands remain explicit because they currently need EggW-specific structured response data, browser behavior, or later phase review. Web-only `/theme`, `/rename`, `/spawn`, `/redraw`, and `/displayMode` behavior stays explicit. Duplicated thread command behavior remains pending for a separate review.
+- 2026-06-14: Reviewed duplicated thread commands against shared `ThreadUiPlugin`/subagent handlers after the adapter landed. Decision: keep EggW `/threads`, `/thread`, `/newThread`, `/deleteThread`, `/duplicateThread`, `/parentThread`, `/listChildren`, `/continue`, and `/spawn`/`/spawnChildThread` explicit for now. EggW handlers return structured browser `data` for navigation/reload/lists/diagnostics and preserve existing web semantics; shared handlers are terminal/UI-callback oriented and would change behavior. Known remaining command gaps are already tracked separately: `/waitForThreads` queued wait parity in Phase 5 and new-root system prompt parity in Phase 9.
 
 ## Phase 5 — `/waitForThreads` parity
 
