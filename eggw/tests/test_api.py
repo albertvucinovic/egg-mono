@@ -145,6 +145,101 @@ class TestThreadOperations:
         assert data["streaming_kind"] == "tool"
         assert data["streaming_invoke_id"] == invoke_id
 
+    def test_get_user_wait_state_settings_and_normal_answer_submission(self, client):
+        """EggW exposes active get-user waits and answers via normal messages."""
+        from eggthreads import append_message, create_snapshot
+
+        get_user_tool_name = "get_user_message_while_preserving_llm_turn"
+        create_resp = client.post("/api/threads", json={"name": "Get User Wait"})
+        thread_id = create_resp.json()["id"]
+        invoke_id = "invoke-get-user-web"
+        tool_call_id = "call-get-user-web"
+        note = "What should I do next?"
+
+        assert core_state.db.try_open_stream(
+            thread_id,
+            invoke_id,
+            "2999-01-01 00:00:00",
+            owner="test",
+            purpose="tool",
+        )
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": get_user_tool_name,
+                            "arguments": json.dumps({"assistant_note": note}),
+                        },
+                    }
+                ]
+            },
+        )
+        core_state.db.append_event(
+            event_id="started-get-user-web",
+            thread_id=thread_id,
+            type_="tool_call.execution_started",
+            invoke_id=invoke_id,
+            payload={"tool_call_id": tool_call_id},
+        )
+        note_msg_id = append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            note,
+            extra={
+                "answer_user_preserve_turn": True,
+                "source_tool_name": get_user_tool_name,
+                "tool_call_id": tool_call_id,
+                "awaiting_user_message_tool_call_id": tool_call_id,
+            },
+        )
+        create_snapshot(core_state.db, thread_id)
+
+        state_response = client.get(f"/api/threads/{thread_id}/state")
+        settings_response = client.get(f"/api/threads/{thread_id}/settings")
+
+        assert state_response.status_code == 200
+        state = state_response.json()
+        assert state["state"] == "waiting_user"
+        assert state["streaming_kind"] == "tool"
+        assert state["streaming_invoke_id"] == invoke_id
+        assert state["active_get_user_wait"] is True
+        assert state["get_user_waiting_note"]["msg_id"] == note_msg_id
+        assert state["get_user_waiting_note"]["tool_call_id"] == tool_call_id
+        assert state["get_user_waiting_note"]["content"] == note
+
+        assert settings_response.status_code == 200
+        settings = settings_response.json()
+        assert settings["active_get_user_wait"] is True
+        assert settings["get_user_waiting_note"]["content"] == note
+
+        answer_response = client.post(
+            f"/api/threads/{thread_id}/messages",
+            json={"content": "Continue with the next slice."},
+        )
+
+        assert answer_response.status_code == 200
+        answer_msg_id = answer_response.json()["message_id"]
+        row = core_state.db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND msg_id=? AND type='msg.create'",
+            (thread_id, answer_msg_id),
+        ).fetchone()
+        payload = json.loads(row[0])
+        assert payload["role"] == "user"
+        assert payload["content"] == "Continue with the next slice."
+        assert payload.get("keep_user_turn") is not True
+        assert payload.get("no_api") is not True
+
+        state_after_answer = client.get(f"/api/threads/{thread_id}/state").json()
+        assert state_after_answer["active_get_user_wait"] is False
+
 
 class TestMessageOperations:
     """Test message sending and retrieval."""

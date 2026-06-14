@@ -17,6 +17,7 @@ from eggthreads import (
     duplicate_thread,
     current_thread_model,
     thread_state,
+    get_active_get_user_message_waiting_note,
 )
 
 from ..models import ThreadInfo, CreateThreadRequest
@@ -262,7 +263,8 @@ async def get_thread_state_endpoint(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    state = thread_state(core.db, thread_id)
+    get_user_waiting_note = get_active_get_user_message_waiting_note(core.db, thread_id)
+    state = "waiting_user" if get_user_waiting_note is not None else thread_state(core.db, thread_id)
     root_id = get_thread_root_id(thread_id)
 
     streaming_kind = None
@@ -285,5 +287,7 @@ async def get_thread_state_endpoint(thread_id: str):
         "state": state,
         "streaming_kind": streaming_kind,
         "streaming_invoke_id": streaming_invoke_id,
+        "active_get_user_wait": get_user_waiting_note is not None,
+        "get_user_waiting_note": get_user_waiting_note,
         "scheduler_running": root_id in core.active_schedulers,
     }

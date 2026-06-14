@@ -17,6 +17,7 @@ from eggthreads import (
     get_thread_recovery,
     enable_thread_session,
     disable_thread_session,
+    get_active_get_user_message_waiting_note,
 )
 
 from .. import core
@@ -33,10 +34,14 @@ async def get_thread_settings(thread_id: str):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
+    get_user_waiting_note = get_active_get_user_message_waiting_note(core.db, thread_id)
+
     return {
         "auto_approval": get_thread_auto_approval_status(core.db, thread_id),
         "autoContinueOnError": get_thread_recovery(core.db, thread_id).auto_continue_on_error,
         "model_key": current_thread_model(core.db, thread_id),
+        "active_get_user_wait": get_user_waiting_note is not None,
+        "get_user_waiting_note": get_user_waiting_note,
     }
 
 

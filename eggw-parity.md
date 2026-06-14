@@ -81,13 +81,13 @@ Reference files:
 - EggW frontend/backend: `eggw/frontend/src/components/MessageInput.tsx`, `eggw/eggw/routes/threads.py`, `eggw/eggw/routes/messages.py`
 
 Tasks:
-- [ ] Expose active get-user waiting state in EggW thread state/settings APIs.
-- [ ] Show distinct input mode while answering get-user tool call:
-  - [ ] header/label like `Message Input (get answer tool)`;
-  - [ ] distinct border/color;
-  - [ ] status text explaining that the next normal message answers the tool.
-- [ ] Allow normal input submission while the thread is in active get-user wait even if an LLM/tool stream is otherwise considered active.
-- [ ] Route that normal message so it answers the active tool call using shared core semantics rather than creating an unrelated user turn.
+- [x] Expose active get-user waiting state in EggW thread state/settings APIs.
+- [x] Show distinct input mode while answering get-user tool call:
+  - [x] header/label like `Message Input (get answer tool)`;
+  - [x] distinct border/color;
+  - [x] status text explaining that the next normal message answers the tool.
+- [x] Allow normal input submission while the thread is in active get-user wait even if an LLM/tool stream is otherwise considered active.
+- [x] Route that normal message so it answers the active tool call using shared core semantics rather than creating an unrelated user turn.
 - [ ] Implement cancel behavior equivalent to terminal Ctrl+C:
   - [ ] close the get-user tool call with `User interrupted...`;
   - [ ] publish a tool result with `keep_user_turn` where needed;
@@ -95,7 +95,7 @@ Tasks:
 - [ ] Add tests for state, input mode, answer submission, and cancel.
 
 Status notes:
-- Pending.
+- 2026-06-13 Phase 3A: Implemented active get-user wait state and answer submission/input affordance only. EggW now exposes shared `get_active_get_user_message_waiting_note()` metadata on thread state/settings, shows a distinct get-answer input mode, allows normal messages while that wait is active, and relies on the existing normal message append path for the waiting tool to consume the answer. Focused backend tests cover state/settings exposure and normal answer submission; frontend typecheck covers the input affordance wiring. Cancel parity remains pending for Phase 3B.
 
 ## Phase 4 — Slash-command parity / shared command registry
 

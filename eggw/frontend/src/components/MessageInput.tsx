@@ -2,9 +2,9 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Send, Loader2, Terminal, StopCircle } from "lucide-react";
-import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, AutocompleteSuggestion } from "@/lib/api";
+import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, AutocompleteSuggestion } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -42,6 +42,14 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     enterMode,
   } = useAppStore();
 
+  const { data: threadState } = useQuery({
+    queryKey: ["threadState", currentThreadId],
+    queryFn: () => fetchThreadState(currentThreadId!),
+    enabled: !!currentThreadId,
+  });
+  const activeGetUserWait = Boolean(threadState?.active_get_user_wait);
+  const getUserWaitingNote = threadState?.get_user_waiting_note;
+
   // Regular message mutation
   const messageMutation = useMutation({
     mutationFn: (content: string) => sendMessage(currentThreadId!, content),
@@ -60,6 +68,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
+      queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Message sent", "success");
     },
     onError: () => {
@@ -338,10 +347,10 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
 
   // Auto-focus input when thread changes or on mount
   useEffect(() => {
-    if (currentThreadId && !isStreaming) {
+    if (currentThreadId && (!isStreaming || activeGetUserWait)) {
       textareaRef.current?.focus();
     }
-  }, [currentThreadId, isStreaming]);
+  }, [currentThreadId, isStreaming, activeGetUserWait]);
 
   // Global key capture - focus input when user starts typing
   useEffect(() => {
@@ -394,11 +403,12 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     const trimmed = input.trim();
     if (!trimmed || !currentThreadId) return;
 
-    // Commands can run during streaming (navigation, status, etc.)
-    // Only block regular messages during streaming
+    // Commands can run during streaming (navigation, status, etc.). Regular
+    // messages are blocked during streaming except while the get-user tool is
+    // explicitly waiting for the next normal user message.
     if (isCommand(trimmed)) {
       commandMutation.mutate(trimmed);
-    } else if (!isStreaming) {
+    } else if (!isStreaming || activeGetUserWait) {
       messageMutation.mutate(trimmed);
     }
   };
@@ -448,9 +458,30 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
 
   const isPending = messageMutation.isPending || commandMutation.isPending;
   const inputIsCommand = isCommand(input);
+  const showGetUserAnswerButton = isStreaming && activeGetUserWait && !inputIsCommand;
 
   return (
-    <div className={`p-4 bg-[var(--panel-bg)] relative ${showBorders ? 'border-t border-[var(--panel-border)]' : ''}`}>
+    <div
+      className={`p-4 bg-[var(--panel-bg)] relative ${showBorders || activeGetUserWait ? 'border-t' : ''}`}
+      style={{ borderColor: activeGetUserWait ? "#d946ef" : "var(--panel-border)" }}
+    >
+      {activeGetUserWait && (
+        <div
+          data-testid="get-user-input-mode"
+          className="mb-2 rounded px-3 py-2 text-xs border"
+          style={{ color: "#f0abfc", borderColor: "#d946ef", background: "rgba(217, 70, 239, 0.12)" }}
+        >
+          <div className="font-medium">Message Input (get answer tool)</div>
+          <div>
+            The next normal message answers the waiting get-user tool and preserves the assistant turn.
+          </div>
+          {getUserWaitingNote?.content && (
+            <div className="mt-1 truncate" title={getUserWaitingNote.content}>
+              Waiting prompt: {getUserWaitingNote.content}
+            </div>
+          )}
+        </div>
+      )}
       {/* Autocomplete dropdown */}
       {showSuggestions && suggestions.length > 0 && (
         <div
@@ -491,12 +522,14 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
           onKeyDown={handleKeyDown}
           placeholder={
             currentThreadId
-              ? "Message, /command, or $ shell..."
+              ? activeGetUserWait
+                ? "Answer the waiting get-user tool..."
+                : "Message, /command, or $ shell..."
               : "Select a thread first"
           }
           disabled={!currentThreadId}
-          className={`flex-1 rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[40px] ${showBorders ? 'border' : ''}`}
-          style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+          className={`flex-1 rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[40px] ${showBorders || activeGetUserWait ? 'border' : ''}`}
+          style={{ background: "var(--panel-bg)", borderColor: activeGetUserWait ? "#d946ef" : "var(--panel-border)", color: "var(--foreground)" }}
           rows={1}
           data-testid="message-input"
         />
@@ -514,6 +547,22 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
               <Terminal className="w-4 h-4" />
             )}
             Run
+          </button>
+        )}
+        {showGetUserAnswerButton && (
+          <button
+            onClick={handleSubmit}
+            disabled={!input.trim() || !currentThreadId || isPending}
+            className="px-4 py-2 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            style={{ background: "#c026d3", color: "white" }}
+            title="Answer the waiting get-user tool"
+          >
+            {isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Send className="w-4 h-4" />
+            )}
+            Answer
           </button>
         )}
         {isStreaming ? (
@@ -561,7 +610,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
         {isStreaming && (
           <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
             <Loader2 className="w-3 h-3 animate-spin" />
-            Streaming...
+            {activeGetUserWait ? "Waiting for get-user answer..." : "Streaming..."}
           </span>
         )}
         <span title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>

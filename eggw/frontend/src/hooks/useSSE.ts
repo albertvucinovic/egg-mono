@@ -196,6 +196,7 @@ export function useSSE(threadId: string | null) {
         const role = payload.role || "unknown";
         addSystemLog(`Message created: ${role}`, "info");
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
       }
