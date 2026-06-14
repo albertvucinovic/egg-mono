@@ -1556,12 +1556,12 @@ class InputPanel:
         """Display options for InputPanel."""
         border_style: str = "green"
         box: Any = rich_box.SQUARE
-        title_style: str = "bold"
+        title_style: str = ""
         title_align: str = "left"
         show_header: bool = False
-        header_style: str = "bold white on green"
+        header_style: str = ""
         header_separator_char: str = "─"
-        header_separator_style: str = "green"
+        header_separator_style: str = ""
         status_style: str = "dim"
         cursor_style: str = "black on white"
         line_num_style: str = "dim"
@@ -1825,8 +1825,18 @@ class InputPanel:
 
         # Optional header at top
         if self.style.show_header:
-            rows.append(Text(f" {self.title} ", style=self.style.header_style, no_wrap=True))
-            rows.append(Text(self.style.header_separator_char * 70, style=self.style.header_separator_style, no_wrap=True))
+            header_text = _panel_title_text(
+                f" {self.title} ",
+                base_style=self.style.border_style,
+                title_style=self.style.header_style,
+            ) or Text(f" {self.title} ", style=self.style.border_style)
+            header_text.no_wrap = True
+            rows.append(header_text)
+            rows.append(Text(
+                self.style.header_separator_char * 70,
+                style=self.style.header_separator_style or self.style.border_style,
+                no_wrap=True,
+            ))
 
         header_lines = len(rows)
 

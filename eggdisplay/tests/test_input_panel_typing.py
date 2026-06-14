@@ -6,6 +6,35 @@ from __future__ import annotations
 from eggdisplay import InputPanel
 
 
+def test_input_panel_title_uses_plain_border_style():
+    """The default input title should not force bold/white over the border color."""
+    panel = InputPanel(title="Message Input", initial_height=4, max_height=4)
+
+    rendered = panel.render()
+
+    assert rendered.title.plain == "Message Input"
+    assert rendered.title.style == "green"
+    assert not rendered.title.spans
+
+
+def test_input_panel_internal_header_inherits_border_style():
+    """Optional inner header rows should be themable via the panel border style."""
+    panel = InputPanel(
+        title="Message Input",
+        initial_height=6,
+        max_height=6,
+        style=InputPanel.PanelStyle(show_header=True),
+    )
+
+    rendered = panel.render()
+    spans = rendered.renderable.spans
+
+    assert rendered.renderable.plain.startswith(" Message Input \n")
+    assert spans[0].style == "green"
+    assert spans[1].style == "green"
+    assert all("white" not in str(span.style) for span in spans[:2])
+
+
 def test_input_panel_shows_typed_text():
     """Typing characters should appear in the panel's text."""
     panel = InputPanel(initial_height=8, max_height=12)

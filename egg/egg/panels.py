@@ -884,7 +884,7 @@ class PanelsMixin:
             if waiting_note is not None:
                 title = "Message Input (get answer tool)"
                 border = "magenta"
-                title_style = "bold magenta"
+                title_style = ""
             else:
                 title = self._normal_input_panel_title
                 border = self._normal_input_border_style
