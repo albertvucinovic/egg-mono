@@ -3,7 +3,13 @@ from __future__ import annotations
 import os
 
 from .base import WebBackend, WebBackendError
-from .fetch import DirectHttpFetchProvider, FetchOrchestrator
+from .fetch import (
+    DEFAULT_FETCH_CACHE_MAX_CHARS,
+    DEFAULT_FETCH_CACHE_MAX_ENTRIES,
+    DEFAULT_FETCH_CACHE_TTL_SEC,
+    DirectHttpFetchProvider,
+    FetchOrchestrator,
+)
 from .search import (
     DEFAULT_DEGRADED_EMPTY_SEARCH_CACHE_TTL_SEC,
     DEFAULT_SEARCH_CACHE_MAX_ENTRIES,
@@ -20,6 +26,9 @@ FETCH_BACKEND_ENV = "EGG_WEB_FETCH_BACKEND"
 SEARCH_CACHE_TTL_ENV = "EGG_WEB_SEARCH_CACHE_TTL_SEC"
 SEARCH_CACHE_DEGRADED_EMPTY_TTL_ENV = "EGG_WEB_SEARCH_CACHE_DEGRADED_EMPTY_TTL_SEC"
 SEARCH_CACHE_MAX_ENTRIES_ENV = "EGG_WEB_SEARCH_CACHE_MAX_ENTRIES"
+FETCH_CACHE_TTL_ENV = "EGG_WEB_FETCH_CACHE_TTL_SEC"
+FETCH_CACHE_MAX_ENTRIES_ENV = "EGG_WEB_FETCH_CACHE_MAX_ENTRIES"
+FETCH_CACHE_MAX_CHARS_ENV = "EGG_WEB_FETCH_CACHE_MAX_CHARS"
 
 
 def _chosen_backend(
@@ -127,15 +136,24 @@ def get_fetch_orchestrator(name: str | None = None) -> FetchOrchestrator:
     """
     chosen, source = _chosen_backend(name, split_env=FETCH_BACKEND_ENV)
     if chosen in ("searxng", "searx"):
-        return FetchOrchestrator([DirectHttpFetchProvider()])
+        return _fetch_orchestrator([DirectHttpFetchProvider()])
     if chosen == "tavily":
         from .tavily import TavilyBackend
-        return FetchOrchestrator([TavilyBackend()])
+        return _fetch_orchestrator([TavilyBackend()])
     if chosen == "auto":
         providers = []
         if os.environ.get("TAVILY_API_KEY"):
             from .tavily import TavilyBackend
             providers.append(TavilyBackend())
         providers.append(DirectHttpFetchProvider())
-        return FetchOrchestrator(providers)
+        return _fetch_orchestrator(providers)
     raise _unknown_backend_error(chosen, source)
+
+
+def _fetch_orchestrator(providers: list) -> FetchOrchestrator:
+    return FetchOrchestrator(
+        providers,
+        cache_ttl_sec=_env_float(FETCH_CACHE_TTL_ENV, DEFAULT_FETCH_CACHE_TTL_SEC),
+        cache_max_entries=_env_int(FETCH_CACHE_MAX_ENTRIES_ENV, DEFAULT_FETCH_CACHE_MAX_ENTRIES),
+        cache_max_chars=_env_int(FETCH_CACHE_MAX_CHARS_ENV, DEFAULT_FETCH_CACHE_MAX_CHARS),
+    )

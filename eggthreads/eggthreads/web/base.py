@@ -99,6 +99,53 @@ def _diagnostic_messages(attempts: List[Any]) -> List[str]:
     return messages
 
 
+def bound_text(value: Any, *, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) > limit:
+        return text[:limit].rstrip() + "…"
+    return text
+
+
+def bound_diagnostics(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        return bound_text(value, limit=200)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 20:
+                out["…"] = "truncated"
+                break
+            out[bound_text(key, limit=80)] = bound_diagnostics(item, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [bound_diagnostics(item, depth=depth + 1) for item in list(value)[:20]]
+    if isinstance(value, (str, bytes)):
+        return bound_text(value, limit=500)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return bound_text(value, limit=200)
+
+
+def coerce_nonnegative_float(value: float | None, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if out >= 0 else default
+
+
+def coerce_nonnegative_int(value: int | None, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return default
+    return out if out >= 0 else default
+
+
 class WebBackendError(Exception):
     def __init__(
         self,

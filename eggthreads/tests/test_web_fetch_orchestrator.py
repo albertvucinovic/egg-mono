@@ -3,7 +3,14 @@ from __future__ import annotations
 import pytest
 
 from eggthreads.tools import create_default_tools
-from eggthreads.web import DirectHttpFetchProvider, WebBackendError, get_fetch_orchestrator
+from eggthreads.web import (
+    DirectHttpFetchProvider,
+    FetchAttempt,
+    FetchOrchestrator,
+    FetchResponse,
+    WebBackendError,
+    get_fetch_orchestrator,
+)
 
 
 class _MockResponse:
@@ -571,3 +578,203 @@ def test_direct_http_marks_404_terminal(monkeypatch):
     assert exc.provider == "direct_http"
     assert exc.status_code == 404
     assert exc.retriable is False
+
+
+class CountingFetchProvider:
+    def __init__(self, name="counting", *, degraded=False, content="Body"):
+        self.name = name
+        self.calls = 0
+        self.degraded = degraded
+        self.content = content
+
+    def fetch_response(self, url):
+        self.calls += 1
+        return FetchResponse(
+            final_url=f"{str(url).strip()}/final",
+            content=self.content,
+            content_type="text/plain",
+            attempts=[
+                FetchAttempt(
+                    provider=self.name,
+                    success=True,
+                    degraded=self.degraded,
+                    retriable=self.degraded,
+                    message=f"{self.name} fetched",
+                    diagnostics={"large": "x" * 2000},
+                )
+            ],
+        )
+
+
+class FailingFetchProvider:
+    name = "failing"
+
+    def __init__(self):
+        self.calls = 0
+
+    def fetch_response(self, url):
+        self.calls += 1
+        raise WebBackendError("temporary fetch failure", provider=self.name, retriable=True)
+
+
+def test_fetch_orchestrator_reuses_cache_for_identical_normalized_url():
+    provider = CountingFetchProvider()
+    orchestrator = FetchOrchestrator([provider])
+
+    first = orchestrator.fetch_response(" HTTPS://Example.com:443/Page#section ")
+    second = orchestrator.fetch_response("https://example.com/Page")
+
+    assert provider.calls == 1
+    assert first.final_url == second.final_url
+    assert second.content == "Body"
+
+    # Mutating the returned object must not mutate the cached copy.
+    first.content = "mutated"
+    third = orchestrator.fetch_response("https://example.com/Page")
+    assert third.content == "Body"
+    assert provider.calls == 1
+
+
+def test_fetch_cache_key_separates_url_and_provider_chain():
+    provider = CountingFetchProvider("one")
+    orchestrator = FetchOrchestrator([provider])
+
+    orchestrator.fetch_response("https://example.com/a")
+    orchestrator.fetch_response("https://example.com/b")
+
+    other_provider = CountingFetchProvider("two")
+    FetchOrchestrator([other_provider]).fetch_response("https://example.com/a")
+
+    assert provider.calls == 2
+    assert other_provider.calls == 1
+
+
+def test_fetch_cache_is_bounded_by_max_entries():
+    provider = CountingFetchProvider("bounded")
+    orchestrator = FetchOrchestrator([provider], cache_max_entries=1)
+
+    orchestrator.fetch_response("https://example.com/alpha")
+    orchestrator.fetch_response("https://example.com/beta")
+    orchestrator.fetch_response("https://example.com/alpha")
+
+    assert provider.calls == 3
+
+
+def test_fetch_cache_stores_final_url_alias_after_redirect():
+    provider = CountingFetchProvider("redirect")
+    orchestrator = FetchOrchestrator([provider])
+
+    first = orchestrator.fetch_response("https://example.com/start")
+    second = orchestrator.fetch_response("https://example.com/start/final")
+
+    assert provider.calls == 1
+    assert first.final_url == "https://example.com/start/final"
+    assert second.final_url == "https://example.com/start/final"
+
+
+def test_fetch_cache_ttl_zero_disables_cache():
+    provider = CountingFetchProvider("ttl")
+    orchestrator = FetchOrchestrator([provider], cache_ttl_sec=0)
+
+    orchestrator.fetch_response("https://example.com/x")
+    orchestrator.fetch_response("https://example.com/x")
+
+    assert provider.calls == 2
+
+
+def test_fetch_cache_skips_degraded_empty_and_oversized_responses():
+    degraded_provider = CountingFetchProvider("degraded", degraded=True)
+    FetchOrchestrator([degraded_provider]).fetch_response("https://example.com/degraded")
+    FetchOrchestrator([degraded_provider]).fetch_response("https://example.com/degraded")
+    assert degraded_provider.calls == 2
+
+    empty_provider = CountingFetchProvider("empty", content="")
+    orchestrator = FetchOrchestrator([empty_provider])
+    orchestrator.fetch_response("https://example.com/empty")
+    orchestrator.fetch_response("https://example.com/empty")
+    assert empty_provider.calls == 2
+
+    large_provider = CountingFetchProvider("large", content="abcdef")
+    orchestrator = FetchOrchestrator([large_provider], cache_max_chars=5)
+    orchestrator.fetch_response("https://example.com/large")
+    orchestrator.fetch_response("https://example.com/large")
+    assert large_provider.calls == 2
+
+
+def test_fetch_cache_does_not_cache_provider_failures():
+    failing = FailingFetchProvider()
+    fallback = CountingFetchProvider("fallback")
+    orchestrator = FetchOrchestrator([failing, fallback])
+
+    first = orchestrator.fetch_response("https://example.com/fallback")
+    second = orchestrator.fetch_response("https://example.com/fallback")
+
+    assert failing.calls == 2
+    assert fallback.calls == 2
+    assert [attempt.provider for attempt in first.attempts] == ["failing", "fallback"]
+    assert [attempt.provider for attempt in second.attempts] == ["failing", "fallback"]
+
+
+def test_cached_fetch_attempt_diagnostics_are_bounded():
+    provider = CountingFetchProvider("bounded-diagnostics")
+    orchestrator = FetchOrchestrator([provider])
+
+    orchestrator.fetch_response("https://example.com/diagnostics")
+    cached = orchestrator.fetch_response("https://example.com/diagnostics")
+
+    assert provider.calls == 1
+    assert len(cached.attempts[0].diagnostics["large"]) < 600
+
+
+def test_fetch_cache_ttl_env_can_disable_factory_cache(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("EGG_WEB_BACKEND", "searxng")
+    monkeypatch.setenv("EGG_WEB_FETCH_CACHE_TTL_SEC", "0")
+    calls = []
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        calls.append(url)
+        return _MockResponse(
+            200,
+            text="uncached direct fetch",
+            url=url,
+            headers={"Content-Type": "text/plain"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    tools = create_default_tools()
+    first = tools.execute("fetch_url", {"url": "https://example.com/fresh"})
+    second = tools.execute("fetch_url", {"url": "https://example.com/fresh"})
+
+    assert calls == ["https://example.com/fresh", "https://example.com/fresh"]
+    assert first == second
+
+
+def test_fetch_url_tool_output_is_preserved_from_cache(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("EGG_WEB_BACKEND", "searxng")
+    calls = []
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        calls.append(url)
+        return _MockResponse(
+            200,
+            text="# Cached\n\nSame output",
+            url="https://example.com/final",
+            headers={"Content-Type": "text/markdown"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    tools = create_default_tools()
+    first = tools.execute("fetch_url", {"url": "https://example.com/start"})
+    second = tools.execute("fetch_url", {"url": "https://example.com/start"})
+    third = tools.execute("fetch_url", {"url": "https://example.com/final"})
+
+    assert calls == ["https://example.com/start"]
+    assert first == "URL: https://example.com/final\n\n# Cached\n\nSame output"
+    assert second == first
+    assert third == first

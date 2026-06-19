@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
+import time
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from .base import FetchAttempt, FetchProvider, FetchResponse, WebBackendError
+from .base import (
+    FetchAttempt,
+    FetchProvider,
+    FetchResponse,
+    WebBackendError,
+    bound_diagnostics,
+    bound_text,
+    coerce_nonnegative_float,
+    coerce_nonnegative_int,
+)
 from .extract import html_to_markdown
 
 
@@ -19,6 +32,10 @@ DEFAULT_USER_AGENT = (
 DEFAULT_TIMEOUT_SEC = 20.0
 DEFAULT_MAX_BYTES = 2_000_000
 DEFAULT_MAX_CHARS = 200_000
+DEFAULT_FETCH_CACHE_TTL_SEC = 300.0
+DEFAULT_FETCH_CACHE_MAX_ENTRIES = 128
+DEFAULT_FETCH_CACHE_MAX_CHARS = 500_000
+FETCH_CACHE_VERSION = "fetch-cache-v1"
 QUALITY_SCORE_THRESHOLD = 4
 NEAR_EMPTY_HTML_CHARS = 20
 NEAR_EMPTY_HTML_WORDS = 3
@@ -50,15 +67,44 @@ class FetchQuality:
         }
 
 
+@dataclass
+class _FetchCacheEntry:
+    expires_at: float
+    response: FetchResponse
+
+
+_FETCH_CACHE: OrderedDict[tuple[Any, ...], _FetchCacheEntry] = OrderedDict()
+
+
 class FetchOrchestrator:
     """Run an ordered fetch provider fallback chain."""
 
-    def __init__(self, providers: Iterable[FetchProvider]):
+    def __init__(
+        self,
+        providers: Iterable[FetchProvider],
+        *,
+        cache_ttl_sec: float | None = None,
+        cache_max_entries: int | None = None,
+        cache_max_chars: int | None = None,
+        cache_enabled: bool = True,
+    ):
         self.providers = list(providers)
         if not self.providers:
             raise WebBackendError("No fetch providers configured.", provider="fetch")
+        self.cache_ttl_sec = coerce_nonnegative_float(cache_ttl_sec, DEFAULT_FETCH_CACHE_TTL_SEC)
+        self.cache_max_entries = coerce_nonnegative_int(
+            cache_max_entries, DEFAULT_FETCH_CACHE_MAX_ENTRIES
+        )
+        self.cache_max_chars = coerce_nonnegative_int(cache_max_chars, DEFAULT_FETCH_CACHE_MAX_CHARS)
+        self.cache_enabled = cache_enabled
 
     def fetch_response(self, url: str) -> FetchResponse:
+        cache_key = self._cache_key(url)
+        if self.cache_enabled:
+            cached = _fetch_cache_get(cache_key)
+            if cached is not None:
+                return cached
+
         attempts: list[FetchAttempt] = []
         last_error: WebBackendError | None = None
         for index, provider in enumerate(self.providers):
@@ -75,6 +121,12 @@ class FetchOrchestrator:
                     raise
                 raise _combined_fetch_error(attempts, e) from e
             response.attempts = attempts + response.attempts
+            if self.cache_enabled and self._is_cacheable(response):
+                keys = [cache_key]
+                final_key = self._cache_key(response.final_url)
+                if final_key != cache_key and self.cache_max_entries >= 2:
+                    keys.append(final_key)
+                _fetch_cache_put(keys, response, self.cache_ttl_sec, self.cache_max_entries)
             return response
         if last_error is not None:
             raise last_error
@@ -82,6 +134,119 @@ class FetchOrchestrator:
 
     def fetch(self, url: str) -> str:
         return self.fetch_response(url).to_tool_output()
+
+    def _cache_key(self, url: str) -> tuple[Any, ...]:
+        return (
+            FETCH_CACHE_VERSION,
+            tuple(_provider_cache_identity(provider) for provider in self.providers),
+            _normalize_url(url),
+        )
+
+    def _is_cacheable(self, response: FetchResponse) -> bool:
+        if self.cache_ttl_sec <= 0 or self.cache_max_entries <= 0:
+            return False
+        if response.degraded or not response.content.strip():
+            return False
+        if len(response.content) > self.cache_max_chars:
+            return False
+        return True
+
+
+def clear_fetch_cache() -> None:
+    """Clear process-local fetch cache state for tests/operator reset."""
+
+    _FETCH_CACHE.clear()
+
+
+def _fetch_cache_get(key: tuple[Any, ...]) -> FetchResponse | None:
+    now = time.monotonic()
+    entry = _FETCH_CACHE.get(key)
+    if entry is None:
+        return None
+    if entry.expires_at <= now:
+        _FETCH_CACHE.pop(key, None)
+        return None
+    _FETCH_CACHE.move_to_end(key)
+    return copy.deepcopy(entry.response)
+
+
+def _fetch_cache_put(
+    keys: list[tuple[Any, ...]],
+    response: FetchResponse,
+    ttl_sec: float,
+    max_entries: int,
+) -> None:
+    cached = _response_for_cache(response)
+    expires_at = time.monotonic() + ttl_sec
+    for key in keys:
+        _FETCH_CACHE[key] = _FetchCacheEntry(
+            expires_at=expires_at,
+            response=copy.deepcopy(cached),
+        )
+        _FETCH_CACHE.move_to_end(key)
+    while len(_FETCH_CACHE) > max_entries:
+        _FETCH_CACHE.popitem(last=False)
+
+
+def _provider_cache_identity(provider: FetchProvider) -> tuple[str, ...]:
+    cls = provider.__class__
+    parts = [
+        str(getattr(provider, "name", cls.__name__)),
+        f"{cls.__module__}.{cls.__qualname__}",
+    ]
+    extract_url = getattr(provider, "EXTRACT_URL", None)
+    if extract_url:
+        parts.append(f"extract_url={extract_url}")
+    if hasattr(provider, "_api_key"):
+        api_key = str(getattr(provider, "_api_key") or "")
+        if api_key:
+            key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+            parts.append(f"api_key_hash={key_hash}")
+        else:
+            parts.append("api_key=missing")
+    direct_attrs = (
+        ("user_agent", "_ua"),
+        ("timeout_sec", "_timeout_sec"),
+        ("max_bytes", "_max_bytes"),
+        ("max_chars", "_max_chars"),
+    )
+    for label, attr in direct_attrs:
+        if hasattr(provider, attr):
+            parts.append(f"{label}={getattr(provider, attr)}")
+    return tuple(parts)
+
+
+def _response_for_cache(response: FetchResponse) -> FetchResponse:
+    return FetchResponse(
+        final_url=str(response.final_url or "").strip(),
+        content=str(response.content or ""),
+        content_type=str(response.content_type or "").strip(),
+        attempts=[
+            FetchAttempt(
+                provider=bound_text(attempt.provider, limit=80),
+                success=attempt.success,
+                degraded=attempt.degraded,
+                retriable=attempt.retriable,
+                message=bound_text(attempt.message, limit=500),
+                diagnostics=bound_diagnostics(attempt.diagnostics),
+            )
+            for attempt in response.attempts[:8]
+        ],
+    )
+
+
+def _normalize_url(url: str) -> str:
+    text = str(url or "").strip()
+    parsed = urlparse(text)
+    if not parsed.scheme or not parsed.netloc:
+        return text
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    if (scheme == "http" and netloc.endswith(":80")) or (
+        scheme == "https" and netloc.endswith(":443")
+    ):
+        netloc = netloc.rsplit(":", 1)[0]
+    return parsed._replace(scheme=scheme, netloc=netloc, fragment="").geturl()
 
 
 class DirectHttpFetchProvider(FetchProvider):

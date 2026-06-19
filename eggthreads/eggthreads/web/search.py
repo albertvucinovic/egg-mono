@@ -8,7 +8,17 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, List
 
-from .base import SearchAttempt, SearchProvider, SearchResponse, SearchResult, WebBackendError
+from .base import (
+    SearchAttempt,
+    SearchProvider,
+    SearchResponse,
+    SearchResult,
+    WebBackendError,
+    bound_diagnostics,
+    bound_text,
+    coerce_nonnegative_float,
+    coerce_nonnegative_int,
+)
 
 
 SEARCH_CACHE_VERSION = "search-cache-v1"
@@ -41,12 +51,14 @@ class SearchOrchestrator:
         self.providers = list(providers)
         if not self.providers:
             raise WebBackendError("No search providers configured.", provider="search")
-        self.cache_ttl_sec = _coerce_float(cache_ttl_sec, DEFAULT_SEARCH_CACHE_TTL_SEC)
-        self.degraded_empty_cache_ttl_sec = _coerce_float(
+        self.cache_ttl_sec = coerce_nonnegative_float(cache_ttl_sec, DEFAULT_SEARCH_CACHE_TTL_SEC)
+        self.degraded_empty_cache_ttl_sec = coerce_nonnegative_float(
             degraded_empty_cache_ttl_sec,
             DEFAULT_DEGRADED_EMPTY_SEARCH_CACHE_TTL_SEC,
         )
-        self.cache_max_entries = _coerce_int(cache_max_entries, DEFAULT_SEARCH_CACHE_MAX_ENTRIES)
+        self.cache_max_entries = coerce_nonnegative_int(
+            cache_max_entries, DEFAULT_SEARCH_CACHE_MAX_ENTRIES
+        )
         self.cache_enabled = cache_enabled
 
     def search_response(self, query: str, max_results: int = 5) -> SearchResponse:
@@ -173,75 +185,28 @@ def _response_for_cache(response: SearchResponse) -> SearchResponse:
     return SearchResponse(
         results=[
             SearchResult(
-                title=_bound_text(result.title, limit=500),
-                url=_bound_text(result.url, limit=1000),
-                snippet=_bound_text(result.snippet, limit=1000),
+                title=bound_text(result.title, limit=500),
+                url=bound_text(result.url, limit=1000),
+                snippet=bound_text(result.snippet, limit=1000),
             )
             for result in response.results
         ],
         attempts=[
             SearchAttempt(
-                provider=_bound_text(attempt.provider, limit=80),
+                provider=bound_text(attempt.provider, limit=80),
                 success=attempt.success,
                 degraded=attempt.degraded,
                 retriable=attempt.retriable,
-                message=_bound_text(attempt.message, limit=500),
-                diagnostics=_bound_diagnostics(attempt.diagnostics),
+                message=bound_text(attempt.message, limit=500),
+                diagnostics=bound_diagnostics(attempt.diagnostics),
             )
             for attempt in response.attempts[:8]
         ],
     )
 
 
-def _bound_diagnostics(value: Any, *, depth: int = 0) -> Any:
-    if depth >= 4:
-        return _bound_text(value, limit=200)
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= 20:
-                out["…"] = "truncated"
-                break
-            out[_bound_text(key, limit=80)] = _bound_diagnostics(item, depth=depth + 1)
-        return out
-    if isinstance(value, (list, tuple)):
-        return [_bound_diagnostics(item, depth=depth + 1) for item in list(value)[:20]]
-    if isinstance(value, (str, bytes)):
-        return _bound_text(value, limit=500)
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return _bound_text(value, limit=200)
-
-
-def _bound_text(value: Any, *, limit: int) -> str:
-    text = str(value or "").strip()
-    if len(text) > limit:
-        return text[:limit].rstrip() + "…"
-    return text
-
-
 def _normalize_query(query: str) -> str:
     return " ".join(str(query or "").strip().lower().split())
-
-
-def _coerce_float(value: float | None, default: float) -> float:
-    if value is None:
-        return default
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return default
-    return out if out >= 0 else default
-
-
-def _coerce_int(value: int | None, default: int) -> int:
-    if value is None:
-        return default
-    try:
-        out = int(value)
-    except (TypeError, ValueError):
-        return default
-    return out if out >= 0 else default
 
 
 def _attempt_from_error(provider_name: str, error: WebBackendError) -> SearchAttempt:
