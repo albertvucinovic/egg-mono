@@ -3,7 +3,15 @@ from __future__ import annotations
 import os
 from typing import List
 
-from .base import SearchAttempt, SearchResponse, SearchResult, WebBackend, WebBackendError
+from .base import (
+    FetchAttempt,
+    FetchResponse,
+    SearchAttempt,
+    SearchResponse,
+    SearchResult,
+    WebBackend,
+    WebBackendError,
+)
 
 
 class TavilyBackend(WebBackend):
@@ -85,22 +93,43 @@ class TavilyBackend(WebBackend):
         )
 
     def fetch(self, url: str) -> str:
+        return self.fetch_response(url).to_tool_output()
+
+    def fetch_response(self, url: str) -> FetchResponse:
         import requests
         api_key = self._require_key()
-        resp = requests.post(
-            self.EXTRACT_URL,
-            json={"urls": [url], "format": "markdown"},
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            raise WebBackendError(
-                f"Tavily API status {resp.status_code}: {resp.text[:400]}"
+        try:
+            resp = requests.post(
+                self.EXTRACT_URL,
+                json={"urls": [url], "format": "markdown"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                timeout=30,
             )
-        data = resp.json() or {}
+        except requests.RequestException as e:
+            raise WebBackendError(
+                f"Tavily extract request failed: {e}",
+                provider=self.name,
+                retriable=True,
+            ) from e
+        if resp.status_code != 200:
+            retriable = resp.status_code == 429 or resp.status_code >= 500
+            raise WebBackendError(
+                f"Tavily API status {resp.status_code}: {resp.text[:400]}",
+                provider=self.name,
+                retriable=retriable,
+                status_code=resp.status_code,
+            )
+        try:
+            data = resp.json() or {}
+        except ValueError as e:
+            raise WebBackendError(
+                "Tavily extract returned non-JSON.",
+                provider=self.name,
+                retriable=True,
+            ) from e
         results = data.get("results") or []
         failed = data.get("failed_results") or []
         if results and isinstance(results[0], dict):
@@ -111,8 +140,24 @@ class TavilyBackend(WebBackend):
                 content = ""
             content = content.strip()
             if content:
-                return f"URL: {result_url}\n\n{content}"
-            return f"URL: {result_url}\n\n(no content)"
+                return FetchResponse(
+                    final_url=result_url,
+                    content=content,
+                    content_type="text/markdown",
+                    attempts=[
+                        FetchAttempt(
+                            provider=self.name,
+                            success=True,
+                            message=f"Tavily extracted {result_url}.",
+                        )
+                    ],
+                )
+            raise WebBackendError(
+                f"Tavily extract returned empty content for {result_url}",
+                provider=self.name,
+                retriable=True,
+                degraded=True,
+            )
         if failed:
             first = failed[0]
             if isinstance(first, dict):
@@ -120,8 +165,24 @@ class TavilyBackend(WebBackend):
                 reason = str(
                     first.get("error") or first.get("reason") or "fetch failed"
                 ).strip()
-                raise WebBackendError(f"failed to fetch {failed_url}: {reason}")
+                raise WebBackendError(
+                    f"failed to fetch {failed_url}: {reason}",
+                    provider=self.name,
+                    retriable=True,
+                    degraded=True,
+                    diagnostics={"failed_result": {"url": failed_url, "reason": reason[:200]}},
+                )
             s = str(first).strip()
             if s:
-                raise WebBackendError(f"failed to fetch {url}: {s}")
-        raise WebBackendError("No results.")
+                raise WebBackendError(
+                    f"failed to fetch {url}: {s}",
+                    provider=self.name,
+                    retriable=True,
+                    degraded=True,
+                )
+        raise WebBackendError(
+            "Tavily extract returned no results.",
+            provider=self.name,
+            retriable=True,
+            degraded=True,
+        )

@@ -51,14 +51,52 @@ class SearchResponse:
         return bool(self.attempts) and all(not attempt.success for attempt in self.attempts)
 
     def diagnostic_messages(self) -> List[str]:
-        messages: List[str] = []
-        for attempt in self.attempts:
-            if not (attempt.message and (attempt.degraded or not attempt.success)):
-                continue
-            if attempt.message in messages:
-                continue
-            messages.append(attempt.message)
-        return messages
+        return _diagnostic_messages(self.attempts)
+
+
+@dataclass
+class FetchAttempt:
+    provider: str
+    success: bool
+    degraded: bool = False
+    retriable: bool = False
+    message: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FetchResponse:
+    final_url: str
+    content: str
+    content_type: str = ""
+    attempts: List[FetchAttempt] = field(default_factory=list)
+
+    def to_tool_output(self) -> str:
+        content = (self.content or "").strip()
+        if not content:
+            content = "(no content)"
+        return f"URL: {self.final_url}\n\n{content}"
+
+    @property
+    def degraded(self) -> bool:
+        return any(
+            attempt.degraded or attempt.retriable or not attempt.success
+            for attempt in self.attempts
+        )
+
+    def diagnostic_messages(self) -> List[str]:
+        return _diagnostic_messages(self.attempts)
+
+
+def _diagnostic_messages(attempts: List[Any]) -> List[str]:
+    messages: List[str] = []
+    for attempt in attempts:
+        if not (attempt.message and (attempt.degraded or not attempt.success)):
+            continue
+        if attempt.message in messages:
+            continue
+        messages.append(attempt.message)
+    return messages
 
 
 class WebBackendError(Exception):
@@ -88,7 +126,15 @@ class SearchProvider(ABC):
         ...
 
 
-class WebBackend(SearchProvider, ABC):
+class FetchProvider(ABC):
+    name: str = "fetch"
+
+    @abstractmethod
+    def fetch_response(self, url: str) -> FetchResponse:
+        ...
+
+
+class WebBackend(SearchProvider, FetchProvider, ABC):
     """Strategy interface for web search + fetch.
 
     Implementations translate between the shared tool surface
@@ -107,6 +153,27 @@ class WebBackend(SearchProvider, ABC):
                     provider=self.name,
                     success=True,
                     message=f"{self.name} returned {len(results)} result(s).",
+                )
+            ],
+        )
+
+    def fetch_response(self, url: str) -> FetchResponse:
+        text = self.fetch(url)
+        final_url = url
+        content = text
+        if text.startswith("URL: "):
+            first, sep, rest = text.partition("\n\n")
+            final_url = first.removeprefix("URL: ").strip() or url
+            if sep:
+                content = rest
+        return FetchResponse(
+            final_url=final_url,
+            content=content,
+            attempts=[
+                FetchAttempt(
+                    provider=self.name,
+                    success=True,
+                    message=f"{self.name} fetched {final_url}.",
                 )
             ],
         )

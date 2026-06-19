@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from ..plugins import PluginContext
 from ..tools import ToolRegistry
-from ..web import SearchResponse, WebBackendError, get_backend, get_search_orchestrator
+from ..web import SearchResponse, WebBackendError, get_fetch_orchestrator, get_search_orchestrator
 
 WEB_RESULTS_CAP = 25
 
@@ -75,8 +75,8 @@ def fetch_url_tool(args: Dict[str, Any]) -> str:
     if not url:
         return 'Error: "url" is required.'
     try:
-        backend = get_backend()
-        return backend.fetch(url)
+        orchestrator = get_fetch_orchestrator()
+        return orchestrator.fetch(url)
     except WebBackendError as e:
         return f"Error: {e}"
     except Exception as e:

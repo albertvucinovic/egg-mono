@@ -4,7 +4,6 @@ import os
 from typing import Any, List
 
 from ..base import SearchAttempt, SearchResponse, SearchResult, WebBackend, WebBackendError
-from ..extract import html_to_markdown
 
 
 DEFAULT_URL = "http://localhost:8888"
@@ -160,25 +159,6 @@ class SearxngBackend(WebBackend):
         return SearchResponse(results=out, attempts=[attempt])
 
     def fetch(self, url: str) -> str:
-        import requests
-        try:
-            resp = requests.get(
-                url,
-                headers={
-                    "User-Agent": self._ua,
-                    "Accept": "text/html,application/xhtml+xml",
-                },
-                timeout=20,
-                allow_redirects=True,
-            )
-        except requests.RequestException as e:
-            raise WebBackendError(f"fetch failed: {e}") from e
-        if resp.status_code >= 400:
-            raise WebBackendError(
-                f"fetch status {resp.status_code} for {url}"
-            )
-        final_url = resp.url or url
-        markdown = html_to_markdown(resp.text or "", url=final_url)
-        if not markdown.strip():
-            return f"URL: {final_url}\n\n(no content)"
-        return f"URL: {final_url}\n\n{markdown}"
+        from ..fetch import DirectHttpFetchProvider
+
+        return DirectHttpFetchProvider(user_agent=self._ua, name=self.name).fetch(url)

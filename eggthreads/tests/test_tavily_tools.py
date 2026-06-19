@@ -27,7 +27,7 @@ def tools():
 @pytest.fixture(autouse=True)
 def _force_tavily_backend(monkeypatch):
     # The web_search / fetch_url tools dispatch through the currently
-    # selected WebBackend; pin it to Tavily for this file.
+    # selected web provider/orchestrator; pin them to Tavily for this file.
     monkeypatch.setenv('EGG_WEB_BACKEND', 'tavily')
 
 
