@@ -65,11 +65,17 @@ export TAVILY_API_KEY=tvly-...
 # Optional pins; auto mode also uses Tavily first when the key is set.
 export EGG_WEB_SEARCH_BACKEND=tavily
 export EGG_WEB_FETCH_BACKEND=tavily
+# Optional explicit ordered chains; no browser providers are active.
+export EGG_WEB_SEARCH_CHAIN=tavily,searxng
+export EGG_WEB_FETCH_CHAIN=tavily,direct_http
 ```
 
 Valid backend selector values are `auto`, `searxng`/`searx`, and `tavily`.
-Split selectors (`EGG_WEB_SEARCH_BACKEND`, `EGG_WEB_FETCH_BACKEND`) override
-`EGG_WEB_BACKEND` for their own tool only.
+Chain variables (`EGG_WEB_SEARCH_CHAIN`, `EGG_WEB_FETCH_CHAIN`) override split
+selectors for their own tool only. Split selectors (`EGG_WEB_SEARCH_BACKEND`,
+`EGG_WEB_FETCH_BACKEND`) override `EGG_WEB_BACKEND`. Chain values are
+comma-separated current provider names; fetch chains also accept `direct_http`
+(`searxng` maps to direct HTTP compatibility for fetch).
 
 ## Stop
 

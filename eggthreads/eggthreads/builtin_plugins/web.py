@@ -326,7 +326,8 @@ def register_web_tools(registry: ToolRegistry) -> None:
         description=(
             "Perform a web search and return results with titles, URLs, and short snippets. "
             f"Defaults to 10 results (cap {WEB_RESULTS_CAP}); pass max_results to adjust. "
-            "Backend is selected via EGG_WEB_SEARCH_BACKEND or EGG_WEB_BACKEND (default: auto)."
+            "Backend is selected via EGG_WEB_SEARCH_CHAIN, EGG_WEB_SEARCH_BACKEND, "
+            "or EGG_WEB_BACKEND (default: auto)."
         ),
         parameters_schema=search_schema,
         impl=web_search_tool,
@@ -335,9 +336,9 @@ def register_web_tools(registry: ToolRegistry) -> None:
         name="fetch_url",
         description=(
             "Fetch and extract readable markdown from a URL. Use this when you "
-            "already know the page URL. Backend is selected via EGG_WEB_FETCH_BACKEND "
-            "or EGG_WEB_BACKEND (default: auto; Tavily Extract when configured, "
-            "then direct HTTP)."
+            "already know the page URL. Backend is selected via EGG_WEB_FETCH_CHAIN, "
+            "EGG_WEB_FETCH_BACKEND, or EGG_WEB_BACKEND (default: auto; Tavily "
+            "Extract when configured, then direct HTTP)."
         ),
         parameters_schema=fetch_schema,
         impl=fetch_url_tool,
