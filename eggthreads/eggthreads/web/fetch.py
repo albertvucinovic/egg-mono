@@ -173,6 +173,7 @@ class DirectHttpFetchProvider(FetchProvider):
             extracted_content=content,
             content_type=content_type,
             final_url=final_url,
+            header_hints=_quality_header_hints(resp),
         )
         if not quality.ok:
             raise WebBackendError(
@@ -278,6 +279,7 @@ def classify_fetch_quality(
     extracted_content: str,
     content_type: str,
     final_url: str,
+    header_hints: tuple[str, ...] = (),
 ) -> FetchQuality:
     """Return a small confidence score for known low-quality fetch output.
 
@@ -366,6 +368,56 @@ def classify_fetch_quality(
     ):
         add("bot_block_placeholder", QUALITY_SCORE_THRESHOLD)
 
+    header_score = _header_hint_score(header_hints)
+    if header_score >= QUALITY_SCORE_THRESHOLD:
+        add("provider_challenge_headers", QUALITY_SCORE_THRESHOLD, ", ".join(header_hints[:5]))
+
+    if htmlish and re.search(r"<meta\b[^>]*http-equiv=[\"']?refresh", raw_text, re.IGNORECASE):
+        add("meta_refresh_placeholder", QUALITY_SCORE_THRESHOLD, "meta refresh")
+
+    script_count = len(re.findall(r"<script\b", raw_text, re.IGNORECASE))
+    form_count = len(re.findall(r"<form\b", raw_text, re.IGNORECASE))
+    if htmlish and (script_count >= 6 or form_count >= 2) and _low_or_generic_content(content_lower):
+        add(
+            "script_form_heavy_placeholder",
+            QUALITY_SCORE_THRESHOLD,
+            f"{script_count} scripts/{form_count} forms",
+        )
+
+    if htmlish and _low_or_generic_content(content_lower) and _contains_any(
+        combined,
+        (
+            "unsupported browser",
+            "browser is not supported",
+            "browser not supported",
+            "outdated browser",
+            "upgrade your browser",
+            "update your browser",
+            "requires a modern browser",
+        ),
+    ):
+        add("unsupported_browser_placeholder", QUALITY_SCORE_THRESHOLD)
+
+    if htmlish and _low_or_generic_content(content_lower) and _contains_any(
+        combined,
+        (
+            "sign in to continue",
+            "log in to continue",
+            "login to continue",
+            "login required",
+            "please log in",
+            "please sign in",
+            "create an account to continue",
+            "accept cookies to continue",
+            "allow cookies to continue",
+            "cookie consent",
+            "consent required",
+            "manage consent",
+            "we value your privacy",
+        ),
+    ):
+        add("login_or_consent_wall", QUALITY_SCORE_THRESHOLD)
+
     path = urlparse(final_url).path.lower()
     if _has_suspicious_final_path(path) and _low_or_generic_content(content_lower):
         add("suspicious_final_url_path", QUALITY_SCORE_THRESHOLD, path)
@@ -387,6 +439,56 @@ def _looks_like_html(kind: str, raw_lower: str) -> bool:
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles)
+
+
+def _quality_header_hints(resp: Any) -> tuple[str, ...]:
+    headers = getattr(resp, "headers", None) or {}
+    if not hasattr(headers, "items"):
+        return ()
+    hints: set[str] = set()
+    for raw_name, raw_value in list(headers.items())[:50]:
+        name = str(raw_name or "").strip().lower()
+        value = str(raw_value or "").strip().lower()[:500]
+        combined = f"{name}: {value}"
+        if name == "server" and "cloudflare" in value:
+            hints.add("cloudflare_cdn_header")
+        if (
+            name in {"cf-mitigated", "cf-chl-bypass"}
+            or "cf-chl" in combined
+            or "__cf_bm" in combined
+            or "cf_clearance" in combined
+        ):
+            hints.add("cloudflare_challenge_header")
+        if (
+            "x-akamai" in name
+            or "akamai-bot" in combined
+            or "_abck" in combined
+            or "ak_bmsc" in combined
+            or "bm_sz" in combined
+        ):
+            hints.add("akamai_challenge_header")
+        if "perimeterx" in combined or name.startswith("x-px") or "_px" in combined:
+            hints.add("perimeterx_challenge_header")
+        if "datadome" in combined or name.startswith("x-datadome"):
+            hints.add("datadome_challenge_header")
+        if (
+            "incapsula" in combined
+            or "incap_ses" in combined
+            or "visid_incap" in combined
+            or "nlbi_" in combined
+            or name == "x-iinfo"
+        ):
+            hints.add("incapsula_challenge_header")
+        if "ddos-guard" in combined or "__ddg" in combined or name.startswith("x-ddg"):
+            hints.add("ddos_guard_challenge_header")
+    return tuple(sorted(hints))
+
+
+def _header_hint_score(header_hints: tuple[str, ...]) -> int:
+    score = 0
+    for hint in header_hints:
+        score += 1 if hint == "cloudflare_cdn_header" else QUALITY_SCORE_THRESHOLD
+    return score
 
 
 def _has_suspicious_final_path(path: str) -> bool:

@@ -316,6 +316,141 @@ def test_direct_http_suspicious_final_path_with_generic_content_is_degraded(monk
     assert "suspicious_final_url_path" in exc_info.value.diagnostics["fetch_quality"]["signals"]
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected_hint"),
+    [
+        ({"cf-mitigated": "challenge"}, "cloudflare_challenge_header"),
+        ({"Set-Cookie": "ak_bmsc=abc; Path=/; HttpOnly"}, "akamai_challenge_header"),
+        ({"x-px-captcha": "1"}, "perimeterx_challenge_header"),
+        ({"Set-Cookie": "datadome=abc; Path=/; Secure"}, "datadome_challenge_header"),
+        ({"x-iinfo": "1-123-0", "Set-Cookie": "incap_ses_123=abc"}, "incapsula_challenge_header"),
+        ({"Server": "ddos-guard"}, "ddos_guard_challenge_header"),
+    ],
+)
+def test_direct_http_provider_challenge_headers_are_degraded(monkeypatch, headers, expected_hint):
+    challenge_headers = headers
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text="<html><body><h1>Security check</h1></body></html>",
+            url=url,
+            headers={"Content-Type": "text/html", **challenge_headers},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/page")
+
+    quality = exc_info.value.diagnostics["fetch_quality"]
+    assert "provider_challenge_headers" in quality["signals"]
+    assert expected_hint in ", ".join(quality["details"])
+
+
+def test_cloudflare_server_header_alone_does_not_reject_good_content(monkeypatch):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text="<html><body><h1>Article</h1><p>Useful documentation content with enough words to avoid near-empty scoring.</p></body></html>",
+            url=url,
+            headers={"Content-Type": "text/html", "Server": "cloudflare"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = DirectHttpFetchProvider().fetch_response("https://example.com/article")
+
+    assert "Useful documentation content" in response.content
+
+
+def test_direct_http_meta_refresh_placeholder_is_degraded(monkeypatch):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text="<html><head><meta http-equiv='refresh' content='0; url=/login'></head><body>Continue</body></html>",
+            url=url,
+            headers={"Content-Type": "text/html"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/page")
+
+    assert "meta_refresh_placeholder" in exc_info.value.diagnostics["fetch_quality"]["signals"]
+
+
+def test_direct_http_script_form_heavy_placeholder_is_degraded(monkeypatch):
+    scripts = "".join("<script>check()</script>" for _ in range(6))
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text=f"<html><body>{scripts}<form></form><form></form>Security check</body></html>",
+            url=url,
+            headers={"Content-Type": "text/html"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/page")
+
+    assert "script_form_heavy_placeholder" in exc_info.value.diagnostics["fetch_quality"]["signals"]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_signal"),
+    [
+        ("Unsupported browser. Please upgrade your browser to continue.", "unsupported_browser_placeholder"),
+        ("Sign in to continue. Create an account to continue.", "login_or_consent_wall"),
+        ("Accept cookies to continue. Manage consent.", "login_or_consent_wall"),
+    ],
+)
+def test_direct_http_browser_login_cookie_placeholders_are_degraded(monkeypatch, body, expected_signal):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text=f"<html><body>{body}</body></html>",
+            url=url,
+            headers={"Content-Type": "text/html"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/page")
+
+    assert expected_signal in exc_info.value.diagnostics["fetch_quality"]["signals"]
+
+
+def test_direct_http_cookie_login_article_false_positive_guard(monkeypatch):
+    article = """
+    <html><body><main><h1>Authentication and cookies</h1>
+    <p>This documentation explains how login cookies work in a browser. It is a
+    normal article with enough substantive content to avoid being confused with
+    a cookie consent wall or login placeholder. Developers can read examples,
+    implementation notes, and troubleshooting guidance here.</p>
+    </main></body></html>
+    """
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(200, text=article, url=url, headers={"Content-Type": "text/html"})
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    response = DirectHttpFetchProvider().fetch_response("https://example.com/docs/cookies")
+
+    assert "normal article" in response.content
+
+
 def test_direct_http_extracts_html(monkeypatch):
     html = "<html><body><h1>Title</h1><p>Paragraph body.</p></body></html>"
 
