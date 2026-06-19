@@ -4,7 +4,12 @@ import os
 
 from .base import WebBackend, WebBackendError
 from .fetch import DirectHttpFetchProvider, FetchOrchestrator
-from .search import SearchOrchestrator
+from .search import (
+    DEFAULT_DEGRADED_EMPTY_SEARCH_CACHE_TTL_SEC,
+    DEFAULT_SEARCH_CACHE_MAX_ENTRIES,
+    DEFAULT_SEARCH_CACHE_TTL_SEC,
+    SearchOrchestrator,
+)
 
 
 DEFAULT_BACKEND = "auto"
@@ -12,6 +17,9 @@ VALID_BACKENDS = "auto, searxng, tavily"
 GLOBAL_BACKEND_ENV = "EGG_WEB_BACKEND"
 SEARCH_BACKEND_ENV = "EGG_WEB_SEARCH_BACKEND"
 FETCH_BACKEND_ENV = "EGG_WEB_FETCH_BACKEND"
+SEARCH_CACHE_TTL_ENV = "EGG_WEB_SEARCH_CACHE_TTL_SEC"
+SEARCH_CACHE_DEGRADED_EMPTY_TTL_ENV = "EGG_WEB_SEARCH_CACHE_DEGRADED_EMPTY_TTL_SEC"
+SEARCH_CACHE_MAX_ENTRIES_ENV = "EGG_WEB_SEARCH_CACHE_MAX_ENTRIES"
 
 
 def _chosen_backend(
@@ -65,10 +73,10 @@ def get_search_orchestrator(name: str | None = None) -> SearchOrchestrator:
     chosen, source = _chosen_backend(name, split_env=SEARCH_BACKEND_ENV)
     if chosen in ("searxng", "searx"):
         from .searxng import SearxngBackend
-        return SearchOrchestrator([SearxngBackend()])
+        return _search_orchestrator([SearxngBackend()])
     if chosen == "tavily":
         from .tavily import TavilyBackend
-        return SearchOrchestrator([TavilyBackend()])
+        return _search_orchestrator([TavilyBackend()])
     if chosen == "auto":
         providers = []
         if os.environ.get("TAVILY_API_KEY"):
@@ -76,8 +84,38 @@ def get_search_orchestrator(name: str | None = None) -> SearchOrchestrator:
             providers.append(TavilyBackend())
         from .searxng import SearxngBackend
         providers.append(SearxngBackend())
-        return SearchOrchestrator(providers)
+        return _search_orchestrator(providers)
     raise _unknown_backend_error(chosen, source)
+
+
+def _search_orchestrator(providers: list) -> SearchOrchestrator:
+    return SearchOrchestrator(
+        providers,
+        cache_ttl_sec=_env_float(SEARCH_CACHE_TTL_ENV, DEFAULT_SEARCH_CACHE_TTL_SEC),
+        degraded_empty_cache_ttl_sec=_env_float(
+            SEARCH_CACHE_DEGRADED_EMPTY_TTL_ENV,
+            DEFAULT_DEGRADED_EMPTY_SEARCH_CACHE_TTL_SEC,
+        ),
+        cache_max_entries=_env_int(SEARCH_CACHE_MAX_ENTRIES_ENV, DEFAULT_SEARCH_CACHE_MAX_ENTRIES),
+    )
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    try:
+        value = float(raw) if raw is not None and raw.strip() else default
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    try:
+        value = int(raw) if raw is not None and raw.strip() else default
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
 
 
 def get_fetch_orchestrator(name: str | None = None) -> FetchOrchestrator:
