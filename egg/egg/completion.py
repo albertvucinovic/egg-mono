@@ -38,6 +38,7 @@ from eggthreads.command_catalog import (  # type: ignore
     create_default_command_registry,
     command_completion_names,
 )
+from eggthreads.content_parts import content_to_plain_text
 
 
 class ModelCompleter(Completer):
@@ -190,7 +191,7 @@ class EggCompleter(Completer):
                     role = (m or {}).get('role')
                     if role not in ('user', 'assistant', 'system', 'tool'):
                         continue
-                    txt = (m or {}).get('content') or ''
+                    txt = content_to_plain_text((m or {}).get('content'))
                     if not isinstance(txt, str) or not txt:
                         continue
                     # tokenize by words; keep 3+ char tokens
@@ -438,7 +439,7 @@ class EggCompleter(Completer):
                             if not msg_id:
                                 continue
                             role = msg.get('role', 'unknown')
-                            content = msg.get('content', '') or ''
+                            content = content_to_plain_text(msg.get('content', ''))
                             content_preview = content[:40].replace('\n', ' ')
                             hay = f"{msg_id} {role} {content}".lower()
                             if pref_l and pref_l not in hay:
@@ -474,7 +475,7 @@ class EggCompleter(Completer):
                                 if not msg_id:
                                     continue
                                 role = msg.get('role', 'unknown')
-                                content = msg.get('content', '') or ''
+                                content = content_to_plain_text(msg.get('content', ''))
                                 content_preview = content[:40].replace('\n', ' ')
                                 hay = f"{msg_id} {role} {content}".lower()
                                 if pref_l and pref_l not in hay:
@@ -598,7 +599,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                     role = (m or {}).get('role')
                     if role not in ('user', 'assistant', 'system', 'tool'):
                         continue
-                    txt = (m or {}).get('content') or ''
+                    txt = content_to_plain_text((m or {}).get('content'))
                     if not isinstance(txt, str) or not txt:
                         continue
                     for w in re.findall(r"[A-Za-z0-9_]{3,}", txt):
@@ -888,7 +889,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                             if not msg_id:
                                 continue
                             role = msg.get('role', 'unknown')
-                            content = msg.get('content', '') or ''
+                            content = content_to_plain_text(msg.get('content', ''))
                             content_preview = content[:40].replace('\n', ' ')
                             if len(content) > 40:
                                 content_preview += '...'
@@ -942,7 +943,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                                 if not msg_id:
                                     continue
                                 role = msg.get('role', 'unknown')
-                                content = msg.get('content', '') or ''
+                                content = content_to_plain_text(msg.get('content', ''))
                                 content_preview = content[:40].replace('\n', ' ')
                                 if len(content) > 40:
                                     content_preview += '...'

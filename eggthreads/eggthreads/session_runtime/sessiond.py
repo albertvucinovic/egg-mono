@@ -45,6 +45,22 @@ def format_bash_output(output_text: str) -> str:
 
 
 def _message_text_for_context_file(value: Any) -> str:
+    if isinstance(value, list):
+        rendered: List[str] = []
+        for part in value:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                rendered.append(part.get("text") or "")
+            elif part.get("type") == "attachment":
+                filename = part.get("filename") or "(unnamed)"
+                presentation = part.get("presentation") or "file"
+                mime_type = part.get("mime_type") or "application/octet-stream"
+                size = part.get("size_bytes")
+                sha = str(part.get("sha256") or "")[:8] or "unknown"
+                rendered.append(f"[Attachment: {presentation} {filename} {mime_type} {size} B sha256:{sha}]")
+        if rendered:
+            return "\n".join(rendered)
     if isinstance(value, str):
         return value
     try:

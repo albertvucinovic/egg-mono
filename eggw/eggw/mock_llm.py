@@ -16,6 +16,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, AsyncIterator
 
+from eggthreads.content_parts import content_to_plain_text
+
 
 class MockModelRegistry:
     """Mock model registry for testing."""
@@ -38,14 +40,7 @@ class MockLLMClient:
         """Extract the last user message content."""
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    return content
-                elif isinstance(content, list):
-                    # Handle multimodal content
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            return part.get("text", "")
+                return content_to_plain_text(msg.get("content", ""))
         return ""
 
     def _should_call_tool(self, user_msg: str, tools: Optional[List[Dict]]) -> Optional[Dict]:

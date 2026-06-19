@@ -14,6 +14,8 @@ from email.utils import parsedate_to_datetime
 import json
 from typing import Any, Dict, Optional
 
+from .content_parts import content_to_plain_text
+
 DEFAULT_TRANSPORT_DELAY_SEC = 2.0
 DEFAULT_TIMEOUT_DELAY_SEC = 2.0
 DEFAULT_SERVER_DELAY_SEC = 5.0
@@ -411,11 +413,11 @@ def classify_failure_payload(
     if not isinstance(payload, dict):
         return _stop("none", "Payload is not a message object", "")
     if payload.get("recovery_notice"):
-        return _stop("local_notice", "Recovery notices are local status, not provider failures", payload.get("content", ""))
+        return _stop("local_notice", "Recovery notices are local status, not provider failures", content_to_plain_text(payload.get("content", "")))
 
     role = payload.get("role")
-    content = payload.get("content")
-    if role == "system" and isinstance(content, str) and content.strip():
+    content = content_to_plain_text(payload.get("content"))
+    if role == "system" and content.strip():
         return classify_failure_text(content, max_delay_sec=max_delay_sec)
 
     incomplete_reason = payload.get("incomplete_reason")

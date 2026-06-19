@@ -1828,6 +1828,8 @@ def _repl_message_view(message: Dict[str, Any], db: ThreadsDB, thread_id: str) -
         'role': message.get('role'),
         'content': message.get('content', ''),
     }
+    if isinstance(out.get('content'), list):
+        out['content_text'] = _message_content_text(out.get('content'))
     seq = message.get('event_seq')
     if seq is None:
         seq = _get_event_seq_for_msg_id(db, thread_id, message.get('msg_id'))
@@ -2273,7 +2275,7 @@ def diagnose_thread(db: ThreadsDB, thread_id: str) -> ThreadDiagnosis:
     if messages:
         last_msg_id, last_payload, _ = messages[-1]
         last_role = last_payload.get('role')
-        last_content = last_payload.get('content', '')
+        last_content = _message_content_text(last_payload.get('content', ''))
         if last_role == 'system' and 'error' in last_content.lower():
             issues.append("Thread ends with error message")
             details['last_error'] = last_content[:200]
@@ -2717,29 +2719,64 @@ async def continue_thread_async(
     return result
 
 
-def append_message(db: ThreadsDB, thread_id: str, role: str, content: str, extra: Optional[Dict[str, Any]] = None) -> str:
+def _message_content_text(content: Any) -> str:
+    """Return a plain text rendering for string or Egg content-array content."""
+
+    try:
+        from .content_parts import content_to_plain_text
+
+        return content_to_plain_text(content)
+    except Exception:
+        if isinstance(content, str):
+            return content
+        if content is None:
+            return ''
+        try:
+            return json.dumps(content, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(content)
+
+
+def _validate_append_message_content(content: Any) -> Any:
+    try:
+        from .content_parts import validate_message_content
+
+        return validate_message_content(content)
+    except ImportError:
+        if isinstance(content, str):
+            return content
+        raise
+
+
+def append_message(db: ThreadsDB, thread_id: str, role: str, content: str | list[dict[str, Any]], extra: Optional[Dict[str, Any]] = None) -> str:
     """Append a user/assistant/system message to a thread.
 
     This helper is intentionally thin: policy decisions about which
     messages are sent to the provider (e.g. via ``no_api``) are handled
     elsewhere, primarily in ``thread_state`` / ``discover_runner_actionable``
     and ``ThreadRunner._sanitize_messages_for_api``.
+
+    ``content`` may be either the historical string form or a validated Egg
+    content-part array.  Strings are preserved byte-for-byte for backwards
+    compatibility; arrays are canonicalized before they are written to the
+    event log.
     """
 
     payload_extra: Dict[str, Any] = dict(extra or {})
+    content = _validate_append_message_content(content)
 
     msg_id = _ulid_like()
     db.append_event(
         event_id=_ulid_like(),
         thread_id=thread_id,
         type_='msg.create',
-        payload={"role": role, "content": content, **payload_extra},
+        payload={**payload_extra, "role": role, "content": content},
         msg_id=msg_id,
     )
     return msg_id
 
 
-def edit_message(db: ThreadsDB, thread_id: str, msg_id: str, new_content: str, extra: Optional[Dict[str, Any]] = None) -> None:
+def edit_message(db: ThreadsDB, thread_id: str, msg_id: str, new_content: str | list[dict[str, Any]], extra: Optional[Dict[str, Any]] = None) -> None:
     """Edit an existing message's content.
 
     Appends a ``msg.edit`` event that updates the message content.
@@ -2752,7 +2789,7 @@ def edit_message(db: ThreadsDB, thread_id: str, msg_id: str, new_content: str, e
         new_content: New content to replace the existing content.
         extra: Optional additional payload fields for the edit event.
     """
-    db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.edit', payload={"content": new_content, **(extra or {})}, msg_id=msg_id)
+    db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.edit', payload={**(extra or {}), "content": _validate_append_message_content(new_content)}, msg_id=msg_id)
 
 
 def delete_message(db: ThreadsDB, thread_id: str, msg_id: str) -> None:
@@ -3632,7 +3669,7 @@ def word_count_from_snapshot(db: ThreadsDB, thread_id: str) -> int:
         return 0
     try:
         msgs = json.loads(row.snapshot_json).get("messages", [])
-        return sum(len(str(m.get("content") or "").split()) for m in msgs)
+        return sum(len(_message_content_text(m.get("content") if isinstance(m, dict) else "").split()) for m in msgs)
     except Exception:
         return 0
 
@@ -3652,8 +3689,8 @@ def word_count_from_events(db: ThreadsDB, thread_id: str) -> int:
             p = json.loads(pj) if isinstance(pj, str) else (pj or {})
             # Content
             c = p.get("content")
-            if isinstance(c, str):
-                extra += len(c.split())
+            if isinstance(c, (str, list)):
+                extra += len(_message_content_text(c).split())
             # Reasoning (msg.create)
             r = p.get("reasoning")
             if isinstance(r, str):
@@ -4006,7 +4043,7 @@ def _active_assistant_notes(db: ThreadsDB, thread_id: str, *, limit: int = 5) ->
                 "event_seq": event_seq,
                 "ts": ts,
                 "msg_id": msg_id,
-                "content": _truncate_status_text(payload.get("content"), limit=2000),
+                "content": _truncate_status_text(_message_content_text(payload.get("content")), limit=2000),
             }
             model_key = payload.get("model_key")
             if isinstance(model_key, str) and model_key:
@@ -4134,7 +4171,7 @@ def _active_get_user_message_waiting_note(db: ThreadsDB, thread_id: str) -> Opti
             "event_seq": event_seq,
             "ts": row["ts"],
             "msg_id": msg_id,
-            "content": str(payload.get("content") or ""),
+            "content": _message_content_text(payload.get("content")),
             "tool_call_id": active_tool.tool_call_id,
         }
 
@@ -4649,8 +4686,9 @@ def _last_assistant_content_from_snapshot(db: ThreadsDB, thread_id: str) -> str:
             msgs = snap.get('messages', []) or []
             for m in reversed(msgs):
                 try:
-                    if m.get('role') == 'assistant' and isinstance(m.get('content'), str):
-                        return m.get('content') or ''
+                    content = m.get('content')
+                    if m.get('role') == 'assistant' and isinstance(content, (str, list)):
+                        return _message_content_text(content)
                 except Exception:
                     continue
 
@@ -4667,8 +4705,9 @@ def _last_assistant_content_from_snapshot(db: ThreadsDB, thread_id: str) -> str:
         except Exception:
             continue
         try:
-            if payload.get('role') == 'assistant' and isinstance(payload.get('content'), str):
-                return payload.get('content') or ''
+            content = payload.get('content')
+            if payload.get('role') == 'assistant' and isinstance(content, (str, list)):
+                return _message_content_text(content)
         except Exception:
             continue
     return ''
@@ -4711,9 +4750,9 @@ def _is_llm_error_message(payload: Dict[str, Any]) -> bool:
     if payload.get('role') != 'system':
         return False
     content = payload.get('content')
-    if not isinstance(content, str):
+    if not isinstance(content, (str, list)):
         return False
-    low = content.lower()
+    low = _message_content_text(content).lower()
     return 'llm/runner error' in low or 'llm error' in low or 'context limit exceeded' in low
 
 
@@ -4770,8 +4809,9 @@ def _latest_completed_llm_turn_seq(db: ThreadsDB, thread_id: str) -> int:
         role = payload.get('role')
         completed = False
         if role == 'assistant':
+            content = payload.get('content')
             completed = bool(
-                payload.get('content')
+                _message_content_text(content).strip() if isinstance(content, list) else content
                 or payload.get('tool_calls')
                 or payload.get('reasoning')
                 or payload.get('reasoning_content')

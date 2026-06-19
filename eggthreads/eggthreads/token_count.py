@@ -378,7 +378,16 @@ def _tokens_for_message(msg: Dict[str, Any], index: int) -> _PerMessageTokens:
 
     role = str(msg.get("role") or "")
 
-    content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+    raw_content = msg.get("content")
+    if isinstance(raw_content, str):
+        content = raw_content
+    else:
+        try:
+            from .content_parts import content_to_plain_text
+
+            content = content_to_plain_text(raw_content)
+        except Exception:
+            content = ""
     content_tokens = _count_text_tokens(content)
 
     reasoning = msg.get("reasoning") or msg.get("reasoning_content")

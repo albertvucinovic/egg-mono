@@ -16,6 +16,7 @@ from rich.markdown import Markdown
 from rich import box as rich_box
 
 from eggthreads import create_snapshot
+from eggthreads.content_parts import content_to_plain_text
 
 from .utils import snapshot_messages, looks_markdown
 from .min_run_summary import (
@@ -230,7 +231,7 @@ class TranscriptScrollbackSource:
         if not isinstance(m, dict):
             return True
         role = m.get('role')
-        content = (m.get('content') or '').strip()
+        content = content_to_plain_text(m.get('content')).strip()
         if role == 'user':
             return True
         if role == 'assistant':
@@ -1452,7 +1453,7 @@ class PanelsMixin:
         else:
             hidden_details = self._ensure_static_hidden_details_state(hidden_details)
         role = m.get('role')
-        content = (m.get('content') or '').strip()
+        content = content_to_plain_text(m.get('content')).strip()
         model_key = (m.get('model_key') or '').strip()
         msg_id = m.get('msg_id') or ''
         ts_str = self._static_transcript_ts_text(m.get('ts'))

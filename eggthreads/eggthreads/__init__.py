@@ -158,6 +158,17 @@ from .token_count import (
     total_token_stats,
     thread_token_stats,
 )
+from .content_parts import (
+    ContentPartError,
+    content_has_attachments,
+    content_to_plain_text,
+    extract_attachment_refs,
+    format_attachment_placeholder,
+    normalize_content_to_parts,
+    validate_content_part,
+    validate_content_parts,
+    validate_message_content,
+)
 from .tools_config import (
     ToolsConfig,
     get_thread_tools_config,

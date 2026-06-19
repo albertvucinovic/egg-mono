@@ -1197,6 +1197,12 @@ def _repl_context_cache_dir(db: ThreadsDB, thread_id: str) -> Path:
 
 
 def _message_text_for_context_file(value: Any) -> str:
+    try:
+        from .content_parts import content_to_plain_text
+
+        return content_to_plain_text(value)
+    except Exception:
+        pass
     if isinstance(value, str):
         return value
     try:

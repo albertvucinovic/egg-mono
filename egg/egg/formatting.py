@@ -13,6 +13,7 @@ from eggthreads import (
     get_thread_status,
     get_thread_statuses_bulk,
 )
+from eggthreads.content_parts import content_to_plain_text
 
 from .utils import snapshot_messages
 from .min_run_summary import (
@@ -340,7 +341,7 @@ class FormattingMixin:
                         lines.append(reason_header)
                     else:
                         add_hidden_reasoning(tokens=min_message_token_count(per_message_tokens, msg_id, 'reasoning', reas))
-                content = (m.get('content') or '').strip()
+                content = content_to_plain_text(m.get('content')).strip()
                 if content:
                     if verbosity == 'min':
                         flush_hidden()
@@ -411,7 +412,7 @@ class FormattingMixin:
                                     tool_call_id=str(nm or ''),
                                 )
             elif role == 'user':
-                content = (m.get('content') or '').strip()
+                content = content_to_plain_text(m.get('content')).strip()
                 if content:
                     if verbosity == 'min':
                         flush_hidden()
@@ -426,7 +427,7 @@ class FormattingMixin:
                 else:
                     name = m.get('name') or 'tool'
                     lower_label = 'Tool'
-                content = (m.get('content') or '').strip()
+                content = content_to_plain_text(m.get('content')).strip()
                 if content:
                     if verbosity == 'max':
                         header = f"[Tool: {name}{tps_text}{msg_id_text}]"
@@ -443,7 +444,7 @@ class FormattingMixin:
                                 tokens=min_message_token_count(per_message_tokens, msg_id, 'content', content),
                             )
             elif role == 'system':
-                content = (m.get('content') or '').strip()
+                content = content_to_plain_text(m.get('content')).strip()
                 if content:
                     if verbosity == 'min' and not min_system_message_is_visible(content):
                         continue

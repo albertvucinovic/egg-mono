@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel
 
 
@@ -20,7 +20,8 @@ class MessageContent(BaseModel):
     """A single message or transcript marker in a thread."""
     id: str
     role: str  # "user" | "assistant" | "system" | "tool" | "compaction_marker"
-    content: Optional[str] = None
+    content: Optional[Union[str, List[Dict[str, Any]]]] = None
+    content_text: Optional[str] = None
     kind: str = "message"
     start_msg_id: Optional[str] = None
     start_event_seq: Optional[int] = None
@@ -55,7 +56,7 @@ class ToolCallInfo(BaseModel):
 
 class SendMessageRequest(BaseModel):
     """Request to send a message to a thread."""
-    content: str
+    content: Union[str, List[Dict[str, Any]]]
 
 
 class CommandRequest(BaseModel):

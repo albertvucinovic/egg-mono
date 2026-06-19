@@ -33,6 +33,7 @@ from .tool_state import (
 from .tools_config import get_thread_tools_config
 from .tool_call_id import normalize_tool_call_id
 from .terminal_safety import sanitize_terminal_text
+from .content_parts import content_to_plain_text
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -1291,8 +1292,9 @@ class ThreadRunner:
                 msgs = snap.get('messages', []) if isinstance(snap, dict) else []
                 last_assist = None
                 for m in reversed(msgs):
-                    if m.get('role') == 'assistant' and isinstance(m.get('content'), str):
-                        last_assist = m.get('content')
+                    content = m.get('content')
+                    if m.get('role') == 'assistant' and isinstance(content, (str, list)):
+                        last_assist = content_to_plain_text(content)
                         break
                 rec = _extract_short(last_assist or '') if last_assist else None
                 if rec:
@@ -1515,7 +1517,7 @@ class ThreadRunner:
                 if thinking_policy == 'last assistant turn' or encrypted_thinking_mode == 'last assistant turn':
                     for i, m in enumerate(msgs):
                         try:
-                            if m.get('role') == 'user' and isinstance(m.get('content'), str):
+                            if m.get('role') == 'user':
                                 last_user_idx = i
                         except Exception:
                             continue
@@ -1633,6 +1635,7 @@ class ThreadRunner:
                         continue
                     r = m.get('role')
                     content = m.get('content', '')
+                    content_text = content_to_plain_text(content)
                     # Compute optional thinking text according to policy
                     thinking_text = _maybe_include_reasoning(m, idx)
                     encrypted_thinking_val = _maybe_include_encrypted_thinking(m, idx)
@@ -1651,7 +1654,7 @@ class ThreadRunner:
                         # (e.g., StepFun) even when empty.
                         msg_out: Dict[str, Any] = {
                             'role': 'assistant',
-                            'content': content,
+                            'content': content_text,
                             'tool_calls': tcs,
                         }
                         if thinking_text is not None:
@@ -1664,7 +1667,7 @@ class ThreadRunner:
                         _passthrough_provider_fields(m, msg_out)
                         base_messages.append(msg_out)
                     elif r == 'tool':
-                        obj = {'role': 'tool', 'content': content}
+                        obj = {'role': 'tool', 'content': content_text}
                         if m.get('name'):
                             obj['name'] = m.get('name')
                         if m.get('tool_call_id'):
@@ -1676,7 +1679,7 @@ class ThreadRunner:
                             obj['user_tool_call'] = m.get('user_tool_call')
                         base_messages.append(obj)
                     elif r in ('system', 'user', 'assistant'):
-                        msg_out: Dict[str, Any] = {'role': r, 'content': content}
+                        msg_out: Dict[str, Any] = {'role': r, 'content': content_text}
                         if r == 'assistant' and thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
                         elif r == 'assistant' and encrypted_thinking_val is not None:
@@ -1698,8 +1701,9 @@ class ThreadRunner:
             snap_has_last = False
         if not snap_has_last:
             if not payload.get('no_api'):
+                user_content_text = content_to_plain_text(user_content)
                 if role == 'tool':
-                    obj = {'role': 'tool', 'content': user_content}
+                    obj = {'role': 'tool', 'content': user_content_text}
                     if payload.get('name'):
                         obj['name'] = payload.get('name')
                     if payload.get('tool_call_id'):
@@ -1708,7 +1712,7 @@ class ThreadRunner:
                         obj['user_tool_call'] = payload.get('user_tool_call')
                     base_messages.append(obj)
                 else:
-                    base_messages.append({'role': 'user', 'content': user_content})
+                    base_messages.append({'role': 'user', 'content': user_content_text})
 
 
         assistant_text_parts: List[str] = []
@@ -2250,6 +2254,10 @@ class ThreadRunner:
             # User messages must not carry tool_calls when sent to provider
             if role == "user" and "tool_calls" in m2:
                 m2.pop("tool_calls", None)
+
+            content_value = m2.get("content")
+            if isinstance(content_value, list):
+                m2["content"] = content_to_plain_text(content_value)
 
             # For real tool outputs (role="tool" in the tools protocol),
             # mask secrets before sending to the provider unless raw mode
@@ -2964,7 +2972,7 @@ class ThreadRunner:
         except Exception:
             payload = {}
         content = payload.get('content')
-        return content if isinstance(content, str) else None
+        return content_to_plain_text(content) if isinstance(content, (str, list)) else None
 
     def _parent_msg_has_no_api(self, msg_id: str) -> bool:
         """Check whether the parent message for a tool call was tagged no_api.

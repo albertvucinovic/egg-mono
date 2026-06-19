@@ -9,6 +9,7 @@ from typing import Any, Dict
 
 from ..plugins import PluginContext
 from ..tools import ToolContext, ToolExecutionResult, ToolRegistry
+from ..content_parts import content_to_plain_text
 
 
 TOOL_NAME = "answer_user_while_preserving_llm_turn"
@@ -89,7 +90,7 @@ def _next_normal_user_message_after(db: Any, thread_id: str, after_seq: int) -> 
         return {
             "event_seq": int(row["event_seq"]),
             "msg_id": str(row["msg_id"]),
-            "content": str(payload.get("content") or ""),
+            "content": content_to_plain_text(payload.get("content")),
         }
     return None
 

@@ -19,6 +19,7 @@ from eggthreads import (
     get_active_get_user_message_waiting_note,
     interrupt_thread,
 )
+from eggthreads.content_parts import content_to_plain_text
 
 from ..models import MessageContent, SendMessageRequest
 from .. import core
@@ -217,6 +218,7 @@ def _get_messages_sync(db_path: str, thread_id: str) -> List[MessageContent]:
             id=msg_id,
             role=msg.get("role", ""),
             content=msg.get("content"),
+            content_text=content_to_plain_text(msg.get("content")),
             reasoning=msg.get("reasoning"),
             tool_calls=msg.get("tool_calls"),
             tool_stream=msg.get("tool_stream") if isinstance(msg.get("tool_stream"), dict) else None,

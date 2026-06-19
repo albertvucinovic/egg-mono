@@ -10,6 +10,7 @@ from typing import Optional, List
 from fastapi import APIRouter
 
 from eggthreads import list_threads, create_default_tools
+from eggthreads.content_parts import content_to_plain_text
 from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS
 from eggthreads.skills import list_skills
 
@@ -418,7 +419,7 @@ async def get_autocomplete(
                                 if not msg_id:
                                     continue
                                 role = msg.get('role', 'unknown')
-                                content = msg.get('content', '') or ''
+                                content = content_to_plain_text(msg.get('content', ''))
                                 # Truncate content for display
                                 content_preview = content[:40].replace('\n', ' ')
                                 if len(content) > 40:
@@ -474,7 +475,7 @@ async def get_autocomplete(
                                 if not msg_id:
                                     continue
                                 role = msg.get('role', 'unknown')
-                                content = msg.get('content', '') or ''
+                                content = content_to_plain_text(msg.get('content', ''))
                                 content_preview = content[:40].replace('\n', ' ')
                                 if len(content) > 40:
                                     content_preview += '...'
@@ -544,7 +545,7 @@ async def get_autocomplete(
                     words = set()
                     tok_lower = tok.lower()
                     for msg in msgs[-100:]:  # Last 100 messages
-                        content = msg.get('content') or ''
+                        content = content_to_plain_text(msg.get('content'))
                         if isinstance(content, str):
                             for word in re.findall(r"[A-Za-z0-9_]{3,}", content):
                                 if word.lower().startswith(tok_lower) and word.lower() != tok_lower:
