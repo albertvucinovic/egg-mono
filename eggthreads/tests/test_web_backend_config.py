@@ -129,6 +129,9 @@ def test_unknown_search_split_backend_names_correct_env_var(monkeypatch):
     msg = str(exc_info.value)
     assert "Unknown EGG_WEB_SEARCH_BACKEND='bogus'" in msg
     assert "auto, searxng, tavily" in msg
+    valid_values = msg.split("Valid values:", 1)[1]
+    assert "browser" not in valid_values.lower()
+    assert "playwright" not in valid_values.lower()
 
 
 def test_unknown_fetch_split_backend_names_correct_env_var(monkeypatch):
@@ -142,6 +145,20 @@ def test_unknown_fetch_split_backend_names_correct_env_var(monkeypatch):
     msg = str(exc_info.value)
     assert "Unknown EGG_WEB_FETCH_BACKEND='bogus'" in msg
     assert "auto, searxng, tavily" in msg
+    valid_values = msg.split("Valid values:", 1)[1]
+    assert "browser" not in valid_values.lower()
+    assert "playwright" not in valid_values.lower()
+
+
+def test_default_provider_lists_do_not_include_browser_providers(monkeypatch):
+    _clear_web_env(monkeypatch)
+
+    search = get_search_orchestrator()
+    fetch = get_fetch_orchestrator()
+    provider_names = [provider.name for provider in [*search.providers, *fetch.providers]]
+
+    assert provider_names == ["searxng", "direct_http"]
+    assert not any("browser" in name.lower() or "playwright" in name.lower() for name in provider_names)
 
 
 def test_search_chain_falls_back_from_tavily_to_searxng(monkeypatch):

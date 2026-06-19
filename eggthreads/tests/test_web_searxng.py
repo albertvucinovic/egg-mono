@@ -38,6 +38,7 @@ def test_web_tools_exposed(tools):
     # Tavily-named aliases were removed when the pluggable backend landed.
     assert 'search_tavily' not in names
     assert 'fetch_tavily' not in names
+    assert not any('browser' in name.lower() or 'playwright' in name.lower() for name in names)
 
 
 def test_searxng_search_parses_json(monkeypatch):

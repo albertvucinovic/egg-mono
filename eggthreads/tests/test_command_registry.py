@@ -881,16 +881,34 @@ def test_web_commands_are_registered_handlers(monkeypatch) -> None:
 
     registry = create_default_command_registry()
 
-    assert registry.get("startSearxng").handler is web.start_searxng_command
-    assert registry.get("stopSearxng").handler is web.stop_searxng_command
+    start_spec = registry.get("startSearxng")
+    stop_spec = registry.get("stopSearxng")
 
-    calls: list[tuple[list[str], str]] = []
-    monkeypatch.setattr(web, "run_searxng_compose", lambda ctx, args, **kwargs: calls.append((args, kwargs["action"])))
+    assert start_spec.handler is web.start_searxng_command
+    assert stop_spec.handler is web.stop_searxng_command
+    assert start_spec.usage == "/startSearxng"
+    assert stop_spec.usage == "/stopSearxng"
+    assert "search backend" in start_spec.description
+    assert "search backend" in stop_spec.description
+
+    calls: list[tuple[list[str], dict]] = []
+    monkeypatch.setattr(web, "run_searxng_compose", lambda ctx, args, **kwargs: calls.append((args, kwargs)))
 
     registry.execute("startSearxng", CommandContext())
     registry.execute("stopSearxng", CommandContext())
 
-    assert calls == [(["up", "-d"], "start"), (["down"], "stop")]
+    assert [(args, kwargs["action"]) for args, kwargs in calls] == [
+        (["up", "-d"], "start"),
+        (["down"], "stop"),
+    ]
+    start_summary = calls[0][1]["success_summary"]
+    stop_summary = calls[1][1]["success_summary"]
+    assert "web_search" in start_summary
+    assert "local/no-key search fallback" in start_summary
+    assert "Tavily Extract" in start_summary
+    assert "direct HTTP" in start_summary
+    assert "web_search needs /startSearxng" in stop_summary
+    assert "fetch_url is unaffected" in stop_summary
 
 
 def test_render_command_registry_help_uses_metadata() -> None:

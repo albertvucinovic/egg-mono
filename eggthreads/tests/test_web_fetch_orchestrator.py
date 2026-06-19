@@ -564,6 +564,55 @@ def test_direct_http_marks_503_retriable(monkeypatch):
     assert exc.retriable is True
 
 
+def test_direct_http_marks_403_terminal(monkeypatch):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(403, text="forbidden", url=url)
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/forbidden")
+
+    exc = exc_info.value
+    assert exc.provider == "direct_http"
+    assert exc.status_code == 403
+    assert exc.retriable is False
+
+
+def test_direct_http_marks_429_retriable(monkeypatch):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(429, text="too many requests", url=url)
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/rate-limited")
+
+    exc = exc_info.value
+    assert exc.provider == "direct_http"
+    assert exc.status_code == 429
+    assert exc.retriable is True
+
+
+def test_direct_http_timeout_is_retriable(monkeypatch):
+    import requests
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        raise requests.Timeout("slow response")
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/slow")
+
+    exc = exc_info.value
+    assert exc.provider == "direct_http"
+    assert exc.retriable is True
+    assert "slow response" in str(exc)
+
+
 def test_direct_http_marks_404_terminal(monkeypatch):
     def mock_get(url, headers=None, timeout=None, allow_redirects=None):
         return _MockResponse(404, text="not found", url=url)
@@ -577,6 +626,61 @@ def test_direct_http_marks_404_terminal(monkeypatch):
     exc = exc_info.value
     assert exc.provider == "direct_http"
     assert exc.status_code == 404
+    assert exc.retriable is False
+
+
+def test_fetch_chain_falls_back_after_direct_http_429(monkeypatch):
+    monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "direct_http,tavily")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    calls = []
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        calls.append(("get", url))
+        return _MockResponse(429, text="too many requests", url=url)
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        calls.append(("post", url))
+        return _MockResponse(200, {
+            "results": [
+                {"url": "https://example.com/rate-limited", "raw_content": "hosted fallback"},
+            ],
+            "failed_results": [],
+        })
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    response = get_fetch_orchestrator().fetch_response("https://example.com/rate-limited")
+
+    assert calls == [
+        ("get", "https://example.com/rate-limited"),
+        ("post", "https://api.tavily.com/extract"),
+    ]
+    assert [attempt.provider for attempt in response.attempts] == ["direct_http", "tavily"]
+    assert response.content == "hosted fallback"
+
+
+def test_fetch_chain_does_not_fallback_after_direct_http_403(monkeypatch):
+    monkeypatch.setenv("EGG_WEB_FETCH_CHAIN", "direct_http,tavily")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(403, text="forbidden", url=url)
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        raise AssertionError("terminal 403 should not fall back to Tavily")
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        get_fetch_orchestrator().fetch_response("https://example.com/forbidden")
+
+    exc = exc_info.value
+    assert exc.provider == "direct_http"
+    assert exc.status_code == 403
     assert exc.retriable is False
 
 
