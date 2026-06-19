@@ -8,10 +8,33 @@ from .search import SearchOrchestrator
 
 
 DEFAULT_BACKEND = "auto"
+VALID_BACKENDS = "auto, searxng, tavily"
+GLOBAL_BACKEND_ENV = "EGG_WEB_BACKEND"
+SEARCH_BACKEND_ENV = "EGG_WEB_SEARCH_BACKEND"
+FETCH_BACKEND_ENV = "EGG_WEB_FETCH_BACKEND"
 
 
-def _chosen_backend(name: str | None = None) -> str:
-    return (name or os.environ.get("EGG_WEB_BACKEND") or DEFAULT_BACKEND).strip().lower()
+def _chosen_backend(
+    name: str | None = None,
+    *,
+    split_env: str | None = None,
+) -> tuple[str, str]:
+    if name is not None:
+        return name.strip().lower(), "backend"
+    if split_env:
+        raw = os.environ.get(split_env)
+        if raw is not None and raw.strip():
+            return raw.strip().lower(), split_env
+    raw = os.environ.get(GLOBAL_BACKEND_ENV)
+    if raw is not None and raw.strip():
+        return raw.strip().lower(), GLOBAL_BACKEND_ENV
+    return DEFAULT_BACKEND, split_env or GLOBAL_BACKEND_ENV
+
+
+def _unknown_backend_error(chosen: str, source: str) -> WebBackendError:
+    return WebBackendError(
+        f"Unknown {source}={chosen!r}. Valid values: {VALID_BACKENDS}."
+    )
 
 
 def get_backend(name: str | None = None) -> WebBackend:
@@ -21,7 +44,7 @@ def get_backend(name: str | None = None) -> WebBackend:
     ``get_fetch_orchestrator()``.  This remains for legacy imports/tests that
     still expect one combined backend object.
     """
-    chosen = _chosen_backend(name)
+    chosen, source = _chosen_backend(name)
     if chosen == "auto":
         chosen = "searxng"
     if chosen in ("searxng", "searx"):
@@ -30,9 +53,7 @@ def get_backend(name: str | None = None) -> WebBackend:
     if chosen == "tavily":
         from .tavily import TavilyBackend
         return TavilyBackend()
-    raise WebBackendError(
-        f"Unknown EGG_WEB_BACKEND={chosen!r}. Valid values: auto, searxng, tavily."
-    )
+    raise _unknown_backend_error(chosen, source)
 
 
 def get_search_orchestrator(name: str | None = None) -> SearchOrchestrator:
@@ -41,7 +62,7 @@ def get_search_orchestrator(name: str | None = None) -> SearchOrchestrator:
     ``auto`` tries configured hosted providers first, then SearXNG.  Explicit
     ``searxng`` or ``tavily`` remains pinned/deterministic.
     """
-    chosen = _chosen_backend(name)
+    chosen, source = _chosen_backend(name, split_env=SEARCH_BACKEND_ENV)
     if chosen in ("searxng", "searx"):
         from .searxng import SearxngBackend
         return SearchOrchestrator([SearxngBackend()])
@@ -56,9 +77,7 @@ def get_search_orchestrator(name: str | None = None) -> SearchOrchestrator:
         from .searxng import SearxngBackend
         providers.append(SearxngBackend())
         return SearchOrchestrator(providers)
-    raise WebBackendError(
-        f"Unknown EGG_WEB_BACKEND={chosen!r}. Valid values: auto, searxng, tavily."
-    )
+    raise _unknown_backend_error(chosen, source)
 
 
 def get_fetch_orchestrator(name: str | None = None) -> FetchOrchestrator:
@@ -68,7 +87,7 @@ def get_fetch_orchestrator(name: str | None = None) -> FetchOrchestrator:
     historical ``searxng`` backend name remains accepted for fetch by mapping to
     the direct HTTP behavior it already used internally.
     """
-    chosen = _chosen_backend(name)
+    chosen, source = _chosen_backend(name, split_env=FETCH_BACKEND_ENV)
     if chosen in ("searxng", "searx"):
         return FetchOrchestrator([DirectHttpFetchProvider()])
     if chosen == "tavily":
@@ -81,6 +100,4 @@ def get_fetch_orchestrator(name: str | None = None) -> FetchOrchestrator:
             providers.append(TavilyBackend())
         providers.append(DirectHttpFetchProvider())
         return FetchOrchestrator(providers)
-    raise WebBackendError(
-        f"Unknown EGG_WEB_BACKEND={chosen!r}. Valid values: auto, searxng, tavily."
-    )
+    raise _unknown_backend_error(chosen, source)
