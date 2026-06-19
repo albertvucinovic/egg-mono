@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from ..plugins import PluginContext
 from ..tools import ToolRegistry
-from ..web import WebBackendError, get_backend
+from ..web import SearchResponse, WebBackendError, get_backend, get_search_orchestrator
 
 WEB_RESULTS_CAP = 25
 
@@ -38,14 +38,15 @@ def web_search_tool(args: Dict[str, Any]) -> str:
         return 'Error: "query" is required.'
     n = resolve_max_results(args)
     try:
-        backend = get_backend()
-        results = backend.search(query, max_results=n)
+        orchestrator = get_search_orchestrator()
+        response = orchestrator.search_response(query, max_results=n)
     except WebBackendError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error: web_search failed: {e}"
+    results = response.results
     if not results:
-        return "No results."
+        return _format_empty_search_response(response)
     lines = []
     for r in results:
         if not (r.title or r.url):
@@ -58,6 +59,15 @@ def web_search_tool(args: Dict[str, Any]) -> str:
         else:
             lines.append(f"- {r.title}  {r.url}")
     return "\n".join(lines)
+
+
+def _format_empty_search_response(response: SearchResponse) -> str:
+    if response.degraded_empty:
+        lines = ["Search backend degraded; no reliable results returned."]
+        for message in response.diagnostic_messages()[:3]:
+            lines.append(f"- {message}")
+        return "\n".join(lines)
+    return "No matching results found."
 
 
 def fetch_url_tool(args: Dict[str, Any]) -> str:
@@ -314,7 +324,7 @@ def register_web_tools(registry: ToolRegistry) -> None:
         description=(
             "Perform a web search and return results with titles, URLs, and short snippets. "
             f"Defaults to 10 results (cap {WEB_RESULTS_CAP}); pass max_results to adjust. "
-            "Backend is selected via EGG_WEB_BACKEND (default: searxng)."
+            "Backend is selected via EGG_WEB_BACKEND (default: auto)."
         ),
         parameters_schema=search_schema,
         impl=web_search_tool,

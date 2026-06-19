@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import List
 
-from .base import SearchResult, WebBackend, WebBackendError
+from .base import SearchAttempt, SearchResponse, SearchResult, WebBackend, WebBackendError
 
 
 class TavilyBackend(WebBackend):
@@ -17,31 +17,52 @@ class TavilyBackend(WebBackend):
 
     def _require_key(self) -> str:
         if not self._api_key:
-            raise WebBackendError("TAVILY_API_KEY not set in environment.")
+            raise WebBackendError("TAVILY_API_KEY not set in environment.", provider=self.name)
         return self._api_key
 
     def search(self, query: str, max_results: int = 5) -> List[SearchResult]:
+        return self.search_response(query, max_results=max_results).results
+
+    def search_response(self, query: str, max_results: int = 5) -> SearchResponse:
         import requests
         api_key = self._require_key()
-        resp = requests.post(
-            self.SEARCH_URL,
-            json={
-                "query": query,
-                "max_results": max_results,
-                "include_answer": False,
-                "search_depth": "basic",
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            raise WebBackendError(
-                f"Tavily API status {resp.status_code}: {resp.text[:400]}"
+        try:
+            resp = requests.post(
+                self.SEARCH_URL,
+                json={
+                    "query": query,
+                    "max_results": max_results,
+                    "include_answer": False,
+                    "search_depth": "basic",
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                timeout=20,
             )
-        data = resp.json() or {}
+        except requests.RequestException as e:
+            raise WebBackendError(
+                f"Tavily request failed: {e}",
+                provider=self.name,
+                retriable=True,
+            ) from e
+        if resp.status_code != 200:
+            retriable = resp.status_code == 429 or resp.status_code >= 500
+            raise WebBackendError(
+                f"Tavily API status {resp.status_code}: {resp.text[:400]}",
+                provider=self.name,
+                retriable=retriable,
+                status_code=resp.status_code,
+            )
+        try:
+            data = resp.json() or {}
+        except ValueError as e:
+            raise WebBackendError(
+                "Tavily returned non-JSON.",
+                provider=self.name,
+                retriable=True,
+            ) from e
         raw = data.get("results") or data.get("data") or []
         out: List[SearchResult] = []
         for r in raw[:max_results]:
@@ -52,7 +73,16 @@ class TavilyBackend(WebBackend):
             snippet = (r.get("content") or r.get("snippet") or "").strip()
             if title or url:
                 out.append(SearchResult(title=title, url=url, snippet=snippet))
-        return out
+        return SearchResponse(
+            results=out,
+            attempts=[
+                SearchAttempt(
+                    provider=self.name,
+                    success=True,
+                    message=f"Tavily returned {len(out)} result(s).",
+                )
+            ],
+        )
 
     def fetch(self, url: str) -> str:
         import requests
