@@ -188,7 +188,7 @@ def _is_incremental_safe_tail_event(ev: Dict[str, Any], payload: Dict[str, Any])
         if payload.get("tool_call_id") is not None:
             return payload.get("role") == "tool"
         return True
-    if ev_type in {"stream.open", "stream.delta", "stream.close"}:
+    if ev_type in {"stream.open", "stream.delta", "stream.close", "provider_request.started"}:
         return True
     if ev_type == "control.interrupt":
         # Continue rewrites the effective LLM boundary relative to an older

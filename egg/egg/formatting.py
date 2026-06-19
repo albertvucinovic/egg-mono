@@ -636,6 +636,13 @@ class FormattingMixin:
         if ls.get('active_invoke'):
             live_tps = self.current_stream_tps()
             live_tps_text = f" ({live_tps})" if live_tps else ""
+            provider_duration = ""
+            try:
+                provider_duration = self._current_provider_stream_duration()
+            except Exception:
+                provider_duration = ""
+            if provider_duration:
+                parts.append(f"\n[Provider status]\n{provider_duration}")
             if ls.get('reason'):
                 parts.append(f"\n[Reasoning (streaming){live_tps_text}]\n{ls['reason']}")
             reasoning_summary = ls.get('reasoning_summary') or {}

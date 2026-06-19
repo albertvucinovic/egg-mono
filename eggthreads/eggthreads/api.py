@@ -2776,6 +2776,7 @@ _SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES = {
     'stream.close',
     'tool_call.approval',
     'tool_call.execution_started',
+    'provider_request.started',
     'tool_call.summary',
     'tool_call.finished',
     'tool_call.output_approval',

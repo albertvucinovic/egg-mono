@@ -48,6 +48,38 @@ def _new_tool_summary() -> Dict[str, Any]:
     return {"active": False, "name": "", "text": ""}
 
 
+def _new_live_state(
+    *,
+    active_invoke: Optional[str] = None,
+    stream_kind: Optional[str] = None,
+    started_at: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Return the complete per-thread live-stream UI state shape.
+
+    Keeping this in one place prevents thread switches / interrupts from
+    accidentally dropping timing fields that are populated by replay/hydration.
+    """
+
+    return {
+        "active_invoke": active_invoke,
+        "stream_kind": stream_kind,
+        "started_at": started_at,
+        "timeout_sec": None,
+        "timeout_started_at": None,
+        "provider_started_at": None,
+        "provider_timeout_sec": None,
+        "content": "",
+        "reason": "",
+        "reasoning_summary": _new_reasoning_summary(),
+        "tools": {},
+        "tool_stream_indicator": _new_tool_stream_indicator(),
+        "tool_summary": _new_tool_summary(),
+        "tc_text": {},
+        "tc_names": {},
+        "tc_order": [],
+    }
+
+
 def _tool_call_args_stream_style(app: Any) -> Optional[str]:
     if getattr(app, '_rich_theme', None) is not None:
         return "egg.tool_call_dim"
@@ -109,6 +141,19 @@ class StreamingMixin:
     # with the scheduler's write operations on the main db connection
     _watcher_db: Optional[ThreadsDB] = None
 
+    def _make_live_state(
+        self,
+        *,
+        active_invoke: Optional[str] = None,
+        stream_kind: Optional[str] = None,
+        started_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return _new_live_state(
+            active_invoke=active_invoke,
+            stream_kind=stream_kind,
+            started_at=started_at,
+        )
+
     def _get_watcher_db(self) -> ThreadsDB:
         """Get or create a dedicated database connection for event watching."""
         if self._watcher_db is None:
@@ -139,20 +184,7 @@ class StreamingMixin:
         # Reset live streaming state when switching threads so that we
         # don't show stale streaming output from a previous thread while
         # we wait for the new thread's events to arrive.
-        self._live_state = {
-            "active_invoke": None,
-            "stream_kind": None,
-            "started_at": None,
-            "timeout_sec": None,
-            "content": "",
-            "reason": "",
-            "reasoning_summary": _new_reasoning_summary(),
-            "tools": {},
-            "tool_stream_indicator": _new_tool_stream_indicator(),
-            "tool_summary": _new_tool_summary(),
-            "tc_text": {},
-            "tc_order": [],
-        }
+        self._live_state = self._make_live_state()
         # When switching to a thread, compute any pending tool or output
         # approvals once so that the Approval panel reflects existing
         # state even if no new events arrive. We deliberately avoid doing
@@ -188,20 +220,15 @@ class StreamingMixin:
             # "(streaming)" output, even if we joined the thread after
             # the stream had already started.
             try:
-                self._live_state = {
-                    "active_invoke": row_open["invoke_id"],
-                    "stream_kind": row_open["purpose"],
-                    "started_at": self._event_started_at_epoch(row_open["opened_at"]),
-                    "timeout_sec": None,
-                    "content": "",
-                    "reason": "",
-                    "reasoning_summary": _new_reasoning_summary(),
-                    "tools": {},
-                    "tool_stream_indicator": _new_tool_stream_indicator(),
-                    "tool_summary": _new_tool_summary(),
-                    "tc_text": {},
-                    "tc_order": [],
-                }
+                self._live_state = self._make_live_state(
+                    active_invoke=row_open["invoke_id"],
+                    stream_kind=row_open["purpose"],
+                    started_at=self._event_started_at_epoch(row_open["opened_at"]),
+                )
+                self._hydrate_active_stream_timing_from_events(
+                    thread_id,
+                    str(row_open["invoke_id"]),
+                )
             except Exception:
                 # If anything goes wrong, we still proceed; the stream
                 # deltas will be applied, we just might miss the
@@ -223,6 +250,13 @@ class StreamingMixin:
                     await self.ingest_event_for_live(e, thread_id)
                     if idx and idx % 100 == 0:
                         await asyncio.sleep(0)
+                try:
+                    self._hydrate_active_stream_timing_from_events(
+                        thread_id,
+                        str(row_open["invoke_id"]),
+                    )
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -362,21 +396,11 @@ class StreamingMixin:
                     stream_kind = e.get('purpose') if isinstance(e, dict) else None
                 except Exception:
                     stream_kind = None
-            self._live_state = {
-                "active_invoke": e["invoke_id"],
-                "stream_kind": stream_kind,
-                "started_at": started_at,
-                "timeout_sec": None,
-                "content": "",
-                "reason": "",
-                "reasoning_summary": _new_reasoning_summary(),
-                "tools": {},
-                "tool_stream_indicator": _new_tool_stream_indicator(),
-                "tool_summary": _new_tool_summary(),
-                "tc_text": {},
-                "tc_names": {},
-                "tc_order": [],
-            }
+            self._live_state = self._make_live_state(
+                active_invoke=e["invoke_id"],
+                stream_kind=stream_kind,
+                started_at=started_at,
+            )
             try:
                 inv = e.get("invoke_id") if isinstance(e, dict) else e["invoke_id"]
                 self.log_system(f"Streaming started (invoke {str(inv)[-6:]}).")
@@ -445,6 +469,10 @@ class StreamingMixin:
                 timeout = _timeout_from_tool_call_payload(payload)
                 if timeout is not None:
                     self._live_state['timeout_sec'] = timeout
+                    if not self._live_state.get('timeout_started_at'):
+                        self._live_state['timeout_started_at'] = self._event_started_at_epoch(
+                            e["ts"] if "ts" in e.keys() else None
+                        ) or self._live_state.get('started_at')
         elif t == 'tool_call.execution_started':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
@@ -454,6 +482,25 @@ class StreamingMixin:
                 timeout = _timeout_from_mapping(payload)
                 if timeout is not None:
                     self._live_state['timeout_sec'] = timeout
+                    self._live_state['timeout_started_at'] = self._event_started_at_epoch(
+                        e["ts"] if "ts" in e.keys() else None
+                    ) or self._live_state.get('started_at')
+        elif t == 'provider_request.started':
+            try:
+                payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
+            except Exception:
+                payload = {}
+            started_at = self._event_started_at_epoch(e["ts"] if "ts" in e.keys() else None)
+            if started_at is None:
+                try:
+                    started_at = float(time.time())
+                except Exception:
+                    started_at = None
+            self._live_state['provider_started_at'] = started_at
+            if isinstance(payload, dict):
+                timeout = _positive_timeout(payload.get('timeout') or payload.get('timeout_sec'))
+                if timeout is not None:
+                    self._live_state['provider_timeout_sec'] = timeout
         elif t == 'tool_call.summary':
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
@@ -469,12 +516,82 @@ class StreamingMixin:
             self._live_state['active_invoke'] = None
             self._live_state['stream_kind'] = None
             self._live_state['started_at'] = None
+            self._live_state['timeout_started_at'] = None
+            self._live_state['provider_started_at'] = None
+            self._live_state['provider_timeout_sec'] = None
             try:
                 create_snapshot(self.db, self.current_thread)
             except Exception:
                 pass
             self._stream_end_on_renderer()
             self.log_system('Streaming finished.')
+
+    def _hydrate_active_stream_timing_from_events(self, thread_id: str, invoke_id: str) -> None:
+        """Best-effort timing replay for active streams after switching threads.
+
+        Watcher replay can start from the latest snapshot boundary, and snapshot
+        boundaries intentionally skip streaming/control events.  If a tool
+        timeout or provider-request start happened before that boundary, the
+        live header would otherwise lose the countdown/countup until a new event
+        arrived.  Query just the small timing event set by invoke_id so the
+        System header is correct immediately after switching to an active
+        thread.
+        """
+
+        if not invoke_id:
+            return
+        try:
+            cur = self.db.conn.execute(
+                "SELECT type, ts, payload_json FROM events "
+                "WHERE thread_id=? AND invoke_id=? "
+                "AND type IN ('stream.open', 'msg.create', 'tool_call.execution_started', 'provider_request.started') "
+                "ORDER BY event_seq ASC",
+                (thread_id, invoke_id),
+            )
+            rows = cur.fetchall()
+        except Exception:
+            rows = []
+
+        for row in rows:
+            try:
+                ev_type = row["type"]
+                ts_value = row["ts"]
+                payload_json = row["payload_json"]
+            except Exception:
+                try:
+                    ev_type, ts_value, payload_json = row
+                except Exception:
+                    continue
+            try:
+                payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            started_at = self._event_started_at_epoch(ts_value)
+            if ev_type == 'stream.open':
+                ls = getattr(self, '_live_state', {}) or {}
+                if not ls.get('started_at') and started_at is not None:
+                    ls['started_at'] = started_at
+                sk = payload.get('stream_kind') or payload.get('purpose')
+                if isinstance(sk, str) and sk and not ls.get('stream_kind'):
+                    ls['stream_kind'] = sk
+            elif ev_type == 'msg.create':
+                timeout = _timeout_from_tool_call_payload(payload)
+                if timeout is not None:
+                    self._live_state['timeout_sec'] = timeout
+                    if not self._live_state.get('timeout_started_at'):
+                        self._live_state['timeout_started_at'] = started_at or self._live_state.get('started_at')
+            elif ev_type == 'tool_call.execution_started':
+                timeout = _timeout_from_mapping(payload)
+                if timeout is not None:
+                    self._live_state['timeout_sec'] = timeout
+                    self._live_state['timeout_started_at'] = started_at or self._live_state.get('started_at')
+            elif ev_type == 'provider_request.started':
+                self._live_state['provider_started_at'] = started_at or self._live_state.get('started_at')
+                timeout = _positive_timeout(payload.get('timeout') or payload.get('timeout_sec'))
+                if timeout is not None:
+                    self._live_state['provider_timeout_sec'] = timeout
 
     def _stream_begin_on_renderer(self, stream_kind: Optional[str]) -> None:
         renderer = getattr(self, '_renderer', None)

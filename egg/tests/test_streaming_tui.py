@@ -305,6 +305,108 @@ def test_tool_timeout_countdown_stays_in_header_with_suppressed_tool_stream(tmp_
     assert "timeout in 270s (limit 300s)" in header
 
 
+def test_provider_stream_duration_is_displayed_in_system_header(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    monkeypatch.setattr("egg.panels.time.time", lambda: 1040.0)
+
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "stream.open",
+                "invoke_id": invoke_id,
+                "ts": "1970-01-01T00:16:40Z",
+                "payload_json": json.dumps({"stream_kind": "llm"}),
+            },
+            tid,
+        )
+    )
+    assert "streaming" not in app._current_stream_header_part()
+
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "provider_request.started",
+                "invoke_id": invoke_id,
+                "ts": "1970-01-01T00:16:50Z",
+                "payload_json": json.dumps({"timeout": 600}),
+            },
+            tid,
+        )
+    )
+
+    header = app._current_stream_header_part()
+    assert "streaming 30s (limit 600s)" in header
+    app.update_panels()
+    assert "streaming 30s (limit 600s)" in app.system_output.title
+
+
+def test_active_stream_timing_hydrates_after_thread_switch_snapshot_boundary(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    monkeypatch.setattr("egg.panels.time.time", lambda: 1030.0)
+
+    assert app.db.try_open_stream(
+        thread_id=tid,
+        invoke_id=invoke_id,
+        lease_until_iso="9999-12-31T23:59:59Z",
+        owner="pytest",
+        purpose="tool",
+    )
+    app.db.conn.execute(
+        "UPDATE open_streams SET opened_at=? WHERE thread_id=?",
+        ("1970-01-01T00:16:40Z", tid),
+    )
+    open_seq = app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="stream.open",
+        payload={"stream_kind": "tool"},
+        msg_id=_uid(),
+        invoke_id=invoke_id,
+    )
+    start_seq = app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": "call-wait", "timeout": 300},
+        invoke_id=invoke_id,
+    )
+    app.db.conn.execute(
+        "UPDATE events SET ts=? WHERE event_seq IN (?, ?)",
+        ("1970-01-01T00:16:40Z", open_seq, start_seq),
+    )
+    # Snapshot advances past the timing events. watch_thread should still hydrate
+    # timeout state from invoke-scoped timing events when switching to this thread.
+    from eggthreads import create_snapshot
+
+    create_snapshot(app.db, tid)
+    app._live_state = app._make_live_state()
+
+    import egg.streaming as streaming_mod
+
+    class _NoOpWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            if False:  # pragma: no cover - keep it an async generator
+                yield []
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _NoOpWatcher)
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert app._live_state["timeout_sec"] == 300
+    assert "timeout in 270s (limit 300s)" in app._current_stream_header_part()
+    app.update_panels()
+    assert "timeout in 270s (limit 300s)" in app.system_output.title
+
+
 def test_watch_thread_yields_while_replaying_large_active_reasoning_stream(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     tid = app.current_thread

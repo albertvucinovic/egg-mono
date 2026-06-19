@@ -285,16 +285,27 @@ class InputMixin:
                 except Exception:
                     pass
                 # Reset live streaming state so UI stops showing partial output
-                self._live_state = {
-                    "active_invoke": None,
-                    "stream_kind": None,
-                    "started_at": None,
-                    "content": "",
-                    "reason": "",
-                    "tools": {},
-                    "tc_text": {},
-                    "tc_order": [],
-                }
+                try:
+                    self._live_state = self._make_live_state()
+                except Exception:
+                    self._live_state = {
+                        "active_invoke": None,
+                        "stream_kind": None,
+                        "started_at": None,
+                        "timeout_sec": None,
+                        "timeout_started_at": None,
+                        "provider_started_at": None,
+                        "provider_timeout_sec": None,
+                        "content": "",
+                        "reason": "",
+                        "reasoning_summary": {"active": False, "text": ""},
+                        "tools": {},
+                        "tool_stream_indicator": {"active": False, "name": "", "frames": 0},
+                        "tool_summary": {"active": False, "name": "", "text": ""},
+                        "tc_text": {},
+                        "tc_names": {},
+                        "tc_order": [],
+                    }
                 self.log_system('Interrupted current stream/tool execution with Ctrl+C (thread remains open).')
                 # Recompute any approval prompts after cancellation
                 self.compute_pending_prompt()

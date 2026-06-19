@@ -915,12 +915,18 @@ class PanelsMixin:
             return ""
         kind = ls.get('stream_kind') or 'stream'
         if kind == 'llm':
+            duration = self._current_provider_stream_duration()
             tps_str = ""
             if include_tps:
                 tps = self._live_llm_tps_cached(str(invoke))
                 if isinstance(tps, (int, float)) and tps > 0:
                     tps_str = self._fmt_header_metric(tps, 'tps')
-            inner = f"llm {tps_str}" if tps_str else "llm"
+            parts = ["llm"]
+            if tps_str:
+                parts.append(tps_str)
+            if duration:
+                parts.append(duration)
+            inner = "; ".join(parts)
         elif kind == 'tool':
             tool_name = ""
             countdown = self._current_tool_timeout_countdown()
@@ -963,13 +969,34 @@ class PanelsMixin:
             return ""
         try:
             timeout = float(ls.get('timeout_sec'))
-            started = float(ls.get('started_at'))
+            started = float(ls.get('timeout_started_at') or ls.get('started_at'))
         except Exception:
             return ""
         if timeout <= 0 or started <= 0:
             return ""
         remaining = max(0.0, timeout - (time.time() - started))
         return f"timeout in {remaining:.0f}s (limit {timeout:.0f}s)"
+
+    def _current_provider_stream_duration(self) -> str:
+        """Return elapsed provider streaming time for the active LLM request."""
+
+        ls = getattr(self, '_live_state', {}) or {}
+        if not ls.get('active_invoke') or ls.get('stream_kind') != 'llm':
+            return ""
+        try:
+            started = float(ls.get('provider_started_at'))
+        except Exception:
+            return ""
+        if started <= 0:
+            return ""
+        elapsed = max(0.0, time.time() - started)
+        try:
+            limit = float(ls.get('provider_timeout_sec'))
+        except Exception:
+            limit = 0.0
+        if limit > 0:
+            return f"streaming {elapsed:.0f}s (limit {limit:.0f}s)"
+        return f"streaming {elapsed:.0f}s"
 
     def current_stream_tps(self) -> str:
         """Return a compact live TPS string for the active LLM stream."""

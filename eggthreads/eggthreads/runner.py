@@ -1787,6 +1787,18 @@ class ThreadRunner:
         # Convert to int for aiohttp; 0 means no timeout
         api_timeout_int = int(api_timeout) if api_timeout > 0 else 0
 
+        self.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=self.thread_id,
+            type_='provider_request.started',
+            msg_id=None,
+            invoke_id=invoke_id,
+            payload={
+                'timeout': api_timeout_int,
+                'model_key': current_model,
+            },
+        )
+
         interrupted = False
         transport_error_after_output: Optional[BaseException] = None
 
