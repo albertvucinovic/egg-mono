@@ -132,7 +132,11 @@ def cmd_start_searxng() -> CommandResponse:
     return _run_searxng_compose(
         ["up", "-d"],
         action="start",
-        success_summary="Container up at http://localhost:8888. web_search / fetch_url will now use SearXNG.",
+        success_summary=(
+            "Container up at http://localhost:8888. web_search can now use "
+            "SearXNG as the local/no-key search fallback. In auto mode, "
+            "fetch_url uses Tavily Extract when configured, otherwise direct HTTP."
+        ),
         timeout_sec=600,
     )
 
@@ -142,7 +146,11 @@ def cmd_stop_searxng() -> CommandResponse:
     return _run_searxng_compose(
         ["down"],
         action="stop",
-        success_summary="Container stopped. web_search / fetch_url will now fail until restarted or backend is changed.",
+        success_summary=(
+            "Container stopped. web_search needs SearXNG restarted unless a "
+            "hosted search backend is configured; fetch_url is unaffected unless "
+            "explicitly pinned to Tavily without TAVILY_API_KEY."
+        ),
         timeout_sec=120,
     )
 

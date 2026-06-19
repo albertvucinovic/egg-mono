@@ -394,8 +394,8 @@ def create_default_tools() -> ToolRegistry:
     - python: Execute Python scripts
     - spawn_agent: Create child threads for delegation
     - spawn_agent_auto: Create auto-approved child threads
-    - web_search: Web search via the configured backend (SearXNG by default)
-    - fetch_url: Fetch and extract readable markdown for a URL
+    - web_search: Provider-fallback web search (auto by default)
+    - fetch_url: Provider-fallback URL fetch/extraction (auto by default)
     - wait: Synchronize on child thread completion
 
     Returns:

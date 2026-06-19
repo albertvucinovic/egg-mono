@@ -99,7 +99,8 @@ class SearxngBackend(WebBackend):
                 "Run /startSearxng in egg to start the local container "
                 "(or `docker-compose up -d` in "
                 "eggthreads/eggthreads/web/searxng/). "
-                "Alternatively set EGG_WEB_BACKEND=tavily and TAVILY_API_KEY.",
+                "Alternatively set EGG_WEB_SEARCH_BACKEND=tavily "
+                "(or EGG_WEB_BACKEND=tavily) and TAVILY_API_KEY.",
                 provider=self.name,
                 retriable=True,
             ) from e

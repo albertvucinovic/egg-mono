@@ -1,4 +1,4 @@
-# SearXNG settings for egg-mono's web_search / fetch_url tools.
+# SearXNG settings for egg-mono's local/no-key web_search fallback.
 #
 # Two changes vs the distributed defaults:
 #   1. Enable the `json` response format so eggthreads can consume

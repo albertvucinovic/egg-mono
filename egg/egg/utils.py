@@ -51,7 +51,7 @@ Commands:
   Auth (ChatGPT OAuth):
     /login, /logout, /authStatus
   Web search backend:
-    /startSearxng — start the local SearXNG docker container (used by web_search / fetch_url)
+    /startSearxng — start the local SearXNG docker container (web_search local/no-key fallback)
     /stopSearxng — stop the local SearXNG docker container
   Other:
     /enterMode <send|newline>, /cost, /paste, /reload, /quit

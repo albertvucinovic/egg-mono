@@ -1018,8 +1018,16 @@ Returns a registry pre-populated with common tools:
 - python: Execute Python scripts
 - spawn_agent: Create child threads for delegation
 - spawn_agent_auto: Create auto-approved child threads
-- web_search: Web search via the configured backend (SearXNG by default)
-- fetch_url: Fetch and extract readable markdown for a URL
+- web_search: Provider-fallback web search. In default `auto` mode, Tavily is
+  tried first when `TAVILY_API_KEY` is set, then local SearXNG is used as the
+  no-key fallback. Configure with `EGG_WEB_SEARCH_BACKEND`, falling back to
+  `EGG_WEB_BACKEND`; valid values are `auto`, `searxng`, and `tavily`.
+- fetch_url: Non-browser provider-fallback URL retrieval/extraction. In default
+  `auto` mode, Tavily Extract is tried first when `TAVILY_API_KEY` is set, then
+  direct HTTP is used as the local/no-key fallback with content-quality checks.
+  Configure with `EGG_WEB_FETCH_BACKEND`, falling back to `EGG_WEB_BACKEND`;
+  direct HTTP bounds are controlled by `EGG_WEB_FETCH_TIMEOUT_SEC`,
+  `EGG_WEB_FETCH_MAX_BYTES`, and `EGG_WEB_FETCH_MAX_CHARS`.
 - wait: Synchronize on child thread completion
 
 Returns:

@@ -265,7 +265,9 @@ def start_searxng_command(context: Any, arg: str):
         starting_msg="starting container (first run may pull the image)",
         success_summary=(
             "Container up at http://localhost:8888. "
-            "web_search / fetch_url will now use SearXNG."
+            "web_search can now use SearXNG as the local/no-key search fallback. "
+            "In auto mode, fetch_url uses Tavily Extract when configured, "
+            "otherwise direct HTTP."
         ),
         timeout_sec=600,
     )
@@ -281,9 +283,9 @@ def stop_searxng_command(context: Any, arg: str):
         action="stop",
         starting_msg="stopping container",
         success_summary=(
-            "Container stopped. web_search / fetch_url will now fail "
-            "until you /startSearxng again or switch backends "
-            "(EGG_WEB_BACKEND=tavily)."
+            "Container stopped. web_search needs /startSearxng again unless a hosted "
+            "search backend is configured. fetch_url is unaffected unless explicitly "
+            "pinned to Tavily without TAVILY_API_KEY."
         ),
         timeout_sec=120,
     )
@@ -293,8 +295,8 @@ def stop_searxng_command(context: Any, arg: str):
 def register_web_commands(registry: Any) -> None:
     from ..command_catalog import CommandSpec
 
-    registry.register(CommandSpec("startSearxng", start_searxng_command, category="web", usage="/startSearxng", description="Start the local SearXNG backend."))
-    registry.register(CommandSpec("stopSearxng", stop_searxng_command, category="web", usage="/stopSearxng", description="Stop the local SearXNG backend."))
+    registry.register(CommandSpec("startSearxng", start_searxng_command, category="web", usage="/startSearxng", description="Start the local SearXNG search backend."))
+    registry.register(CommandSpec("stopSearxng", stop_searxng_command, category="web", usage="/stopSearxng", description="Stop the local SearXNG search backend."))
 
 
 def register_web_tools(registry: ToolRegistry) -> None:
@@ -324,7 +326,7 @@ def register_web_tools(registry: ToolRegistry) -> None:
         description=(
             "Perform a web search and return results with titles, URLs, and short snippets. "
             f"Defaults to 10 results (cap {WEB_RESULTS_CAP}); pass max_results to adjust. "
-            "Backend is selected via EGG_WEB_BACKEND (default: auto)."
+            "Backend is selected via EGG_WEB_SEARCH_BACKEND or EGG_WEB_BACKEND (default: auto)."
         ),
         parameters_schema=search_schema,
         impl=web_search_tool,
@@ -333,7 +335,9 @@ def register_web_tools(registry: ToolRegistry) -> None:
         name="fetch_url",
         description=(
             "Fetch and extract readable markdown from a URL. Use this when you "
-            "already know the page URL."
+            "already know the page URL. Backend is selected via EGG_WEB_FETCH_BACKEND "
+            "or EGG_WEB_BACKEND (default: auto; Tavily Extract when configured, "
+            "then direct HTTP)."
         ),
         parameters_schema=fetch_schema,
         impl=fetch_url_tool,
