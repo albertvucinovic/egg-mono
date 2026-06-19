@@ -12,7 +12,7 @@ from .base import (
     WebBackendError,
 )
 from .factory import get_backend, get_fetch_orchestrator, get_search_orchestrator
-from .fetch import DirectHttpFetchProvider, FetchOrchestrator
+from .fetch import DirectHttpFetchProvider, FetchOrchestrator, FetchQuality, classify_fetch_quality
 from .search import SearchOrchestrator
 
 __all__ = [
@@ -20,6 +20,7 @@ __all__ = [
     "FetchAttempt",
     "FetchOrchestrator",
     "FetchProvider",
+    "FetchQuality",
     "FetchResponse",
     "SearchAttempt",
     "SearchOrchestrator",
@@ -31,4 +32,5 @@ __all__ = [
     "get_backend",
     "get_fetch_orchestrator",
     "get_search_orchestrator",
+    "classify_fetch_quality",
 ]

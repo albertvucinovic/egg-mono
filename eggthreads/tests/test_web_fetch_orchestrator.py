@@ -118,6 +118,41 @@ def test_auto_fetch_reports_concise_diagnostics_when_all_providers_fail(monkeypa
     assert "fetch status 503 for https://example.com" in out
 
 
+def test_auto_fetch_reports_placeholder_when_all_providers_degraded(monkeypatch, tools):
+    monkeypatch.setenv("EGG_WEB_BACKEND", "auto")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+
+    def mock_post(url, json=None, headers=None, timeout=None):
+        return _MockResponse(200, {
+            "results": [],
+            "failed_results": [{"url": "https://example.com", "error": "timeout"}],
+        })
+
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text="""
+            <html><head><title>Just a moment...</title></head>
+            <body>Checking your browser before accessing example.com.</body></html>
+            """,
+            url="https://example.com/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page",
+            headers={"Content-Type": "text/html"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    out = tools.execute("fetch_url", {"url": "https://example.com"})
+
+    assert out.startswith("Error: fetch failed after provider fallback:")
+    assert "failed to fetch https://example.com: timeout" in out
+    assert "Direct HTTP content degraded" in out
+    assert "cloudflare_challenge" in out
+    assert "javascript_required_placeholder" in out
+    assert "Checking your browser before accessing example.com" not in out
+
+
 def test_auto_fetch_without_tavily_key_uses_direct_http_only(monkeypatch, tools):
     monkeypatch.delenv("EGG_WEB_BACKEND", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
@@ -170,6 +205,115 @@ def test_explicit_searxng_fetch_uses_direct_http_compatibility(monkeypatch, tool
 
     assert calls == ["https://example.com/direct"]
     assert out == "URL: https://example.com/direct\n\ndirect compatibility"
+
+
+def test_direct_http_empty_html_extraction_is_degraded(monkeypatch):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text="<html><head><title></title></head><body><script>app()</script></body></html>",
+            url=url,
+            headers={"Content-Type": "text/html"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/empty")
+
+    exc = exc_info.value
+    assert exc.provider == "direct_http"
+    assert exc.degraded is True
+    assert exc.retriable is True
+    assert "empty_html_extraction" in str(exc)
+    assert exc.diagnostics["fetch_quality"]["signals"] == ["empty_html_extraction"]
+
+
+def test_direct_http_near_empty_html_extraction_is_degraded(monkeypatch):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text="<html><body>OK</body></html>",
+            url=url,
+            headers={"Content-Type": "text/html"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/empty-ish")
+
+    assert "near_empty_html_extraction" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("html", "expected_signal"),
+    [
+        (
+            "<html><title>Just a moment...</title><body>Just a moment while we verify your browser /cdn-cgi/trace</body></html>",
+            "cloudflare_challenge",
+        ),
+        (
+            "<html><title>Attention Required!</title><body>Cloudflare Ray ID security check</body></html>",
+            "cloudflare_challenge",
+        ),
+        (
+            "<html><body><div class='g-recaptcha'></div>Complete this CAPTCHA to continue</body></html>",
+            "captcha_challenge",
+        ),
+        (
+            "<html><body><div class='h-captcha'></div>Security check</body></html>",
+            "captcha_challenge",
+        ),
+        (
+            "<html><body><div class='cf-turnstile'></div>Security check</body></html>",
+            "captcha_challenge",
+        ),
+        (
+            "<html><body>Please enable JavaScript and cookies to continue. Checking your browser.</body></html>",
+            "javascript_required_placeholder",
+        ),
+        (
+            "<html><body>Access Denied. We detected unusual traffic from your computer network.</body></html>",
+            "bot_block_placeholder",
+        ),
+    ],
+)
+def test_direct_http_blocked_placeholder_pages_are_degraded(monkeypatch, html, expected_signal):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(200, text=html, url=url, headers={"Content-Type": "text/html"})
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/page")
+
+    exc = exc_info.value
+    assert exc.provider == "direct_http"
+    assert exc.degraded is True
+    assert exc.retriable is True
+    assert expected_signal in exc.diagnostics["fetch_quality"]["signals"]
+
+
+def test_direct_http_suspicious_final_path_with_generic_content_is_degraded(monkeypatch):
+    def mock_get(url, headers=None, timeout=None, allow_redirects=None):
+        return _MockResponse(
+            200,
+            text="<html><body>Please verify</body></html>",
+            url="https://example.com/challenge/verify",
+            headers={"Content-Type": "text/html"},
+        )
+
+    import requests
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(WebBackendError) as exc_info:
+        DirectHttpFetchProvider().fetch_response("https://example.com/page")
+
+    assert "suspicious_final_url_path" in exc_info.value.diagnostics["fetch_quality"]["signals"]
 
 
 def test_direct_http_extracts_html(monkeypatch):

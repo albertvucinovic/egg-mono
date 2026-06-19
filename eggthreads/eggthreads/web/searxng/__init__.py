@@ -161,4 +161,4 @@ class SearxngBackend(WebBackend):
     def fetch(self, url: str) -> str:
         from ..fetch import DirectHttpFetchProvider
 
-        return DirectHttpFetchProvider(user_agent=self._ua, name=self.name).fetch(url)
+        return DirectHttpFetchProvider(user_agent=self._ua).fetch(url)

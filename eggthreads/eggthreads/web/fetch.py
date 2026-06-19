@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -17,6 +19,35 @@ DEFAULT_USER_AGENT = (
 DEFAULT_TIMEOUT_SEC = 20.0
 DEFAULT_MAX_BYTES = 2_000_000
 DEFAULT_MAX_CHARS = 200_000
+QUALITY_SCORE_THRESHOLD = 4
+NEAR_EMPTY_HTML_CHARS = 20
+NEAR_EMPTY_HTML_WORDS = 3
+
+
+@dataclass(frozen=True)
+class FetchQuality:
+    """Small, explainable quality score for direct HTTP fetch output."""
+
+    score: int
+    signals: tuple[str, ...]
+    details: tuple[str, ...] = ()
+    threshold: int = QUALITY_SCORE_THRESHOLD
+
+    @property
+    def ok(self) -> bool:
+        return self.score < self.threshold
+
+    @property
+    def summary(self) -> str:
+        return ", ".join(self.signals) if self.signals else "ok"
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "score": self.score,
+            "threshold": self.threshold,
+            "signals": list(self.signals),
+            "details": list(self.details),
+        }
 
 
 class FetchOrchestrator:
@@ -137,6 +168,20 @@ class DirectHttpFetchProvider(FetchProvider):
         text = _response_text(resp, raw_bytes[: self._max_bytes])
         content, normalized_type = _extract_content(text, content_type, final_url)
         content = _bound_chars(content.strip(), self._max_chars)
+        quality = classify_fetch_quality(
+            raw_text=text,
+            extracted_content=content,
+            content_type=content_type,
+            final_url=final_url,
+        )
+        if not quality.ok:
+            raise WebBackendError(
+                f"Direct HTTP content degraded for {final_url}: {quality.summary}",
+                provider=self.name,
+                retriable=True,
+                degraded=True,
+                diagnostics={"fetch_quality": quality.diagnostics()},
+            )
         attempt = FetchAttempt(
             provider=self.name,
             success=True,
@@ -225,6 +270,147 @@ def _extract_content(text: str, content_type: str, final_url: str) -> tuple[str,
     if kind.startswith("text/"):
         return text, kind
     return text, kind or content_type
+
+
+def classify_fetch_quality(
+    *,
+    raw_text: str,
+    extracted_content: str,
+    content_type: str,
+    final_url: str,
+) -> FetchQuality:
+    """Return a small confidence score for known low-quality fetch output.
+
+    The score intentionally combines multiple concise signals instead of trying
+    to be a comprehensive allow/deny list.  New block-page families can be added
+    by appending one weighted signal and one focused test.
+    """
+
+    kind = content_type.split(";", 1)[0].strip().lower()
+    raw_lower = _normalize_for_quality(raw_text)
+    content_lower = _normalize_for_quality(extracted_content)
+    combined = f"{raw_lower}\n{content_lower}"
+    htmlish = _looks_like_html(kind, raw_lower)
+    signals: list[str] = []
+    details: list[str] = []
+    score = 0
+
+    def add(signal: str, weight: int, detail: str = "") -> None:
+        nonlocal score
+        if signal in signals:
+            return
+        signals.append(signal)
+        score += weight
+        if detail:
+            details.append(detail[:200])
+
+    content = extracted_content.strip()
+    word_count = len(re.findall(r"\w+", content))
+    if htmlish and not content:
+        add("empty_html_extraction", QUALITY_SCORE_THRESHOLD, "no extracted text")
+    elif htmlish and (len(content) < NEAR_EMPTY_HTML_CHARS or word_count < NEAR_EMPTY_HTML_WORDS):
+        add(
+            "near_empty_html_extraction",
+            QUALITY_SCORE_THRESHOLD,
+            f"{len(content)} chars/{word_count} words",
+        )
+
+    if _contains_any(
+        combined,
+        (
+            "just a moment",
+            "attention required",
+            "/cdn-cgi/",
+            "cf-browser-verification",
+            "cloudflare ray id",
+        ),
+    ):
+        add("cloudflare_challenge", QUALITY_SCORE_THRESHOLD)
+
+    if _contains_any(
+        combined,
+        (
+            "captcha",
+            "recaptcha",
+            "g-recaptcha",
+            "h-captcha",
+            "hcaptcha",
+            "turnstile",
+            "cf-turnstile",
+        ),
+    ):
+        add("captcha_challenge", QUALITY_SCORE_THRESHOLD)
+
+    if _contains_any(
+        combined,
+        (
+            "enable javascript",
+            "please enable js",
+            "checking your browser",
+            "browser check",
+            "javascript and cookies",
+        ),
+    ):
+        add("javascript_required_placeholder", QUALITY_SCORE_THRESHOLD)
+
+    if _contains_any(
+        combined,
+        (
+            "access denied",
+            "unusual traffic",
+            "automated queries",
+            "traffic from your computer network",
+            "temporarily blocked",
+            "request blocked",
+        ),
+    ):
+        add("bot_block_placeholder", QUALITY_SCORE_THRESHOLD)
+
+    path = urlparse(final_url).path.lower()
+    if _has_suspicious_final_path(path) and _low_or_generic_content(content_lower):
+        add("suspicious_final_url_path", QUALITY_SCORE_THRESHOLD, path)
+
+    return FetchQuality(score=score, signals=tuple(signals), details=tuple(details))
+
+
+def _normalize_for_quality(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+
+def _looks_like_html(kind: str, raw_lower: str) -> bool:
+    if kind in {"text/html", "application/xhtml+xml"}:
+        return True
+    if kind:
+        return False
+    return any(marker in raw_lower for marker in ("<html", "<!doctype", "<body"))
+
+
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _has_suspicious_final_path(path: str) -> bool:
+    return any(
+        marker in path
+        for marker in ("/login", "/captcha", "/challenge", "/verify", "/cdn-cgi/")
+    )
+
+
+def _low_or_generic_content(content_lower: str) -> bool:
+    if len(content_lower) < 300:
+        return True
+    return _contains_any(
+        content_lower,
+        (
+            "access denied",
+            "attention required",
+            "just a moment",
+            "security check",
+            "please verify",
+            "checking your browser",
+            "login required",
+        ),
+    )
 
 
 def _bound_chars(text: str, limit: int) -> str:

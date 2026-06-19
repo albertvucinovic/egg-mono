@@ -70,7 +70,7 @@ def get_fetch_orchestrator(name: str | None = None) -> FetchOrchestrator:
     """
     chosen = _chosen_backend(name)
     if chosen in ("searxng", "searx"):
-        return FetchOrchestrator([DirectHttpFetchProvider(name="searxng")])
+        return FetchOrchestrator([DirectHttpFetchProvider()])
     if chosen == "tavily":
         from .tavily import TavilyBackend
         return FetchOrchestrator([TavilyBackend()])
