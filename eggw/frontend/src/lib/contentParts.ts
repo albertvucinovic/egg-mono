@@ -59,6 +59,12 @@ export function isArtifactPart(part: ContentPart): part is ArtifactContentPart {
   return part?.type === "artifact";
 }
 
+export function isImageContentPart(part: Pick<AttachmentContentPart | ArtifactContentPart, "presentation" | "mime_type">): boolean {
+  const presentation = String(part.presentation || "").toLowerCase();
+  const mimeType = String(part.mime_type || "").toLowerCase();
+  return presentation === "image" || mimeType.startsWith("image/");
+}
+
 export function formatBytes(sizeBytes: unknown): string {
   const size = typeof sizeBytes === "number" ? sizeBytes : Number(sizeBytes);
   if (!Number.isFinite(size) || size < 0) return "unknown size";

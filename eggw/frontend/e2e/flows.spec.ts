@@ -83,6 +83,28 @@ function mockGeneratedImageMessage(threadId: string, prompt: string) {
   };
 }
 
+function mockImageAttachmentMessage(threadId: string) {
+  const attachmentPart = {
+    type: 'attachment',
+    input_id: 'input123',
+    owner_thread_id: threadId,
+    presentation: 'image',
+    mime_type: 'image/png',
+    filename: 'attached-egg.png',
+    size_bytes: 1234,
+    sha256: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+    options: {},
+  };
+  const textPart = { type: 'text', text: 'Attached image for preview' };
+
+  return {
+    id: 'attachment-message-1',
+    role: 'user',
+    content: [textPart, attachmentPart],
+    content_text: `${textPart.text}\n[Attachment: image attached-egg.png image/png 1.21 KB sha256:abcdef01]`,
+  };
+}
+
 test.describe('Basic Operations', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
@@ -164,6 +186,7 @@ test.describe('Image Generation UI', () => {
     const threadId = 'image-thread-1';
     const prompt = 'A tiny egg robot painting pixels';
     const generatedMessage = mockGeneratedImageMessage(threadId, prompt);
+    const attachmentMessage = mockImageAttachmentMessage(threadId);
     const messagesRequests: string[] = [];
     const messagesRequestsAfterGeneration: string[] = [];
     let imageGenerationRequest: Record<string, unknown> | undefined;
@@ -185,7 +208,7 @@ test.describe('Image Generation UI', () => {
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: imageGenerated ? [generatedMessage] : [],
+        json: imageGenerated ? [generatedMessage, attachmentMessage] : [],
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/image-generation`, async (route, request) => {
@@ -222,6 +245,16 @@ test.describe('Image Generation UI', () => {
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/provider-output/abc12345`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'image/png' },
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axS6S0AAAAASUVORK5CYII=',
+          'base64',
+        ),
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/attachments/input123`, async (route) => {
       await route.fulfill({
         status: 200,
         headers: { ...mockApiHeaders, 'content-type': 'image/png' },
@@ -323,6 +356,10 @@ test.describe('Image Generation UI', () => {
     await expect(preview).toBeVisible({ timeout: 5000 });
     await expect(preview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/provider-output/abc12345`);
     await expect(preview).toHaveAttribute('loading', 'lazy');
+    const attachmentPreview = page.getByTestId('attachment-preview');
+    await expect(attachmentPreview).toBeVisible({ timeout: 5000 });
+    await expect(attachmentPreview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/attachments/input123`);
+    await expect(attachmentPreview).toHaveAttribute('loading', 'lazy');
   });
 });
 

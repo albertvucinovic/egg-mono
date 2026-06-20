@@ -4,9 +4,9 @@ import { useState, useRef, useEffect, useCallback, type Dispatch, type SetStateA
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Paperclip, Send, Loader2, Terminal, StopCircle, X, ImageIcon } from "lucide-react";
-import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, generateThreadImage } from "@/lib/api";
+import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, generateThreadImage, attachmentUrl } from "@/lib/api";
 import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
-import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
+import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, isImageContentPart, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -617,31 +617,50 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
 
       {stagedAttachments.length > 0 && (
         <div className="mb-3 flex flex-wrap gap-2" data-testid="staged-attachments">
-          {stagedAttachments.map((attachment, index) => (
-            <div
-              key={`${attachment.input_id}-${index}`}
-              className={`flex max-w-full items-center gap-2 rounded px-3 py-2 text-xs ${showBorders ? "border" : ""}`}
-              style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-              title={attachmentPlaceholder(attachment)}
-            >
-              <Paperclip className="h-3.5 w-3.5 flex-shrink-0" />
-              <div className="min-w-0">
-                <div className="truncate font-medium">{attachmentFilename(attachment)}</div>
-                <div className="truncate" style={{ color: "var(--muted)" }}>
-                  {attachment.presentation || "file"} · {attachment.mime_type || "application/octet-stream"} · {formatBytes(attachment.size_bytes)}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setStagedAttachments((prev) => prev.filter((_, i) => i !== index))}
-                className="ml-1 rounded p-1 hover:bg-red-500/20"
-                title="Remove attachment"
-                aria-label={`Remove attachment ${attachmentFilename(attachment)}`}
+          {stagedAttachments.map((attachment, index) => {
+            const previewUrl = currentThreadId && attachment.owner_thread_id === currentThreadId && isImageContentPart(attachment)
+              ? attachmentUrl(currentThreadId, attachment.input_id)
+              : null;
+            return (
+              <div
+                key={`${attachment.input_id}-${index}`}
+                className={`flex max-w-full items-center gap-2 rounded px-3 py-2 text-xs ${showBorders ? "border" : ""}`}
+                style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+                title={attachmentPlaceholder(attachment)}
               >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))}
+                <Paperclip className="h-3.5 w-3.5 flex-shrink-0" />
+                {previewUrl && (
+                  <img
+                    src={previewUrl}
+                    alt={`Preview of ${attachmentFilename(attachment)}`}
+                    loading="lazy"
+                    decoding="async"
+                    data-testid="staged-attachment-preview"
+                    className={`h-12 w-12 flex-shrink-0 rounded object-contain ${showBorders ? "border" : ""}`}
+                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)" }}
+                    onError={(event) => {
+                      event.currentTarget.style.display = "none";
+                    }}
+                  />
+                )}
+                <div className="min-w-0">
+                  <div className="truncate font-medium">{attachmentFilename(attachment)}</div>
+                  <div className="truncate" style={{ color: "var(--muted)" }}>
+                    {attachment.presentation || "file"} · {attachment.mime_type || "application/octet-stream"} · {formatBytes(attachment.size_bytes)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStagedAttachments((prev) => prev.filter((_, i) => i !== index))}
+                  className="ml-1 rounded p-1 hover:bg-red-500/20"
+                  title="Remove attachment"
+                  aria-label={`Remove attachment ${attachmentFilename(attachment)}`}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
 

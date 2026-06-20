@@ -22,6 +22,7 @@ import {
   isArtifactPart,
   isAttachmentPart,
   isContentPartArray,
+  isImageContentPart,
   isTextPart,
   type AttachmentContentPart,
   type ContentPart,
@@ -300,6 +301,22 @@ function ContentPartsView({
               <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
                 {attachmentPlaceholder(part)}
               </div>
+              {openUrl && isImageContentPart(part) && (
+                <a href={openUrl} target="_blank" rel="noreferrer" className="mt-2 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
+                  <img
+                    src={openUrl}
+                    alt={`Preview of ${attachmentFilename(part)}`}
+                    loading="lazy"
+                    decoding="async"
+                    data-testid="attachment-preview"
+                    className={`max-h-48 max-w-full rounded object-contain ${showBorders ? "border" : ""}`}
+                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)" }}
+                    onError={(event) => {
+                      event.currentTarget.style.display = "none";
+                    }}
+                  />
+                </a>
+              )}
               {openUrl && downloadUrl && (
                 <div className="mt-2 flex flex-wrap gap-3 text-xs">
                   <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
@@ -325,9 +342,6 @@ function ContentPartsView({
           const downloadUrl = canLink
             ? providerOutputUrl(currentThreadId!, part.artifact_id, { descendantThreadId, download: true })
             : null;
-          const artifactPresentation = String(part.presentation || "").toLowerCase();
-          const artifactMimeType = String(part.mime_type || "").toLowerCase();
-          const isImageArtifact = artifactPresentation === "image" || artifactMimeType.startsWith("image/");
           return (
             <div
               key={`${part.artifact_id || "artifact"}-${idx}`}
@@ -347,7 +361,7 @@ function ContentPartsView({
               <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
                 {artifactPlaceholder(part)}
               </div>
-              {openUrl && isImageArtifact && (
+              {openUrl && isImageContentPart(part) && (
                 <a href={openUrl} target="_blank" rel="noreferrer" className="mt-2 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
                   <img
                     src={openUrl}
