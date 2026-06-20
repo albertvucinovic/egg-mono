@@ -676,6 +676,87 @@ class TestMessageOperations:
         assert "prompt" in response.json()["detail"].lower()
         assert called is False
 
+    def test_image_generation_route_provider_failure_returns_502_without_appending_message(self, client, monkeypatch):
+        from eggllm.image_generation import ImageGenerationProviderError
+        import eggw.routes.messages as messages_route
+
+        calls = []
+
+        def fake_generate(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise ImageGenerationProviderError("provider unavailable")
+
+        monkeypatch.setattr(messages_route, "generate_openai_image_artifacts", fake_generate)
+
+        create_resp = client.post("/api/threads", json={"name": "Image Generation Failure"})
+        thread_id = create_resp.json()["id"]
+        before_messages = client.get(f"/api/threads/{thread_id}/messages").json()
+
+        response = client.post(
+            f"/api/threads/{thread_id}/image-generation",
+            json={"prompt": "Paint an unavailable egg"},
+        )
+
+        assert response.status_code == 502
+        assert response.json()["detail"] == "provider unavailable"
+        assert len(calls) == 1
+        after_messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        assert [m["id"] for m in after_messages] == [m["id"] for m in before_messages]
+
+    def test_image_generation_route_rejects_invalid_output_format_without_calling_service(self, client, monkeypatch):
+        import eggw.routes.messages as messages_route
+
+        called = False
+
+        def fake_generate(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("service should not be called for invalid output_format")
+
+        monkeypatch.setattr(messages_route, "generate_openai_image_artifacts", fake_generate)
+
+        create_resp = client.post("/api/threads", json={"name": "Image Generation Format"})
+        thread_id = create_resp.json()["id"]
+        before_messages = client.get(f"/api/threads/{thread_id}/messages").json()
+
+        response = client.post(
+            f"/api/threads/{thread_id}/image-generation",
+            json={"prompt": "Paint an egg", "output_format": "gif"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "output_format must be png, jpeg, or webp"
+        assert called is False
+        after_messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        assert [m["id"] for m in after_messages] == [m["id"] for m in before_messages]
+
+    def test_image_generation_route_rejects_conflicting_model_backend_without_calling_service(self, client, monkeypatch):
+        import eggw.routes.messages as messages_route
+
+        called = False
+
+        def fake_generate(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("service should not be called for conflicting model/backend")
+
+        monkeypatch.setattr(messages_route, "generate_openai_image_artifacts", fake_generate)
+
+        create_resp = client.post("/api/threads", json={"name": "Image Generation Backend"})
+        thread_id = create_resp.json()["id"]
+        before_messages = client.get(f"/api/threads/{thread_id}/messages").json()
+
+        response = client.post(
+            f"/api/threads/{thread_id}/image-generation",
+            json={"prompt": "Paint an egg", "model": "Image A", "backend": "Image B"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "model and backend must match when both are provided"
+        assert called is False
+        after_messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        assert [m["id"] for m in after_messages] == [m["id"] for m in before_messages]
+
     def test_get_provider_output_returns_bytes_and_headers(self, client, test_db_path):
         from eggthreads.provider_output_artifacts import save_provider_output_bytes
 
