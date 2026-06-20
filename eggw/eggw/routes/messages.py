@@ -5,9 +5,10 @@ import asyncio
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
@@ -19,9 +20,10 @@ from eggthreads import (
     get_active_get_user_message_waiting_note,
     interrupt_thread,
 )
+from eggthreads.attachment_staging import safe_display_filename, save_attachment_bytes_for_thread
 from eggthreads.content_parts import content_to_plain_text
 
-from ..models import MessageContent, SendMessageRequest
+from ..models import AttachmentUploadResponse, MessageContent, SendMessageRequest
 from .. import core
 from ..core import ensure_scheduler_for, get_thread_root_id
 
@@ -29,6 +31,18 @@ router = APIRouter(prefix="/api/threads", tags=["messages"])
 
 GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn"
 GET_USER_INTERRUPT_CONTENT = "User interrupted get_user_message_while_preserving_llm_turn."
+
+
+def _attachment_workspace() -> Path:
+    """Return the workspace root for EggW input artifacts."""
+
+    try:
+        db_path = Path(core.db.path).resolve()  # type: ignore[union-attr]
+        if db_path.parent.name == ".egg":
+            return db_path.parent.parent
+    except Exception:
+        pass
+    return Path.cwd().resolve()
 
 
 def _cancel_active_get_user_wait(thread_id: str, waiting_note: dict | None) -> bool:
@@ -276,6 +290,46 @@ async def send_message(thread_id: str, request: SendMessageRequest):
     ensure_scheduler_for(thread_id)
 
     return {"status": "sent", "message_id": msg_id}
+
+
+@router.post("/{thread_id}/attachments", response_model=AttachmentUploadResponse)
+async def upload_attachment(thread_id: str, file: UploadFile = File(...)):
+    """Ingest a browser-uploaded file as a durable thread input attachment."""
+    if not core.db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = core.db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    raw_filename = str(file.filename or "").strip()
+    if not raw_filename:
+        raise HTTPException(status_code=400, detail="Uploaded file name is required")
+
+    data = await file.read()
+    await file.close()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    display_name = safe_display_filename(raw_filename)
+    provenance = {"kind": "eggw_upload"}
+    if isinstance(file.content_type, str) and file.content_type.strip():
+        provenance["client_content_type"] = file.content_type.strip().lower()
+
+    saved, content_part = save_attachment_bytes_for_thread(
+        _attachment_workspace(),
+        thread_id,
+        data,
+        filename=display_name,
+        provenance=provenance,
+    )
+
+    return AttachmentUploadResponse(
+        input_id=saved.input_id,
+        metadata=saved.metadata,
+        content_part=content_part,
+        content_text=content_to_plain_text([content_part], validate=True),
+    )
 
 
 @router.post("/{thread_id}/open")

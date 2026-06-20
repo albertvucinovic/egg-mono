@@ -12,6 +12,17 @@ from .sandbox import authorize_thread_path_read
 from .terminal_safety import sanitize_terminal_text
 
 
+def safe_display_filename(filename: str | Path | None, *, default: str = "attachment") -> str:
+    """Return a safe basename for user-visible attachment metadata."""
+
+    text = sanitize_terminal_text(str(filename or "")).replace("\\", "/")
+    text = text.rsplit("/", 1)[-1]
+    text = " ".join(text.split())
+    if not text or text in {".", ".."}:
+        text = default
+    return text
+
+
 _IMAGE_MAGIC_PREFIXES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -82,16 +93,39 @@ def save_local_attachment_for_thread(
 
     resolved = authorize_thread_path_read(db, thread_id, source_path)
     data = resolved.read_bytes()
-    display_name = " ".join(sanitize_terminal_text(resolved.name).split()) or "attachment"
-    mime_type, presentation = infer_attachment_mime_and_presentation(display_name, data)
-    saved = save_input_bytes(
+    return save_attachment_bytes_for_thread(
         Path.cwd() if workspace is None else workspace,
         thread_id,
         data,
+        filename=resolved.name,
+        provenance={"kind": "local_path"},
+    )
+
+
+def save_attachment_bytes_for_thread(
+    workspace: str | Path,
+    thread_id: str,
+    data: bytes | bytearray | memoryview,
+    *,
+    filename: str | Path | None = None,
+    provenance: Mapping[str, Any] | None = None,
+) -> tuple[SavedInputArtifact, dict[str, Any]]:
+    """Save uploaded/staged bytes and return a canonical attachment part."""
+
+    data_bytes = bytes(data)
+    display_name = safe_display_filename(filename)
+    mime_type, presentation = infer_attachment_mime_and_presentation(display_name, data_bytes)
+    provenance_data = dict(provenance or {})
+    provenance_data.setdefault("kind", "bytes")
+    provenance_data["display_name"] = display_name
+    saved = save_input_bytes(
+        workspace,
+        thread_id,
+        data_bytes,
         filename=display_name,
         mime_type=mime_type,
         presentation=presentation,
-        provenance={"kind": "local_path", "display_name": display_name},
+        provenance=provenance_data,
     )
     return saved, attachment_part_from_input_metadata(saved.metadata)
 
@@ -126,5 +160,7 @@ __all__ = [
     "build_message_content_with_attachments",
     "format_staged_attachments",
     "infer_attachment_mime_and_presentation",
+    "safe_display_filename",
+    "save_attachment_bytes_for_thread",
     "save_local_attachment_for_thread",
 ]

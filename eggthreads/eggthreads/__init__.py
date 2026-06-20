@@ -286,6 +286,8 @@ from .attachment_staging import (
     build_message_content_with_attachments,
     format_staged_attachments,
     infer_attachment_mime_and_presentation,
+    safe_display_filename,
+    save_attachment_bytes_for_thread,
     save_local_attachment_for_thread,
 )
 
@@ -375,6 +377,7 @@ __all__ = [
     'command_completion_names', 'create_default_command_registry', 'create_default_input_prefix_registry',
     'render_command_registry_help',
     'build_message_content_with_attachments', 'format_staged_attachments',
-    'infer_attachment_mime_and_presentation', 'save_local_attachment_for_thread',
+    'infer_attachment_mime_and_presentation', 'safe_display_filename',
+    'save_attachment_bytes_for_thread', 'save_local_attachment_for_thread',
 ]
 from .event_watcher import EventWatcher

@@ -444,6 +444,95 @@ class TestMessageOperations:
         assert message["id"] == msg_id
         assert len(message["id"]) > 8
 
+    def test_upload_attachment_returns_metadata_part_and_stores_bytes(self, client, test_db_path):
+        from eggthreads.input_artifacts import resolve_input_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Upload Thread"})
+        thread_id = create_resp.json()["id"]
+        data = b"\x89PNG\r\n\x1a\nimage-bytes"
+
+        response = client.post(
+            f"/api/threads/{thread_id}/attachments",
+            files={"file": ("pixel.png", data, "image/png")},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["input_id"] == payload["metadata"]["input_id"]
+        assert payload["metadata"]["owner_thread_id"] == thread_id
+        assert payload["metadata"]["filename"] == "pixel.png"
+        assert payload["metadata"]["mime_type"] == "image/png"
+        assert payload["metadata"]["presentation"] == "image"
+        assert payload["metadata"]["provenance"] == {
+            "kind": "eggw_upload",
+            "display_name": "pixel.png",
+            "client_content_type": "image/png",
+        }
+        assert payload["content_part"]["type"] == "attachment"
+        assert payload["content_part"]["input_id"] == payload["input_id"]
+        assert payload["content_part"]["presentation"] == "image"
+        assert payload["content_text"].startswith("[Attachment: image pixel.png image/png")
+
+        workspace = Path(test_db_path).parent.parent
+        metadata, resolved = resolve_input_bytes(workspace, core_state.db, thread_id, payload["input_id"])
+        assert metadata == payload["metadata"]
+        assert resolved == data
+
+    def test_upload_forged_image_extension_stays_generic_file(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Forged Upload"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/attachments",
+            files={"file": ("not-image.png", b"not really an image", "image/png")},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["metadata"]["filename"] == "not-image.png"
+        assert payload["metadata"]["presentation"] == "file"
+        assert payload["metadata"]["mime_type"] == "text/plain"
+        assert payload["content_part"]["presentation"] == "file"
+        assert payload["content_text"].startswith("[Attachment: file not-image.png text/plain")
+
+    def test_send_message_with_uploaded_attachment_part_exposes_content_text(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Send Uploaded Part"})
+        thread_id = create_resp.json()["id"]
+        upload = client.post(
+            f"/api/threads/{thread_id}/attachments",
+            files={"file": ("note.txt", b"hello upload", "text/plain")},
+        ).json()
+
+        content = [{"type": "text", "text": "see attached"}, upload["content_part"]]
+        send_resp = client.post(f"/api/threads/{thread_id}/messages", json={"content": content})
+
+        assert send_resp.status_code == 200
+        message_id = send_resp.json()["message_id"]
+        messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        sent = next(m for m in messages if m["id"] == message_id)
+        assert sent["content"] == content
+        assert sent["content_text"].startswith("see attached\n[Attachment: file note.txt text/plain")
+
+    def test_upload_attachment_unknown_thread_returns_404(self, client):
+        response = client.post(
+            "/api/threads/missing-thread/attachments",
+            files={"file": ("note.txt", b"hello", "text/plain")},
+        )
+
+        assert response.status_code == 404
+
+    def test_upload_attachment_rejects_empty_file(self, client):
+        create_resp = client.post("/api/threads", json={"name": "Empty Upload"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/attachments",
+            files={"file": ("empty.txt", b"", "text/plain")},
+        )
+
+        assert response.status_code == 400
+        assert "empty" in response.json()["detail"].lower()
+
     def test_get_messages_includes_compaction_marker_and_full_history(self, client):
         """Web transcript API returns a divider marker without hiding old messages."""
         from eggthreads import append_message, commit_thread_compaction, create_snapshot

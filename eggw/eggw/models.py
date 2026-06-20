@@ -59,6 +59,14 @@ class SendMessageRequest(BaseModel):
     content: Union[str, List[Dict[str, Any]]]
 
 
+class AttachmentUploadResponse(BaseModel):
+    """Response for an uploaded thread input attachment."""
+    input_id: str
+    metadata: Dict[str, Any]
+    content_part: Dict[str, Any]
+    content_text: str
+
+
 class CommandRequest(BaseModel):
     """Request to execute a command."""
     command: str  # The full command string (e.g., "/model GPT 5" or "$ ls -la")
