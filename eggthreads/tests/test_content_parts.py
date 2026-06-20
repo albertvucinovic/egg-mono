@@ -7,11 +7,15 @@ import pytest
 import eggthreads as ts
 from eggthreads.content_parts import (
     ContentPartError,
+    artifact_part_from_provider_output_metadata,
+    content_has_artifacts,
     attachment_part_from_input_metadata,
     content_has_attachments,
     content_to_plain_text,
+    extract_artifact_refs,
     extract_attachment_refs,
     format_attachment_placeholder,
+    format_provider_artifact_placeholder,
     normalize_content_to_parts,
     validate_message_content,
 )
@@ -32,6 +36,23 @@ def _attachment_part(**overrides):
         "size_bytes": 186321,
         "sha256": SHA,
         "options": {"detail": "auto"},
+    }
+    part.update(overrides)
+    return part
+
+
+def _artifact_part(**overrides):
+    part = {
+        "type": "artifact",
+        "artifact_id": "q7x9p2aa",
+        "owner_thread_id": "01KVOWNER",
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "generated.png",
+        "size_bytes": 524288,
+        "sha256": SHA,
+        "provenance": {"kind": "openai_image_generation"},
+        "options": {},
     }
     part.update(overrides)
     return part
@@ -79,6 +100,29 @@ def test_validate_content_array_preserves_attachment_fields_and_canonicalizes():
     }
 
 
+def test_validate_content_array_preserves_provider_artifact_fields_and_canonicalizes():
+    content = [
+        {"type": "text", "text": "Generated output"},
+        _artifact_part(presentation="IMAGE", mime_type="IMAGE/PNG"),
+    ]
+
+    normalized = validate_message_content(content)
+
+    assert normalized[0] == {"type": "text", "text": "Generated output"}
+    assert normalized[1] == {
+        "type": "artifact",
+        "artifact_id": "q7x9p2aa",
+        "owner_thread_id": "01KVOWNER",
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "generated.png",
+        "size_bytes": 524288,
+        "sha256": SHA,
+        "provenance": {"kind": "openai_image_generation"},
+        "options": {},
+    }
+
+
 def test_validate_content_array_rejects_invalid_shapes():
     invalid_cases = [
         [],
@@ -91,6 +135,13 @@ def test_validate_content_array_rejects_invalid_shapes():
         [_attachment_part(sha256="not-a-sha")],
         [_attachment_part(options=[])],
         [_attachment_part(extra="nope")],
+        [_artifact_part(artifact_id="../bad")],
+        [_artifact_part(filename="../secret.png")],
+        [_artifact_part(size_bytes=-1)],
+        [_artifact_part(sha256="not-a-sha")],
+        [_artifact_part(provenance=[])],
+        [_artifact_part(options=[])],
+        [_artifact_part(extra="nope")],
     ]
 
     for content in invalid_cases:
@@ -111,6 +162,22 @@ def test_attachment_placeholder_plain_text_and_ref_extraction():
     assert refs == [validate_message_content([attachment])[0]]
     assert content_has_attachments(content) is True
     assert content_has_attachments("plain") is False
+
+
+def test_provider_artifact_placeholder_plain_text_and_ref_extraction():
+    artifact = _artifact_part(size_bytes=524288)
+    content = [{"type": "text", "text": "Generated"}, artifact]
+
+    placeholder = format_provider_artifact_placeholder(artifact)
+    plain = content_to_plain_text(content, validate=True)
+    refs = extract_artifact_refs(content)
+
+    assert placeholder == "[Provider artifact: image generated.png image/png 512 KB sha256:01234567 artifact_id:q7x9p2aa]"
+    assert plain == "Generated\n[Provider artifact: image generated.png image/png 512 KB sha256:01234567 artifact_id:q7x9p2aa]"
+    assert refs == [validate_message_content([artifact])[0]]
+    assert content_has_artifacts(content) is True
+    assert content_has_artifacts("plain") is False
+    assert content_has_attachments(content) is False
 
 
 def test_attachment_part_from_input_metadata_uses_saved_record_shape():
@@ -137,6 +204,34 @@ def test_attachment_part_from_input_metadata_uses_saved_record_shape():
         "size_bytes": 3,
         "sha256": SHA,
         "options": {"detail": "low"},
+    }
+
+
+def test_artifact_part_from_provider_output_metadata_uses_saved_record_shape():
+    metadata = {
+        "artifact_id": "q7x9p2aa",
+        "owner_thread_id": "thread-1",
+        "presentation": "IMAGE",
+        "mime_type": "IMAGE/PNG",
+        "filename": "generated.png",
+        "size_bytes": 3,
+        "sha256": SHA,
+        "provenance": {},
+    }
+
+    part = artifact_part_from_provider_output_metadata(metadata, options={"display": "card"})
+
+    assert part == {
+        "type": "artifact",
+        "artifact_id": "q7x9p2aa",
+        "owner_thread_id": "thread-1",
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "generated.png",
+        "size_bytes": 3,
+        "sha256": SHA,
+        "provenance": {},
+        "options": {"display": "card"},
     }
 
 
@@ -182,6 +277,24 @@ def test_snapshot_word_count_and_token_stats_use_plain_placeholders(tmp_path):
     assert content_to_plain_text(snapshot["messages"][0]["content"]).startswith("What is wrong")
 
 
+def test_snapshot_token_stats_and_repl_context_use_provider_artifact_placeholders(tmp_path):
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    content = [{"type": "text", "text": "Generated image"}, _artifact_part()]
+    msg_id = ts.append_message(db, tid, "assistant", content)
+
+    snapshot = ts.create_snapshot(db, tid)
+    stats = snapshot["token_stats"]
+    per_message = next(iter(stats["per_message"].values()))
+    context = ts.build_repl_thread_context(db, tid)
+
+    assert ts.word_count_from_snapshot(db, tid) > 0
+    assert per_message["content_tokens"] > 0
+    assert content_to_plain_text(snapshot["messages"][0]["content"]).startswith("Generated image")
+    assert "[Provider artifact: image generated.png" in context["messages_by_id"][msg_id]["content_text"]
+
+
 def test_provider_sanitization_falls_back_to_plain_attachment_placeholders(monkeypatch):
     import eggthreads.runner as runner_mod
 
@@ -198,6 +311,26 @@ def test_provider_sanitization_falls_back_to_plain_attachment_placeholders(monke
         {
             "role": "user",
             "content": "What is wrong with this screenshot?\n[Attachment: image screenshot.png image/png 182 KB sha256:01234567]",
+        }
+    ]
+
+
+def test_provider_sanitization_falls_back_to_plain_provider_artifact_placeholders(monkeypatch):
+    import eggthreads.runner as runner_mod
+
+    monkeypatch.setattr(
+        runner_mod,
+        "get_thread_tools_config",
+        lambda _db, _thread_id: type("Cfg", (), {"allow_raw_tool_output": True})(),
+    )
+    runner = _DummyRunner()
+
+    sanitized = runner._sanitize_messages_for_api([{"role": "user", "content": [{"type": "text", "text": "Generated"}, _artifact_part()]}])
+
+    assert sanitized == [
+        {
+            "role": "user",
+            "content": "Generated\n[Provider artifact: image generated.png image/png 512 KB sha256:01234567 artifact_id:q7x9p2aa]",
         }
     ]
 

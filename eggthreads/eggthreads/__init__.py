@@ -159,12 +159,17 @@ from .token_count import (
     thread_token_stats,
 )
 from .content_parts import (
+    ARTIFACT_PART_TYPE,
     ContentPartError,
     attachment_part_from_input_metadata,
+    artifact_part_from_provider_output_metadata,
+    content_has_artifacts,
     content_has_attachments,
     content_to_plain_text,
+    extract_artifact_refs,
     extract_attachment_refs,
     format_attachment_placeholder,
+    format_provider_artifact_placeholder,
     normalize_content_to_parts,
     validate_content_part,
     validate_content_parts,

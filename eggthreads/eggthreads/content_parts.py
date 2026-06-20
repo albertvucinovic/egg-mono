@@ -14,11 +14,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .input_artifacts import validate_input_id
+from .provider_output_artifacts import validate_provider_output_artifact_id
 
 
 TEXT_PART_TYPE = "text"
 ATTACHMENT_PART_TYPE = "attachment"
-CONTENT_PART_TYPES = {TEXT_PART_TYPE, ATTACHMENT_PART_TYPE}
+ARTIFACT_PART_TYPE = "artifact"
+CONTENT_PART_TYPES = {TEXT_PART_TYPE, ATTACHMENT_PART_TYPE, ARTIFACT_PART_TYPE}
 
 _ATTACHMENT_REQUIRED_FIELDS = (
     "input_id",
@@ -30,6 +32,16 @@ _ATTACHMENT_REQUIRED_FIELDS = (
     "sha256",
 )
 _ATTACHMENT_ALLOWED_FIELDS = {"type", *_ATTACHMENT_REQUIRED_FIELDS, "options"}
+_ARTIFACT_REQUIRED_FIELDS = (
+    "artifact_id",
+    "owner_thread_id",
+    "presentation",
+    "mime_type",
+    "filename",
+    "size_bytes",
+    "sha256",
+)
+_ARTIFACT_ALLOWED_FIELDS = {"type", *_ARTIFACT_REQUIRED_FIELDS, "provenance", "options"}
 _TEXT_ALLOWED_FIELDS = {"type", "text"}
 _HEX = set("0123456789abcdef")
 
@@ -58,10 +70,10 @@ def _require_string(value: Any, *, field: str, allow_empty: bool = False) -> str
 
 def _validate_sha256(value: Any) -> str:
     if not isinstance(value, str):
-        raise ContentPartError("attachment sha256 must be a string.")
+        raise ContentPartError("content part sha256 must be a string.")
     text = value.strip().lower()
     if len(text) != 64 or any(ch not in _HEX for ch in text):
-        raise ContentPartError("attachment sha256 must be a 64-character lower-case hexadecimal string.")
+        raise ContentPartError("content part sha256 must be a 64-character lower-case hexadecimal string.")
     return text
 
 
@@ -69,36 +81,36 @@ def _validate_filename(value: Any) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ContentPartError("attachment filename must be a string or null.")
+        raise ContentPartError("content part filename must be a string or null.")
     text = value.strip()
     if not text:
         return None
     if "\x00" in text or "/" in text or "\\" in text:
-        raise ContentPartError("attachment filename must be a display filename, not a path.")
+        raise ContentPartError("content part filename must be a display filename, not a path.")
     if text in {".", ".."}:
-        raise ContentPartError("attachment filename must be a display filename, not a path.")
+        raise ContentPartError("content part filename must be a display filename, not a path.")
     return text
 
 
 def _validate_size_bytes(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ContentPartError("attachment size_bytes must be a non-negative integer.")
+        raise ContentPartError("content part size_bytes must be a non-negative integer.")
     if value < 0:
-        raise ContentPartError("attachment size_bytes must be a non-negative integer.")
+        raise ContentPartError("content part size_bytes must be a non-negative integer.")
     return value
 
 
-def _validate_options(value: Any) -> dict[str, Any]:
+def _validate_object(value: Any, *, field: str) -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, Mapping):
-        raise ContentPartError("attachment options must be an object.")
-    options = dict(value)
+        raise ContentPartError(f"{field} must be an object.")
+    data = dict(value)
     try:
-        json.dumps(options, ensure_ascii=False)
+        json.dumps(data, ensure_ascii=False)
     except Exception as e:
-        raise ContentPartError(f"attachment options must be JSON-serializable: {e}") from e
-    return options
+        raise ContentPartError(f"{field} must be JSON-serializable: {e}") from e
+    return data
 
 
 def validate_content_part(part: Mapping[str, Any]) -> dict[str, Any]:
@@ -133,11 +145,35 @@ def validate_content_part(part: Mapping[str, Any]) -> dict[str, Any]:
             "filename": _validate_filename(part.get("filename")),
             "size_bytes": _validate_size_bytes(part.get("size_bytes")),
             "sha256": _validate_sha256(part.get("sha256")),
-            "options": _validate_options(part.get("options", {})),
+            "options": _validate_object(part.get("options", {}), field="attachment options"),
         }
         return canonical
 
-    raise ContentPartError("content part type must be 'text' or 'attachment'.")
+    if part_type == ARTIFACT_PART_TYPE:
+        _ensure_no_unknown_fields(part, _ARTIFACT_ALLOWED_FIELDS, part_type="artifact")
+        missing = [field for field in _ARTIFACT_REQUIRED_FIELDS if field not in part]
+        if missing:
+            joined = ", ".join(missing)
+            raise ContentPartError(f"artifact content part is missing required field(s): {joined}.")
+        try:
+            artifact_id = validate_provider_output_artifact_id(str(part.get("artifact_id") or ""))
+        except ValueError as e:
+            raise ContentPartError(str(e)) from e
+        canonical = {
+            "type": ARTIFACT_PART_TYPE,
+            "artifact_id": artifact_id,
+            "owner_thread_id": _require_string(part.get("owner_thread_id"), field="artifact owner_thread_id"),
+            "presentation": _require_string(part.get("presentation"), field="artifact presentation").lower(),
+            "mime_type": _require_string(part.get("mime_type"), field="artifact mime_type").lower(),
+            "filename": _validate_filename(part.get("filename")),
+            "size_bytes": _validate_size_bytes(part.get("size_bytes")),
+            "sha256": _validate_sha256(part.get("sha256")),
+            "provenance": _validate_object(part.get("provenance", {}), field="artifact provenance"),
+            "options": _validate_object(part.get("options", {}), field="artifact options"),
+        }
+        return canonical
+
+    raise ContentPartError("content part type must be 'text', 'attachment', or 'artifact'.")
 
 
 def validate_content_parts(parts: Any) -> list[dict[str, Any]]:
@@ -192,6 +228,37 @@ def attachment_part_from_input_metadata(
         "filename": metadata.get("filename"),
         "size_bytes": metadata.get("size_bytes"),
         "sha256": metadata.get("sha256"),
+        "options": dict(options or {}),
+    }
+    return validate_content_part(part)
+
+
+def artifact_part_from_provider_output_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    provenance: Mapping[str, Any] | None = None,
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a canonical provider-output artifact content part from metadata.
+
+    Provider-output artifacts are references to bytes produced by a provider and
+    stored under ``.egg/egg_provider_output``.  Message content stores only the
+    small durable reference/metadata summary; bytes and base64 never appear in
+    transcript content.
+    """
+
+    if not isinstance(metadata, Mapping):
+        raise ContentPartError("provider output metadata must be an object.")
+    part = {
+        "type": ARTIFACT_PART_TYPE,
+        "artifact_id": metadata.get("artifact_id"),
+        "owner_thread_id": metadata.get("owner_thread_id"),
+        "presentation": metadata.get("presentation"),
+        "mime_type": metadata.get("mime_type"),
+        "filename": metadata.get("filename"),
+        "size_bytes": metadata.get("size_bytes"),
+        "sha256": metadata.get("sha256"),
+        "provenance": dict(provenance or {}),
         "options": dict(options or {}),
     }
     return validate_content_part(part)
@@ -255,6 +322,22 @@ def format_attachment_placeholder(part: Mapping[str, Any], *, validate: bool = T
     return f"[Attachment: {presentation} {filename} {mime_type} {size} sha256:{sha_short}]"
 
 
+def format_provider_artifact_placeholder(part: Mapping[str, Any], *, validate: bool = True) -> str:
+    """Format one provider-output artifact part as a plain readable placeholder."""
+
+    artifact = validate_content_part(part) if validate else dict(part)
+    if artifact.get("type") != ARTIFACT_PART_TYPE:
+        raise ContentPartError("provider artifact placeholder requires an artifact content part.")
+    filename = artifact.get("filename") or "(unnamed)"
+    sha = str(artifact.get("sha256") or "")
+    sha_short = sha[:8] if sha else "unknown"
+    artifact_id = str(artifact.get("artifact_id") or "unknown")
+    presentation = artifact.get("presentation") or "file"
+    mime_type = artifact.get("mime_type") or "application/octet-stream"
+    size = _format_size(artifact.get("size_bytes"))
+    return f"[Provider artifact: {presentation} {filename} {mime_type} {size} sha256:{sha_short} artifact_id:{artifact_id}]"
+
+
 def _fallback_part_text(part: Any) -> str:
     try:
         return json.dumps(part, ensure_ascii=False, sort_keys=True)
@@ -297,6 +380,11 @@ def content_to_plain_text(content: Any, *, validate: bool = False) -> str:
                 rendered.append(format_attachment_placeholder(raw_part, validate=validate))
             except Exception:
                 rendered.append(_fallback_part_text(raw_part))
+        elif part_type == ARTIFACT_PART_TYPE:
+            try:
+                rendered.append(format_provider_artifact_placeholder(raw_part, validate=validate))
+            except Exception:
+                rendered.append(_fallback_part_text(raw_part))
         else:
             rendered.append(_fallback_part_text(raw_part))
     return "\n".join(piece for piece in rendered if piece is not None)
@@ -315,23 +403,47 @@ def extract_attachment_refs(content: Any, *, validate: bool = True) -> list[dict
     return [part for part in parts if part.get("type") == ATTACHMENT_PART_TYPE]
 
 
+def extract_artifact_refs(content: Any, *, validate: bool = True) -> list[dict[str, Any]]:
+    """Return canonical provider-output artifact parts referenced by content."""
+
+    if isinstance(content, str) or content is None:
+        return []
+    if not isinstance(content, list):
+        if validate:
+            validate_message_content(content)
+        return []
+    parts = validate_content_parts(content) if validate else [dict(part) for part in content if isinstance(part, Mapping)]
+    return [part for part in parts if part.get("type") == ARTIFACT_PART_TYPE]
+
+
 def content_has_attachments(content: Any, *, validate: bool = True) -> bool:
     """Return True if message content contains one or more attachment parts."""
 
     return bool(extract_attachment_refs(content, validate=validate))
 
 
+def content_has_artifacts(content: Any, *, validate: bool = True) -> bool:
+    """Return True if message content contains provider-output artifact parts."""
+
+    return bool(extract_artifact_refs(content, validate=validate))
+
+
 __all__ = [
     "ATTACHMENT_PART_TYPE",
+    "ARTIFACT_PART_TYPE",
     "CONTENT_PART_TYPES",
     "ContentPartError",
     "MessageContent",
     "TEXT_PART_TYPE",
     "attachment_part_from_input_metadata",
+    "artifact_part_from_provider_output_metadata",
+    "content_has_artifacts",
     "content_has_attachments",
     "content_to_plain_text",
+    "extract_artifact_refs",
     "extract_attachment_refs",
     "format_attachment_placeholder",
+    "format_provider_artifact_placeholder",
     "is_content_part_array",
     "normalize_content_to_parts",
     "validate_content_part",

@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 from eggllm.capabilities import supports_attachment_presentation
 
 from .content_parts import (
+    ARTIFACT_PART_TYPE,
     ATTACHMENT_PART_TYPE,
     TEXT_PART_TYPE,
     content_has_attachments,
@@ -192,6 +193,13 @@ def _lower_content_array(
         part_type = part.get("type")
         if part_type == TEXT_PART_TYPE:
             lowered.append(_lower_text_part(part, ctx.provider_api_type))
+            continue
+        if part_type == ARTIFACT_PART_TYPE:
+            # Provider-output artifacts are not provider inputs.  Until an
+            # explicit promotion-to-input flow exists, keep them as readable
+            # placeholders in provider context for both current and historical
+            # messages.
+            lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": content_to_plain_text([part])}, ctx.provider_api_type))
             continue
         if part_type != ATTACHMENT_PART_TYPE:
             if current_message:

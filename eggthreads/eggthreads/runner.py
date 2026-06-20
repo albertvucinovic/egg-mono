@@ -33,7 +33,7 @@ from .tool_state import (
 from .tools_config import get_thread_tools_config
 from .tool_call_id import normalize_tool_call_id
 from .terminal_safety import sanitize_terminal_text
-from .content_parts import content_has_attachments, content_to_plain_text
+from .content_parts import content_has_artifacts, content_has_attachments, content_to_plain_text
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -2321,7 +2321,10 @@ class ThreadRunner:
                 m2.pop("tool_calls", None)
 
             content_value = m2.get("content")
-            if isinstance(content_value, list) and content_has_attachments(content_value, validate=False):
+            if isinstance(content_value, list) and (
+                content_has_attachments(content_value, validate=False)
+                or content_has_artifacts(content_value, validate=False)
+            ):
                 m2["content"] = content_to_plain_text(content_value)
 
             # For real tool outputs (role="tool" in the tools protocol),

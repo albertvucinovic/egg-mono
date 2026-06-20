@@ -13,10 +13,13 @@ import "katex/dist/katex.min.css";
 import { fetchMessages } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
 import {
+  artifactFilename,
+  artifactPlaceholder,
   attachmentFilename,
   attachmentPlaceholder,
   contentToPlainText,
   formatBytes,
+  isArtifactPart,
   isAttachmentPart,
   isContentPartArray,
   isTextPart,
@@ -252,6 +255,29 @@ function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[];
               </div>
               <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
                 {attachmentPlaceholder(part)}
+              </div>
+            </div>
+          );
+        }
+        if (isArtifactPart(part)) {
+          return (
+            <div
+              key={`${part.artifact_id || "artifact"}-${idx}`}
+              className={`rounded p-3 text-sm ${showBorders ? "border" : ""}`}
+              style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              title={artifactPlaceholder(part)}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">Provider artifact</span>
+                <span>{artifactFilename(part)}</span>
+                <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "var(--panel-bg)", color: "var(--muted)" }}>
+                  {part.presentation || "file"}
+                </span>
+                <span className="text-xs" style={{ color: "var(--muted)" }}>{part.mime_type || "application/octet-stream"}</span>
+                <span className="text-xs" style={{ color: "var(--muted)" }}>{formatBytes(part.size_bytes)}</span>
+              </div>
+              <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
+                {artifactPlaceholder(part)}
               </div>
             </div>
           );

@@ -76,6 +76,21 @@ def _file_part(saved, *, owner_thread_id: str, presentation="file", mime_type="t
     }
 
 
+def _artifact_part(*, owner_thread_id: str):
+    return {
+        "type": "artifact",
+        "artifact_id": "q7x9p2aa",
+        "owner_thread_id": owner_thread_id,
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "generated.png",
+        "size_bytes": 524288,
+        "sha256": "0123456789abcdef" * 4,
+        "provenance": {"kind": "openai_image_generation"},
+        "options": {},
+    }
+
+
 def _content(saved, thread_id):
     return [
         {"type": "text", "text": "look"},
@@ -348,6 +363,28 @@ def test_text_only_content_array_lowers_to_plain_string(tmp_path):
     )
 
     assert lowered[0]["content"] == "hello\nworld"
+
+
+def test_current_provider_artifact_part_lowers_to_plain_placeholder_not_input(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "u1",
+                "role": "user",
+                "content": [{"type": "text", "text": "Generated"}, _artifact_part(owner_thread_id=tid)],
+            }
+        ],
+        _ctx(tmp_path, db, tid, {"input_modalities": ["text", "image"], "attachment_capabilities": {"images": True}}, "responses"),
+        current_msg_id="u1",
+    )
+
+    assert lowered[0]["content"] == (
+        "Generated\n[Provider artifact: image generated.png image/png 512 KB "
+        "sha256:01234567 artifact_id:q7x9p2aa]"
+    )
 
 
 def test_current_attachment_without_capability_fails_fast(tmp_path):

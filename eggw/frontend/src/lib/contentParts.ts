@@ -15,12 +15,25 @@ export interface AttachmentContentPart {
   options?: Record<string, unknown>;
 }
 
+export interface ArtifactContentPart {
+  type: "artifact";
+  artifact_id: string;
+  owner_thread_id: string;
+  presentation: string;
+  mime_type: string;
+  filename?: string | null;
+  size_bytes?: number;
+  sha256?: string;
+  provenance?: Record<string, unknown>;
+  options?: Record<string, unknown>;
+}
+
 export type UnknownContentPart = {
   type: string;
   [key: string]: unknown;
 };
 
-export type ContentPart = TextContentPart | AttachmentContentPart | UnknownContentPart;
+export type ContentPart = TextContentPart | AttachmentContentPart | ArtifactContentPart | UnknownContentPart;
 export type EggMessageContent = string | ContentPart[];
 
 export interface AttachmentUploadResponse {
@@ -42,6 +55,10 @@ export function isAttachmentPart(part: ContentPart): part is AttachmentContentPa
   return part?.type === "attachment";
 }
 
+export function isArtifactPart(part: ContentPart): part is ArtifactContentPart {
+  return part?.type === "artifact";
+}
+
 export function formatBytes(sizeBytes: unknown): string {
   const size = typeof sizeBytes === "number" ? sizeBytes : Number(sizeBytes);
   if (!Number.isFinite(size) || size < 0) return "unknown size";
@@ -61,6 +78,10 @@ export function attachmentFilename(part: AttachmentContentPart): string {
   return part.filename || "(unnamed)";
 }
 
+export function artifactFilename(part: ArtifactContentPart): string {
+  return part.filename || "(unnamed)";
+}
+
 export function attachmentPlaceholder(part: AttachmentContentPart): string {
   const filename = attachmentFilename(part);
   const presentation = part.presentation || "file";
@@ -68,6 +89,16 @@ export function attachmentPlaceholder(part: AttachmentContentPart): string {
   const size = formatBytes(part.size_bytes);
   const sha = typeof part.sha256 === "string" && part.sha256 ? part.sha256.slice(0, 8) : "unknown";
   return `[Attachment: ${presentation} ${filename} ${mimeType} ${size} sha256:${sha}]`;
+}
+
+export function artifactPlaceholder(part: ArtifactContentPart): string {
+  const filename = artifactFilename(part);
+  const presentation = part.presentation || "file";
+  const mimeType = part.mime_type || "application/octet-stream";
+  const size = formatBytes(part.size_bytes);
+  const sha = typeof part.sha256 === "string" && part.sha256 ? part.sha256.slice(0, 8) : "unknown";
+  const artifactId = part.artifact_id || "unknown";
+  return `[Provider artifact: ${presentation} ${filename} ${mimeType} ${size} sha256:${sha} artifact_id:${artifactId}]`;
 }
 
 export function contentToPlainText(content: unknown, fallback = ""): string {
@@ -79,6 +110,7 @@ export function contentToPlainText(content: unknown, fallback = ""): string {
       const typedPart = part as ContentPart;
       if (isTextPart(typedPart)) return typedPart.text;
       if (isAttachmentPart(typedPart)) return attachmentPlaceholder(typedPart);
+      if (isArtifactPart(typedPart)) return artifactPlaceholder(typedPart);
       try {
         return JSON.stringify(typedPart);
       } catch {
