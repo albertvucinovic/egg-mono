@@ -2771,6 +2771,8 @@ class ThreadRunner:
                         tool_timeout_sec=tool_timeout_sec,
                         cancel_check=cancel_check,
                         db=self.db,
+                        models_path=self.models_path,
+                        all_models_path=self.all_models_path,
                         stream=stream_ctx,
                         preserve_tool_result=True,
                     )

@@ -23,7 +23,12 @@ from eggthreads import (
 )
 from eggthreads.attachment_staging import safe_display_filename, save_attachment_bytes_for_thread
 from eggthreads.content_parts import content_to_plain_text
-from eggthreads.image_generation import generate_openai_image_artifacts, image_generation_result_content_parts
+from eggthreads.image_generation import (
+    generate_openai_image_artifacts,
+    image_generation_result_content_parts,
+    normalize_image_generation_model_key,
+    normalize_openai_image_generation_options,
+)
 from eggthreads.provider_output_artifacts import (
     ProviderOutputArtifactAccessError,
     ProviderOutputArtifactError,
@@ -70,33 +75,19 @@ def _content_disposition(disposition: str, filename: str) -> str:
 def _image_generation_options(request: ImageGenerationRequest) -> dict[str, object]:
     """Return explicit provider image-generation options from an API request."""
 
-    options: dict[str, object] = {}
-    if request.n is not None:
-        if request.n < 1 or request.n > 10:
-            raise HTTPException(status_code=400, detail="n must be an integer from 1 to 10")
-        options["n"] = request.n
-    for field in ("size", "quality", "background"):
-        value = getattr(request, field)
-        if isinstance(value, str) and value.strip():
-            options[field] = value.strip()
-    if isinstance(request.output_format, str) and request.output_format.strip():
-        output_format = request.output_format.strip().lower().lstrip(".")
-        if output_format == "jpg":
-            output_format = "jpeg"
-        if output_format not in {"png", "jpeg", "webp"}:
-            raise HTTPException(status_code=400, detail="output_format must be png, jpeg, or webp")
-        options["output_format"] = output_format
-    return options
+    try:
+        return normalize_openai_image_generation_options(request.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 def _image_generation_model_key(request: ImageGenerationRequest) -> str | None:
     """Resolve the model/backend alias pair accepted by the EggW API."""
 
-    model = request.model.strip() if isinstance(request.model, str) and request.model.strip() else None
-    backend = request.backend.strip() if isinstance(request.backend, str) and request.backend.strip() else None
-    if model and backend and model != backend:
-        raise HTTPException(status_code=400, detail="model and backend must match when both are provided")
-    return model or backend
+    try:
+        return normalize_image_generation_model_key(request.model, request.backend)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 def _cancel_active_get_user_wait(thread_id: str, waiting_note: dict | None) -> bool:

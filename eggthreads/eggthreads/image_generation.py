@@ -13,6 +13,59 @@ from .content_parts import artifact_part_from_provider_output_metadata
 from .provider_output_artifacts import SavedProviderOutputArtifact, save_provider_output_bytes
 
 
+def normalize_image_generation_model_key(model: Any = None, backend: Any = None) -> str | None:
+    """Return the explicit image-generation backend key from model/backend aliases.
+
+    Egg's user/API/tool surfaces accept both names for readability.  When both
+    are supplied they must identify the same configured backend so callers do
+    not accidentally send prompts to an unexpected image model.
+    """
+
+    model_key = str(model).strip() if isinstance(model, str) and str(model).strip() else None
+    backend_key = str(backend).strip() if isinstance(backend, str) and str(backend).strip() else None
+    if model_key and backend_key and model_key != backend_key:
+        raise ValueError("model and backend must match when both are provided")
+    return model_key or backend_key
+
+
+def normalize_openai_image_generation_options(values: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the small safe OpenAI Images option set accepted by Egg surfaces."""
+
+    if not isinstance(values, Mapping):
+        return {}
+    options: dict[str, Any] = {}
+
+    n = values.get("n")
+    if n is not None:
+        if isinstance(n, bool):
+            raise ValueError("n must be an integer from 1 to 10")
+        try:
+            n_value = int(n)
+        except (TypeError, ValueError) as e:
+            raise ValueError("n must be an integer from 1 to 10") from e
+        if str(n).strip() != str(n_value) and not isinstance(n, int):
+            raise ValueError("n must be an integer from 1 to 10")
+        if n_value < 1 or n_value > 10:
+            raise ValueError("n must be an integer from 1 to 10")
+        options["n"] = n_value
+
+    for key in ("size", "quality", "background"):
+        value = values.get(key)
+        if isinstance(value, str) and value.strip():
+            options[key] = value.strip()
+
+    output_format = values.get("output_format")
+    if isinstance(output_format, str) and output_format.strip():
+        fmt = output_format.strip().lower().lstrip(".")
+        if fmt == "jpg":
+            fmt = "jpeg"
+        if fmt not in {"png", "jpeg", "webp"}:
+            raise ValueError("output_format must be png, jpeg, or webp")
+        options["output_format"] = fmt
+
+    return options
+
+
 @dataclass(frozen=True)
 class GeneratedProviderOutputArtifact:
     """A generated image saved into ``.egg/egg_provider_output``."""
@@ -203,4 +256,6 @@ __all__ = [
     "ImageGenerationArtifactResult",
     "generate_openai_image_artifacts",
     "image_generation_result_content_parts",
+    "normalize_image_generation_model_key",
+    "normalize_openai_image_generation_options",
 ]
