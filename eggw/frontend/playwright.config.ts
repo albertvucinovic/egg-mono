@@ -34,7 +34,7 @@ export default defineConfig({
   webServer: [
     {
       // Enable test mode for mock LLM responses
-      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && cd ../backend && EGG_TEST_MODE=true EGG_DB_PATH="${TEST_DB_PATH}" uvicorn main:app --host 0.0.0.0 --port ${TEST_BACKEND_PORT}`,
+      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && cd .. && PYTHONPATH=.. EGG_TEST_MODE=true EGG_DB_PATH="${TEST_DB_PATH}" python -m hypercorn eggw.main:app --bind 0.0.0.0:${TEST_BACKEND_PORT}`,
       url: `http://localhost:${TEST_BACKEND_PORT}/health`,
       reuseExistingServer: false, // Always start fresh for tests
       timeout: 30000,

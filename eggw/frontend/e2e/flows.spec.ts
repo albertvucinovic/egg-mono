@@ -45,6 +45,44 @@ async function sendMessage(page: Page, content: string) {
   await input.press('Enter');
 }
 
+const TEST_API_BASE = 'http://localhost:8099';
+
+const mockApiHeaders = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
+  'access-control-allow-headers': 'content-type',
+};
+
+function mockGeneratedImageMessage(threadId: string, prompt: string) {
+  const artifactPart = {
+    type: 'artifact',
+    artifact_id: 'abc12345',
+    owner_thread_id: threadId,
+    presentation: 'image',
+    mime_type: 'image/png',
+    filename: 'generated-egg.png',
+    size_bytes: 1234,
+    sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    provenance: {
+      kind: 'openai_image_generation',
+      provider: 'mock-provider',
+      model_key: 'Mock Image Backend',
+    },
+    options: {},
+  };
+  const textPart = {
+    type: 'text',
+    text: `Generated 1 image artifact via Mock Image Backend (mock-image-model).\nPrompt: ${prompt}`,
+  };
+
+  return {
+    id: 'img-message-1',
+    role: 'assistant',
+    content: [textPart, artifactPart],
+    content_text: `${textPart.text}\n[Provider artifact: image generated-egg.png image/png 1.21 KB sha256:01234567 artifact_id:abc12345]`,
+  };
+}
+
 test.describe('Basic Operations', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
@@ -117,6 +155,160 @@ test.describe('Thread Operations', () => {
     await expect(page.locator('[data-testid="staged-attachments"]')).not.toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=Attachment')).toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=note.txt')).toBeVisible({ timeout: 5000 });
+  });
+
+});
+
+test.describe('Image Generation UI', () => {
+  test('can generate an image from the composer with mocked backend', async ({ page }) => {
+    const threadId = 'image-thread-1';
+    const prompt = 'A tiny egg robot painting pixels';
+    const generatedMessage = mockGeneratedImageMessage(threadId, prompt);
+    const messagesRequests: string[] = [];
+    const messagesRequestsAfterGeneration: string[] = [];
+    let imageGenerationRequest: Record<string, unknown> | undefined;
+    let imageGenerated = false;
+
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: '',
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/messages`, async (route, request) => {
+      messagesRequests.push(request.method());
+      if (imageGenerated) messagesRequestsAfterGeneration.push(request.method());
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: imageGenerated ? [generatedMessage] : [],
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/image-generation`, async (route, request) => {
+      if (request.method() === 'OPTIONS') {
+        await route.fulfill({ status: 204, headers: mockApiHeaders });
+        return;
+      }
+      imageGenerationRequest = request.postDataJSON() as Record<string, unknown>;
+      imageGenerated = true;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          message_id: generatedMessage.id,
+          prompt,
+          model_key: 'Mock Image Backend',
+          provider_name: 'mock-provider',
+          model_name: 'mock-image-model',
+          metadata: [
+            {
+              artifact_id: 'abc12345',
+              owner_thread_id: threadId,
+              filename: 'generated-egg.png',
+              mime_type: 'image/png',
+              presentation: 'image',
+              size_bytes: 1234,
+              sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            },
+          ],
+          content_parts: generatedMessage.content,
+          content_text: generatedMessage.content_text,
+          response_metadata: { id: 'mock-response' },
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          input_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0,
+          cached_tokens: 0,
+          context_tokens: 0,
+          full_thread_tokens: 0,
+          total_tokens: 0,
+          cost_usd: 0,
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { enabled: false, effective: false, available: false, user_control_enabled: true },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { state: 'waiting_user', active_get_user_wait: false },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: false } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { id: threadId, name: 'Image UI Test', has_children: false },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/roots`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: [{ id: threadId, name: 'Image UI Test', has_children: false }],
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/models`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: [{ id: threadId, name: 'Image UI Test', has_children: false }],
+      });
+    });
+
+    await page.goto('/image-thread-1');
+    await page.getByTitle('Show sidebar').click();
+    await expect(page.locator('text=System Log')).toBeVisible({ timeout: 5000 });
+
+    await page.getByTestId('image-generation-toggle').click();
+    await expect(page.getByTestId('image-generation-form')).toBeVisible({ timeout: 5000 });
+
+    await page.getByTestId('image-generation-prompt').fill(prompt);
+    await page.getByTestId('image-generation-model').fill('Mock Image Backend');
+    await page.getByTestId('image-generation-count').selectOption('2');
+    await page.getByTestId('image-generation-size').fill('1024x1024');
+    await page.getByTestId('image-generation-submit').click();
+
+    await expect.poll(() => imageGenerationRequest).toEqual({
+      prompt,
+      model: 'Mock Image Backend',
+      n: 2,
+      size: '1024x1024',
+    });
+    await expect.poll(() => messagesRequests.length).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => messagesRequestsAfterGeneration.length).toBeGreaterThanOrEqual(1);
+    await expect(page.locator('text=Generated 1 artifact; appended result to transcript')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Provider artifact')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=generated-egg.png')).toBeVisible({ timeout: 5000 });
   });
 });
 
