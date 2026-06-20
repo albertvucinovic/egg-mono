@@ -62,6 +62,20 @@ def _image_part(saved, *, owner_thread_id: str, presentation="image", mime_type=
     }
 
 
+def _file_part(saved, *, owner_thread_id: str, presentation="file", mime_type="text/plain", filename="notes.txt"):
+    return {
+        "type": "attachment",
+        "input_id": saved.input_id,
+        "owner_thread_id": owner_thread_id,
+        "presentation": presentation,
+        "mime_type": mime_type,
+        "filename": filename,
+        "size_bytes": saved.metadata["size_bytes"],
+        "sha256": saved.metadata["sha256"],
+        "options": {},
+    }
+
+
 def _content(saved, thread_id):
     return [
         {"type": "text", "text": "look"},
@@ -121,6 +135,206 @@ def test_openai_responses_image_attachment_lowers_to_input_image_data_url(tmp_pa
         "image_url": "data:image/png;base64," + base64.b64encode(b"png-bytes").decode("ascii"),
         "detail": "low",
     }
+
+
+def test_openai_responses_document_attachment_lowers_to_input_file_data_url(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    data = b"%PDF-1.7\nbody"
+    saved = save_input_bytes(tmp_path, tid, data, filename="guide.pdf", mime_type="application/pdf", presentation="document")
+    model_config = {
+        "input_modalities": ["text", "document"],
+        "attachment_capabilities": {"documents": {"mime_types": ["application/pdf"]}},
+    }
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "u1",
+                "role": "user",
+                "content": [{"type": "text", "text": "read"}, _file_part(saved, owner_thread_id=tid, presentation="document", mime_type="application/pdf", filename="guide.pdf")],
+            }
+        ],
+        _ctx(tmp_path, db, tid, model_config, "responses"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "input_text", "text": "read"}
+    assert content[1] == {
+        "type": "input_file",
+        "filename": "guide.pdf",
+        "file_data": "data:application/pdf;base64," + base64.b64encode(data).decode("ascii"),
+    }
+
+
+def test_openai_chat_document_attachment_lowers_to_file_data_url(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    data = b"%PDF-1.7\nbody"
+    saved = save_input_bytes(tmp_path, tid, data, filename="guide.pdf", mime_type="application/pdf", presentation="document")
+    model_config = {
+        "input_modalities": ["text", "document"],
+        "attachment_capabilities": {"documents": {"mime_types": ["application/pdf"]}},
+    }
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "u1",
+                "role": "user",
+                "content": [{"type": "text", "text": "read"}, _file_part(saved, owner_thread_id=tid, presentation="document", mime_type="application/pdf", filename="guide.pdf")],
+            }
+        ],
+        _ctx(tmp_path, db, tid, model_config, "chat_completions"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "text", "text": "read"}
+    assert content[1] == {
+        "type": "file",
+        "file": {
+            "filename": "guide.pdf",
+            "file_data": "data:application/pdf;base64," + base64.b64encode(data).decode("ascii"),
+        },
+    }
+
+
+def test_openai_responses_file_attachment_lowers_to_input_file_data_url(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    data = b"a,b\n1,2\n"
+    saved = save_input_bytes(tmp_path, tid, data, filename="data.csv", mime_type="text/csv", presentation="file")
+    model_config = {
+        "input_modalities": ["text", "file"],
+        "attachment_capabilities": {"files": {"mime_types": ["text/csv"]}},
+    }
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "u1",
+                "role": "user",
+                "content": [{"type": "text", "text": "load"}, _file_part(saved, owner_thread_id=tid, presentation="file", mime_type="text/csv", filename="data.csv")],
+            }
+        ],
+        _ctx(tmp_path, db, tid, model_config, "responses"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "input_text", "text": "load"}
+    assert content[1] == {
+        "type": "input_file",
+        "filename": "data.csv",
+        "file_data": "data:text/csv;base64," + base64.b64encode(data).decode("ascii"),
+    }
+
+
+def test_openai_chat_file_attachment_lowers_to_file_data_url(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    data = b"a,b\n1,2\n"
+    saved = save_input_bytes(tmp_path, tid, data, filename="data.csv", mime_type="text/csv", presentation="file")
+    model_config = {
+        "input_modalities": ["text", "file"],
+        "attachment_capabilities": {"files": {"mime_types": ["text/csv"]}},
+    }
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "u1",
+                "role": "user",
+                "content": [{"type": "text", "text": "load"}, _file_part(saved, owner_thread_id=tid, presentation="file", mime_type="text/csv", filename="data.csv")],
+            }
+        ],
+        _ctx(tmp_path, db, tid, model_config, "chat_completions"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "text", "text": "load"}
+    assert content[1] == {
+        "type": "file",
+        "file": {
+            "filename": "data.csv",
+            "file_data": "data:text/csv;base64," + base64.b64encode(data).decode("ascii"),
+        },
+    }
+
+
+def test_current_file_attachment_without_matching_mime_capability_fails_fast(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    saved = save_input_bytes(tmp_path, tid, b"a,b\n", filename="data.csv", mime_type="text/csv", presentation="file")
+    model_config = {
+        "input_modalities": ["text", "file"],
+        "attachment_capabilities": {"files": {"mime_types": ["application/pdf"]}},
+    }
+
+    with pytest.raises(AttachmentLoweringError, match="cannot be sent"):
+        lower_messages_for_provider(
+            [
+                {
+                    "msg_id": "u1",
+                    "role": "user",
+                    "content": [_file_part(saved, owner_thread_id=tid, presentation="file", mime_type="text/csv", filename="data.csv")],
+                }
+            ],
+            _ctx(tmp_path, db, tid, model_config, "chat_completions"),
+            current_msg_id="u1",
+        )
+
+
+def test_current_file_attachment_metadata_mismatch_fails_fast(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    saved = save_input_bytes(tmp_path, tid, b"a,b\n", filename="data.csv", mime_type="text/csv", presentation="file")
+    model_config = {
+        "input_modalities": ["text", "file"],
+        "attachment_capabilities": {"files": {"mime_types": ["application/pdf"]}},
+    }
+
+    with pytest.raises(AttachmentLoweringError, match="metadata mismatch"):
+        lower_messages_for_provider(
+            [
+                {
+                    "msg_id": "u1",
+                    "role": "user",
+                    "content": [_file_part(saved, owner_thread_id=tid, presentation="file", mime_type="application/pdf", filename="data.csv")],
+                }
+            ],
+            _ctx(tmp_path, db, tid, model_config, "chat_completions"),
+            current_msg_id="u1",
+        )
+
+
+def test_historical_file_attachment_metadata_mismatch_becomes_placeholder(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    saved = save_input_bytes(tmp_path, tid, b"a,b\n", filename="data.csv", mime_type="text/csv", presentation="file")
+    model_config = {
+        "input_modalities": ["text", "file"],
+        "attachment_capabilities": {"files": {"mime_types": ["application/pdf"]}},
+    }
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "old",
+                "role": "user",
+                "content": [{"type": "text", "text": "old"}, _file_part(saved, owner_thread_id=tid, presentation="file", mime_type="application/pdf", filename="data.csv")],
+            },
+            {"msg_id": "new", "role": "user", "content": "next"},
+        ],
+        _ctx(tmp_path, db, tid, model_config, "chat_completions"),
+        current_msg_id="new",
+    )
+
+    assert lowered[0]["content"] == "old\n[Attachment: file data.csv application/pdf 4 B sha256:" + saved.metadata["sha256"][:8] + "]"
+    assert lowered[1]["content"] == "next"
 
 
 def test_text_only_content_array_lowers_to_plain_string(tmp_path):
@@ -215,6 +429,30 @@ def test_runner_provider_sanitization_keeps_lowered_image_parts(tmp_path, monkey
     )
 
     messages = [{"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}}]}]
+    sanitized = runner._sanitize_messages_for_api(messages)
+
+    assert sanitized[0]["content"] == messages[0]["content"]
+
+
+def test_runner_provider_sanitization_keeps_lowered_file_parts(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    model_config = {"input_modalities": ["text", "file"], "attachment_capabilities": {"files": True}}
+    runner = _DummyRunner(db, tid, _DummyLLM(model_config))
+    monkeypatch.setattr(
+        "eggthreads.runner.get_thread_tools_config",
+        lambda _db, _thread_id: MagicMock(allow_raw_tool_output=True),
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "read"},
+                {"type": "file", "file": {"filename": "notes.txt", "file_data": "data:text/plain;base64,SGk="}},
+            ],
+        }
+    ]
     sanitized = runner._sanitize_messages_for_api(messages)
 
     assert sanitized[0]["content"] == messages[0]["content"]

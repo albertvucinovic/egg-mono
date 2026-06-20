@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Provider-bound lowering for Egg attachment content parts.
 
-This module is deliberately narrow for Phase 3: image attachments can lower to
-OpenAI Chat Completions or OpenAI Responses only when the selected chat model
-explicitly advertises image support.  Other attachments fail fast for the
-current/new trigger message and become textual placeholders in older history.
+This module is deliberately narrow for Phase 3: attachments lower at the
+provider boundary only when the selected chat model explicitly advertises the
+corresponding presentation/MIME support.  Raw bytes become base64/data URLs
+here, never in stored thread history.
 """
 
 import base64
@@ -31,6 +31,11 @@ class AttachmentLoweringError(ValueError):
     """Raised when current-turn attachments cannot be lowered safely."""
 
 
+_OPENAI_ATTACHMENT_API_TYPES = {"chat_completions", "responses"}
+_OPENAI_FILE_PRESENTATIONS = {"document", "file"}
+_OPENAI_NATIVE_ATTACHMENT_PART_TYPES = {"image_url", "input_image", "file", "input_file"}
+
+
 @dataclass(frozen=True)
 class AttachmentLoweringContext:
     workspace: Path
@@ -47,6 +52,13 @@ def message_has_attachments(message: Mapping[str, Any]) -> bool:
 
 def _is_image_attachment(part: Mapping[str, Any]) -> bool:
     return str(part.get("type") or "") == ATTACHMENT_PART_TYPE and str(part.get("presentation") or "").lower() == "image"
+
+
+def _is_openai_file_attachment(part: Mapping[str, Any]) -> bool:
+    return (
+        str(part.get("type") or "") == ATTACHMENT_PART_TYPE
+        and str(part.get("presentation") or "").strip().lower() in _OPENAI_FILE_PRESENTATIONS
+    )
 
 
 def _data_url(part: Mapping[str, Any], data: bytes) -> str:
@@ -107,6 +119,17 @@ def _can_lower_image(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) ->
     )
 
 
+def _can_lower_openai_file(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> bool:
+    presentation = str(part.get("presentation") or "").strip().lower()
+    if presentation not in _OPENAI_FILE_PRESENTATIONS:
+        return False
+    return supports_attachment_presentation(
+        ctx.model_config,
+        presentation,
+        mime_type=str(part.get("mime_type") or ""),
+    )
+
+
 def _placeholder(part: Mapping[str, Any]) -> str:
     try:
         return format_attachment_placeholder(part, validate=False)
@@ -138,6 +161,22 @@ def _lower_image_part(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -
     return out
 
 
+def _attachment_filename(part: Mapping[str, Any]) -> str:
+    filename = str(part.get("filename") or "").strip()
+    if filename:
+        return filename
+    input_id = str(part.get("input_id") or "").strip()
+    return input_id or "attachment"
+
+
+def _lower_openai_file_part(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> Dict[str, Any]:
+    data_url = _data_url(part, _resolve_attachment_bytes(ctx, part))
+    filename = _attachment_filename(part)
+    if ctx.provider_api_type == "responses":
+        return {"type": "input_file", "filename": filename, "file_data": data_url}
+    return {"type": "file", "file": {"filename": filename, "file_data": data_url}}
+
+
 def _lower_content_array(
     ctx: AttachmentLoweringContext,
     content: list[dict[str, Any]],
@@ -159,7 +198,7 @@ def _lower_content_array(
                 raise AttachmentLoweringError(f"Unsupported content part type: {part_type}")
             lowered.append({"type": "text", "text": content_to_plain_text([part])})
             continue
-        if _is_image_attachment(part) and ctx.provider_api_type in {"chat_completions", "responses"} and _can_lower_image(ctx, part):
+        if _is_image_attachment(part) and ctx.provider_api_type in _OPENAI_ATTACHMENT_API_TYPES and _can_lower_image(ctx, part):
             try:
                 lowered.append(_lower_image_part(ctx, part))
             except Exception as e:
@@ -169,17 +208,26 @@ def _lower_content_array(
                     raise AttachmentLoweringError(_unsupported_message(part, ctx, str(e))) from e
                 lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": _placeholder(part)}, ctx.provider_api_type))
             continue
-        # TODO(Phase 3+): add Anthropic-native image lowering and document/file
-        # provider upload/lowering.  This slice intentionally supports only
-        # OpenAI Chat/Responses image data URLs.
-        reason = "unsupported attachment type or missing image capability"
+        if _is_openai_file_attachment(part) and ctx.provider_api_type in _OPENAI_ATTACHMENT_API_TYPES and _can_lower_openai_file(ctx, part):
+            try:
+                lowered.append(_lower_openai_file_part(ctx, part))
+            except Exception as e:
+                if current_message:
+                    if isinstance(e, AttachmentLoweringError):
+                        raise
+                    raise AttachmentLoweringError(_unsupported_message(part, ctx, str(e))) from e
+                lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": _placeholder(part)}, ctx.provider_api_type))
+            continue
+        # TODO(Phase 3+): add Anthropic-native image/document/file lowering
+        # when an Anthropic adapter path exists.
+        reason = "unsupported attachment type or missing attachment capability"
         if current_message:
             raise AttachmentLoweringError(_unsupported_message(part, ctx, reason))
         lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": _placeholder(part)}, ctx.provider_api_type))
 
     if (
         not current_message
-        and not any(isinstance(item, dict) and item.get("type") in {"image_url", "input_image"} for item in lowered)
+        and not any(isinstance(item, dict) and item.get("type") in _OPENAI_NATIVE_ATTACHMENT_PART_TYPES for item in lowered)
     ):
         return "\n".join(str(item.get("text") or "") for item in lowered)
     return lowered

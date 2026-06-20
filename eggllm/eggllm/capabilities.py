@@ -224,6 +224,8 @@ def supports_attachment_presentation(
     presentation_token = _clean_token(presentation)
     if not presentation_token:
         return False
+    if mime_type and not _mime_matches_presentation(mime_type, presentation_token):
+        return False
     caps = attachment_capabilities(model_config)
     entry = _capability_entry(caps, presentation_token)
     top_level_mimes = [

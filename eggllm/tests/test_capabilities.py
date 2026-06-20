@@ -60,6 +60,28 @@ def test_flat_supported_mime_types_enable_matching_attachment_presentations():
     assert supports_attachment_presentation(cfg, "document", mime_type="application/pdf") is True
 
 
+def test_attachment_capability_rejects_mime_outside_presentation():
+    cfg = {
+        "model_name": "gpt-docs",
+        "input_modalities": ["text", "document"],
+        "attachment_capabilities": {"documents": True},
+    }
+
+    assert supports_attachment_presentation(cfg, "document", mime_type="application/pdf") is True
+    assert supports_attachment_presentation(cfg, "document", mime_type="image/png") is False
+
+
+def test_explicit_file_capability_is_mime_scoped_when_configured():
+    cfg = {
+        "model_name": "gpt-files",
+        "input_modalities": ["text", "file"],
+        "attachment_capabilities": {"files": {"mime_types": ["text/csv"]}},
+    }
+
+    assert supports_attachment_presentation(cfg, "file", mime_type="text/csv") is True
+    assert supports_attachment_presentation(cfg, "file", mime_type="application/pdf") is False
+
+
 def test_non_chat_default_is_not_selected_for_conversation(tmp_path, monkeypatch):
     monkeypatch.delenv("EG_CHILD_MODEL", raising=False)
     monkeypatch.delenv("DEFAULT_MODEL", raising=False)
