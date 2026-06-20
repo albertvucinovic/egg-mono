@@ -27,7 +27,6 @@ from eggthreads.api import append_continue_recovery_notice
 from ..models import CommandResponse
 from .. import core
 from ..core import (
-    MODELS_PATH,
     get_thread_root_id,
     ensure_scheduler_for,
 )
@@ -36,7 +35,8 @@ from ..system_prompt import append_root_system_prompt
 
 async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
     """Handle /spawnChildThread command."""
-    models_path = str(MODELS_PATH)
+    models_path = str(core.MODELS_PATH)
+    all_models_path = str(core.ALL_MODELS_PATH)
 
     # Get parent's model
     parent_model = current_thread_model(core.db, thread_id)
@@ -47,6 +47,7 @@ async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
         parent_id=thread_id,
         initial_model_key=parent_model,
         models_path=models_path,
+        all_models_path=all_models_path,
     )
 
     # If context provided, add it as a user message
@@ -63,7 +64,8 @@ async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
 
 async def cmd_new_thread(name: str) -> CommandResponse:
     """Handle /newThread command."""
-    models_path = str(MODELS_PATH)
+    models_path = str(core.MODELS_PATH)
+    all_models_path = str(core.ALL_MODELS_PATH)
     chat_keys = core.chat_model_keys(core.models_config, core.llm_client)
     model_key = core.default_model_key or (chat_keys[0] if chat_keys else None)
 
@@ -72,6 +74,7 @@ async def cmd_new_thread(name: str) -> CommandResponse:
         name=name if name else None,
         initial_model_key=model_key,
         models_path=models_path,
+        all_models_path=all_models_path,
     )
     append_root_system_prompt(core.db, thread_id)
 
@@ -169,20 +172,6 @@ async def cmd_list_threads() -> CommandResponse:
     # Find roots (threads with no parent)
     roots = [t.thread_id for t in all_threads if t.thread_id not in parent_map]
 
-    # Fetch all model settings in one query
-    model_map: Dict[str, str] = {}  # thread_id -> model_key
-    try:
-        cur = core.db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
-        for row in cur.fetchall():
-            model_map[row[0]] = row[1]
-    except Exception:
-        pass
-
-    # For threads without explicit model, use initial_model_key
-    for t in all_threads:
-        if t.thread_id not in model_map and t.initial_model_key:
-            model_map[t.thread_id] = t.initial_model_key
-
     # Pre-compute real-time status for all threads in one batch (efficient)
     all_tids = [t.thread_id for t in all_threads]
     status_map = get_thread_statuses_bulk(core.db, all_tids)
@@ -200,7 +189,7 @@ async def cmd_list_threads() -> CommandResponse:
         # Build thread line
         prefix = "  " * indent + ("├─ " if indent > 0 else "")
         name_part = f" ({t.name})" if t.name else ""
-        model = model_map.get(tid, "")
+        model = current_thread_model(core.db, tid) or ""
         model_part = f" [{model}]" if model else ""
         # Use real-time status instead of stale database status
         state = status_map.get(tid, "idle")
@@ -428,7 +417,8 @@ async def cmd_spawn_auto_approved(thread_id: str, context: str) -> CommandRespon
     """Handle /spawnAutoApprovedChildThread command."""
     from eggthreads import approve_tool_calls_for_thread
 
-    models_path = str(MODELS_PATH)
+    models_path = str(core.MODELS_PATH)
+    all_models_path = str(core.ALL_MODELS_PATH)
 
     # Get parent's model
     parent_model = current_thread_model(core.db, thread_id)
@@ -439,6 +429,7 @@ async def cmd_spawn_auto_approved(thread_id: str, context: str) -> CommandRespon
         parent_id=thread_id,
         initial_model_key=parent_model,
         models_path=models_path,
+        all_models_path=all_models_path,
     )
 
     # Enable auto-approval for the child

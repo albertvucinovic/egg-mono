@@ -10,7 +10,6 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from eggconfig import get_models_path
 from eggthreads import ThreadsDB
 
 # Mock LLM for testing
@@ -19,7 +18,7 @@ from .mock_llm import is_test_mode, get_llm_client
 # Import core state management
 from . import core
 from .core import state as core_state
-from .core import load_models_config, MODELS_PATH
+from .core import load_models_config
 
 
 @asynccontextmanager
@@ -28,9 +27,12 @@ async def lifespan(app: FastAPI):
     # Change to the caller's working directory if specified
     # This ensures sandbox configs, models.json, etc. are found correctly
     egg_cwd = os.environ.get("EGG_CWD")
+    resolved_egg_cwd = Path(egg_cwd).expanduser().resolve() if egg_cwd else None
     if egg_cwd:
-        os.chdir(egg_cwd)
-        print(f"Working directory: {egg_cwd}")
+        os.chdir(resolved_egg_cwd)
+        print(f"Working directory: {resolved_egg_cwd}")
+
+    core_state.configure_model_paths(resolved_egg_cwd)
 
     # Initialize database - use EGG_DB_PATH if specified, else default
     db_path = os.environ.get("EGG_DB_PATH")
@@ -45,14 +47,15 @@ async def lifespan(app: FastAPI):
     # Load models
     core_state.models_config, core_state.default_model_key = load_models_config()
 
-    # Initialize LLM client
-    # Look for models.json in CWD first, then fall back to eggconfig default
-    cwd_models = Path.cwd() / "models.json"
-    models_path = cwd_models if cwd_models.exists() else get_models_path()
+    # Initialize LLM client using the same resolved model paths as the routes,
+    # scheduler, and commands.
+    models_path = core_state.MODELS_PATH
+    all_models_path = core_state.ALL_MODELS_PATH
     try:
         from eggllm import LLMClient
-        core_state.llm_client = LLMClient(models_path=models_path)
+        core_state.llm_client = LLMClient(models_path=models_path, all_models_path=all_models_path)
         print(f"Models config: {models_path}")
+        print(f"All-models catalog: {all_models_path}")
     except Exception as e:
         print(f"Warning: Could not initialize LLM client: {e}")
         core_state.llm_client = None

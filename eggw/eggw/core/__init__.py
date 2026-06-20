@@ -1,11 +1,11 @@
 """Core modules for eggw backend."""
 from . import state
 from .state import (
-    MODELS_PATH,
-    ALL_MODELS_PATH,
     DB_PATH,
+    configure_model_paths,
     init_db,
     get_db,
+    resolve_model_paths,
 )
 from .config import (
     chat_model_keys,
@@ -24,7 +24,15 @@ from .scheduler import (
 
 # Dynamic attribute access for mutable state variables
 # This ensures core.db always returns the current value from state.db
-_DYNAMIC_ATTRS = {'db', 'llm_client', 'models_config', 'default_model_key', 'active_schedulers'}
+_DYNAMIC_ATTRS = {
+    'db',
+    'llm_client',
+    'models_config',
+    'default_model_key',
+    'active_schedulers',
+    'MODELS_PATH',
+    'ALL_MODELS_PATH',
+}
 
 
 def __getattr__(name):
@@ -42,6 +50,8 @@ __all__ = [
     "MODELS_PATH",
     "ALL_MODELS_PATH",
     "DB_PATH",
+    "configure_model_paths",
+    "resolve_model_paths",
     "init_db",
     "get_db",
     # Config

@@ -49,23 +49,13 @@ async def get_threads():
     except Exception:
         pass
 
-    # Bulk fetch model settings
-    model_map: Dict[str, str] = {}
-    try:
-        cur = core.db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
-        for row in cur.fetchall():
-            model_map[row[0]] = row[1]
-    except Exception:
-        pass
-
     threads = []
     for t in all_threads:
-        model = model_map.get(t.thread_id) or t.initial_model_key
         threads.append(ThreadInfo(
             id=t.thread_id,
             name=t.name,
             parent_id=parent_map.get(t.thread_id),
-            model_key=model,
+            model_key=current_thread_model(core.db, t.thread_id),
             has_children=t.thread_id in children_set,
         ))
     return threads
@@ -92,26 +82,16 @@ async def get_root_threads():
     except Exception:
         pass
 
-    # Bulk fetch model settings
-    model_map: Dict[str, str] = {}
-    try:
-        cur = core.db.conn.execute("SELECT thread_id, value FROM thread_config WHERE key = 'model_key'")
-        for row in cur.fetchall():
-            model_map[row[0]] = row[1]
-    except Exception:
-        pass
-
     threads = []
     for t in all_threads:
         # Skip if thread has a parent (not a root)
         if t.thread_id in parent_set:
             continue
-        model = model_map.get(t.thread_id) or t.initial_model_key
         threads.append(ThreadInfo(
             id=t.thread_id,
             name=t.name,
             parent_id=None,
-            model_key=model,
+            model_key=current_thread_model(core.db, t.thread_id),
             has_children=t.thread_id in children_set,
         ))
     return threads
@@ -149,6 +129,7 @@ async def create_thread(request: CreateThreadRequest):
         raise HTTPException(status_code=400, detail="Model is not usable for normal chat")
 
     models_path = str(core.MODELS_PATH)
+    all_models_path = str(core.ALL_MODELS_PATH)
 
     if request.parent_id:
         # Create child thread
@@ -158,6 +139,7 @@ async def create_thread(request: CreateThreadRequest):
             name=request.name,
             initial_model_key=model_key,
             models_path=models_path,
+            all_models_path=all_models_path,
         )
     else:
         # Create root thread
@@ -166,6 +148,7 @@ async def create_thread(request: CreateThreadRequest):
             name=request.name,
             initial_model_key=model_key,
             models_path=models_path,
+            all_models_path=all_models_path,
         )
         append_root_system_prompt(core.db, thread_id)
 

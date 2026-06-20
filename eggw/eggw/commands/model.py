@@ -6,7 +6,6 @@ from eggthreads import current_thread_model, set_thread_model
 
 from ..models import CommandResponse
 from .. import core
-from ..core import ALL_MODELS_PATH, MODELS_PATH
 
 
 async def cmd_model(thread_id: str, model_name: str) -> CommandResponse:
@@ -38,7 +37,13 @@ async def cmd_model(thread_id: str, model_name: str) -> CommandResponse:
                 success=False,
                 message=f"Unknown model: {model_name}",
             )
-    set_thread_model(core.db, thread_id, model_name)
+    set_thread_model(
+        core.db,
+        thread_id,
+        model_name,
+        models_path=str(core.MODELS_PATH),
+        all_models_path=str(core.ALL_MODELS_PATH),
+    )
     return CommandResponse(
         success=True,
         message=f"Model changed to: {model_name}",
@@ -55,14 +60,14 @@ async def cmd_update_all_models(provider: str) -> CommandResponse:
         else:
             from eggllm import LLMClient
 
-            llm = LLMClient(models_path=MODELS_PATH, all_models_path=ALL_MODELS_PATH)
+            llm = LLMClient(models_path=core.MODELS_PATH, all_models_path=core.ALL_MODELS_PATH)
 
         if not provider:
             return CommandResponse(
                 success=True,
                 message=format_update_all_models_text(
                     llm.registry.providers_config,
-                    all_models_path=ALL_MODELS_PATH,
+                    all_models_path=core.ALL_MODELS_PATH,
                 ),
             )
 
@@ -77,7 +82,7 @@ async def cmd_update_all_models(provider: str) -> CommandResponse:
                 llm.registry.providers_config,
                 provider=provider,
                 result=result if isinstance(result, str) else str(result),
-                all_models_path=ALL_MODELS_PATH,
+                all_models_path=core.ALL_MODELS_PATH,
             ),
             data={"provider": provider} if ok else None,
         )

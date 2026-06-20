@@ -157,6 +157,9 @@ export default function ThreadPage() {
 
   const contextHeaderText = formatTokenCount(tokenStats?.context_tokens ?? null);
   const costHeaderText = tokenStats ? `$${(tokenStats.cost_usd || 0).toFixed(4)} cost` : null;
+  const currentModelKey = threadSettings?.model_key ?? currentThreadData?.model_key ?? "";
+  const modelOptions = modelsData?.models || [];
+  const hasCurrentModelOption = !!currentModelKey && modelOptions.some((m: { key: string }) => m.key === currentModelKey);
 
   // Connect to SSE for real-time streaming
   useSSE(threadId);
@@ -424,7 +427,7 @@ export default function ThreadPage() {
             <div className="flex items-center gap-1.5">
               <span style={{ color: "var(--muted)" }}>Model:</span>
               <select
-                value={threadSettings?.model_key || ""}
+                value={currentModelKey}
                 onChange={(e) => {
                   if (threadId && e.target.value) {
                     modelMutation.mutate({ threadId: threadId, modelKey: e.target.value });
@@ -434,7 +437,17 @@ export default function ThreadPage() {
                 className="border rounded px-1.5 py-0.5 text-xs disabled:opacity-50"
                 style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               >
-                {modelsData.models.map((m: { key: string }) => (
+                {!currentModelKey && (
+                  <option value="" disabled>
+                    Loading model...
+                  </option>
+                )}
+                {currentModelKey && !hasCurrentModelOption && (
+                  <option value={currentModelKey}>
+                    {currentModelKey}
+                  </option>
+                )}
+                {modelOptions.map((m: { key: string }) => (
                   <option key={m.key} value={m.key}>
                     {m.key}
                   </option>

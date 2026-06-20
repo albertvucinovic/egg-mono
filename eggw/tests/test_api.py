@@ -107,6 +107,32 @@ class TestThreadOperations:
         assert len(data["id"]) > 0
         return data["id"]
 
+    def test_thread_lists_use_latest_model_switch(self, client):
+        """Thread list APIs should report the event-log model source of truth."""
+        from eggthreads import set_thread_model
+
+        response = client.post("/api/threads", json={"name": "Model Switch List Test"})
+        assert response.status_code == 200
+        thread_id = response.json()["id"]
+
+        set_thread_model(
+            core_state.db,
+            thread_id,
+            "Switched Model",
+            concrete_model_info={},
+            reason="test",
+        )
+
+        response = client.get("/api/threads")
+        assert response.status_code == 200
+        thread = next(t for t in response.json() if t["id"] == thread_id)
+        assert thread["model_key"] == "Switched Model"
+
+        response = client.get("/api/threads/roots")
+        assert response.status_code == 200
+        thread = next(t for t in response.json() if t["id"] == thread_id)
+        assert thread["model_key"] == "Switched Model"
+
     def test_api_created_root_thread_has_one_system_prompt(self, client, monkeypatch):
         """EggW API-created root threads include the loaded system prompt once."""
         monkeypatch.setattr("eggw.system_prompt.load_system_prompt", lambda: "EGGW TEST SYSTEM PROMPT")

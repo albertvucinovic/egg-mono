@@ -8,10 +8,6 @@ from typing import Optional
 from eggthreads import SubtreeScheduler, get_parent
 
 from . import state
-from .state import (
-    MODELS_PATH,
-    ALL_MODELS_PATH,
-)
 
 # Import mock LLM utilities
 from ..mock_llm import is_test_mode, get_llm_client
@@ -43,15 +39,15 @@ def start_scheduler(root_tid: str) -> None:
     # Use mock LLM in test mode
     llm = None
     if is_test_mode():
-        llm = get_llm_client(str(MODELS_PATH), str(ALL_MODELS_PATH))
+        llm = get_llm_client(str(state.MODELS_PATH), str(state.ALL_MODELS_PATH))
         print(f"Using MockLLMClient for scheduler (test mode)")
 
     sched = SubtreeScheduler(
         state.db,
         root_thread_id=root_tid,
         llm=llm,  # Pass mock LLM if in test mode, None otherwise (scheduler creates its own)
-        models_path=str(MODELS_PATH),
-        all_models_path=str(ALL_MODELS_PATH),
+        models_path=str(state.MODELS_PATH),
+        all_models_path=str(state.ALL_MODELS_PATH),
     )
     task = asyncio.create_task(sched.run_forever(poll_sec=poll_sec))
     state.active_schedulers[root_tid] = {"scheduler": sched, "task": task}

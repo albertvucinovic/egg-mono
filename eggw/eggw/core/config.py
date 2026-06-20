@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from .state import MODELS_PATH
+from . import state
 
 
 def load_models_config() -> Tuple[Dict[str, Any], Optional[str]]:
@@ -14,19 +14,20 @@ def load_models_config() -> Tuple[Dict[str, Any], Optional[str]]:
     from eggllm.catalog import AllModelsCatalog
     from eggllm.registry import ModelRegistry
 
-    if not MODELS_PATH.exists():
+    models_path = state.MODELS_PATH
+    if not models_path.exists():
         return {}, None
 
-    models_config, providers_config = eggllm_load_models(MODELS_PATH)
+    models_config, providers_config = eggllm_load_models(models_path)
 
     # Get default_model from the raw JSON
     default_model = None
     try:
-        registry = ModelRegistry(models_config, providers_config, AllModelsCatalog(None))
+        registry = ModelRegistry(models_config, providers_config, AllModelsCatalog(state.ALL_MODELS_PATH))
         default_model = registry.default_chat_model_key()
     except Exception:
         try:
-            with open(MODELS_PATH) as f:
+            with open(models_path) as f:
                 raw_config = json.load(f)
                 default_model = raw_config.get("default_model")
         except Exception:

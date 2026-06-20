@@ -38,5 +38,11 @@ async def set_model(thread_id: str, request: SetModelRequest):
     if not core.is_chat_model_key(request.model_key, core.models_config.get(request.model_key) or {}, core.llm_client):
         raise HTTPException(status_code=400, detail="Model is not usable for normal chat")
 
-    set_thread_model(core.db, thread_id, request.model_key)
+    set_thread_model(
+        core.db,
+        thread_id,
+        request.model_key,
+        models_path=str(core.MODELS_PATH),
+        all_models_path=str(core.ALL_MODELS_PATH),
+    )
     return {"status": "ok", "model_key": request.model_key}
