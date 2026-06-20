@@ -120,6 +120,18 @@ export async function uploadAttachment(threadId: string, file: File): Promise<At
   return res.json();
 }
 
+export function providerOutputUrl(
+  threadId: string,
+  artifactId: string,
+  options: { descendantThreadId?: string; download?: boolean } = {},
+): string {
+  const params = new URLSearchParams();
+  if (options.descendantThreadId) params.set("descendant_thread_id", options.descendantThreadId);
+  if (options.download) params.set("download", "true");
+  const query = params.toString();
+  return `${API_BASE}/api/threads/${encodeURIComponent(threadId)}/provider-output/${encodeURIComponent(artifactId)}${query ? `?${query}` : ""}`;
+}
+
 export interface CommandResponse {
   success: boolean;
   message: string;

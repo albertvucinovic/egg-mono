@@ -10,7 +10,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
-import { fetchMessages } from "@/lib/api";
+import { fetchMessages, providerOutputUrl } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
 import {
   artifactFilename,
@@ -226,6 +226,7 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
 }
 
 function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[]; showBorders?: boolean }) {
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
   return (
     <div className="space-y-2">
       {parts.map((part, idx) => {
@@ -260,6 +261,16 @@ function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[];
           );
         }
         if (isArtifactPart(part)) {
+          const canLink = Boolean(currentThreadId && part.artifact_id);
+          const descendantThreadId = canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId
+            ? part.owner_thread_id
+            : undefined;
+          const openUrl = canLink
+            ? providerOutputUrl(currentThreadId!, part.artifact_id, { descendantThreadId })
+            : null;
+          const downloadUrl = canLink
+            ? providerOutputUrl(currentThreadId!, part.artifact_id, { descendantThreadId, download: true })
+            : null;
           return (
             <div
               key={`${part.artifact_id || "artifact"}-${idx}`}
@@ -279,6 +290,16 @@ function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[];
               <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
                 {artifactPlaceholder(part)}
               </div>
+              {openUrl && downloadUrl && (
+                <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                  <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
+                    Open
+                  </a>
+                  <a href={downloadUrl} className="underline" style={{ color: "var(--accent)" }}>
+                    Download
+                  </a>
+                </div>
+              )}
             </div>
           );
         }

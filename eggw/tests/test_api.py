@@ -533,6 +533,110 @@ class TestMessageOperations:
         assert response.status_code == 400
         assert "empty" in response.json()["detail"].lower()
 
+    def test_get_provider_output_returns_bytes_and_headers(self, client, test_db_path):
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Provider Output"})
+        thread_id = create_resp.json()["id"]
+        workspace = Path(test_db_path).parent.parent
+        data = b"\x89PNG\r\n\x1a\nprovider-image"
+        saved = save_provider_output_bytes(
+            workspace,
+            thread_id,
+            data,
+            filename="generated image.png",
+            mime_type="image/png",
+            presentation="image",
+        )
+
+        inline = client.get(f"/api/threads/{thread_id}/provider-output/{saved.artifact_id}")
+        download = client.get(f"/api/threads/{thread_id}/provider-output/{saved.artifact_id}?download=true")
+
+        assert inline.status_code == 200
+        assert inline.content == data
+        assert inline.headers["content-type"].startswith("image/png")
+        assert inline.headers["x-content-type-options"] == "nosniff"
+        assert inline.headers["content-disposition"].startswith("inline;")
+        assert "generated%20image.png" in inline.headers["content-disposition"]
+        assert download.status_code == 200
+        assert download.content == data
+        assert download.headers["content-disposition"].startswith("attachment;")
+
+    def test_get_provider_output_parent_can_read_child_with_explicit_selector(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Provider Output Parent"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        workspace = Path(test_db_path).parent.parent
+        saved = save_provider_output_bytes(workspace, child_id, b"child bytes", filename="child.txt", mime_type="text/plain", presentation="file")
+
+        response = client.get(
+            f"/api/threads/{parent_id}/provider-output/{saved.artifact_id}",
+            params={"descendant_thread_id": child_id},
+        )
+
+        assert response.status_code == 200
+        assert response.content == b"child bytes"
+        assert response.headers["content-type"].startswith("text/plain")
+
+    def test_get_provider_output_parent_without_selector_gets_404(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Provider Output Missing Selector"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        workspace = Path(test_db_path).parent.parent
+        saved = save_provider_output_bytes(workspace, child_id, b"child bytes")
+
+        response = client.get(f"/api/threads/{parent_id}/provider-output/{saved.artifact_id}")
+
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_get_provider_output_denies_child_and_sibling_access(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Provider Output Denied"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        sibling_id = create_child_thread(core_state.db, parent_id, name="sibling")
+        workspace = Path(test_db_path).parent.parent
+        parent_saved = save_provider_output_bytes(workspace, parent_id, b"parent bytes")
+        sibling_saved = save_provider_output_bytes(workspace, sibling_id, b"sibling bytes")
+
+        parent_response = client.get(
+            f"/api/threads/{child_id}/provider-output/{parent_saved.artifact_id}",
+            params={"descendant_thread_id": parent_id},
+        )
+        sibling_response = client.get(
+            f"/api/threads/{child_id}/provider-output/{sibling_saved.artifact_id}",
+            params={"descendant_thread_id": sibling_id},
+        )
+
+        assert parent_response.status_code == 403
+        assert sibling_response.status_code == 403
+
+    def test_get_provider_output_rejects_sha_and_pathlike_ids_without_path_leak(self, client, test_db_path):
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Provider Output Bad IDs"})
+        thread_id = create_resp.json()["id"]
+        workspace = Path(test_db_path).parent.parent
+        saved = save_provider_output_bytes(workspace, thread_id, b"secret bytes")
+
+        sha_response = client.get(f"/api/threads/{thread_id}/provider-output/{saved.metadata['sha256']}")
+        path_response = client.get(f"/api/threads/{thread_id}/provider-output/..%2Fbad1")
+
+        assert sha_response.status_code == 400
+        assert path_response.status_code == 404
+        joined_details = f"{sha_response.json().get('detail')} {path_response.json().get('detail')}"
+        assert str(workspace) not in joined_details
+        assert ".egg" not in joined_details
+
     def test_get_messages_includes_compaction_marker_and_full_history(self, client):
         """Web transcript API returns a divider marker without hiding old messages."""
         from eggthreads import append_message, commit_thread_compaction, create_snapshot

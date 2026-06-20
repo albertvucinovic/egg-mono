@@ -7,8 +7,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import List
+from urllib.parse import quote
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
@@ -22,6 +23,12 @@ from eggthreads import (
 )
 from eggthreads.attachment_staging import safe_display_filename, save_attachment_bytes_for_thread
 from eggthreads.content_parts import content_to_plain_text
+from eggthreads.provider_output_artifacts import (
+    ProviderOutputArtifactAccessError,
+    ProviderOutputArtifactError,
+    ProviderOutputArtifactNotFoundError,
+    resolve_provider_output_bytes,
+)
 
 from ..models import AttachmentUploadResponse, MessageContent, SendMessageRequest
 from .. import core
@@ -43,6 +50,13 @@ def _attachment_workspace() -> Path:
     except Exception:
         pass
     return Path.cwd().resolve()
+
+
+def _content_disposition(disposition: str, filename: str) -> str:
+    safe_name = safe_display_filename(filename, default="artifact")
+    ascii_name = "".join(ch if 0x20 <= ord(ch) < 0x7F and ch not in {'"', '\\'} else "_" for ch in safe_name)
+    ascii_name = ascii_name or "artifact"
+    return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe_name)}"
 
 
 def _cancel_active_get_user_wait(thread_id: str, waiting_note: dict | None) -> bool:
@@ -329,6 +343,51 @@ async def upload_attachment(thread_id: str, file: UploadFile = File(...)):
         metadata=saved.metadata,
         content_part=content_part,
         content_text=content_to_plain_text([content_part], validate=True),
+    )
+
+
+@router.get("/{thread_id}/provider-output/{artifact_id}")
+async def get_provider_output_artifact(
+    thread_id: str,
+    artifact_id: str,
+    descendant_thread_id: str | None = None,
+    download: bool = False,
+):
+    """Return provider-output artifact bytes after thread access checks."""
+    if not core.db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = core.db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    try:
+        metadata, data = resolve_provider_output_bytes(
+            _attachment_workspace(),
+            core.db,
+            thread_id,
+            artifact_id,
+            descendant_thread_id=descendant_thread_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid provider output artifact id") from None
+    except ProviderOutputArtifactAccessError:
+        raise HTTPException(status_code=403, detail="Access denied for provider output artifact") from None
+    except ProviderOutputArtifactNotFoundError:
+        raise HTTPException(status_code=404, detail="Provider output artifact not found") from None
+    except ProviderOutputArtifactError:
+        raise HTTPException(status_code=400, detail="Provider output artifact is invalid") from None
+
+    media_type = str(metadata.get("mime_type") or "application/octet-stream").strip().lower() or "application/octet-stream"
+    filename = str(metadata.get("filename") or metadata.get("artifact_id") or "artifact")
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": _content_disposition(disposition, filename),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
