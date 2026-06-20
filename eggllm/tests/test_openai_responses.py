@@ -919,7 +919,7 @@ class TestOpenAICompatUsageCapture:
             "prompt_tokens": 12,
             "completion_tokens": 3,
             "total_tokens": 15,
-            "prompt_tokens_details": {"cached_tokens": 7},
+            "prompt_tokens_details": {"cached_tokens": 7, "image_tokens": 1200},
             "completion_tokens_details": {"reasoning_tokens": 2},
         }
         chunks = [
@@ -942,6 +942,7 @@ class TestOpenAICompatUsageCapture:
                 "content": "Hi",
                 "api_usage": {
                     "total_input_tokens": 12,
+                    "total_image_input_tokens": 1200,
                     "total_output_tokens": 3,
                     "cached_input_tokens": 7,
                     "total_reasoning_tokens": 2,
@@ -978,7 +979,7 @@ class TestResponsesUsageCapture:
             "input_tokens": 20,
             "output_tokens": 5,
             "total_tokens": 25,
-            "input_tokens_details": {"cached_tokens": 11},
+            "input_tokens_details": {"cached_tokens": 11, "image_tokens": 1200},
             "output_tokens_details": {"reasoning_tokens": 4},
         }
         events = [
@@ -1000,6 +1001,7 @@ class TestResponsesUsageCapture:
                 "content": "Final answer.",
                 "api_usage": {
                     "total_input_tokens": 20,
+                    "total_image_input_tokens": 1200,
                     "total_output_tokens": 5,
                     "cached_input_tokens": 11,
                     "total_reasoning_tokens": 4,

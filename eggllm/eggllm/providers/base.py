@@ -19,6 +19,28 @@ def _nested_usage_int(obj: Dict[str, Any], *path: str) -> Optional[int]:
     return _usage_int(cur)
 
 
+def _image_input_tokens(provider_usage: Dict[str, Any]) -> Optional[int]:
+    """Best-effort extraction of provider-confirmed image input tokens.
+
+    Providers do not expose a universal multimodal usage schema.  OpenAI-like
+    APIs that do break input down tend to put image tokens under
+    ``prompt_tokens_details`` or ``input_tokens_details``; keep the raw
+    provider_usage too so unknown future shapes remain inspectable.
+    """
+
+    for key in ("total_image_input_tokens", "image_input_tokens", "input_image_tokens", "image_tokens"):
+        value = _usage_int(provider_usage.get(key))
+        if value is not None:
+            return value
+
+    for details_key in ("prompt_tokens_details", "input_tokens_details"):
+        for token_key in ("image_tokens", "image_input_tokens", "input_image_tokens"):
+            value = _nested_usage_int(provider_usage, details_key, token_key)
+            if value is not None:
+                return value
+    return None
+
+
 def normalize_provider_usage(provider_usage: Any) -> Dict[str, int]:
     """Normalize known provider usage objects to Egg's token fields."""
     if not isinstance(provider_usage, dict):
@@ -32,6 +54,7 @@ def normalize_provider_usage(provider_usage: Any) -> Dict[str, int]:
 
     if "prompt_tokens" in provider_usage or "completion_tokens" in provider_usage:
         set_field("total_input_tokens", _usage_int(provider_usage.get("prompt_tokens")))
+        set_field("total_image_input_tokens", _image_input_tokens(provider_usage))
         set_field("total_output_tokens", _usage_int(provider_usage.get("completion_tokens")))
         set_field("cached_input_tokens", _nested_usage_int(provider_usage, "prompt_tokens_details", "cached_tokens"))
         set_field("total_reasoning_tokens", _nested_usage_int(provider_usage, "completion_tokens_details", "reasoning_tokens"))
@@ -42,6 +65,7 @@ def normalize_provider_usage(provider_usage: Any) -> Dict[str, int]:
         cache_creation = _usage_int(provider_usage.get("cache_creation_input_tokens")) or 0
         cache_read = _usage_int(provider_usage.get("cache_read_input_tokens")) or 0
         out["total_input_tokens"] = input_tokens + cache_creation + cache_read
+        set_field("total_image_input_tokens", _image_input_tokens(provider_usage))
         out["cached_input_tokens"] = cache_read
         out["cache_creation_input_tokens"] = cache_creation
         set_field("total_output_tokens", _usage_int(provider_usage.get("output_tokens")))
@@ -49,6 +73,7 @@ def normalize_provider_usage(provider_usage: Any) -> Dict[str, int]:
 
     if "input_tokens" in provider_usage or "output_tokens" in provider_usage:
         set_field("total_input_tokens", _usage_int(provider_usage.get("input_tokens")))
+        set_field("total_image_input_tokens", _image_input_tokens(provider_usage))
         set_field("total_output_tokens", _usage_int(provider_usage.get("output_tokens")))
         set_field("cached_input_tokens", _nested_usage_int(provider_usage, "input_tokens_details", "cached_tokens"))
         set_field("total_reasoning_tokens", _nested_usage_int(provider_usage, "output_tokens_details", "reasoning_tokens"))

@@ -495,6 +495,7 @@ def _model_key_from_message(msg: Dict[str, Any]) -> Optional[str]:
 
 _API_USAGE_TOKEN_FIELDS = {
     "total_input_tokens",
+    "total_image_input_tokens",
     "cached_input_tokens",
     "cache_creation_input_tokens",
     "cache_creation_5m_input_tokens",
@@ -745,6 +746,7 @@ def _token_stats_for_messages(
             actual_call_count += 1
             _record_api_confirmed_usage(api_confirmed_usage, actual_usage)
             input_for_call = int(actual_usage.get("total_input_tokens", input_tok))
+            image_input_for_call = int(actual_usage.get("total_image_input_tokens", image_input_tok))
             out_tok = int(actual_usage.get("total_output_tokens", heuristic_out_tok))
             reason_tok = int(actual_usage.get("total_reasoning_tokens", heuristic_reason_tok))
             cached_for_call = int(actual_usage.get("cached_input_tokens", 0))
@@ -756,6 +758,7 @@ def _token_stats_for_messages(
         else:
             estimated_call_count += 1
             input_for_call = int(input_tok)
+            image_input_for_call = int(image_input_tok)
             out_tok = int(heuristic_out_tok)
             reason_tok = int(heuristic_reason_tok)
             creation_for_call = 0
@@ -772,7 +775,7 @@ def _token_stats_for_messages(
                 last_input_tokens_by_model[mk] = int(input_for_call)
 
         total_input_tokens += input_for_call
-        total_image_input_tokens += image_input_tok
+        total_image_input_tokens += image_input_for_call
         total_output_tokens += out_tok
         total_reasoning_tokens += reason_tok
         cached_input_tokens += cached_for_call
@@ -791,7 +794,7 @@ def _token_stats_for_messages(
         else:
             bm["estimated_call_count"] += 1
         bm["total_input_tokens"] += int(input_for_call)
-        bm["total_image_input_tokens"] += int(image_input_tok)
+        bm["total_image_input_tokens"] += int(image_input_for_call)
         bm["cached_input_tokens"] += int(cached_for_call)
         bm["cache_creation_input_tokens"] += int(creation_for_call)
         bm["cache_creation_5m_input_tokens"] += int(creation_5m_for_call)

@@ -149,6 +149,7 @@ def test_snapshot_token_stats_prefers_actual_assistant_api_usage():
                 "model_key": "m",
                 "api_usage": {
                     "total_input_tokens": 1000,
+                    "total_image_input_tokens": 120,
                     "cached_input_tokens": 600,
                     "cache_creation_input_tokens": 40,
                     "total_output_tokens": 50,
@@ -161,6 +162,7 @@ def test_snapshot_token_stats_prefers_actual_assistant_api_usage():
     usage = snapshot_token_stats(snapshot)["api_usage"]
 
     assert usage["total_input_tokens"] == 1000
+    assert usage["total_image_input_tokens"] == 120
     assert usage["cached_input_tokens"] == 600
     assert usage["cache_creation_input_tokens"] == 40
     assert usage["total_output_tokens"] == 50
@@ -170,10 +172,12 @@ def test_snapshot_token_stats_prefers_actual_assistant_api_usage():
     assert usage["estimated_call_count"] == 0
     assert usage["api_confirmed_usage"]["actual_call_count"] == 1
     assert usage["api_confirmed_usage"]["total_input_tokens"] == 1000
+    assert usage["api_confirmed_usage"]["total_image_input_tokens"] == 120
     assert usage["api_confirmed_usage"]["cached_input_tokens"] == 600
     assert usage["api_confirmed_usage"]["cache_creation_input_tokens"] == 40
     assert usage["api_confirmed_usage"]["total_output_tokens"] == 50
     assert usage["api_confirmed_usage"]["field_call_counts"]["total_input_tokens"] == 1
+    assert usage["api_confirmed_usage"]["field_call_counts"]["total_image_input_tokens"] == 1
     assert usage["cached_tokens"] == 1000
     assert usage["last_call_input_tokens"] == 1000
     assert usage["by_model"]["m"]["actual_call_count"] == 1

@@ -424,11 +424,13 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
                 "api_confirmed_usage": {
                     "actual_call_count": 1,
                     "total_input_tokens": 5,
+                    "total_image_input_tokens": 1200,
                     "cached_input_tokens": 1,
                     "cache_creation_input_tokens": 2,
                     "total_output_tokens": 2,
                     "field_call_counts": {
                         "total_input_tokens": 1,
+                        "total_image_input_tokens": 1,
                         "cached_input_tokens": 1,
                         "cache_creation_input_tokens": 1,
                         "total_output_tokens": 1,
@@ -491,6 +493,7 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
     assert "estimated_call_count:  0" in cost_text
     assert "API-confirmed usage:" in cost_text
     assert "input_tokens: 5" in cost_text
+    assert "image_input_tokens: 1200" in cost_text
     assert "cached_input_tokens: 1" in cost_text
     assert "output_tokens: 2" in cost_text
     assert "cache_creation_input_tokens: 2" in cost_text

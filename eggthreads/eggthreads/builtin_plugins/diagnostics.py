@@ -115,6 +115,7 @@ def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
         confirmed = usage.get("api_confirmed_usage") if isinstance(usage.get("api_confirmed_usage"), dict) else {}
         lines.append("  API-confirmed usage:")
         lines.append(_confirmed_token_line(confirmed, "total_input_tokens", "input_tokens"))
+        lines.append(_confirmed_token_line(confirmed, "total_image_input_tokens", "image_input_tokens"))
         lines.append(_confirmed_token_line(confirmed, "cached_input_tokens", "cached_input_tokens"))
         lines.append(_confirmed_token_line(confirmed, "total_output_tokens", "output_tokens"))
         if (confirmed.get("cache_creation_input_tokens") or 0):
