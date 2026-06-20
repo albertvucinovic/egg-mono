@@ -466,11 +466,46 @@ def _response_json(response: Any, *, label: str = "OpenAI Images") -> Mapping[st
     return body
 
 
+def _response_body_preview(response: Any, *, limit: int = 2000) -> str:
+    body = getattr(response, "text", None)
+    if not isinstance(body, str) or not body.strip():
+        content = getattr(response, "content", None)
+        if isinstance(content, (bytes, bytearray, memoryview)):
+            try:
+                body = bytes(content).decode("utf-8", errors="replace")
+            except Exception:
+                body = repr(bytes(content)[:limit])
+    if not isinstance(body, str) or not body.strip():
+        try:
+            parsed = response.json()
+        except Exception:
+            return ""
+        try:
+            import json as _json
+
+            body = _json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            body = repr(parsed)
+    body = " ".join(body.split())
+    if len(body) > limit:
+        body = body[: max(0, limit - 1)].rstrip() + "…"
+    return body
+
+
+def _raise_for_status(response: Any, *, label: str) -> None:
+    try:
+        response.raise_for_status()
+    except Exception as e:
+        body = _response_body_preview(response)
+        suffix = f" Response body: {body}" if body else ""
+        raise ImageGenerationProviderError(f"{label} request failed: {e}.{suffix}") from e
+
+
 def _download_url_image(session: Any, url: str, *, timeout: int) -> tuple[bytes, str | None]:
     if not hasattr(session, "get"):
         raise ImageGenerationProviderError("OpenAI Images URL response requires a session with get().")
     response = session.get(url, timeout=timeout)
-    response.raise_for_status()
+    _raise_for_status(response, label="OpenAI Images URL download")
     data = getattr(response, "content", None)
     if not isinstance(data, (bytes, bytearray, memoryview)):
         raise ImageGenerationProviderError("Downloaded OpenAI Images URL response did not contain bytes.")
@@ -667,6 +702,27 @@ def _parse_openai_responses_image_tool_response(
     return response_metadata, tuple(images)
 
 
+def _is_chatgpt_codex_responses_backend(backend: OpenAIResponsesImageToolBackend) -> bool:
+    auth_type = str(backend.provider_config.get("auth_type") or "api_key").strip().lower()
+    url = str(backend.url or "").strip().lower()
+    provider_name = str(backend.provider_name or "").strip().lower()
+    return "chatgpt.com/backend-api/codex/responses" in url or (
+        provider_name == "openai-pro" and auth_type == "chatgpt_oauth"
+    )
+
+
+def _reject_unsupported_chatgpt_codex_image_backend(backend: OpenAIResponsesImageToolBackend) -> None:
+    if not _is_chatgpt_codex_responses_backend(backend):
+        return
+    raise ImageGenerationConfigError(
+        "The ChatGPT/Codex subscription Responses endpoint does not currently expose "
+        "the provider-native image_generation tool, so it cannot be used as an Egg "
+        "generate_image backend. Use an OpenAI API image backend such as "
+        "'OpenAI Image: gpt-image-1', or configure a non-Codex Responses API provider "
+        "that supports image_generation."
+    )
+
+
 def _select_image_generation_api_type(
     model_key: str | None,
     registry: ModelRegistry,
@@ -733,7 +789,7 @@ def generate_openai_images(
     headers = build_provider_headers(backend.provider_name, backend.provider_config, accept_sse=False)
     sess = session or requests
     response = sess.post(backend.url, headers=headers, json=payload, timeout=timeout)
-    response.raise_for_status()
+    _raise_for_status(response, label="OpenAI Images")
     response_metadata, images = _parse_openai_images_response(
         _response_json(response, label="OpenAI Images"),
         session=sess,
@@ -776,6 +832,7 @@ def generate_openai_responses_image_tool(
 
     registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
     backend = resolve_openai_responses_image_tool_backend(model_key, registry=registry)
+    _reject_unsupported_chatgpt_codex_image_backend(backend)
 
     configured = registry.merge_parameters(backend.model_key)
     configured_tool_options = _filter_openai_responses_image_tool_options(configured, reject_unknown=False)
@@ -801,7 +858,7 @@ def generate_openai_responses_image_tool(
     headers = build_provider_headers(backend.provider_name, backend.provider_config, accept_sse=False)
     sess = session or requests
     response = sess.post(backend.url, headers=headers, json=payload, timeout=timeout)
-    response.raise_for_status()
+    _raise_for_status(response, label="OpenAI Responses image_generation")
     response_metadata, images = _parse_openai_responses_image_tool_response(
         _response_json(response, label="OpenAI Responses image_generation"),
         backend=backend,

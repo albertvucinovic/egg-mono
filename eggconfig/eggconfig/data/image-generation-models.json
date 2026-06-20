@@ -20,30 +20,6 @@
       "provider": "openai",
       "api_type": "openai_images",
       "model_name": "gpt-image-2"
-    },
-    "OpenAI Pro Image: GPT-5.5": {
-      "provider": "openai-pro",
-      "api_type": "openai_responses_image_tool",
-      "model_name": "gpt-5.5",
-      "parameters": {
-        "store": false
-      }
-    },
-    "OpenAI Pro Image: GPT-5.4": {
-      "provider": "openai-pro",
-      "api_type": "openai_responses_image_tool",
-      "model_name": "gpt-5.4",
-      "parameters": {
-        "store": false
-      }
-    },
-    "OpenAI Pro Image: GPT-5.3 Codex": {
-      "provider": "openai-pro",
-      "api_type": "openai_responses_image_tool",
-      "model_name": "gpt-5.3-codex",
-      "parameters": {
-        "store": false
-      }
     }
   }
 }

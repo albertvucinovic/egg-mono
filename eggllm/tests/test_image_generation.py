@@ -34,6 +34,16 @@ class FakeResponse:
         return self._payload
 
 
+class FakeErrorResponse(FakeResponse):
+    def __init__(self, payload=None, *, text: str = "", content: bytes | None = None, headers=None):
+        super().__init__(payload, content=content, headers=headers)
+        self.text = text
+
+    def raise_for_status(self):
+        self.raise_for_status_calls += 1
+        raise RuntimeError("400 Client Error: Bad Request for url")
+
+
 class FakeSession:
     def __init__(self, post_payload, *, get_content: bytes = b"url-image", get_headers=None):
         self.post_payload = post_payload
@@ -540,6 +550,53 @@ def test_openai_responses_image_tool_rejects_multi_image_n_option(tmp_path, monk
             all_models_path=all_models_path,
             options={"n": 2},
             session=FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]},),
+        )
+
+
+def test_openai_responses_image_tool_rejects_packaged_chatgpt_codex_backend_before_http(tmp_path, monkeypatch):
+    models_path, all_models_path = _write_models(
+        tmp_path,
+        _responses_image_tool_models(
+            provider_overrides={
+                "api_base": "https://chatgpt.com/backend-api/codex/responses",
+                "auth_type": "chatgpt_oauth",
+                "api_key_env": "",
+            },
+            model_overrides={"model_name": "gpt-5.5"},
+        ),
+    )
+    session = FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]})
+
+    with pytest.raises(ImageGenerationConfigError, match="ChatGPT/Codex subscription Responses endpoint"):
+        generate_openai_responses_image_tool(
+            "cat",
+            model_key="Responses Image Tool",
+            models_path=models_path,
+            all_models_path=all_models_path,
+            session=session,
+        )
+
+    assert session.posts == []
+
+
+def test_openai_image_generation_http_error_includes_response_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    models_path, all_models_path = _write_models(tmp_path, _image_models())
+
+    class ErrorSession:
+        posts = []
+
+        def post(self, url, *, headers, json, timeout):
+            self.posts.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return FakeErrorResponse(text='{"error":{"message":"bad option"}}')
+
+    with pytest.raises(ImageGenerationProviderError, match="bad option"):
+        generate_openai_images(
+            "bad",
+            model_key="Image Backend",
+            models_path=models_path,
+            all_models_path=all_models_path,
+            session=ErrorSession(),
         )
 
 
