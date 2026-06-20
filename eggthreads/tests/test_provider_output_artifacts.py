@@ -529,7 +529,7 @@ def test_generate_openai_image_artifacts_stores_b64_outputs_as_provider_artifact
     assert second_metadata["provenance"]["output_index"] == 1
 
 
-def test_generate_openai_image_artifacts_preserves_responses_image_tool_refs(tmp_path):
+def test_generate_openai_image_artifacts_preserves_codex_image_refs(tmp_path):
     from eggllm.image_generation import GeneratedImage, ImageGenerationResult
     from eggthreads.image_generation import generate_openai_image_artifacts
 
@@ -538,24 +538,22 @@ def test_generate_openai_image_artifacts_preserves_responses_image_tool_refs(tmp
 
     def fake_generate(*args, **kwargs):
         return ImageGenerationResult(
-            model_key="Responses Image Tool",
+            model_key="Codex Image Backend",
             provider_name="openai-pro",
-            model_name="gpt-5.4",
+            model_name="gpt-image-2",
             prompt="Draw a pro egg",
             request_options={"size": "1024x1024"},
-            response_metadata={"id": "resp_123"},
+            response_metadata={"created": 123456},
             images=(
                 GeneratedImage(
-                    data=b"responses-image",
+                    data=b"codex-image",
                     metadata={
-                        "api_type": "openai_responses_image_tool",
+                        "api_type": "codex_images",
                         "mime_type": "image/png",
                         "filename": "generated-1.png",
                         "output_index": 0,
-                        "source": "image_generation_call",
-                        "image_generation_call_id": "ig_123",
-                        "image_generation_call_status": "completed",
-                        "response_id": "resp_123",
+                        "source": "b64_json",
+                        "response_created": 123456,
                     },
                 ),
             ),
@@ -569,26 +567,23 @@ def test_generate_openai_image_artifacts_preserves_responses_image_tool_refs(tmp
     )
 
     metadata, data = resolve_provider_output_bytes(tmp_path, db, tid, result.artifacts[0].artifact_id)
-    assert data == b"responses-image"
+    assert data == b"codex-image"
     assert metadata["provenance"] == {
-        "kind": "openai_responses_image_generation",
+        "kind": "codex_image_generation",
         "provider": "openai-pro",
-        "model_key": "Responses Image Tool",
-        "model": "gpt-5.4",
+        "model_key": "Codex Image Backend",
+        "model": "gpt-image-2",
         "prompt": "Draw a pro egg",
         "output_index": 0,
-        "response_id": "resp_123",
     }
     assert metadata["provider_refs"] == {
         "openai": {
-            "api_type": "openai_responses_image_tool",
-            "model": "gpt-5.4",
-            "model_key": "Responses Image Tool",
+            "api_type": "codex_images",
+            "model": "gpt-image-2",
+            "model_key": "Codex Image Backend",
             "output_index": 0,
-            "source": "image_generation_call",
-            "response_id": "resp_123",
-            "image_generation_call_id": "ig_123",
-            "image_generation_call_status": "completed",
+            "source": "b64_json",
+            "response_created": 123456,
             "request_options": {"size": "1024x1024"},
         }
     }

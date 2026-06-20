@@ -66,10 +66,10 @@ def test_tool_help_for_generate_image_includes_dynamic_config(tmp_path) -> None:
                         "model_name": "gpt-image-1",
                         "alias": ["gpt-image"],
                     },
-                    "OpenAI Responses Image Tool": {
+                    "OpenAI Pro Image: gpt-image-2": {
                         "provider": "openai",
-                        "api_type": "openai_responses_image_tool",
-                        "model_name": "gpt-4.1-mini",
+                        "api_type": "codex_images",
+                        "model_name": "gpt-image-2",
                     },
                 },
             }
@@ -90,7 +90,9 @@ def test_tool_help_for_generate_image_includes_dynamic_config(tmp_path) -> None:
     assert "`OpenAI Image: gpt-image-1` (default)" in output
     assert "aliases: `gpt-image`" in output
     assert "api_type: `openai_images`" in output
-    assert "`OpenAI Responses Image Tool`" in output
+    assert "`OpenAI Pro Image: gpt-image-2`" in output
+    assert "api_type: `codex_images`" in output
+    assert "endpoint note: posts to `images/generations`" in output
     assert "Recommended call: omit `model`" in output
 
 

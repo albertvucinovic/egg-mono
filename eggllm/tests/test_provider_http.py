@@ -65,6 +65,31 @@ def test_build_provider_headers_for_chatgpt_oauth_provider(monkeypatch, tmp_path
     assert headers["User-Agent"].startswith("eggllm/1.0 (")
 
 
+def test_build_provider_headers_can_omit_responses_beta_for_chatgpt_oauth(monkeypatch):
+    class DummyStore:
+        def is_logged_in(self):
+            return True
+
+        def get_access_token(self):
+            return "access-123"
+
+        def get_account_id(self):
+            return "acct_123"
+
+    monkeypatch.setattr("eggllm.provider_http.TokenStore", DummyStore, raising=False)
+
+    headers = build_provider_headers(
+        "openai-pro",
+        {"auth_type": "chatgpt_oauth"},
+        accept_sse=False,
+        include_responses_beta=False,
+    )
+
+    assert headers["Authorization"] == "Bearer access-123"
+    assert headers["chatgpt-account-id"] == "acct_123"
+    assert "OpenAI-Beta" not in headers
+
+
 def test_build_provider_headers_requires_oauth_login(monkeypatch):
     class DummyStore:
         def is_logged_in(self):

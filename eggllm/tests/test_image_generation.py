@@ -11,9 +11,9 @@ from eggllm.image_generation import (
     ImageGenerationProviderError,
     generate_images,
     generate_openai_images,
-    generate_openai_responses_image_tool,
+    generate_codex_images,
+    resolve_codex_images_backend,
     resolve_openai_images_backend,
-    resolve_openai_responses_image_tool_backend,
 )
 from eggllm.providers.factory import AdapterFactory
 
@@ -134,16 +134,16 @@ def _image_models(provider_overrides=None, model_overrides=None):
     return {"providers": {"openai-images": provider}}
 
 
-def _responses_image_tool_models(provider_overrides=None, model_overrides=None):
+def _codex_images_models(provider_overrides=None, model_overrides=None):
     provider = {
-        "api_base": "https://api.openai.com/v1/responses",
-        "api_key_env": "OPENAI_API_KEY",
-        "api_type": "openai_responses_image_tool",
+        "api_base": "https://chatgpt.com/backend-api/codex/responses",
+        "auth_type": "chatgpt_oauth",
+        "api_type": "codex_images",
         "model_kind": "image_generation",
-        "parameters": {"size": "1024x1024", "store": False},
+        "parameters": {"size": "auto", "quality": "auto", "background": "auto"},
         "models": {
-            "Responses Image Tool": {
-                "model_name": "gpt-4.1",
+            "Codex Image Backend": {
+                "model_name": "gpt-image-2",
                 "task_capabilities": ["image_generation"],
             },
         },
@@ -151,8 +151,8 @@ def _responses_image_tool_models(provider_overrides=None, model_overrides=None):
     if provider_overrides:
         provider.update(provider_overrides)
     if model_overrides:
-        provider["models"]["Responses Image Tool"].update(model_overrides)
-    return {"providers": {"openai-responses-image-tool": provider}}
+        provider["models"]["Codex Image Backend"].update(model_overrides)
+    return {"providers": {"openai-pro": provider}}
 
 
 def _b64(data: bytes) -> str:
@@ -322,13 +322,13 @@ def test_openai_images_discovery_skips_other_image_backend_api_types(tmp_path, m
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     models = {
         "providers": {
-            "responses-image-tool": {
-                "api_base": "https://api.openai.com/v1/responses",
+            "codex-images": {
+                "api_base": "https://chatgpt.com/backend-api/codex/responses",
                 "api_key_env": "OPENAI_API_KEY",
-                "api_type": "openai_responses_image_tool",
+                "api_type": "codex_images",
                 "model_kind": "image_generation",
                 "models": {
-                    "Responses Image Tool": {
+                    "Codex Image Backend": {
                         "model_name": "gpt-4.1",
                         "task_capabilities": ["image_generation"],
                     }
@@ -441,142 +441,128 @@ def test_openai_images_provider_errors_for_invalid_payload(tmp_path, monkeypatch
         )
 
 
-def test_openai_responses_image_tool_request_and_parse_call_result(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())
+def test_codex_images_request_and_parse_call_result(tmp_path, monkeypatch):
+    class DummyStore:
+        def is_logged_in(self):
+            return True
+
+        def get_access_token(self):
+            return "access-123"
+
+        def get_account_id(self):
+            return "acct_123"
+
+    monkeypatch.setattr("eggllm.provider_http.TokenStore", DummyStore, raising=False)
+    models_path, all_models_path = _write_models(tmp_path, _codex_images_models())
     session = FakeSession(
         {
-            "id": "resp_123",
             "created": 123456,
-            "status": "completed",
-            "output": [
-                {
-                    "type": "image_generation_call",
-                    "id": "ig_123",
-                    "status": "completed",
-                    "result": _b64(b"generated-png"),
-                    "revised_prompt": "A refined prompt",
-                }
-            ],
+            "background": "auto",
+            "quality": "high",
+            "size": "1024x1024",
+            "data": [{"b64_json": _b64(b"generated-png"), "revised_prompt": "A refined prompt"}],
             "usage": {"input_tokens": 10, "output_tokens": 2},
         }
     )
 
-    backend = resolve_openai_responses_image_tool_backend(
-        "Responses Image Tool",
+    backend = resolve_codex_images_backend(
+        "Codex Image Backend",
         models_path=models_path,
         all_models_path=all_models_path,
     )
-    result = generate_openai_responses_image_tool(
+    result = generate_codex_images(
         "  Paint an egg in space  ",
-        model_key="Responses Image Tool",
+        model_key="Codex Image Backend",
         models_path=models_path,
         all_models_path=all_models_path,
-        options={"quality": "high", "output_format": "png"},
+        options={"quality": "high", "output_format": "png", "size": "1024x1024"},
         timeout=33,
         session=session,
     )
 
-    assert backend.url == "https://api.openai.com/v1/responses"
+    assert backend.url == "https://chatgpt.com/backend-api/codex/images/generations"
     assert len(session.posts) == 1
     post = session.posts[0]
-    assert post["url"] == "https://api.openai.com/v1/responses"
+    assert post["url"] == "https://chatgpt.com/backend-api/codex/images/generations"
     assert post["timeout"] == 33
-    assert post["headers"] == {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer test-key",
-    }
+    assert post["headers"]["Content-Type"] == "application/json"
+    assert post["headers"]["Authorization"] == "Bearer access-123"
+    assert post["headers"]["chatgpt-account-id"] == "acct_123"
+    assert "OpenAI-Beta" not in post["headers"]
+    assert post["headers"]["originator"] == "egg"
     assert post["json"] == {
-        "model": "gpt-4.1",
-        "instructions": "",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Paint an egg in space"}],
-            }
-        ],
-        "tools": [{"type": "image_generation", "size": "1024x1024", "quality": "high", "output_format": "png"}],
-        "tool_choice": "required",
-        "store": False,
+        "prompt": "Paint an egg in space",
+        "model": "gpt-image-2",
+        "background": "auto",
+        "quality": "high",
+        "size": "1024x1024",
     }
-    assert result.model_key == "Responses Image Tool"
-    assert result.provider_name == "openai-responses-image-tool"
-    assert result.model_name == "gpt-4.1"
+    assert result.model_key == "Codex Image Backend"
+    assert result.provider_name == "openai-pro"
+    assert result.model_name == "gpt-image-2"
     assert result.prompt == "Paint an egg in space"
-    assert result.request_options == {"size": "1024x1024", "quality": "high", "output_format": "png"}
+    assert result.request_options == {"size": "1024x1024", "quality": "high", "background": "auto"}
     assert result.response_metadata == {
-        "api_type": "openai_responses_image_tool",
-        "id": "resp_123",
+        "api_type": "codex_images",
         "created": 123456,
-        "status": "completed",
+        "background": "auto",
+        "quality": "high",
+        "size": "1024x1024",
         "usage": {"input_tokens": 10, "output_tokens": 2},
     }
     assert result.images[0].data == b"generated-png"
-    assert result.images[0].metadata["api_type"] == "openai_responses_image_tool"
-    assert result.images[0].metadata["source"] == "image_generation_call"
-    assert result.images[0].metadata["image_generation_call_id"] == "ig_123"
+    assert result.images[0].metadata["api_type"] == "codex_images"
+    assert result.images[0].metadata["source"] == "b64_json"
     assert result.images[0].metadata["revised_prompt"] == "A refined prompt"
-    assert "result" not in result.images[0].metadata
+    assert "b64_json" not in result.images[0].metadata
 
 
-def test_openai_responses_image_tool_ignores_single_image_n_option(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())
-    session = FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]})
+def test_codex_images_ignores_single_image_n_option(tmp_path, monkeypatch):
+    class DummyStore:
+        def is_logged_in(self):
+            return True
 
-    result = generate_openai_responses_image_tool(
+        def get_access_token(self):
+            return "access-123"
+
+        def get_account_id(self):
+            return None
+
+    monkeypatch.setattr("eggllm.provider_http.TokenStore", DummyStore, raising=False)
+    models_path, all_models_path = _write_models(tmp_path, _codex_images_models())
+    session = FakeSession({"data": [{"b64_json": _b64(b"img")}]})
+
+    result = generate_codex_images(
         "single image",
-        model_key="Responses Image Tool",
+        model_key="Codex Image Backend",
         models_path=models_path,
         all_models_path=all_models_path,
         options={"n": 1, "size": "1024x1024"},
         session=session,
     )
 
-    assert result.request_options == {"size": "1024x1024"}
-    assert session.posts[0]["json"]["tools"] == [{"type": "image_generation", "size": "1024x1024"}]
+    assert result.request_options == {"background": "auto", "quality": "auto", "size": "1024x1024"}
+    assert session.posts[0]["json"] == {
+        "prompt": "single image",
+        "model": "gpt-image-2",
+        "background": "auto",
+        "quality": "auto",
+        "size": "1024x1024",
+    }
 
 
-def test_openai_responses_image_tool_rejects_multi_image_n_option(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())
+def test_codex_images_rejects_multi_image_n_option(tmp_path, monkeypatch):
+    models_path, all_models_path = _write_models(tmp_path, _codex_images_models())
 
     with pytest.raises(ImageGenerationConfigError, match="one image per call"):
-        generate_openai_responses_image_tool(
+        generate_codex_images(
             "two images",
-            model_key="Responses Image Tool",
+            model_key="Codex Image Backend",
             models_path=models_path,
             all_models_path=all_models_path,
             options={"n": 2},
-            session=FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]},),
+            session=FakeSession({"output": [{"type": "b64_json", "result": _b64(b"img")}]},),
         )
-
-
-def test_openai_responses_image_tool_rejects_packaged_chatgpt_codex_backend_before_http(tmp_path, monkeypatch):
-    models_path, all_models_path = _write_models(
-        tmp_path,
-        _responses_image_tool_models(
-            provider_overrides={
-                "api_base": "https://chatgpt.com/backend-api/codex/responses",
-                "auth_type": "chatgpt_oauth",
-                "api_key_env": "",
-            },
-            model_overrides={"model_name": "gpt-5.5"},
-        ),
-    )
-    session = FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]})
-
-    with pytest.raises(ImageGenerationConfigError, match="ChatGPT/Codex subscription Responses endpoint"):
-        generate_openai_responses_image_tool(
-            "cat",
-            model_key="Responses Image Tool",
-            models_path=models_path,
-            all_models_path=all_models_path,
-            session=session,
-        )
-
-    assert session.posts == []
 
 
 def test_openai_image_generation_http_error_includes_response_body(tmp_path, monkeypatch):
@@ -600,10 +586,20 @@ def test_openai_image_generation_http_error_includes_response_body(tmp_path, mon
         )
 
 
-def test_generate_images_dispatches_to_responses_image_tool_backend(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())
-    session = FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]})
+def test_generate_images_dispatches_to_codex_images_backend(tmp_path, monkeypatch):
+    class DummyStore:
+        def is_logged_in(self):
+            return True
+
+        def get_access_token(self):
+            return "access-123"
+
+        def get_account_id(self):
+            return None
+
+    monkeypatch.setattr("eggllm.provider_http.TokenStore", DummyStore, raising=False)
+    models_path, all_models_path = _write_models(tmp_path, _codex_images_models())
+    session = FakeSession({"data": [{"b64_json": _b64(b"img")}]})
 
     result = generate_images(
         "dispatch",
@@ -612,17 +608,22 @@ def test_generate_images_dispatches_to_responses_image_tool_backend(tmp_path, mo
         session=session,
     )
 
-    assert result.model_key == "Responses Image Tool"
-    assert session.posts[0]["url"] == "https://api.openai.com/v1/responses"
-    assert session.posts[0]["json"]["tools"] == [{"type": "image_generation", "size": "1024x1024"}]
-    assert session.posts[0]["json"]["tool_choice"] == "required"
+    assert result.model_key == "Codex Image Backend"
+    assert session.posts[0]["url"] == "https://chatgpt.com/backend-api/codex/images/generations"
+    assert session.posts[0]["json"] == {
+        "prompt": "dispatch",
+        "model": "gpt-image-2",
+        "background": "auto",
+        "quality": "auto",
+        "size": "auto",
+    }
 
 
 def test_generate_images_dispatches_explicit_openai_images_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     models = {
         "providers": {
-            **_responses_image_tool_models()["providers"],
+            **_codex_images_models()["providers"],
             **_image_models()["providers"],
         }
     }
@@ -641,14 +642,24 @@ def test_generate_images_dispatches_explicit_openai_images_backend(tmp_path, mon
     assert session.posts[0]["url"] == "https://api.openai.com/v1/images/generations"
 
 
-def test_openai_responses_image_tool_rejects_bad_payload(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())
+def test_codex_images_rejects_bad_payload(tmp_path, monkeypatch):
+    class DummyStore:
+        def is_logged_in(self):
+            return True
 
-    with pytest.raises(ImageGenerationProviderError, match="did not contain image_generation_call"):
-        generate_openai_responses_image_tool(
+        def get_access_token(self):
+            return "access-123"
+
+        def get_account_id(self):
+            return None
+
+    monkeypatch.setattr("eggllm.provider_http.TokenStore", DummyStore, raising=False)
+    models_path, all_models_path = _write_models(tmp_path, _codex_images_models())
+
+    with pytest.raises(ImageGenerationProviderError, match="did not contain any data items"):
+        generate_codex_images(
             "no image",
-            model_key="Responses Image Tool",
+            model_key="Codex Image Backend",
             models_path=models_path,
             all_models_path=all_models_path,
             session=FakeSession({"output": [{"type": "message", "content": []}]}),

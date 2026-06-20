@@ -139,8 +139,8 @@ def register_image_generation_tools(registry: ToolRegistry) -> None:
                     "type": "integer",
                     "description": (
                         "Optional number of images to generate, from 1 to 10, for backends that support "
-                        "multiple images. OpenAI Responses image_generation backends generate one image per "
-                        "call; Egg ignores n=1 and rejects n>1 for those backends."
+                        "multiple images. Codex-style image backends generate one image per call; Egg ignores "
+                        "n=1 and rejects n>1 for those backends."
                     ),
                 },
                 "size": {"type": "string", "description": "Optional provider-supported image size, for example 1024x1024."},

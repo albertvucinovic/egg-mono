@@ -147,8 +147,9 @@ def _provenance(
     image_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
     api_type = str(image_metadata.get("api_type") or "openai_images")
+    kind = "codex_image_generation" if api_type == "codex_images" else "openai_image_generation"
     provenance: dict[str, Any] = {
-        "kind": "openai_responses_image_generation" if api_type == "openai_responses_image_tool" else "openai_image_generation",
+        "kind": kind,
         "provider": result.provider_name,
         "model_key": result.model_key,
         "model": result.model_name,
@@ -177,7 +178,7 @@ def _provider_refs(
         "output_index": image_metadata.get("output_index"),
         "source": image_metadata.get("source"),
     }
-    for key in ("response_id", "response_created", "source_url", "image_generation_call_id", "image_generation_call_status"):
+    for key in ("response_id", "response_created", "source_url"):
         value = image_metadata.get(key)
         if value is not None:
             openai_refs[key] = value

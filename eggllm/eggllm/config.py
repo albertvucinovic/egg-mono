@@ -20,8 +20,10 @@ IMAGE_GENERATION_MODEL_DEFAULTS: Dict[str, Any] = {
 IMAGE_GENERATION_PRESETS: Dict[str, Dict[str, Any]] = {
     "openai_image": {"api_type": "openai_images"},
     "openai_images": {"api_type": "openai_images"},
-    "openai_responses_image": {"api_type": "openai_responses_image_tool"},
-    "openai_responses_image_tool": {"api_type": "openai_responses_image_tool"},
+    "codex_image": {"api_type": "codex_images"},
+    "codex_images": {"api_type": "codex_images"},
+    "chatgpt_codex_image": {"api_type": "codex_images"},
+    "chatgpt_codex_images": {"api_type": "codex_images"},
 }
 
 

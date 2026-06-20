@@ -15,6 +15,7 @@ def build_provider_headers(
     provider_config: Dict[str, Any],
     *,
     accept_sse: bool = False,
+    include_responses_beta: bool = True,
 ) -> Dict[str, str]:
     """Build request headers for a provider.
 
@@ -43,7 +44,8 @@ def build_provider_headers(
                 file=sys.stderr,
             )
 
-        headers["OpenAI-Beta"] = "responses=experimental"
+        if include_responses_beta:
+            headers["OpenAI-Beta"] = "responses=experimental"
         headers["originator"] = "egg"
         headers["User-Agent"] = (
             f"eggllm/1.0 ({platform.system()} {platform.release()}; {platform.machine()})"

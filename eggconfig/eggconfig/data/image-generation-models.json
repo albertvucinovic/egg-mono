@@ -1,6 +1,16 @@
 {
-  "default_model": "OpenAI Image: gpt-image-1",
+  "default_model": "OpenAI Pro Image: gpt-image-2",
   "models": {
+    "OpenAI Pro Image: gpt-image-2": {
+      "provider": "openai-pro",
+      "api_type": "codex_images",
+      "model_name": "gpt-image-2",
+      "parameters": {
+        "background": "auto",
+        "quality": "auto",
+        "size": "auto"
+      }
+    },
     "OpenAI Image: gpt-image-1": {
       "provider": "openai",
       "api_type": "openai_images",

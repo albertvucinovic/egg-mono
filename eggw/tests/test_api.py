@@ -98,20 +98,20 @@ class TestHealthAndBasics:
                     "model_name": "gpt-image-1",
                     "api_type": "openai_images",
                 },
-                "Responses Image Tool": {
+                "OpenAI Pro Image: gpt-image-2": {
                     "provider": "openai-pro",
-                    "model_name": "gpt-5.4",
-                    "api_type": "openai_responses_image_tool",
+                    "model_name": "gpt-image-2",
+                    "api_type": "codex_images",
                 },
             }
-            core_state.default_image_generation_model_key = "Responses Image Tool"
+            core_state.default_image_generation_model_key = "OpenAI Pro Image: gpt-image-2"
 
             response = client.get("/api/image-models")
 
             assert response.status_code == 200
             payload = response.json()
-            assert [model["key"] for model in payload["models"]] == ["Image Backend", "Responses Image Tool"]
-            assert payload["default_model"] == "Responses Image Tool"
+            assert [model["key"] for model in payload["models"]] == ["Image Backend", "OpenAI Pro Image: gpt-image-2"]
+            assert payload["default_model"] == "OpenAI Pro Image: gpt-image-2"
         finally:
             core_state.image_generation_models_config = old_models
             core_state.default_image_generation_model_key = old_default

@@ -22,9 +22,8 @@ from .registry import ModelRegistry
 
 IMAGE_GENERATION_TASK = "image_generation"
 OPENAI_IMAGES_API_TYPE = "openai_images"
-OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE = "openai_responses_image_tool"
+CODEX_IMAGES_API_TYPE = "codex_images"
 OPENAI_IMAGES_GENERATIONS_PATH = "/images/generations"
-OPENAI_RESPONSES_PATH = "/responses"
 OPENAI_IMAGES_OPTION_KEYS = frozenset(
     {
         "background",
@@ -39,39 +38,17 @@ OPENAI_IMAGES_OPTION_KEYS = frozenset(
         "user",
     }
 )
-OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS = frozenset(
+CODEX_IMAGES_OPTION_KEYS = frozenset(
     {
         "background",
-        "moderation",
-        "output_format",
-        "partial_images",
         "quality",
         "size",
-    }
-)
-OPENAI_RESPONSES_PAYLOAD_OPTION_KEYS = frozenset(
-    {
-        "max_output_tokens",
-        "max_tokens",
-        "metadata",
-        "parallel_tool_calls",
-        "prompt_cache_key",
-        "prompt_cache_retention",
-        "reasoning",
-        "reasoning_effort",
-        "store",
-        "temperature",
-        "text",
-        "tool_choice",
-        "top_p",
-        "truncation",
-        "user",
     }
 )
 SUPPORTED_IMAGE_GENERATION_API_TYPES = frozenset(
     {
         OPENAI_IMAGES_API_TYPE,
-        OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE,
+        CODEX_IMAGES_API_TYPE,
     }
 )
 
@@ -114,8 +91,8 @@ class OpenAIImagesBackend:
 
 
 @dataclass(frozen=True)
-class OpenAIResponsesImageToolBackend:
-    """Resolved OpenAI Responses image-generation-tool backend configuration."""
+class CodexImagesBackend:
+    """Resolved Codex-style image-generation backend configuration."""
 
     model_key: str
     provider_name: str
@@ -188,18 +165,17 @@ def _filter_openai_images_options(
     }
 
 
-def _filter_openai_responses_image_tool_options(
+def _filter_codex_images_options(
     options: Mapping[str, Any] | None,
     *,
     reject_unknown: bool,
 ) -> dict[str, Any]:
     if not isinstance(options, Mapping):
         return {}
-    normalized: dict[str, Any] = {}
     unknown = sorted(
         str(key)
         for key, value in options.items()
-        if value is not None and str(key) not in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS and str(key) != "n"
+        if value is not None and str(key) not in CODEX_IMAGES_OPTION_KEYS and str(key) not in {"n", "output_format"}
     )
     n_value = options.get("n")
     if n_value is not None:
@@ -211,38 +187,34 @@ def _filter_openai_responses_image_tool_options(
             if isinstance(n_value, bool) or n_int != 1:
                 if reject_unknown:
                     raise ImageGenerationConfigError(
-                        "OpenAI Responses image_generation currently supports one image per call; "
+                        "Codex image generation currently supports one image per call; "
                         "omit n or use n=1, or choose an openai_images backend for multi-image generation."
                     )
             # n=1 is the default/single-image case for this backend.  The
-            # Responses image_generation tool does not accept an explicit ``n``
-            # option, but LLMs often include n=1 because Egg's generic
-            # generate_image schema has to cover both Images and Responses
-            # backends.  Treat n=1 as harmless and drop it.
+            # Codex image endpoint supports an optional n field in its typed
+            # request, but Codex's own imagegen extension omits it for
+            # standalone generation.  Keep Egg's request Codex-like and drop a
+            # harmless n=1 from generic generate_image calls.
+    output_format = options.get("output_format")
+    if output_format is not None:
+        fmt = str(output_format).strip().lower().lstrip(".")
+        if fmt == "jpg":
+            fmt = "jpeg"
+        if fmt and fmt != "png" and reject_unknown:
+            raise ImageGenerationConfigError(
+                "Codex image generation currently returns PNG; omit output_format or use output_format=png."
+            )
+        # Codex's typed request does not include output_format.  Drop the
+        # harmless PNG/default value so generic generate_image calls can work
+        # across both OpenAI Images and Codex-style backends.
     if unknown and reject_unknown:
         joined = ", ".join(unknown)
-        raise ImageGenerationConfigError(f"Unsupported OpenAI Responses image_generation option(s): {joined}")
-    for key, value in options.items():
-        if value is not None and str(key) in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS:
-            normalized[str(key)] = value
-    return normalized
-
-
-def _filter_openai_responses_payload_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(options, Mapping):
-        return {}
-    payload: dict[str, Any] = {}
-    for key, value in options.items():
-        if value is None or str(key) not in OPENAI_RESPONSES_PAYLOAD_OPTION_KEYS:
-            continue
-        key_text = str(key)
-        if key_text == "max_tokens":
-            payload["max_output_tokens"] = value
-        elif key_text == "reasoning_effort":
-            payload.setdefault("reasoning", {"effort": value})
-        else:
-            payload[key_text] = value
-    return payload
+        raise ImageGenerationConfigError(f"Unsupported Codex image generation option(s): {joined}")
+    return {
+        str(key): value
+        for key, value in options.items()
+        if value is not None and str(key) in CODEX_IMAGES_OPTION_KEYS
+    }
 
 
 def _resolve_openai_images_url(api_base: Any) -> str:
@@ -262,19 +234,19 @@ def _resolve_openai_images_url(api_base: Any) -> str:
     return stripped
 
 
-def _resolve_openai_responses_url(api_base: Any) -> str:
+def _resolve_codex_images_url(api_base: Any) -> str:
     base = str(api_base or "").strip()
     if not base:
-        raise ImageGenerationConfigError("OpenAI Responses image provider is missing api_base.")
+        raise ImageGenerationConfigError("Codex image provider is missing api_base.")
     stripped = base.rstrip("/")
-    if stripped.endswith(OPENAI_RESPONSES_PATH):
+    if stripped.endswith(OPENAI_IMAGES_GENERATIONS_PATH):
         return stripped
-    for suffix in ("/chat/completions", "/images/generations", "/images"):
+    if stripped.endswith("/images"):
+        return stripped + "/generations"
+    for suffix in ("/responses", "/chat/completions"):
         if stripped.endswith(suffix):
-            return stripped[: -len(suffix)] + OPENAI_RESPONSES_PATH
-    if stripped.endswith("/v1"):
-        return stripped + OPENAI_RESPONSES_PATH
-    return stripped
+            return stripped[: -len(suffix)] + OPENAI_IMAGES_GENERATIONS_PATH
+    return stripped + OPENAI_IMAGES_GENERATIONS_PATH
 
 
 def _validate_image_generation_backend(
@@ -391,40 +363,46 @@ def resolve_openai_images_backend(
     )
 
 
-def resolve_openai_responses_image_tool_backend(
+def resolve_codex_images_backend(
     model_key: str | None = None,
     *,
     registry: ModelRegistry | None = None,
     models_path: str | Path = "models.json",
     all_models_path: str | Path = "all-models.json",
     image_generation_models_path: str | Path | None = None,
-) -> OpenAIResponsesImageToolBackend:
-    """Resolve and validate an ``api_type: openai_responses_image_tool`` backend."""
+) -> CodexImagesBackend:
+    """Resolve and validate an ``api_type: codex_images`` backend.
+
+    This is the Codex-style image endpoint used by Codex's standalone
+    image-generation extension.  It posts directly to ``images/generations``
+    relative to the configured provider base URL instead of trying to force a
+    provider-native image-generation tool into a normal Responses call.
+    """
 
     registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
     if model_key:
         resolved = _resolve_listed_image_generation_model(registry, model_key)
     else:
-        candidates = _configured_backend_candidates(registry, expected_api_type=OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE)
+        candidates = _configured_backend_candidates(registry, expected_api_type=CODEX_IMAGES_API_TYPE)
         resolved = candidates[0] if candidates else None
         if not resolved:
             raise ImageGenerationConfigError(
-                "No api_type: openai_responses_image_tool image generation model is configured in image-generation-models.json."
+                "No api_type: codex_images image generation model is configured in image-generation-models.json."
             )
 
     cfg, provider_name, provider_config, model_name = _validate_image_generation_backend(
         registry,
         resolved,
-        expected_api_type=OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE,
+        expected_api_type=CODEX_IMAGES_API_TYPE,
     )
     api_base = cfg.get("api_base") or provider_config.get("api_base")
-    return OpenAIResponsesImageToolBackend(
+    return CodexImagesBackend(
         model_key=resolved,
         provider_name=provider_name,
         provider_config=provider_config,
         model_config=dict(cfg),
         model_name=model_name,
-        url=_resolve_openai_responses_url(api_base),
+        url=_resolve_codex_images_url(api_base),
     )
 
 
@@ -585,52 +563,6 @@ def _parse_openai_images_response(
     return response_metadata, tuple(images)
 
 
-def _iter_image_generation_call_items(value: Any):
-    if isinstance(value, Mapping):
-        if value.get("type") == "image_generation_call":
-            yield value
-            return
-        for child in value.values():
-            yield from _iter_image_generation_call_items(child)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _iter_image_generation_call_items(item)
-
-
-def _b64_values_from_response_image_call(item: Mapping[str, Any]) -> list[tuple[Any, str | None, str | None]]:
-    """Return ``(b64, mime_type, revised_prompt)`` candidates from one call item."""
-
-    revised_prompt = item.get("revised_prompt") if isinstance(item.get("revised_prompt"), str) else None
-    candidates: list[tuple[Any, str | None, str | None]] = []
-
-    def add_candidate(value: Any, *, mime_type: Any = None, revised: Any = None) -> None:
-        if isinstance(value, str) and value.strip():
-            mime_text = str(mime_type).split(";", 1)[0].strip().lower() if mime_type else None
-            revised_text = revised if isinstance(revised, str) and revised else revised_prompt
-            candidates.append((value, mime_text or None, revised_text))
-
-    for key in ("result", "b64_json", "image", "data"):
-        value = item.get(key)
-        if isinstance(value, str):
-            add_candidate(value, mime_type=item.get("mime_type") or item.get("content_type"))
-        elif isinstance(value, Mapping):
-            nested_mime = value.get("mime_type") or value.get("content_type") or item.get("mime_type") or item.get("content_type")
-            nested_revised = value.get("revised_prompt") or revised_prompt
-            for nested_key in ("b64_json", "data", "base64", "image"):
-                add_candidate(value.get(nested_key), mime_type=nested_mime, revised=nested_revised)
-        elif isinstance(value, list):
-            for nested in value:
-                if isinstance(nested, str):
-                    add_candidate(nested, mime_type=item.get("mime_type") or item.get("content_type"))
-                elif isinstance(nested, Mapping):
-                    nested_mime = nested.get("mime_type") or nested.get("content_type") or item.get("mime_type") or item.get("content_type")
-                    nested_revised = nested.get("revised_prompt") or revised_prompt
-                    for nested_key in ("b64_json", "data", "base64", "image"):
-                        add_candidate(nested.get(nested_key), mime_type=nested_mime, revised=nested_revised)
-
-    return candidates
-
-
 def _provider_error_message(body: Mapping[str, Any], *, label: str) -> str | None:
     error = body.get("error")
     if not error:
@@ -642,85 +574,65 @@ def _provider_error_message(body: Mapping[str, Any], *, label: str) -> str | Non
     return f"{label} error: {error}"
 
 
-def _parse_openai_responses_image_tool_response(
+def _parse_codex_images_response(
     body: Mapping[str, Any],
     *,
-    backend: OpenAIResponsesImageToolBackend,
+    backend: CodexImagesBackend,
     request_options: Mapping[str, Any],
 ) -> tuple[dict[str, Any], tuple[GeneratedImage, ...]]:
-    provider_error = _provider_error_message(body, label="OpenAI Responses image_generation")
+    provider_error = _provider_error_message(body, label="Codex images")
     if provider_error:
         raise ImageGenerationProviderError(provider_error)
 
-    response_metadata: dict[str, Any] = {"api_type": OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE}
-    for key in ("id", "created", "created_at", "status", "usage"):
+    data_items = body.get("data")
+    if not isinstance(data_items, list) or not data_items:
+        raise ImageGenerationProviderError("Codex images response did not contain any data items.")
+
+    response_metadata: dict[str, Any] = {"api_type": CODEX_IMAGES_API_TYPE}
+    for key in ("id", "created", "created_at", "background", "quality", "size", "usage"):
         value = body.get(key)
         if value is not None:
             response_metadata[key] = value
 
     images: list[GeneratedImage] = []
-    default_mime_type = _mime_type_for_output_format(request_options.get("output_format"))
+    default_mime_type = _DEFAULT_IMAGE_MIME_TYPE
     response_id = body.get("id")
     response_created = body.get("created") if body.get("created") is not None else body.get("created_at")
-    for item in _iter_image_generation_call_items(body.get("output") if "output" in body else body):
-        call_id = item.get("id") or item.get("call_id")
-        call_status = item.get("status")
-        for raw_b64, explicit_mime_type, revised_prompt in _b64_values_from_response_image_call(item):
-            image_bytes, data_url_mime = _decode_b64_image(raw_b64)
-            mime_type = explicit_mime_type or data_url_mime or default_mime_type
-            output_index = len(images)
-            filename = f"generated-{output_index + 1}.{_extension_for_mime_type(mime_type)}"
-            metadata: dict[str, Any] = {
-                "api_type": OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE,
-                "provider": backend.provider_name,
-                "model_key": backend.model_key,
-                "model": backend.model_name,
-                "output_index": output_index,
-                "source": "image_generation_call",
-                "mime_type": mime_type,
-                "filename": filename,
-            }
-            if call_id is not None:
-                metadata["image_generation_call_id"] = call_id
-            if call_status is not None:
-                metadata["image_generation_call_status"] = call_status
-            if revised_prompt:
-                metadata["revised_prompt"] = revised_prompt
-            if response_id is not None:
-                metadata["response_id"] = response_id
-            if response_created is not None:
-                metadata["response_created"] = response_created
-            if request_options:
-                metadata["request_options"] = dict(request_options)
-            images.append(GeneratedImage(data=image_bytes, metadata=metadata))
-
-    if not images:
-        raise ImageGenerationProviderError(
-            "OpenAI Responses image_generation response did not contain image_generation_call image data."
+    for index, item in enumerate(data_items):
+        if not isinstance(item, Mapping):
+            raise ImageGenerationProviderError("Codex images data item must be an object.")
+        if not item.get("b64_json"):
+            raise ImageGenerationProviderError("Codex images data item has no b64_json field.")
+        image_bytes, data_url_mime = _decode_b64_image(item.get("b64_json"))
+        explicit_mime_type = item.get("mime_type") or item.get("content_type")
+        mime_type = (
+            str(explicit_mime_type).split(";", 1)[0].strip().lower()
+            if explicit_mime_type
+            else data_url_mime or default_mime_type
         )
+        filename = f"generated-{index + 1}.{_extension_for_mime_type(mime_type)}"
+        metadata: dict[str, Any] = {
+            "api_type": CODEX_IMAGES_API_TYPE,
+            "provider": backend.provider_name,
+            "model_key": backend.model_key,
+            "model": backend.model_name,
+            "output_index": index,
+            "source": "b64_json",
+            "mime_type": mime_type,
+            "filename": filename,
+        }
+        revised_prompt = item.get("revised_prompt")
+        if isinstance(revised_prompt, str) and revised_prompt:
+            metadata["revised_prompt"] = revised_prompt
+        if response_id is not None:
+            metadata["response_id"] = response_id
+        if response_created is not None:
+            metadata["response_created"] = response_created
+        if request_options:
+            metadata["request_options"] = dict(request_options)
+        images.append(GeneratedImage(data=image_bytes, metadata=metadata))
 
     return response_metadata, tuple(images)
-
-
-def _is_chatgpt_codex_responses_backend(backend: OpenAIResponsesImageToolBackend) -> bool:
-    auth_type = str(backend.provider_config.get("auth_type") or "api_key").strip().lower()
-    url = str(backend.url or "").strip().lower()
-    provider_name = str(backend.provider_name or "").strip().lower()
-    return "chatgpt.com/backend-api/codex/responses" in url or (
-        provider_name == "openai-pro" and auth_type == "chatgpt_oauth"
-    )
-
-
-def _reject_unsupported_chatgpt_codex_image_backend(backend: OpenAIResponsesImageToolBackend) -> None:
-    if not _is_chatgpt_codex_responses_backend(backend):
-        return
-    raise ImageGenerationConfigError(
-        "The ChatGPT/Codex subscription Responses endpoint does not currently expose "
-        "the provider-native image_generation tool, so it cannot be used as an Egg "
-        "generate_image backend. Use an OpenAI API image backend such as "
-        "'OpenAI Image: gpt-image-1', or configure a non-Codex Responses API provider "
-        "that supports image_generation."
-    )
 
 
 def _select_image_generation_api_type(
@@ -786,7 +698,12 @@ def generate_openai_images(
         **request_options,
     }
 
-    headers = build_provider_headers(backend.provider_name, backend.provider_config, accept_sse=False)
+    headers = build_provider_headers(
+        backend.provider_name,
+        backend.provider_config,
+        accept_sse=False,
+        include_responses_beta=False,
+    )
     sess = session or requests
     response = sess.post(backend.url, headers=headers, json=payload, timeout=timeout)
     _raise_for_status(response, label="OpenAI Images")
@@ -808,7 +725,7 @@ def generate_openai_images(
     )
 
 
-def generate_openai_responses_image_tool(
+def generate_codex_images(
     prompt: str,
     *,
     model_key: str | None = None,
@@ -820,10 +737,12 @@ def generate_openai_responses_image_tool(
     timeout: int = 600,
     session: Any = None,
 ) -> ImageGenerationResult:
-    """Generate images via a separate OpenAI Responses ``image_generation`` tool call.
+    """Generate images through a configured Codex-style image backend.
 
-    This backend is an implementation detail of Egg's ``generate_image`` tool;
-    it is not registered as a normal chat provider tool.
+    Codex's standalone image-generation extension posts typed requests to
+    ``images/generations`` relative to the Codex provider base URL.  Egg uses
+    the same direct image endpoint shape here instead of routing generation
+    through a normal Responses turn with a forced ``image_generation`` tool.
     """
 
     prompt_text = str(prompt or "").strip()
@@ -831,36 +750,31 @@ def generate_openai_responses_image_tool(
         raise ValueError("image generation prompt must not be empty")
 
     registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
-    backend = resolve_openai_responses_image_tool_backend(model_key, registry=registry)
-    _reject_unsupported_chatgpt_codex_image_backend(backend)
+    backend = resolve_codex_images_backend(model_key, registry=registry)
 
-    configured = registry.merge_parameters(backend.model_key)
-    configured_tool_options = _filter_openai_responses_image_tool_options(configured, reject_unknown=False)
-    configured_payload_options = _filter_openai_responses_payload_options(configured)
-    explicit_tool_options = _filter_openai_responses_image_tool_options(options, reject_unknown=True)
-    request_options = {**configured_tool_options, **explicit_tool_options}
-    image_tool = {"type": "image_generation", **request_options}
+    configured_options = _filter_codex_images_options(
+        registry.merge_parameters(backend.model_key),
+        reject_unknown=False,
+    )
+    explicit_options = _filter_codex_images_options(options, reject_unknown=True)
+    request_options = {**configured_options, **explicit_options}
     payload: dict[str, Any] = {
+        "prompt": prompt_text,
         "model": backend.model_name,
-        "instructions": "",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": prompt_text}],
-            }
-        ],
-        "tools": [image_tool],
-        "tool_choice": "required",
-        **configured_payload_options,
+        **request_options,
     }
 
-    headers = build_provider_headers(backend.provider_name, backend.provider_config, accept_sse=False)
+    headers = build_provider_headers(
+        backend.provider_name,
+        backend.provider_config,
+        accept_sse=False,
+        include_responses_beta=False,
+    )
     sess = session or requests
     response = sess.post(backend.url, headers=headers, json=payload, timeout=timeout)
-    _raise_for_status(response, label="OpenAI Responses image_generation")
-    response_metadata, images = _parse_openai_responses_image_tool_response(
-        _response_json(response, label="OpenAI Responses image_generation"),
+    _raise_for_status(response, label="Codex images")
+    response_metadata, images = _parse_codex_images_response(
+        _response_json(response, label="Codex images"),
         backend=backend,
         request_options=request_options,
     )
@@ -900,8 +814,8 @@ def generate_images(
             timeout=timeout,
             session=session,
         )
-    if api_type == OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE:
-        return generate_openai_responses_image_tool(
+    if api_type == CODEX_IMAGES_API_TYPE:
+        return generate_codex_images(
             prompt,
             model_key=resolved_model_key or model_key,
             registry=registry,
@@ -919,16 +833,16 @@ __all__ = [
     "ImageGenerationError",
     "ImageGenerationProviderError",
     "ImageGenerationResult",
+    "CODEX_IMAGES_API_TYPE",
+    "CODEX_IMAGES_OPTION_KEYS",
     "OPENAI_IMAGES_API_TYPE",
     "OPENAI_IMAGES_OPTION_KEYS",
-    "OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE",
-    "OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS",
+    "CodexImagesBackend",
     "OpenAIImagesBackend",
-    "OpenAIResponsesImageToolBackend",
     "SUPPORTED_IMAGE_GENERATION_API_TYPES",
+    "generate_codex_images",
     "generate_images",
     "generate_openai_images",
-    "generate_openai_responses_image_tool",
+    "resolve_codex_images_backend",
     "resolve_openai_images_backend",
-    "resolve_openai_responses_image_tool_backend",
 ]

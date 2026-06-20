@@ -282,13 +282,13 @@ def test_registry_discovers_image_generation_backends_by_task_and_kind(tmp_path)
                     },
                 },
             },
-            "openai-responses-image-tool": {
-                "api_base": "https://api.openai.com/v1/responses",
-                "api_key_env": "OPENAI_API_KEY",
+            "openai-pro": {
+                "api_base": "https://chatgpt.com/backend-api/codex/responses",
+                "auth_type": "chatgpt_oauth",
                 "models": {
-                    "Responses Image Tool": {
-                        "model_name": "gpt-4.1",
-                        "api_type": "openai_responses_image_tool",
+                    "Codex Image Backend": {
+                        "model_name": "gpt-image-2",
+                        "api_type": "codex_images",
                         "model_kind": "image_generation",
                         "task_capabilities": ["image_generation"],
                     },
@@ -306,11 +306,11 @@ def test_registry_discovers_image_generation_backends_by_task_and_kind(tmp_path)
     registry = ModelRegistry(models_config, providers_config, DummyCatalog())
 
     assert registry.chat_model_keys() == ["Chat"]
-    assert registry.model_keys_by_kind("image-generation") == ["Image Generator", "Responses Image Tool"]
-    assert registry.task_model_keys("image_generation", model_kind="image_generation") == ["Image Generator", "Responses Image Tool"]
+    assert registry.model_keys_by_kind("image-generation") == ["Image Generator", "Codex Image Backend"]
+    assert registry.task_model_keys("image_generation", model_kind="image_generation") == ["Image Generator", "Codex Image Backend"]
     assert registry.task_model_keys("image_edit", model_kind="image_generation") == ["Image Generator"]
     assert registry.get_effective_model_config("Image Generator")["api_type"] == "openai_images"
-    assert registry.get_effective_model_config("Responses Image Tool")["api_type"] == "openai_responses_image_tool"
+    assert registry.get_effective_model_config("Codex Image Backend")["api_type"] == "codex_images"
 
 
 def test_provider_level_image_generation_metadata_defaults_string_models(tmp_path):
