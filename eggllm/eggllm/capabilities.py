@@ -39,6 +39,7 @@ CAPABILITY_METADATA_KEYS = (
     "task_capabilities",
     "attachment_capabilities",
 )
+PROVIDER_MODEL_DEFAULT_KEYS = (*CAPABILITY_METADATA_KEYS, "api_type")
 
 
 def _clean_token(value: Any) -> str:
@@ -87,7 +88,9 @@ def output_modalities(model_config: Mapping[str, Any] | None) -> List[str]:
 def task_capabilities(model_config: Mapping[str, Any] | None) -> List[str]:
     if not isinstance(model_config, Mapping):
         return list(DEFAULT_TASK_CAPABILITIES)
-    return _string_list(model_config.get("task_capabilities"), DEFAULT_TASK_CAPABILITIES)
+    kind = model_kind(model_config)
+    default = DEFAULT_TASK_CAPABILITIES if kind == DEFAULT_MODEL_KIND else [kind]
+    return _string_list(model_config.get("task_capabilities"), default)
 
 
 def attachment_capabilities(model_config: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -132,7 +135,7 @@ def effective_model_config(
 
     out: Dict[str, Any] = {}
     if isinstance(provider_config, Mapping):
-        for key in CAPABILITY_METADATA_KEYS:
+        for key in PROVIDER_MODEL_DEFAULT_KEYS:
             if key in provider_config:
                 out[key] = provider_config[key]
     if isinstance(model_config, Mapping):
@@ -144,8 +147,22 @@ def effective_model_config(
     return out
 
 
+def is_model_kind(model_config: Mapping[str, Any] | None, kind: str) -> bool:
+    token = _clean_token(kind)
+    return bool(token) and model_kind(model_config) == token
+
+
 def is_chat_model(model_config: Mapping[str, Any] | None) -> bool:
-    return model_kind(model_config) == DEFAULT_MODEL_KIND
+    return is_model_kind(model_config, DEFAULT_MODEL_KIND)
+
+
+def is_image_generation_model(model_config: Mapping[str, Any] | None) -> bool:
+    return is_model_kind(model_config, "image_generation")
+
+
+def supports_task_capability(model_config: Mapping[str, Any] | None, task: str) -> bool:
+    token = _clean_token(task)
+    return bool(token) and token in task_capabilities(model_config)
 
 
 def supports_input_modality(model_config: Mapping[str, Any] | None, modality: str) -> bool:
@@ -251,6 +268,7 @@ def supports_attachment_presentation(
 __all__ = [
     "DEFAULT_ATTACHMENT_CAPABILITIES",
     "CAPABILITY_METADATA_KEYS",
+    "PROVIDER_MODEL_DEFAULT_KEYS",
     "DEFAULT_IMAGE_MIME_TYPES",
     "DEFAULT_INPUT_MODALITIES",
     "DEFAULT_MODEL_KIND",
@@ -260,10 +278,13 @@ __all__ = [
     "effective_model_config",
     "input_modalities",
     "is_chat_model",
+    "is_image_generation_model",
+    "is_model_kind",
     "model_kind",
     "model_metadata",
     "output_modalities",
     "supports_attachment_presentation",
     "supports_input_modality",
+    "supports_task_capability",
     "task_capabilities",
 ]

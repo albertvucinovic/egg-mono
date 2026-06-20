@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, List
 
-from .capabilities import effective_model_config, is_chat_model, model_metadata
+from .capabilities import effective_model_config, is_chat_model, is_model_kind, model_metadata, supports_task_capability
 
 
 class ModelRegistry:
@@ -22,6 +22,28 @@ class ModelRegistry:
         """Return configured display keys usable for normal chat turns."""
 
         return [name for name in self.models_config.keys() if is_chat_model(self.get_effective_model_config(name))]
+
+    def model_keys_by_kind(self, kind: str) -> List[str]:
+        """Return configured display keys with the requested normalized model kind."""
+
+        return [name for name in self.models_config.keys() if is_model_kind(self.get_effective_model_config(name), kind)]
+
+    def task_model_keys(self, task: str, *, model_kind: str | None = None) -> List[str]:
+        """Return configured display keys that advertise a task capability.
+
+        ``model_kind`` can further restrict discovery to backend classes such
+        as ``image_generation``.  This is discovery/plumbing only: callers must
+        still use an appropriate non-chat adapter/tool path for non-chat kinds.
+        """
+
+        out: List[str] = []
+        for name in self.models_config.keys():
+            cfg = self.get_effective_model_config(name)
+            if model_kind is not None and not is_model_kind(cfg, model_kind):
+                continue
+            if supports_task_capability(cfg, task):
+                out.append(name)
+        return out
 
     def default_model_key(self) -> Optional[str]:
         meta = self.providers_config.get("_meta")

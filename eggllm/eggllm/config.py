@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Dict, Tuple, Any
 
-from .capabilities import CAPABILITY_METADATA_KEYS
+from .capabilities import PROVIDER_MODEL_DEFAULT_KEYS
 
 
 TEMPLATE_GUIDE = r'''
@@ -64,7 +64,7 @@ def load_models_config(models_path: str | Path) -> Tuple[Dict[str, Dict[str, Any
                 providers_config[prov_name]["auth_type"] = auth_type
             if parameters:
                 providers_config[prov_name]["parameters"] = parameters
-            for key in CAPABILITY_METADATA_KEYS:
+            for key in PROVIDER_MODEL_DEFAULT_KEYS:
                 if key in prov_obj:
                     providers_config[prov_name][key] = prov_obj[key]
 

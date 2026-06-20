@@ -241,6 +241,7 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json",
                     "model_kind",
                     "task_capabilities",
                     "attachment_capabilities",
+                    "api_type",
                 ):
                     if key in provider_cfg:
                         provider_dict[key] = provider_cfg[key]
