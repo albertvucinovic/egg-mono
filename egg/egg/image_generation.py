@@ -6,6 +6,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from eggllm.config import load_image_generation_models_config
 from eggthreads.command_catalog import CommandResult, CommandSpec
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.image_generation import (
@@ -14,7 +15,7 @@ from eggthreads.image_generation import (
     image_generation_result_content_parts,
 )
 
-from .utils import ALL_MODELS_PATH, MODELS_PATH
+from .utils import ALL_MODELS_PATH, IMAGE_GENERATION_MODELS_PATH, MODELS_PATH
 
 _IMAGE_GENERATE_COMMAND = "imageGenerate"
 _IMAGE_GENERATE_OPTION_KEYS = {
@@ -165,6 +166,7 @@ def image_generate_command(ctx: Any, arg: str) -> CommandResult:
             model_key=model_key,
             models_path=MODELS_PATH,
             all_models_path=ALL_MODELS_PATH,
+            image_generation_models_path=IMAGE_GENERATION_MODELS_PATH,
             options=options,
         )
         content = _append_result_message(ctx, result)
@@ -177,6 +179,27 @@ def image_generate_command(ctx: Any, arg: str) -> CommandResult:
 
 def _complete_image_generate(ctx: Any, arg: str):
     text = str(arg or "")
+    current = text.rsplit(None, 1)[-1] if text and not text.endswith(" ") else ""
+
+    def image_backend_keys() -> list[str]:
+        try:
+            models_config, _providers_config = load_image_generation_models_config(
+                IMAGE_GENERATION_MODELS_PATH,
+                models_path=MODELS_PATH,
+            )
+            return list(models_config.keys())
+        except Exception:
+            return []
+
+    for prefix in ("model=", "backend="):
+        if current.startswith(prefix):
+            partial = current[len(prefix):].strip("'\"").lower()
+            return [
+                f"{prefix}{shlex.quote(key)}"
+                for key in image_backend_keys()
+                if key.lower().startswith(partial)
+            ]
+
     fragments = [
         "model=",
         "n=1",
@@ -187,7 +210,6 @@ def _complete_image_generate(ctx: Any, arg: str):
         "background=transparent",
         "-- ",
     ]
-    current = text.rsplit(None, 1)[-1] if text and not text.endswith(" ") else ""
     return [fragment for fragment in fragments if fragment.startswith(current)]
 
 

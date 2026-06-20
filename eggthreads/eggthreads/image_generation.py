@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from eggllm.image_generation import ImageGenerationResult, generate_openai_images
+from eggllm.image_generation import ImageGenerationResult, generate_images
 
 from .content_parts import artifact_part_from_provider_output_metadata
 from .provider_output_artifacts import SavedProviderOutputArtifact, save_provider_output_bytes
@@ -146,8 +146,9 @@ def _provenance(
     result: ImageGenerationResult,
     image_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
+    api_type = str(image_metadata.get("api_type") or "openai_images")
     provenance: dict[str, Any] = {
-        "kind": "openai_image_generation",
+        "kind": "openai_responses_image_generation" if api_type == "openai_responses_image_tool" else "openai_image_generation",
         "provider": result.provider_name,
         "model_key": result.model_key,
         "model": result.model_name,
@@ -168,14 +169,15 @@ def _provider_refs(
     result: ImageGenerationResult,
     image_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
+    api_type = str(image_metadata.get("api_type") or "openai_images")
     openai_refs: dict[str, Any] = {
-        "api_type": "openai_images",
+        "api_type": api_type,
         "model": result.model_name,
         "model_key": result.model_key,
         "output_index": image_metadata.get("output_index"),
         "source": image_metadata.get("source"),
     }
-    for key in ("response_id", "response_created", "source_url"):
+    for key in ("response_id", "response_created", "source_url", "image_generation_call_id", "image_generation_call_status"):
         value = image_metadata.get(key)
         if value is not None:
             openai_refs[key] = value
@@ -192,6 +194,7 @@ def generate_openai_image_artifacts(
     model_key: str | None = None,
     models_path: str | Path = "models.json",
     all_models_path: str | Path = "all-models.json",
+    image_generation_models_path: str | Path | None = None,
     options: Mapping[str, Any] | None = None,
     timeout: int = 600,
     session: Any = None,
@@ -204,12 +207,13 @@ def generate_openai_image_artifacts(
     fake HTTP ``session`` or a ``backend_generate_func`` to avoid network calls.
     """
 
-    generate = backend_generate_func or generate_openai_images
+    generate = backend_generate_func or generate_images
     result = generate(
         prompt,
         model_key=model_key,
         models_path=models_path,
         all_models_path=all_models_path,
+        image_generation_models_path=image_generation_models_path,
         options=options,
         timeout=timeout,
         session=session,

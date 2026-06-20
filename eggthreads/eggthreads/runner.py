@@ -777,7 +777,8 @@ class ThreadRunner:
     """
 
     def __init__(self, db: ThreadsDB, thread_id: str, llm: Optional[LLMClient] = None, owner: Optional[str] = None, purpose: str = "assistant_stream", config: Optional[RunnerConfig] = None,
-                 models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None):
+                 models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None,
+                 image_generation_models_path: Optional[str] = None):
         self.db = db
         self.thread_id = thread_id
         if llm is not None:
@@ -792,6 +793,14 @@ class ThreadRunner:
         self.tools = tools or create_default_tools()
         self.models_path = models_path or 'models.json'
         self.all_models_path = all_models_path or 'all-models.json'
+        if image_generation_models_path is not None:
+            self.image_generation_models_path = image_generation_models_path
+        else:
+            try:
+                from eggllm.config import default_image_generation_models_path
+                self.image_generation_models_path = str(default_image_generation_models_path(self.models_path))
+            except Exception:
+                self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
 
     def _has_compaction_summary_request_between(self, start_event_seq: int, before_event_seq: int) -> bool:
         rows = self.db.conn.execute(
@@ -2773,6 +2782,7 @@ class ThreadRunner:
                         db=self.db,
                         models_path=self.models_path,
                         all_models_path=self.all_models_path,
+                        image_generation_models_path=self.image_generation_models_path,
                         stream=stream_ctx,
                         preserve_tool_result=True,
                     )
@@ -3508,7 +3518,8 @@ class SubtreeScheduler:
     """Async orchestrator: watches a root thread and runs runnable threads within its subtree, up to concurrency limit."""
 
     def __init__(self, db: ThreadsDB, root_thread_id: str, llm: Optional[LLMClient] = None, owner: Optional[str] = None, config: Optional[RunnerConfig] = None,
-                 models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None):
+                 models_path: Optional[str] = None, all_models_path: Optional[str] = None, tools: Optional[ToolRegistry] = None,
+                 image_generation_models_path: Optional[str] = None):
         self.db = db
         self.root = root_thread_id
         if llm is not None:
@@ -3532,6 +3543,14 @@ class SubtreeScheduler:
         self.tools = tools or create_default_tools()
         self.models_path = models_path or 'models.json'
         self.all_models_path = all_models_path or 'all-models.json'
+        if image_generation_models_path is not None:
+            self.image_generation_models_path = image_generation_models_path
+        else:
+            try:
+                from eggllm.config import default_image_generation_models_path
+                self.image_generation_models_path = str(default_image_generation_models_path(self.models_path))
+            except Exception:
+                self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
         self._tasks: Set[asyncio.Task] = set()
 
     async def shutdown(self) -> None:
@@ -3652,6 +3671,7 @@ class SubtreeScheduler:
                     config=self.cfg,
                     models_path=self.models_path,
                     all_models_path=self.all_models_path,
+                    image_generation_models_path=self.image_generation_models_path,
                     tools=self.tools,
                 )
                 try:

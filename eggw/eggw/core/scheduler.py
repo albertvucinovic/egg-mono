@@ -48,6 +48,7 @@ def start_scheduler(root_tid: str) -> None:
         llm=llm,  # Pass mock LLM if in test mode, None otherwise (scheduler creates its own)
         models_path=str(state.MODELS_PATH),
         all_models_path=str(state.ALL_MODELS_PATH),
+        image_generation_models_path=str(state.IMAGE_GENERATION_MODELS_PATH),
     )
     task = asyncio.create_task(sched.run_forever(poll_sec=poll_sec))
     state.active_schedulers[root_tid] = {"scheduler": sched, "task": task}

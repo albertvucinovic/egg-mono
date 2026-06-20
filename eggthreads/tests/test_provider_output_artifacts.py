@@ -409,6 +409,7 @@ def test_generate_openai_image_artifacts_stores_b64_outputs_as_provider_artifact
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     models_path = tmp_path / "models.json"
     all_models_path = tmp_path / "all-models.json"
+    image_generation_models_path = tmp_path / "image-generation-models.json"
     models_path.write_text(
         json.dumps(
             {
@@ -416,16 +417,23 @@ def test_generate_openai_image_artifacts_stores_b64_outputs_as_provider_artifact
                     "openai-images": {
                         "api_base": "https://api.openai.com/v1",
                         "api_key_env": "OPENAI_API_KEY",
-                        "api_type": "openai_images",
-                        "model_kind": "image_generation",
-                        "models": {
-                            "Image Backend": {
-                                "model_name": "gpt-image-1",
-                                "task_capabilities": ["image_generation"],
-                            }
-                        },
                     }
                 }
+            }
+        ),
+        encoding="utf-8",
+    )
+    image_generation_models_path.write_text(
+        json.dumps(
+            {
+                "default_model": "Image Backend",
+                "models": {
+                    "Image Backend": {
+                        "provider": "openai-images",
+                        "api_type": "openai_images",
+                        "model_name": "gpt-image-1",
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -442,6 +450,7 @@ def test_generate_openai_image_artifacts_stores_b64_outputs_as_provider_artifact
         model_key="Image Backend",
         models_path=models_path,
         all_models_path=all_models_path,
+        image_generation_models_path=image_generation_models_path,
         options={"n": 2, "size": "1024x1024", "output_format": "png"},
         timeout=11,
         session=session,
@@ -518,3 +527,68 @@ def test_generate_openai_image_artifacts_stores_b64_outputs_as_provider_artifact
     assert second_bytes == b"generated-two"
     assert second_metadata["filename"] == "generated-2.png"
     assert second_metadata["provenance"]["output_index"] == 1
+
+
+def test_generate_openai_image_artifacts_preserves_responses_image_tool_refs(tmp_path):
+    from eggllm.image_generation import GeneratedImage, ImageGenerationResult
+    from eggthreads.image_generation import generate_openai_image_artifacts
+
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+
+    def fake_generate(*args, **kwargs):
+        return ImageGenerationResult(
+            model_key="Responses Image Tool",
+            provider_name="openai-pro",
+            model_name="gpt-5.4",
+            prompt="Draw a pro egg",
+            request_options={"size": "1024x1024"},
+            response_metadata={"id": "resp_123"},
+            images=(
+                GeneratedImage(
+                    data=b"responses-image",
+                    metadata={
+                        "api_type": "openai_responses_image_tool",
+                        "mime_type": "image/png",
+                        "filename": "generated-1.png",
+                        "output_index": 0,
+                        "source": "image_generation_call",
+                        "image_generation_call_id": "ig_123",
+                        "image_generation_call_status": "completed",
+                        "response_id": "resp_123",
+                    },
+                ),
+            ),
+        )
+
+    result = generate_openai_image_artifacts(
+        tmp_path,
+        tid,
+        "Draw a pro egg",
+        backend_generate_func=fake_generate,
+    )
+
+    metadata, data = resolve_provider_output_bytes(tmp_path, db, tid, result.artifacts[0].artifact_id)
+    assert data == b"responses-image"
+    assert metadata["provenance"] == {
+        "kind": "openai_responses_image_generation",
+        "provider": "openai-pro",
+        "model_key": "Responses Image Tool",
+        "model": "gpt-5.4",
+        "prompt": "Draw a pro egg",
+        "output_index": 0,
+        "response_id": "resp_123",
+    }
+    assert metadata["provider_refs"] == {
+        "openai": {
+            "api_type": "openai_responses_image_tool",
+            "model": "gpt-5.4",
+            "model_key": "Responses Image Tool",
+            "output_index": 0,
+            "source": "image_generation_call",
+            "response_id": "resp_123",
+            "image_generation_call_id": "ig_123",
+            "image_generation_call_status": "completed",
+            "request_options": {"size": "1024x1024"},
+        }
+    }

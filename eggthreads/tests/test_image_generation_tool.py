@@ -97,13 +97,25 @@ def test_generate_image_tool_calls_shared_service_and_returns_artifact_metadata(
     workspace.mkdir()
     models_path = tmp_path / "models.json"
     all_models_path = tmp_path / "all-models.json"
+    image_generation_models_path = tmp_path / "image-generation-models.json"
     calls = []
     before_message_count = db.conn.execute(
         "SELECT COUNT(*) FROM events WHERE thread_id=? AND type='msg.create'",
         (thread_id,),
     ).fetchone()[0]
 
-    def fake_generate(workspace_arg, thread_id_arg, prompt, *, model_key, models_path, all_models_path, options, timeout):
+    def fake_generate(
+        workspace_arg,
+        thread_id_arg,
+        prompt,
+        *,
+        model_key,
+        models_path,
+        all_models_path,
+        image_generation_models_path,
+        options,
+        timeout,
+    ):
         calls.append(
             {
                 "workspace": Path(workspace_arg),
@@ -112,6 +124,7 @@ def test_generate_image_tool_calls_shared_service_and_returns_artifact_metadata(
                 "model_key": model_key,
                 "models_path": Path(models_path),
                 "all_models_path": Path(all_models_path),
+                "image_generation_models_path": Path(image_generation_models_path),
                 "options": options,
                 "timeout": timeout,
             }
@@ -137,6 +150,7 @@ def test_generate_image_tool_calls_shared_service_and_returns_artifact_metadata(
         working_dir=workspace,
         models_path=models_path,
         all_models_path=all_models_path,
+        image_generation_models_path=image_generation_models_path,
     )
 
     assert calls == [
@@ -147,6 +161,7 @@ def test_generate_image_tool_calls_shared_service_and_returns_artifact_metadata(
             "model_key": "Image Backend",
             "models_path": models_path,
             "all_models_path": all_models_path,
+            "image_generation_models_path": image_generation_models_path,
             "options": {
                 "n": 2,
                 "size": "1024x1024",

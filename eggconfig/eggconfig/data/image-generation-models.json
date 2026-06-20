@@ -1,0 +1,49 @@
+{
+  "default_model": "OpenAI Image: gpt-image-1",
+  "models": {
+    "OpenAI Image: gpt-image-1": {
+      "provider": "openai",
+      "api_type": "openai_images",
+      "model_name": "gpt-image-1"
+    },
+    "OpenAI Image: gpt-image-1-mini": {
+      "provider": "openai",
+      "api_type": "openai_images",
+      "model_name": "gpt-image-1-mini"
+    },
+    "OpenAI Image: gpt-image-1.5": {
+      "provider": "openai",
+      "api_type": "openai_images",
+      "model_name": "gpt-image-1.5"
+    },
+    "OpenAI Image: gpt-image-2": {
+      "provider": "openai",
+      "api_type": "openai_images",
+      "model_name": "gpt-image-2"
+    },
+    "OpenAI Pro Image: GPT-5.5": {
+      "provider": "openai-pro",
+      "api_type": "openai_responses_image_tool",
+      "model_name": "gpt-5.5",
+      "parameters": {
+        "store": false
+      }
+    },
+    "OpenAI Pro Image: GPT-5.4": {
+      "provider": "openai-pro",
+      "api_type": "openai_responses_image_tool",
+      "model_name": "gpt-5.4",
+      "parameters": {
+        "store": false
+      }
+    },
+    "OpenAI Pro Image: GPT-5.3 Codex": {
+      "provider": "openai-pro",
+      "api_type": "openai_responses_image_tool",
+      "model_name": "gpt-5.3-codex",
+      "parameters": {
+        "store": false
+      }
+    }
+  }
+}

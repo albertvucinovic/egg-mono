@@ -476,6 +476,7 @@ async def generate_thread_image(thread_id: str, request: ImageGenerationRequest)
                 model_key=model_key,
                 models_path=core.MODELS_PATH,
                 all_models_path=core.ALL_MODELS_PATH,
+                image_generation_models_path=core.IMAGE_GENERATION_MODELS_PATH,
                 options=options,
             ),
         )

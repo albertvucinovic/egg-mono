@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-
 from eggthreads import set_thread_model
 
 from ..models import ModelInfo, ModelsResponse, SetModelRequest
@@ -25,6 +24,20 @@ async def get_models():
             display_name=key,  # The key is the display name in eggllm format
         ))
     return ModelsResponse(models=models, default_model=core.default_model_key)
+
+
+@router.get("/image-models", response_model=ModelsResponse)
+async def get_image_models():
+    """Get configured provider-backed image-generation backends."""
+    models = []
+    for key, config in core.image_generation_models_config.items():
+        models.append(ModelInfo(
+            key=key,
+            provider=config.get("provider", "unknown"),
+            model_id=config.get("model_name", key),
+            display_name=key,
+        ))
+    return ModelsResponse(models=models, default_model=core.default_image_generation_model_key)
 
 
 @router.post("/threads/{thread_id}/model")

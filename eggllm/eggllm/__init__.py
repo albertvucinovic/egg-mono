@@ -1,5 +1,6 @@
 from .client import LLMClient
 from .auth import TokenStore, login_browser, logout
+from .config import default_image_generation_models_path, load_image_generation_models_config
 from .image_generation import (
     GeneratedImage,
     ImageGenerationConfigError,
@@ -7,8 +8,12 @@ from .image_generation import (
     ImageGenerationProviderError,
     ImageGenerationResult,
     OpenAIImagesBackend,
+    OpenAIResponsesImageToolBackend,
+    generate_images,
     generate_openai_images,
+    generate_openai_responses_image_tool,
     resolve_openai_images_backend,
+    resolve_openai_responses_image_tool_backend,
 )
 from .capabilities import (
     attachment_capabilities,
@@ -31,14 +36,20 @@ __all__ = [
     "TokenStore",
     "login_browser",
     "logout",
+    "default_image_generation_models_path",
+    "load_image_generation_models_config",
     "GeneratedImage",
     "ImageGenerationConfigError",
     "ImageGenerationError",
     "ImageGenerationProviderError",
     "ImageGenerationResult",
     "OpenAIImagesBackend",
+    "OpenAIResponsesImageToolBackend",
+    "generate_images",
     "generate_openai_images",
+    "generate_openai_responses_image_tool",
     "resolve_openai_images_backend",
+    "resolve_openai_responses_image_tool_backend",
     "attachment_capabilities",
     "effective_model_config",
     "input_modalities",

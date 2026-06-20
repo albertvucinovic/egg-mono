@@ -231,6 +231,12 @@ export async function fetchModels() {
   return res.json();
 }
 
+export async function fetchImageGenerationModels() {
+  const res = await fetch(`${API_BASE}/api/image-models`);
+  if (!res.ok) throw new Error("Failed to fetch image generation models");
+  return res.json();
+}
+
 export async function setThreadModel(threadId: string, modelKey: string) {
   const res = await fetch(`${API_BASE}/api/threads/${threadId}/model`, {
     method: "POST",

@@ -58,6 +58,7 @@ from .completion import get_autocomplete_items  # type: ignore
 from .utils import (
     MODELS_PATH,
     ALL_MODELS_PATH,
+    IMAGE_GENERATION_MODELS_PATH,
     SYSTEM_PROMPT_PATH,
     COMMANDS_TEXT,
     get_system_prompt,
@@ -443,6 +444,7 @@ class EggDisplayApp(
             root_thread_id=root_tid,
             models_path=str(MODELS_PATH),
             all_models_path=str(ALL_MODELS_PATH),
+            image_generation_models_path=str(IMAGE_GENERATION_MODELS_PATH),
         )
         task = asyncio.create_task(sched.run_forever(poll_sec=poll_sec))
         self.active_schedulers[root_tid] = {"scheduler": sched, "task": task}

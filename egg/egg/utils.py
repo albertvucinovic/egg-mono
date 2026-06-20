@@ -11,10 +11,12 @@ from typing import Any, Dict, List, Optional
 ROOT = Path(__file__).resolve().parent
 
 # Path constants - eggconfig provides canonical locations for model config files
-from eggconfig import get_models_path, get_all_models_path
+from eggconfig import get_all_models_path, get_models_path
+from eggllm.config import default_image_generation_models_path
 
 MODELS_PATH = get_models_path()
 ALL_MODELS_PATH = get_all_models_path()
+IMAGE_GENERATION_MODELS_PATH = default_image_generation_models_path(MODELS_PATH)
 SYSTEM_PROMPT_PATH = ROOT / 'systemPrompt'
 
 COMMANDS_TEXT = """

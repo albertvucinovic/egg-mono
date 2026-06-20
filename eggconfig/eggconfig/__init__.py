@@ -9,3 +9,7 @@ def get_models_path() -> Path:
 
 def get_all_models_path() -> Path:
     return _DATA_DIR / "all-models.json"
+
+
+def get_image_generation_models_path() -> Path:
+    return _DATA_DIR / "image-generation-models.json"

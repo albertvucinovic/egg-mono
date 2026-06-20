@@ -88,6 +88,34 @@ class TestHealthAndBasics:
         data = response.json()
         assert isinstance(data, list)
 
+    def test_image_models_endpoint_lists_only_supported_image_generation_backends(self, client):
+        old_models = core_state.image_generation_models_config
+        old_default = core_state.default_image_generation_model_key
+        try:
+            core_state.image_generation_models_config = {
+                "Image Backend": {
+                    "provider": "openai-images",
+                    "model_name": "gpt-image-1",
+                    "api_type": "openai_images",
+                },
+                "Responses Image Tool": {
+                    "provider": "openai-pro",
+                    "model_name": "gpt-5.4",
+                    "api_type": "openai_responses_image_tool",
+                },
+            }
+            core_state.default_image_generation_model_key = "Responses Image Tool"
+
+            response = client.get("/api/image-models")
+
+            assert response.status_code == 200
+            payload = response.json()
+            assert [model["key"] for model in payload["models"]] == ["Image Backend", "Responses Image Tool"]
+            assert payload["default_model"] == "Responses Image Tool"
+        finally:
+            core_state.image_generation_models_config = old_models
+            core_state.default_image_generation_model_key = old_default
+
 
 class TestThreadOperations:
     """Test thread CRUD operations."""
@@ -721,7 +749,17 @@ class TestMessageOperations:
 
         calls = []
 
-        def fake_generate(workspace, thread_id, prompt, *, model_key, models_path, all_models_path, options):
+        def fake_generate(
+            workspace,
+            thread_id,
+            prompt,
+            *,
+            model_key,
+            models_path,
+            all_models_path,
+            image_generation_models_path,
+            options,
+        ):
             calls.append(
                 {
                     "workspace": Path(workspace),
@@ -730,6 +768,7 @@ class TestMessageOperations:
                     "model_key": model_key,
                     "models_path": Path(models_path),
                     "all_models_path": Path(all_models_path),
+                    "image_generation_models_path": Path(image_generation_models_path),
                     "options": options,
                 }
             )
@@ -775,6 +814,7 @@ class TestMessageOperations:
                 "model_key": "Image Backend",
                 "models_path": calls[0]["models_path"],
                 "all_models_path": calls[0]["all_models_path"],
+                "image_generation_models_path": calls[0]["image_generation_models_path"],
                 "options": {
                     "n": 2,
                     "size": "1024x1024",

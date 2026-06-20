@@ -7,6 +7,6 @@ the real package API here so both editable installs and direct monorepo imports
 behave the same way.
 """
 
-from .eggconfig import get_all_models_path, get_models_path
+from .eggconfig import get_all_models_path, get_image_generation_models_path, get_models_path
 
-__all__ = ["get_models_path", "get_all_models_path"]
+__all__ = ["get_models_path", "get_all_models_path", "get_image_generation_models_path"]

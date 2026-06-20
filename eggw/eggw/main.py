@@ -46,6 +46,9 @@ async def lifespan(app: FastAPI):
 
     # Load models
     core_state.models_config, core_state.default_model_key = load_models_config()
+    core_state.image_generation_models_config, core_state.default_image_generation_model_key = (
+        core.load_image_generation_models_config()
+    )
 
     # Initialize LLM client using the same resolved model paths as the routes,
     # scheduler, and commands.
@@ -56,6 +59,7 @@ async def lifespan(app: FastAPI):
         core_state.llm_client = LLMClient(models_path=models_path, all_models_path=all_models_path)
         print(f"Models config: {models_path}")
         print(f"All-models catalog: {all_models_path}")
+        print(f"Image generation models config: {core_state.IMAGE_GENERATION_MODELS_PATH}")
     except Exception as e:
         print(f"Warning: Could not initialize LLM client: {e}")
         core_state.llm_client = None

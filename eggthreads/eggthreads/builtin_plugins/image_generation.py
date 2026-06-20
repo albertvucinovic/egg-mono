@@ -46,6 +46,19 @@ def _models_path(ctx: ToolContext, key: str, default: str) -> Any:
     return value if value else default
 
 
+def _default_image_generation_models_path(ctx: ToolContext) -> Any:
+    value = ctx.raw.get("image_generation_models_path")
+    if value:
+        return value
+    models_path = _models_path(ctx, "models_path", "models.json")
+    try:
+        from eggllm.config import default_image_generation_models_path
+
+        return default_image_generation_models_path(models_path)
+    except Exception:
+        return Path(models_path).with_name("image-generation-models.json")
+
+
 def _artifact_public_metadata(metadata: Dict[str, Any]) -> dict[str, Any]:
     """Return the concise artifact metadata safe for an LLM-facing result."""
 
@@ -95,6 +108,7 @@ def generate_image_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecution
             model_key=model_key,
             models_path=_models_path(ctx, "models_path", "models.json"),
             all_models_path=_models_path(ctx, "all_models_path", "all-models.json"),
+            image_generation_models_path=_default_image_generation_models_path(ctx),
             options=options,
             timeout=ctx.timeout_sec or 600,
         )

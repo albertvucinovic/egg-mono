@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback, type Dispatch, type SetStateA
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Paperclip, Send, Loader2, Terminal, StopCircle, X, ImageIcon } from "lucide-react";
-import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, generateThreadImage, attachmentUrl } from "@/lib/api";
+import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, generateThreadImage, attachmentUrl, fetchImageGenerationModels } from "@/lib/api";
 import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
 import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, isImageContentPart, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore } from "@/lib/store";
@@ -98,6 +98,14 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   });
   const activeGetUserWait = Boolean(threadState?.active_get_user_wait);
   const getUserWaitingNote = threadState?.get_user_waiting_note;
+
+  const { data: imageModelsData } = useQuery({
+    queryKey: ["imageModels"],
+    queryFn: fetchImageGenerationModels,
+    enabled: showImageForm,
+  });
+  const imageModelOptions = imageModelsData?.models || [];
+  const imageDefaultModel = imageModelsData?.default_model || "";
 
   // Regular message mutation
   const messageMutation = useMutation({
@@ -594,7 +602,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     }
     const request: ImageGenerationRequest = {
       prompt: imagePrompt.trim(),
-      ...(imageModel.trim() ? { model: imageModel.trim() } : {}),
+      ...((imageModel.trim() || imageDefaultModel) ? { model: imageModel.trim() || imageDefaultModel } : {}),
       ...(imageCount ? { n: Number(imageCount) } : {}),
       ...(imageSize.trim() ? { size: imageSize.trim() } : {}),
     };
@@ -805,12 +813,20 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
             <input
               value={imageModel}
               onChange={(e) => setImageModel(e.target.value)}
-              placeholder="Model/backend (optional)"
+              list="image-generation-model-options"
+              placeholder={imageDefaultModel ? `Default: ${imageDefaultModel}` : "Image model (optional)"}
               disabled={!currentThreadId || imageGenerationMutation.isPending}
               className={`rounded px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
               style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               data-testid="image-generation-model"
             />
+            {imageModelOptions.length > 0 && (
+              <datalist id="image-generation-model-options">
+                {imageModelOptions.map((model: { key: string }) => (
+                  <option key={model.key} value={model.key} />
+                ))}
+              </datalist>
+            )}
             <select
               value={imageCount}
               onChange={(e) => setImageCount(e.target.value)}

@@ -3,8 +3,8 @@ from __future__ import annotations
 """Provider-backed image generation helpers.
 
 This module intentionally stays out of the normal chat adapter registry.  Image
-backends are discovered from ``models.json`` by explicit task/model-kind
-metadata and are called through a small service API.
+backends are loaded from the dedicated ``image-generation-models.json`` config
+and reuse provider credentials/base URLs from ``models.json``.
 """
 
 import base64
@@ -16,13 +16,15 @@ import requests
 
 from .capabilities import is_image_generation_model, supports_task_capability
 from .catalog import AllModelsCatalog
-from .config import load_models_config
+from .config import load_image_generation_models_config
 from .provider_http import build_provider_headers
 from .registry import ModelRegistry
 
 IMAGE_GENERATION_TASK = "image_generation"
 OPENAI_IMAGES_API_TYPE = "openai_images"
+OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE = "openai_responses_image_tool"
 OPENAI_IMAGES_GENERATIONS_PATH = "/images/generations"
+OPENAI_RESPONSES_PATH = "/responses"
 OPENAI_IMAGES_OPTION_KEYS = frozenset(
     {
         "background",
@@ -35,6 +37,41 @@ OPENAI_IMAGES_OPTION_KEYS = frozenset(
         "size",
         "style",
         "user",
+    }
+)
+OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS = frozenset(
+    {
+        "background",
+        "moderation",
+        "output_format",
+        "partial_images",
+        "quality",
+        "size",
+    }
+)
+OPENAI_RESPONSES_PAYLOAD_OPTION_KEYS = frozenset(
+    {
+        "max_output_tokens",
+        "max_tokens",
+        "metadata",
+        "parallel_tool_calls",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning",
+        "reasoning_effort",
+        "store",
+        "temperature",
+        "text",
+        "tool_choice",
+        "top_p",
+        "truncation",
+        "user",
+    }
+)
+SUPPORTED_IMAGE_GENERATION_API_TYPES = frozenset(
+    {
+        OPENAI_IMAGES_API_TYPE,
+        OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE,
     }
 )
 
@@ -77,6 +114,18 @@ class OpenAIImagesBackend:
 
 
 @dataclass(frozen=True)
+class OpenAIResponsesImageToolBackend:
+    """Resolved OpenAI Responses image-generation-tool backend configuration."""
+
+    model_key: str
+    provider_name: str
+    provider_config: dict[str, Any]
+    model_config: dict[str, Any]
+    model_name: str
+    url: str
+
+
+@dataclass(frozen=True)
 class GeneratedImage:
     """One provider-generated image and compact non-byte metadata."""
 
@@ -101,8 +150,15 @@ class ImageGenerationResult:
     images: tuple[GeneratedImage, ...]
 
 
-def _load_registry(models_path: str | Path, all_models_path: str | Path) -> ModelRegistry:
-    models_config, providers_config = load_models_config(models_path)
+def _load_registry(
+    models_path: str | Path,
+    all_models_path: str | Path,
+    image_generation_models_path: str | Path | None = None,
+) -> ModelRegistry:
+    models_config, providers_config = load_image_generation_models_config(
+        image_generation_models_path,
+        models_path=models_path,
+    )
     return ModelRegistry(models_config, providers_config, AllModelsCatalog(all_models_path))
 
 
@@ -132,6 +188,45 @@ def _filter_openai_images_options(
     }
 
 
+def _filter_openai_responses_image_tool_options(
+    options: Mapping[str, Any] | None,
+    *,
+    reject_unknown: bool,
+) -> dict[str, Any]:
+    if not isinstance(options, Mapping):
+        return {}
+    unknown = sorted(
+        str(key)
+        for key, value in options.items()
+        if value is not None and str(key) not in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS
+    )
+    if unknown and reject_unknown:
+        joined = ", ".join(unknown)
+        raise ImageGenerationConfigError(f"Unsupported OpenAI Responses image_generation option(s): {joined}")
+    return {
+        str(key): value
+        for key, value in options.items()
+        if value is not None and str(key) in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS
+    }
+
+
+def _filter_openai_responses_payload_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(options, Mapping):
+        return {}
+    payload: dict[str, Any] = {}
+    for key, value in options.items():
+        if value is None or str(key) not in OPENAI_RESPONSES_PAYLOAD_OPTION_KEYS:
+            continue
+        key_text = str(key)
+        if key_text == "max_tokens":
+            payload["max_output_tokens"] = value
+        elif key_text == "reasoning_effort":
+            payload.setdefault("reasoning", {"effort": value})
+        else:
+            payload[key_text] = value
+    return payload
+
+
 def _resolve_openai_images_url(api_base: Any) -> str:
     base = str(api_base or "").strip()
     if not base:
@@ -149,36 +244,27 @@ def _resolve_openai_images_url(api_base: Any) -> str:
     return stripped
 
 
-def resolve_openai_images_backend(
-    model_key: str | None = None,
+def _resolve_openai_responses_url(api_base: Any) -> str:
+    base = str(api_base or "").strip()
+    if not base:
+        raise ImageGenerationConfigError("OpenAI Responses image provider is missing api_base.")
+    stripped = base.rstrip("/")
+    if stripped.endswith(OPENAI_RESPONSES_PATH):
+        return stripped
+    for suffix in ("/chat/completions", "/images/generations", "/images"):
+        if stripped.endswith(suffix):
+            return stripped[: -len(suffix)] + OPENAI_RESPONSES_PATH
+    if stripped.endswith("/v1"):
+        return stripped + OPENAI_RESPONSES_PATH
+    return stripped
+
+
+def _validate_image_generation_backend(
+    registry: ModelRegistry,
+    resolved: str,
     *,
-    registry: ModelRegistry | None = None,
-    models_path: str | Path = "models.json",
-    all_models_path: str | Path = "all-models.json",
-) -> OpenAIImagesBackend:
-    """Resolve and validate an ``api_type: openai_images`` backend.
-
-    If ``model_key`` is omitted, the first configured backend advertising the
-    ``image_generation`` task and ``image_generation`` model kind is selected.
-    The normal chat model selection is not changed.
-    """
-
-    registry = registry or _load_registry(models_path, all_models_path)
-    if model_key:
-        resolved = registry.resolve(model_key)
-        if not resolved:
-            raise ImageGenerationConfigError(f"Unknown image generation model: {model_key}")
-    else:
-        candidates = registry.task_model_keys(IMAGE_GENERATION_TASK, model_kind=IMAGE_GENERATION_TASK)
-        resolved = None
-        for candidate in candidates:
-            candidate_cfg = registry.get_effective_model_config(candidate)
-            if _normalized_api_type(candidate_cfg.get("api_type")) == OPENAI_IMAGES_API_TYPE:
-                resolved = candidate
-                break
-        if not resolved:
-            raise ImageGenerationConfigError("No api_type: openai_images generation backend is configured.")
-
+    expected_api_type: str,
+) -> tuple[dict[str, Any], str, dict[str, Any], str]:
     cfg = registry.get_effective_model_config(resolved)
     if not is_image_generation_model(cfg):
         kind = cfg.get("model_kind") or "chat"
@@ -190,9 +276,9 @@ def resolve_openai_images_backend(
             f"Model '{resolved}' does not advertise task_capabilities including '{IMAGE_GENERATION_TASK}'."
         )
     api_type = _normalized_api_type(cfg.get("api_type"))
-    if api_type != OPENAI_IMAGES_API_TYPE:
+    if api_type != expected_api_type:
         raise ImageGenerationConfigError(
-            f"Model '{resolved}' has api_type '{api_type or 'chat_completions'}', not '{OPENAI_IMAGES_API_TYPE}'."
+            f"Model '{resolved}' has api_type '{api_type or 'chat_completions'}', not '{expected_api_type}'."
         )
 
     provider_name = cfg.get("provider")
@@ -206,6 +292,76 @@ def resolve_openai_images_backend(
     model_name = str(cfg.get("model_name") or "").strip()
     if not model_name:
         raise ImageGenerationConfigError(f"Model '{resolved}' has no model_name.")
+    return dict(cfg), provider_name, provider_config, model_name
+
+
+def _configured_backend_candidates(
+    registry: ModelRegistry,
+    *,
+    expected_api_type: str | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+    default = registry.default_model_key()
+    if isinstance(default, str) and default.strip():
+        resolved_default = _resolve_listed_image_generation_model(registry, default)
+        candidates.append(resolved_default)
+
+    for candidate in registry.task_model_keys(IMAGE_GENERATION_TASK, model_kind=IMAGE_GENERATION_TASK):
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    if expected_api_type is None:
+        return candidates
+    return [
+        candidate
+        for candidate in candidates
+        if _normalized_api_type(registry.get_effective_model_config(candidate).get("api_type")) == expected_api_type
+    ]
+
+
+def _resolve_listed_image_generation_model(registry: ModelRegistry, model_key: str) -> str:
+    if str(model_key or "").strip().lower().startswith("all:"):
+        raise ImageGenerationConfigError(
+            "Image generation models must be listed in image-generation-models.json; "
+            "catalog/all: model handles are only for normal chat model selection."
+        )
+    resolved = registry.resolve(model_key)
+    if not resolved:
+        raise ImageGenerationConfigError(f"Unknown image generation model: {model_key}")
+    return resolved
+
+
+def resolve_openai_images_backend(
+    model_key: str | None = None,
+    *,
+    registry: ModelRegistry | None = None,
+    models_path: str | Path = "models.json",
+    all_models_path: str | Path = "all-models.json",
+    image_generation_models_path: str | Path | None = None,
+) -> OpenAIImagesBackend:
+    """Resolve and validate an ``api_type: openai_images`` backend.
+
+    If ``model_key`` is omitted, the first configured backend advertising the
+    ``image_generation`` task and ``image_generation`` model kind is selected.
+    The normal chat model selection is not changed.
+    """
+
+    registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
+    if model_key:
+        resolved = _resolve_listed_image_generation_model(registry, model_key)
+    else:
+        candidates = _configured_backend_candidates(registry, expected_api_type=OPENAI_IMAGES_API_TYPE)
+        resolved = candidates[0] if candidates else None
+        if not resolved:
+            raise ImageGenerationConfigError(
+                "No api_type: openai_images image generation model is configured in image-generation-models.json."
+            )
+
+    cfg, provider_name, provider_config, model_name = _validate_image_generation_backend(
+        registry,
+        resolved,
+        expected_api_type=OPENAI_IMAGES_API_TYPE,
+    )
     api_base = cfg.get("api_base") or provider_config.get("api_base")
     return OpenAIImagesBackend(
         model_key=resolved,
@@ -214,6 +370,43 @@ def resolve_openai_images_backend(
         model_config=dict(cfg),
         model_name=model_name,
         url=_resolve_openai_images_url(api_base),
+    )
+
+
+def resolve_openai_responses_image_tool_backend(
+    model_key: str | None = None,
+    *,
+    registry: ModelRegistry | None = None,
+    models_path: str | Path = "models.json",
+    all_models_path: str | Path = "all-models.json",
+    image_generation_models_path: str | Path | None = None,
+) -> OpenAIResponsesImageToolBackend:
+    """Resolve and validate an ``api_type: openai_responses_image_tool`` backend."""
+
+    registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
+    if model_key:
+        resolved = _resolve_listed_image_generation_model(registry, model_key)
+    else:
+        candidates = _configured_backend_candidates(registry, expected_api_type=OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE)
+        resolved = candidates[0] if candidates else None
+        if not resolved:
+            raise ImageGenerationConfigError(
+                "No api_type: openai_responses_image_tool image generation model is configured in image-generation-models.json."
+            )
+
+    cfg, provider_name, provider_config, model_name = _validate_image_generation_backend(
+        registry,
+        resolved,
+        expected_api_type=OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE,
+    )
+    api_base = cfg.get("api_base") or provider_config.get("api_base")
+    return OpenAIResponsesImageToolBackend(
+        model_key=resolved,
+        provider_name=provider_name,
+        provider_config=provider_config,
+        model_config=dict(cfg),
+        model_name=model_name,
+        url=_resolve_openai_responses_url(api_base),
     )
 
 
@@ -245,13 +438,13 @@ def _decode_b64_image(value: Any) -> tuple[bytes, str | None]:
         raise ImageGenerationProviderError("OpenAI Images response contains invalid base64 image data.") from e
 
 
-def _response_json(response: Any) -> Mapping[str, Any]:
+def _response_json(response: Any, *, label: str = "OpenAI Images") -> Mapping[str, Any]:
     try:
         body = response.json()
     except Exception as e:
-        raise ImageGenerationProviderError("OpenAI Images response was not valid JSON.") from e
+        raise ImageGenerationProviderError(f"{label} response was not valid JSON.") from e
     if not isinstance(body, Mapping):
-        raise ImageGenerationProviderError("OpenAI Images response JSON must be an object.")
+        raise ImageGenerationProviderError(f"{label} response JSON must be an object.")
     return body
 
 
@@ -339,12 +532,155 @@ def _parse_openai_images_response(
     return response_metadata, tuple(images)
 
 
+def _iter_image_generation_call_items(value: Any):
+    if isinstance(value, Mapping):
+        if value.get("type") == "image_generation_call":
+            yield value
+            return
+        for child in value.values():
+            yield from _iter_image_generation_call_items(child)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_image_generation_call_items(item)
+
+
+def _b64_values_from_response_image_call(item: Mapping[str, Any]) -> list[tuple[Any, str | None, str | None]]:
+    """Return ``(b64, mime_type, revised_prompt)`` candidates from one call item."""
+
+    revised_prompt = item.get("revised_prompt") if isinstance(item.get("revised_prompt"), str) else None
+    candidates: list[tuple[Any, str | None, str | None]] = []
+
+    def add_candidate(value: Any, *, mime_type: Any = None, revised: Any = None) -> None:
+        if isinstance(value, str) and value.strip():
+            mime_text = str(mime_type).split(";", 1)[0].strip().lower() if mime_type else None
+            revised_text = revised if isinstance(revised, str) and revised else revised_prompt
+            candidates.append((value, mime_text or None, revised_text))
+
+    for key in ("result", "b64_json", "image", "data"):
+        value = item.get(key)
+        if isinstance(value, str):
+            add_candidate(value, mime_type=item.get("mime_type") or item.get("content_type"))
+        elif isinstance(value, Mapping):
+            nested_mime = value.get("mime_type") or value.get("content_type") or item.get("mime_type") or item.get("content_type")
+            nested_revised = value.get("revised_prompt") or revised_prompt
+            for nested_key in ("b64_json", "data", "base64", "image"):
+                add_candidate(value.get(nested_key), mime_type=nested_mime, revised=nested_revised)
+        elif isinstance(value, list):
+            for nested in value:
+                if isinstance(nested, str):
+                    add_candidate(nested, mime_type=item.get("mime_type") or item.get("content_type"))
+                elif isinstance(nested, Mapping):
+                    nested_mime = nested.get("mime_type") or nested.get("content_type") or item.get("mime_type") or item.get("content_type")
+                    nested_revised = nested.get("revised_prompt") or revised_prompt
+                    for nested_key in ("b64_json", "data", "base64", "image"):
+                        add_candidate(nested.get(nested_key), mime_type=nested_mime, revised=nested_revised)
+
+    return candidates
+
+
+def _provider_error_message(body: Mapping[str, Any], *, label: str) -> str | None:
+    error = body.get("error")
+    if not error:
+        return None
+    if isinstance(error, Mapping):
+        code = error.get("code") or error.get("type") or "unknown"
+        message = error.get("message") or str(error)
+        return f"{label} error ({code}): {message}"
+    return f"{label} error: {error}"
+
+
+def _parse_openai_responses_image_tool_response(
+    body: Mapping[str, Any],
+    *,
+    backend: OpenAIResponsesImageToolBackend,
+    request_options: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[GeneratedImage, ...]]:
+    provider_error = _provider_error_message(body, label="OpenAI Responses image_generation")
+    if provider_error:
+        raise ImageGenerationProviderError(provider_error)
+
+    response_metadata: dict[str, Any] = {"api_type": OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE}
+    for key in ("id", "created", "created_at", "status", "usage"):
+        value = body.get(key)
+        if value is not None:
+            response_metadata[key] = value
+
+    images: list[GeneratedImage] = []
+    default_mime_type = _mime_type_for_output_format(request_options.get("output_format"))
+    response_id = body.get("id")
+    response_created = body.get("created") if body.get("created") is not None else body.get("created_at")
+    for item in _iter_image_generation_call_items(body.get("output") if "output" in body else body):
+        call_id = item.get("id") or item.get("call_id")
+        call_status = item.get("status")
+        for raw_b64, explicit_mime_type, revised_prompt in _b64_values_from_response_image_call(item):
+            image_bytes, data_url_mime = _decode_b64_image(raw_b64)
+            mime_type = explicit_mime_type or data_url_mime or default_mime_type
+            output_index = len(images)
+            filename = f"generated-{output_index + 1}.{_extension_for_mime_type(mime_type)}"
+            metadata: dict[str, Any] = {
+                "api_type": OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE,
+                "provider": backend.provider_name,
+                "model_key": backend.model_key,
+                "model": backend.model_name,
+                "output_index": output_index,
+                "source": "image_generation_call",
+                "mime_type": mime_type,
+                "filename": filename,
+            }
+            if call_id is not None:
+                metadata["image_generation_call_id"] = call_id
+            if call_status is not None:
+                metadata["image_generation_call_status"] = call_status
+            if revised_prompt:
+                metadata["revised_prompt"] = revised_prompt
+            if response_id is not None:
+                metadata["response_id"] = response_id
+            if response_created is not None:
+                metadata["response_created"] = response_created
+            if request_options:
+                metadata["request_options"] = dict(request_options)
+            images.append(GeneratedImage(data=image_bytes, metadata=metadata))
+
+    if not images:
+        raise ImageGenerationProviderError(
+            "OpenAI Responses image_generation response did not contain image_generation_call image data."
+        )
+
+    return response_metadata, tuple(images)
+
+
+def _select_image_generation_api_type(
+    model_key: str | None,
+    registry: ModelRegistry,
+) -> tuple[str | None, str]:
+    if model_key:
+        resolved = _resolve_listed_image_generation_model(registry, model_key)
+        api_type = _normalized_api_type(registry.get_effective_model_config(resolved).get("api_type"))
+        if api_type not in SUPPORTED_IMAGE_GENERATION_API_TYPES:
+            supported = ", ".join(sorted(SUPPORTED_IMAGE_GENERATION_API_TYPES))
+            raise ImageGenerationConfigError(
+                f"Model '{resolved}' has unsupported image generation api_type '{api_type or 'chat_completions'}'. "
+                f"Supported types: {supported}."
+            )
+        return resolved, api_type
+
+    for candidate in _configured_backend_candidates(registry):
+        api_type = _normalized_api_type(registry.get_effective_model_config(candidate).get("api_type"))
+        if api_type in SUPPORTED_IMAGE_GENERATION_API_TYPES:
+            return candidate, api_type
+    supported = ", ".join(sorted(SUPPORTED_IMAGE_GENERATION_API_TYPES))
+    raise ImageGenerationConfigError(
+        f"No supported image generation backend is configured. Supported api_type values: {supported}."
+    )
+
+
 def generate_openai_images(
     prompt: str,
     *,
     model_key: str | None = None,
     models_path: str | Path = "models.json",
     all_models_path: str | Path = "all-models.json",
+    image_generation_models_path: str | Path | None = None,
     registry: ModelRegistry | None = None,
     options: Mapping[str, Any] | None = None,
     timeout: int = 600,
@@ -362,7 +698,7 @@ def generate_openai_images(
     if not prompt_text:
         raise ValueError("image generation prompt must not be empty")
 
-    registry = registry or _load_registry(models_path, all_models_path)
+    registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
     backend = resolve_openai_images_backend(model_key, registry=registry)
     configured_options = _filter_openai_images_options(
         registry.merge_parameters(backend.model_key),
@@ -381,7 +717,7 @@ def generate_openai_images(
     response = sess.post(backend.url, headers=headers, json=payload, timeout=timeout)
     response.raise_for_status()
     response_metadata, images = _parse_openai_images_response(
-        _response_json(response),
+        _response_json(response, label="OpenAI Images"),
         session=sess,
         timeout=timeout,
         backend=backend,
@@ -398,6 +734,109 @@ def generate_openai_images(
     )
 
 
+def generate_openai_responses_image_tool(
+    prompt: str,
+    *,
+    model_key: str | None = None,
+    models_path: str | Path = "models.json",
+    all_models_path: str | Path = "all-models.json",
+    image_generation_models_path: str | Path | None = None,
+    registry: ModelRegistry | None = None,
+    options: Mapping[str, Any] | None = None,
+    timeout: int = 600,
+    session: Any = None,
+) -> ImageGenerationResult:
+    """Generate images via a separate OpenAI Responses ``image_generation`` tool call.
+
+    This backend is an implementation detail of Egg's ``generate_image`` tool;
+    it is not registered as a normal chat provider tool.
+    """
+
+    prompt_text = str(prompt or "").strip()
+    if not prompt_text:
+        raise ValueError("image generation prompt must not be empty")
+
+    registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
+    backend = resolve_openai_responses_image_tool_backend(model_key, registry=registry)
+
+    configured = registry.merge_parameters(backend.model_key)
+    configured_tool_options = _filter_openai_responses_image_tool_options(configured, reject_unknown=False)
+    configured_payload_options = _filter_openai_responses_payload_options(configured)
+    explicit_tool_options = _filter_openai_responses_image_tool_options(options, reject_unknown=True)
+    request_options = {**configured_tool_options, **explicit_tool_options}
+    image_tool = {"type": "image_generation", **request_options}
+    payload: dict[str, Any] = {
+        "model": backend.model_name,
+        "instructions": "",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt_text}],
+            }
+        ],
+        "tools": [image_tool],
+        "tool_choice": "required",
+        **configured_payload_options,
+    }
+
+    headers = build_provider_headers(backend.provider_name, backend.provider_config, accept_sse=False)
+    sess = session or requests
+    response = sess.post(backend.url, headers=headers, json=payload, timeout=timeout)
+    response.raise_for_status()
+    response_metadata, images = _parse_openai_responses_image_tool_response(
+        _response_json(response, label="OpenAI Responses image_generation"),
+        backend=backend,
+        request_options=request_options,
+    )
+    return ImageGenerationResult(
+        model_key=backend.model_key,
+        provider_name=backend.provider_name,
+        model_name=backend.model_name,
+        prompt=prompt_text,
+        request_options=request_options,
+        response_metadata=response_metadata,
+        images=images,
+    )
+
+
+def generate_images(
+    prompt: str,
+    *,
+    model_key: str | None = None,
+    models_path: str | Path = "models.json",
+    all_models_path: str | Path = "all-models.json",
+    image_generation_models_path: str | Path | None = None,
+    registry: ModelRegistry | None = None,
+    options: Mapping[str, Any] | None = None,
+    timeout: int = 600,
+    session: Any = None,
+) -> ImageGenerationResult:
+    """Generate images through any configured, supported image backend."""
+
+    registry = registry or _load_registry(models_path, all_models_path, image_generation_models_path)
+    resolved_model_key, api_type = _select_image_generation_api_type(model_key, registry)
+    if api_type == OPENAI_IMAGES_API_TYPE:
+        return generate_openai_images(
+            prompt,
+            model_key=resolved_model_key or model_key,
+            registry=registry,
+            options=options,
+            timeout=timeout,
+            session=session,
+        )
+    if api_type == OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE:
+        return generate_openai_responses_image_tool(
+            prompt,
+            model_key=resolved_model_key or model_key,
+            registry=registry,
+            options=options,
+            timeout=timeout,
+            session=session,
+        )
+    raise ImageGenerationConfigError(f"Unsupported image generation api_type: {api_type}")
+
+
 __all__ = [
     "GeneratedImage",
     "IMAGE_GENERATION_TASK",
@@ -407,7 +846,14 @@ __all__ = [
     "ImageGenerationResult",
     "OPENAI_IMAGES_API_TYPE",
     "OPENAI_IMAGES_OPTION_KEYS",
+    "OPENAI_RESPONSES_IMAGE_TOOL_API_TYPE",
+    "OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS",
     "OpenAIImagesBackend",
+    "OpenAIResponsesImageToolBackend",
+    "SUPPORTED_IMAGE_GENERATION_API_TYPES",
+    "generate_images",
     "generate_openai_images",
+    "generate_openai_responses_image_tool",
     "resolve_openai_images_backend",
+    "resolve_openai_responses_image_tool_backend",
 ]

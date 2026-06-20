@@ -36,6 +36,29 @@ def load_models_config() -> Tuple[Dict[str, Any], Optional[str]]:
     return models_config, default_model
 
 
+def load_image_generation_models_config() -> Tuple[Dict[str, Any], Optional[str]]:
+    """Load dedicated image-generation model configuration."""
+
+    from eggllm.catalog import AllModelsCatalog
+    from eggllm.config import load_image_generation_models_config as eggllm_load_image_models
+    from eggllm.registry import ModelRegistry
+
+    image_models_path = state.IMAGE_GENERATION_MODELS_PATH
+    if not image_models_path.exists():
+        return {}, None
+
+    models_config, providers_config = eggllm_load_image_models(
+        image_models_path,
+        models_path=state.MODELS_PATH,
+    )
+    try:
+        registry = ModelRegistry(models_config, providers_config, AllModelsCatalog(state.ALL_MODELS_PATH))
+        default_model = registry.default_model_key()
+    except Exception:
+        default_model = None
+    return models_config, default_model
+
+
 def effective_model_config(key: str, config: dict, llm_client: Any = None) -> dict:
     """Return EggW's best effective model config for filtering/validation."""
 

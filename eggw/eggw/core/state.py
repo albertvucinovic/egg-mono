@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from eggconfig import get_models_path, get_all_models_path
+from eggconfig import get_all_models_path, get_image_generation_models_path, get_models_path
 from eggthreads import ThreadsDB, SubtreeScheduler
 
 # Paths
@@ -59,15 +59,31 @@ def resolve_model_paths(cwd: Path | str | None = None) -> tuple[Path, Path]:
     return models_path, all_models_path
 
 
+def resolve_image_generation_models_path(cwd: Path | str | None = None) -> Path:
+    """Resolve the image-generation-models.json file used by EggW."""
+
+    base = _base_cwd(cwd)
+    packaged_image_models = get_image_generation_models_path().resolve()
+    image_models_path = _env_path("EGG_IMAGE_GENERATION_MODELS_PATH", base)
+    if image_models_path is not None:
+        return image_models_path
+    local_image_models = base / "image-generation-models.json"
+    if local_image_models.exists():
+        return local_image_models.resolve()
+    return packaged_image_models
+
+
 def configure_model_paths(cwd: Path | str | None = None) -> tuple[Path, Path]:
     """Refresh global model path state and return ``(models, all_models)``."""
 
-    global MODELS_PATH, ALL_MODELS_PATH
+    global MODELS_PATH, ALL_MODELS_PATH, IMAGE_GENERATION_MODELS_PATH
     MODELS_PATH, ALL_MODELS_PATH = resolve_model_paths(cwd)
+    IMAGE_GENERATION_MODELS_PATH = resolve_image_generation_models_path(cwd)
     return MODELS_PATH, ALL_MODELS_PATH
 
 
 MODELS_PATH, ALL_MODELS_PATH = resolve_model_paths()
+IMAGE_GENERATION_MODELS_PATH = resolve_image_generation_models_path()
 DB_PATH = Path(".egg/threads.sqlite")
 
 # Global state - initialized in lifespan
@@ -75,6 +91,8 @@ db: Optional[ThreadsDB] = None
 llm_client = None
 models_config: Dict[str, Any] = {}
 default_model_key: Optional[str] = None
+image_generation_models_config: Dict[str, Any] = {}
+default_image_generation_model_key: Optional[str] = None
 
 # Active schedulers: root_thread_id -> {"scheduler": SubtreeScheduler, "task": Task}
 active_schedulers: Dict[str, Dict[str, Any]] = {}

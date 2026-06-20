@@ -58,7 +58,17 @@ def test_image_generate_command_invokes_service_appends_artifact_refs_and_render
 
     calls = []
 
-    def fake_generate(workspace, thread_id, prompt, *, model_key, models_path, all_models_path, options):
+    def fake_generate(
+        workspace,
+        thread_id,
+        prompt,
+        *,
+        model_key,
+        models_path,
+        all_models_path,
+        image_generation_models_path,
+        options,
+    ):
         calls.append(
             {
                 "workspace": Path(workspace),
@@ -67,6 +77,7 @@ def test_image_generate_command_invokes_service_appends_artifact_refs_and_render
                 "model_key": model_key,
                 "models_path": Path(models_path),
                 "all_models_path": Path(all_models_path),
+                "image_generation_models_path": Path(image_generation_models_path),
                 "options": options,
             }
         )
@@ -89,6 +100,7 @@ def test_image_generate_command_invokes_service_appends_artifact_refs_and_render
             "model_key": "Image Backend",
             "models_path": calls[0]["models_path"],
             "all_models_path": calls[0]["all_models_path"],
+            "image_generation_models_path": calls[0]["image_generation_models_path"],
             "options": {
                 "n": 2,
                 "size": "1024x1024",
