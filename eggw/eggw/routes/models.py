@@ -16,6 +16,8 @@ async def get_models():
     """Get available models with default."""
     models = []
     for key, config in core.models_config.items():
+        if not core.is_chat_model_key(key, config, core.llm_client):
+            continue
         models.append(ModelInfo(
             key=key,
             provider=config.get("provider", "unknown"),
@@ -33,6 +35,8 @@ async def set_model(thread_id: str, request: SetModelRequest):
 
     if request.model_key not in core.models_config:
         raise HTTPException(status_code=400, detail="Invalid model key")
+    if not core.is_chat_model_key(request.model_key, core.models_config.get(request.model_key) or {}, core.llm_client):
+        raise HTTPException(status_code=400, detail="Model is not usable for normal chat")
 
     set_thread_model(core.db, thread_id, request.model_key)
     return {"status": "ok", "model_key": request.model_key}

@@ -33,7 +33,7 @@ from .tool_state import (
 from .tools_config import get_thread_tools_config
 from .tool_call_id import normalize_tool_call_id
 from .terminal_safety import sanitize_terminal_text
-from .content_parts import content_to_plain_text
+from .content_parts import content_has_attachments, content_to_plain_text
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -1078,10 +1078,12 @@ class ThreadRunner:
         # back to the LLM client's current_model_key if needed.
         current_model: Optional[str] = None
         concrete_model_info: Optional[Dict[str, Any]] = None
+        current_model_from_thread = False
         try:
             from .api import current_thread_model, current_thread_model_info
             current_model = current_thread_model(self.db, self.thread_id)
             concrete_model_info = current_thread_model_info(self.db, self.thread_id)
+            current_model_from_thread = bool(current_model)
         except Exception:
             current_model = None
             concrete_model_info = None
@@ -1094,7 +1096,8 @@ class ThreadRunner:
         # For LLM turns, configure the underlying client before we start
         # streaming so that the model used for the provider call matches
         # the model we record in events.
-        if ra.kind == 'RA1_llm' and current_model:
+        deferred_model_selection_error: Optional[Exception] = None
+        if ra.kind == 'RA1_llm' and current_model and current_model_from_thread:
             try:
                 if concrete_model_info:
                     # Try set_model_with_config if available (eggllm >= 0.1.0)
@@ -1104,8 +1107,11 @@ class ThreadRunner:
                         self.llm.set_model(current_model)
                 else:
                     self.llm.set_model(current_model)
-            except Exception:
-                pass
+            except Exception as e:
+                # Do not continue with a mismatched llm.current_model_key while
+                # recording events as current_model.  Surface the error through
+                # the normal stream/error path after stream.open is persisted.
+                deferred_model_selection_error = e
 
         # Open streaming event tagged with model_key and kind so that
         # downstream boundary detection can distinguish RA1 from
@@ -1163,6 +1169,9 @@ class ThreadRunner:
         ra1_emitted_assistant_tool_calls = False
         try:
             if ra.kind == 'RA1_llm':
+                if deferred_model_selection_error is not None:
+                    raise deferred_model_selection_error
+
                 # Check context limit before making LLM call
                 if context_limit:
                     try:
@@ -1635,7 +1644,7 @@ class ThreadRunner:
                         continue
                     r = m.get('role')
                     content = m.get('content', '')
-                    content_text = content_to_plain_text(content)
+                    tool_content_text = content_to_plain_text(content)
                     # Compute optional thinking text according to policy
                     thinking_text = _maybe_include_reasoning(m, idx)
                     encrypted_thinking_val = _maybe_include_encrypted_thinking(m, idx)
@@ -1654,9 +1663,13 @@ class ThreadRunner:
                         # (e.g., StepFun) even when empty.
                         msg_out: Dict[str, Any] = {
                             'role': 'assistant',
-                            'content': content_text,
+                            'content': content,
                             'tool_calls': tcs,
                         }
+                        if m.get('msg_id'):
+                            msg_out['msg_id'] = m.get('msg_id')
+                        if m.get('event_seq') is not None:
+                            msg_out['event_seq'] = m.get('event_seq')
                         if thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
                         elif encrypted_thinking_val is not None:
@@ -1667,7 +1680,11 @@ class ThreadRunner:
                         _passthrough_provider_fields(m, msg_out)
                         base_messages.append(msg_out)
                     elif r == 'tool':
-                        obj = {'role': 'tool', 'content': content_text}
+                        obj = {'role': 'tool', 'content': tool_content_text}
+                        if m.get('msg_id'):
+                            obj['msg_id'] = m.get('msg_id')
+                        if m.get('event_seq') is not None:
+                            obj['event_seq'] = m.get('event_seq')
                         if m.get('name'):
                             obj['name'] = m.get('name')
                         if m.get('tool_call_id'):
@@ -1679,7 +1696,11 @@ class ThreadRunner:
                             obj['user_tool_call'] = m.get('user_tool_call')
                         base_messages.append(obj)
                     elif r in ('system', 'user', 'assistant'):
-                        msg_out: Dict[str, Any] = {'role': r, 'content': content_text}
+                        msg_out: Dict[str, Any] = {'role': r, 'content': content}
+                        if m.get('msg_id'):
+                            msg_out['msg_id'] = m.get('msg_id')
+                        if m.get('event_seq') is not None:
+                            msg_out['event_seq'] = m.get('event_seq')
                         if r == 'assistant' and thinking_text is not None:
                             msg_out[out_thinking_key] = thinking_text
                         elif r == 'assistant' and encrypted_thinking_val is not None:
@@ -1701,9 +1722,8 @@ class ThreadRunner:
             snap_has_last = False
         if not snap_has_last:
             if not payload.get('no_api'):
-                user_content_text = content_to_plain_text(user_content)
                 if role == 'tool':
-                    obj = {'role': 'tool', 'content': user_content_text}
+                    obj = {'role': 'tool', 'content': content_to_plain_text(user_content)}
                     if payload.get('name'):
                         obj['name'] = payload.get('name')
                     if payload.get('tool_call_id'):
@@ -1712,7 +1732,12 @@ class ThreadRunner:
                         obj['user_tool_call'] = payload.get('user_tool_call')
                     base_messages.append(obj)
                 else:
-                    base_messages.append({'role': 'user', 'content': user_content_text})
+                    msg_out = {'role': 'user', 'content': user_content}
+                    if ev.get('msg_id'):
+                        msg_out['msg_id'] = ev.get('msg_id')
+                    if ev.get('event_seq') is not None:
+                        msg_out['event_seq'] = ev.get('event_seq')
+                    base_messages.append(msg_out)
 
 
         assistant_text_parts: List[str] = []
@@ -1741,6 +1766,46 @@ class ThreadRunner:
         # stream.delta payloads.
         tool_calls_args_so_far: Dict[str, str] = {}
         tool_calls_names_so_far: Dict[str, str] = {}
+
+        # Lower Egg-native attachment content parts at the provider boundary.
+        # Current-turn unsupported attachments fail fast; older unsupported
+        # attachments become explicit textual placeholders.
+        try:
+            from .attachment_lowering import AttachmentLoweringContext, lower_messages_for_provider
+
+            model_cfg: Dict[str, Any] = {}
+            try:
+                if hasattr(self.llm, 'registry') and hasattr(self.llm, 'current_model_key'):
+                    if hasattr(self.llm.registry, 'get_effective_model_config'):
+                        model_cfg = self.llm.registry.get_effective_model_config(self.llm.current_model_key)
+                    else:
+                        model_cfg = self.llm.registry.get_model_config(self.llm.current_model_key)
+            except Exception:
+                model_cfg = {}
+            api_type = str(model_cfg.get('api_type') or 'chat_completions') if isinstance(model_cfg, dict) else 'chat_completions'
+            base_messages = lower_messages_for_provider(
+                base_messages,
+                AttachmentLoweringContext(
+                    workspace=Path.cwd().resolve(),
+                    db=self.db,
+                    calling_thread_id=self.thread_id,
+                    model_key=current_model,
+                    model_config=model_cfg,
+                    provider_api_type=api_type,
+                ),
+                current_msg_id=str(ev.get('msg_id') or '') or None,
+            )
+        except Exception:
+            raise
+
+        # Fail fast for any current-turn attachment that survived lowering
+        # (for example because a future provider path bypasses a case). Older
+        # attachments are already text placeholders.
+        current_id = str(ev.get('msg_id') or '')
+        for m in base_messages:
+            if isinstance(m, dict) and current_id and m.get('msg_id') == current_id:
+                if content_has_attachments(m.get('content'), validate=False):
+                    raise ValueError("Current message contains attachments that could not be lowered for this model/provider.")
 
         # Final sanitation step before calling the provider: make sure that
         # user messages never carry "tool_calls" fields and that tool
@@ -2256,7 +2321,7 @@ class ThreadRunner:
                 m2.pop("tool_calls", None)
 
             content_value = m2.get("content")
-            if isinstance(content_value, list):
+            if isinstance(content_value, list) and content_has_attachments(content_value, validate=False):
                 m2["content"] = content_to_plain_text(content_value)
 
             # For real tool outputs (role="tool" in the tools protocol),

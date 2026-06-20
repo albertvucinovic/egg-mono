@@ -70,6 +70,9 @@ def test_stream_chat_strips_usage_metadata_from_provider_payload(tmp_path: Path,
             "content": "answer",
             "api_usage": {"total_input_tokens": 1},
             "provider_usage": {"prompt_tokens": 1},
+            "msg_id": "m1",
+            "event_seq": 123,
+            "ts": "2026-01-01T00:00:00Z",
         },
     ]
 
@@ -78,6 +81,9 @@ def test_stream_chat_strips_usage_metadata_from_provider_payload(tmp_path: Path,
     sent_messages = adapter.payloads[0]["messages"]
     assert all("api_usage" not in m for m in sent_messages)
     assert all("provider_usage" not in m for m in sent_messages)
+    assert all("msg_id" not in m for m in sent_messages)
+    assert all("event_seq" not in m for m in sent_messages)
+    assert all("ts" not in m for m in sent_messages)
 
 
 def test_astream_chat_strips_usage_metadata_from_provider_payload(tmp_path: Path, monkeypatch):

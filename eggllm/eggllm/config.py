@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from typing import Dict, Tuple, Any
 
+from .capabilities import CAPABILITY_METADATA_KEYS
+
 
 TEMPLATE_GUIDE = r'''
 Your models.json can be organized by provider like this:
@@ -62,6 +64,9 @@ def load_models_config(models_path: str | Path) -> Tuple[Dict[str, Dict[str, Any
                 providers_config[prov_name]["auth_type"] = auth_type
             if parameters:
                 providers_config[prov_name]["parameters"] = parameters
+            for key in CAPABILITY_METADATA_KEYS:
+                if key in prov_obj:
+                    providers_config[prov_name][key] = prov_obj[key]
 
             models_map = prov_obj.get("models", {})
             if isinstance(models_map, dict):

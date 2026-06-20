@@ -39,6 +39,7 @@ from eggthreads.command_catalog import (  # type: ignore
     command_completion_names,
 )
 from eggthreads.content_parts import content_to_plain_text
+from eggllm.capabilities import is_chat_model
 
 
 class ModelCompleter(Completer):
@@ -61,6 +62,20 @@ class ModelCompleter(Completer):
         ns = re.sub(r"\s+", " ", ns)
         return ns
 
+    def _is_chat_provider(self, provider: str) -> bool:
+        try:
+            cfg = (getattr(getattr(self.llm, 'registry', None), 'providers_config', {}) or {}).get(provider) or {}
+            return is_chat_model(cfg)
+        except Exception:
+            return True
+
+    def _is_chat_all_suggestion(self, suggestion: str) -> bool:
+        if not isinstance(suggestion, str) or not suggestion.lower().startswith('all:'):
+            return True
+        rest = suggestion[4:]
+        provider = rest.split(':', 1)[0] if rest else ''
+        return self._is_chat_provider(provider) if provider else True
+
     def get_completions(self, document, complete_event) -> Iterable[Completion]:  # type: ignore
         text = getattr(document, 'text_before_cursor', '')
         if not isinstance(text, str) or not text.startswith('/model '):
@@ -76,6 +91,8 @@ class ModelCompleter(Completer):
         if prefix.lower().startswith('all:'):
             try:
                 for s in llm.catalog.get_all_models_suggestions(prefix):
+                    if not self._is_chat_all_suggestion(s):
+                        continue
                     yield Completion(s, start_position=-len(prefix))
             except Exception:
                 pass
@@ -83,7 +100,13 @@ class ModelCompleter(Completer):
 
         # Configured display names
         try:
-            display_names = list((llm.registry.models_config or {}).keys())
+            display_names = [
+                name for name, cfg in (llm.registry.models_config or {}).items()
+                if is_chat_model(
+                    llm.registry.get_effective_model_config(name)
+                    if hasattr(llm.registry, 'get_effective_model_config') else cfg
+                )
+            ]
         except Exception:
             display_names = []
         for name in sorted(display_names):
@@ -94,7 +117,13 @@ class ModelCompleter(Completer):
 
         # provider:name and provider:alias
         try:
-            items = list((llm.registry.models_config or {}).items())
+            items = [
+                (name, cfg) for name, cfg in (llm.registry.models_config or {}).items()
+                if is_chat_model(
+                    llm.registry.get_effective_model_config(name)
+                    if hasattr(llm.registry, 'get_effective_model_config') else cfg
+                )
+            ]
         except Exception:
             items = []
         for display, cfg in items:
@@ -125,6 +154,8 @@ class ModelCompleter(Completer):
         if pref_norm:
             try:
                 for prov in (llm.get_providers() or []):
+                    if not self._is_chat_provider(prov):
+                        continue
                     mids = llm.catalog.get_all_models_for_provider(prov) or []
                     for mid in mids:
                         cand = f"all:{prov}:{mid}"

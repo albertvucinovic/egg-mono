@@ -7,7 +7,13 @@ from .state import (
     init_db,
     get_db,
 )
-from .config import load_models_config, shorten_output_preview
+from .config import (
+    chat_model_keys,
+    effective_model_config,
+    is_chat_model_key,
+    load_models_config,
+    shorten_output_preview,
+)
 from .scheduler import (
     get_thread_root_id,
     start_scheduler,
@@ -41,6 +47,9 @@ __all__ = [
     # Config
     "load_models_config",
     "shorten_output_preview",
+    "effective_model_config",
+    "is_chat_model_key",
+    "chat_model_keys",
     # Scheduler
     "get_thread_root_id",
     "start_scheduler",

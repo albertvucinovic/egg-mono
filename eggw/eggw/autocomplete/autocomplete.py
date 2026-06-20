@@ -99,7 +99,7 @@ async def get_autocomplete(
                     # Split into words and check if all words are found in the model name
                     # or in the provider:model string
                     words = arg_stripped.lower().split()
-                    for key in sorted(core.models_config.keys()):
+                    for key in sorted(core.chat_model_keys(core.models_config, core.llm_client)):
                         cfg = core.models_config.get(key, {})
                         provider = cfg.get("provider", "")
                         searchable = f"{provider}:{key}".lower()
@@ -112,7 +112,7 @@ async def get_autocomplete(
                             })
                 else:
                     # No argument - show all models
-                    for key in sorted(core.models_config.keys()):
+                    for key in sorted(core.chat_model_keys(core.models_config, core.llm_client)):
                         cfg = core.models_config.get(key, {})
                         provider = cfg.get("provider", "")
                         suggestions.append({

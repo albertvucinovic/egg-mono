@@ -119,6 +119,23 @@ class TestMessageConversion:
 
         assert instructions == "Part 1.\nPart 2."
 
+    def test_input_text_array_in_system_message(self):
+        """Already-lowered Responses text parts should remain instructions."""
+        messages = [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "input_text", "text": "Part 1."},
+                    {"type": "input_text", "text": "Part 2."},
+                ],
+            },
+            {"role": "user", "content": "Hello"},
+        ]
+        instructions, input_items = self.adapter._convert_messages_to_input(messages)
+
+        assert instructions == "Part 1.\nPart 2."
+        assert len(input_items) == 1
+
     def test_tool_result_with_none_call_id_skipped(self):
         """Tool results with None tool_call_id should be skipped."""
         messages = [

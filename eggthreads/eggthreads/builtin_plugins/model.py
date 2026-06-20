@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from eggllm.catalog import format_update_all_models_text
+from eggllm.capabilities import is_chat_model
 
 from ..plugins import PluginContext
 
@@ -126,6 +127,14 @@ def model_command(context: Any, arg: str):
         else:
             by_provider: Dict[str, List[str]] = {}
             for name, cfg in (llm.registry.models_config or {}).items():
+                effective = cfg
+                if hasattr(llm.registry, "get_effective_model_config"):
+                    try:
+                        effective = llm.registry.get_effective_model_config(name)
+                    except Exception:
+                        effective = cfg
+                if not is_chat_model(effective):
+                    continue
                 prov = cfg.get("provider", "unknown")
                 by_provider.setdefault(prov, []).append(name)
             lines: List[str] = []

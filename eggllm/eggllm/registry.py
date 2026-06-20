@@ -1,5 +1,7 @@
 from typing import Dict, Any, Optional, List
 
+from .capabilities import effective_model_config, is_chat_model, model_metadata
+
 
 class ModelRegistry:
     def __init__(self, models_config: Dict[str, Dict[str, Any]], providers_config: Dict[str, Dict[str, Any]], catalog):
@@ -16,11 +18,29 @@ class ModelRegistry:
             by_provider.setdefault(prov, []).append(name)
         return by_provider
 
+    def chat_model_keys(self) -> List[str]:
+        """Return configured display keys usable for normal chat turns."""
+
+        return [name for name in self.models_config.keys() if is_chat_model(self.get_effective_model_config(name))]
+
     def default_model_key(self) -> Optional[str]:
         meta = self.providers_config.get("_meta")
         if isinstance(meta, dict):
             return meta.get("default_model")
         return None
+
+    def default_chat_model_key(self) -> Optional[str]:
+        """Return the conversational default, never a non-chat model kind."""
+
+        keys = self.chat_model_keys()
+        default = self.default_model_key()
+        if default:
+            resolved = self.resolve(default)
+            if resolved and is_chat_model(self.get_effective_model_config(resolved)):
+                return resolved
+            # Configured default exists but is not a chat model.  Do not pick
+            # it for normal conversations; fall back to the first chat entry.
+        return keys[0] if keys else None
 
     def _add_ephemeral(self, prov: str, mid: str) -> str:
         virtual_key = f"all:{prov}:{mid}"
@@ -67,6 +87,14 @@ class ModelRegistry:
 
     def get_model_config(self, display_key: str) -> Dict[str, Any]:
         return self.models_config.get(display_key) or {}
+
+    def get_effective_model_config(self, display_key: str) -> Dict[str, Any]:
+        cfg = self.get_model_config(display_key)
+        provider = cfg.get("provider") if isinstance(cfg, dict) else None
+        return effective_model_config(self.provider_config(provider), cfg)
+
+    def get_model_metadata(self, display_key: str) -> Dict[str, Any]:
+        return model_metadata(self.get_effective_model_config(display_key))
 
     def model_options(self, display_key: str) -> Dict[str, Any]:
         """Return per-model options dict for the given display key.

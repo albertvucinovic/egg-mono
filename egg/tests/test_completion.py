@@ -123,6 +123,7 @@ class TestModelCompleter:
     def test_handles_all_prefix(self):
         """Should handle all: prefix for catalog suggestions."""
         mock_llm = MagicMock()
+        mock_llm.registry.providers_config = {}
         mock_llm.catalog.get_all_models_suggestions = MagicMock(
             return_value=['all:openai:gpt-4', 'all:openai:gpt-3.5-turbo']
         )
@@ -134,6 +135,24 @@ class TestModelCompleter:
 
         texts = [c.text for c in completions]
         assert 'all:openai:gpt-4' in texts
+
+    def test_all_prefix_filters_non_chat_providers(self):
+        """Catalog suggestions should omit providers configured as non-chat."""
+        mock_llm = MagicMock()
+        mock_llm.registry.providers_config = {
+            'openai': {},
+            'openai-images': {'model_kind': 'image_generation'},
+        }
+        mock_llm.catalog.get_all_models_suggestions = MagicMock(
+            return_value=['all:openai:gpt-4o', 'all:openai-images:gpt-image-1']
+        )
+
+        completer = ModelCompleter(mock_llm)
+        doc = MockDocument("/model all:")
+
+        texts = [c.text for c in completer.get_completions(doc, None)]
+        assert 'all:openai:gpt-4o' in texts
+        assert 'all:openai-images:gpt-image-1' not in texts
 
 
 class TestEggCompleter:

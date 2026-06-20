@@ -64,7 +64,8 @@ async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
 async def cmd_new_thread(name: str) -> CommandResponse:
     """Handle /newThread command."""
     models_path = str(MODELS_PATH)
-    model_key = core.default_model_key or next(iter(core.models_config.keys()), None)
+    chat_keys = core.chat_model_keys(core.models_config, core.llm_client)
+    model_key = core.default_model_key or (chat_keys[0] if chat_keys else None)
 
     thread_id = create_root_thread(
         core.db,

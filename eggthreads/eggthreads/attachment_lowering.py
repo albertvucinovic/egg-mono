@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+"""Provider-bound lowering for Egg attachment content parts.
+
+This module is deliberately narrow for Phase 3: image attachments can lower to
+OpenAI Chat Completions or OpenAI Responses only when the selected chat model
+explicitly advertises image support.  Other attachments fail fast for the
+current/new trigger message and become textual placeholders in older history.
+"""
+
+import base64
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List
+
+from eggllm.capabilities import supports_attachment_presentation
+
+from .content_parts import (
+    ATTACHMENT_PART_TYPE,
+    TEXT_PART_TYPE,
+    content_has_attachments,
+    content_to_plain_text,
+    format_attachment_placeholder,
+    validate_content_parts,
+)
+from .input_artifacts import resolve_input_bytes
+
+
+class AttachmentLoweringError(ValueError):
+    """Raised when current-turn attachments cannot be lowered safely."""
+
+
+@dataclass(frozen=True)
+class AttachmentLoweringContext:
+    workspace: Path
+    db: Any
+    calling_thread_id: str
+    model_key: str | None
+    model_config: Mapping[str, Any]
+    provider_api_type: str
+
+
+def message_has_attachments(message: Mapping[str, Any]) -> bool:
+    return content_has_attachments(message.get("content"), validate=False)
+
+
+def _is_image_attachment(part: Mapping[str, Any]) -> bool:
+    return str(part.get("type") or "") == ATTACHMENT_PART_TYPE and str(part.get("presentation") or "").lower() == "image"
+
+
+def _data_url(part: Mapping[str, Any], data: bytes) -> str:
+    mime_type = str(part.get("mime_type") or "application/octet-stream").strip().lower() or "application/octet-stream"
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _owner_selector(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> str | None:
+    owner = str(part.get("owner_thread_id") or "").strip()
+    if not owner or owner == ctx.calling_thread_id:
+        return None
+    # Phase 3 provider lowering should normally resolve current thread inputs.
+    # If history legitimately includes descendant-owned records in an ancestor
+    # context, use the same explicit descendant selector as Phase 1 helpers.
+    return owner
+
+
+def _metadata_mismatch(field: str, part_value: Any, metadata_value: Any) -> AttachmentLoweringError:
+    return AttachmentLoweringError(
+        f"Attachment metadata mismatch for {field}: content part has {part_value!r}, "
+        f"stored input metadata has {metadata_value!r}."
+    )
+
+
+def _resolve_attachment_bytes(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> bytes:
+    descendant = _owner_selector(ctx, part)
+    metadata, data = resolve_input_bytes(
+        ctx.workspace,
+        ctx.db,
+        ctx.calling_thread_id,
+        str(part.get("input_id") or ""),
+        descendant_thread_id=descendant,
+    )
+    # Content parts are durable references to input metadata, not independent
+    # authority about the stored bytes.  Verify the provider-bound presentation
+    # still matches the access-checked input record before using it to choose a
+    # MIME/type-specific provider shape.
+    for field in ("owner_thread_id", "presentation", "mime_type", "filename", "size_bytes", "sha256"):
+        if part.get(field) != metadata.get(field):
+            raise _metadata_mismatch(field, part.get(field), metadata.get(field))
+    return data
+
+
+def _unsupported_message(part: Mapping[str, Any], ctx: AttachmentLoweringContext, reason: str) -> str:
+    filename = part.get("filename") or "(unnamed)"
+    presentation = part.get("presentation") or "file"
+    mime_type = part.get("mime_type") or "application/octet-stream"
+    model = ctx.model_key or "current model"
+    return f"Attachment {filename} ({presentation} {mime_type}) cannot be sent to {model}: {reason}."
+
+
+def _can_lower_image(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> bool:
+    return supports_attachment_presentation(
+        ctx.model_config,
+        "image",
+        mime_type=str(part.get("mime_type") or ""),
+    )
+
+
+def _placeholder(part: Mapping[str, Any]) -> str:
+    try:
+        return format_attachment_placeholder(part, validate=False)
+    except Exception:
+        return str(part)
+
+
+def _lower_text_part(part: Mapping[str, Any], provider_api_type: str) -> Dict[str, Any] | str:
+    text = part.get("text") if isinstance(part.get("text"), str) else ""
+    if provider_api_type == "responses":
+        return {"type": "input_text", "text": text}
+    return {"type": "text", "text": text}
+
+
+def _lower_image_part(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> Dict[str, Any]:
+    data_url = _data_url(part, _resolve_attachment_bytes(ctx, part))
+    if ctx.provider_api_type == "responses":
+        out: Dict[str, Any] = {"type": "input_image", "image_url": data_url}
+    else:
+        out = {"type": "image_url", "image_url": {"url": data_url}}
+    options = part.get("options")
+    if isinstance(options, Mapping):
+        detail = options.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            if ctx.provider_api_type == "responses":
+                out["detail"] = detail.strip()
+            else:
+                out["image_url"]["detail"] = detail.strip()  # type: ignore[index]
+    return out
+
+
+def _lower_content_array(
+    ctx: AttachmentLoweringContext,
+    content: list[dict[str, Any]],
+    *,
+    current_message: bool,
+) -> list[Any] | str:
+    parts = validate_content_parts(content)
+    if not any(part.get("type") == ATTACHMENT_PART_TYPE for part in parts):
+        return content_to_plain_text(parts)
+
+    lowered: List[Any] = []
+    for part in parts:
+        part_type = part.get("type")
+        if part_type == TEXT_PART_TYPE:
+            lowered.append(_lower_text_part(part, ctx.provider_api_type))
+            continue
+        if part_type != ATTACHMENT_PART_TYPE:
+            if current_message:
+                raise AttachmentLoweringError(f"Unsupported content part type: {part_type}")
+            lowered.append({"type": "text", "text": content_to_plain_text([part])})
+            continue
+        if _is_image_attachment(part) and ctx.provider_api_type in {"chat_completions", "responses"} and _can_lower_image(ctx, part):
+            try:
+                lowered.append(_lower_image_part(ctx, part))
+            except Exception as e:
+                if current_message:
+                    if isinstance(e, AttachmentLoweringError):
+                        raise
+                    raise AttachmentLoweringError(_unsupported_message(part, ctx, str(e))) from e
+                lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": _placeholder(part)}, ctx.provider_api_type))
+            continue
+        # TODO(Phase 3+): add Anthropic-native image lowering and document/file
+        # provider upload/lowering.  This slice intentionally supports only
+        # OpenAI Chat/Responses image data URLs.
+        reason = "unsupported attachment type or missing image capability"
+        if current_message:
+            raise AttachmentLoweringError(_unsupported_message(part, ctx, reason))
+        lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": _placeholder(part)}, ctx.provider_api_type))
+
+    if (
+        not current_message
+        and not any(isinstance(item, dict) and item.get("type") in {"image_url", "input_image"} for item in lowered)
+    ):
+        return "\n".join(str(item.get("text") or "") for item in lowered)
+    return lowered
+
+
+def lower_message_attachments_for_provider(
+    message: Mapping[str, Any],
+    ctx: AttachmentLoweringContext,
+    *,
+    current_message: bool,
+) -> Dict[str, Any]:
+    """Return a provider-safe copy of one message.
+
+    ``current_message=True`` means attachment lowering failures are user-facing
+    fail-fast errors.  Older context messages may fall back to textual
+    placeholders instead.
+    """
+
+    out = dict(message)
+    content = out.get("content")
+    if isinstance(content, list):
+        out["content"] = _lower_content_array(ctx, content, current_message=current_message)
+    return out
+
+
+def lower_messages_for_provider(
+    messages: List[Dict[str, Any]],
+    ctx: AttachmentLoweringContext,
+    *,
+    current_msg_id: str | None = None,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        msg_id = message.get("msg_id")
+        current = bool(current_msg_id and msg_id == current_msg_id)
+        if current_msg_id is None:
+            current = index == len(messages) - 1
+        out.append(lower_message_attachments_for_provider(message, ctx, current_message=current))
+    return out
+
+
+__all__ = [
+    "AttachmentLoweringContext",
+    "AttachmentLoweringError",
+    "lower_message_attachments_for_provider",
+    "lower_messages_for_provider",
+    "message_has_attachments",
+]

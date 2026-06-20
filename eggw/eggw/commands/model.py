@@ -21,9 +21,11 @@ async def cmd_model(thread_id: str, model_name: str) -> CommandResponse:
         )
 
     # Check if model exists
-    if model_name not in core.models_config:
+    chat_models = {k: core.models_config[k] for k in core.chat_model_keys(core.models_config, core.llm_client)}
+
+    if model_name not in chat_models:
         # Try partial match
-        matches = [k for k in core.models_config.keys() if model_name.lower() in k.lower()]
+        matches = [k for k in chat_models.keys() if model_name.lower() in k.lower()]
         if len(matches) == 1:
             model_name = matches[0]
         elif len(matches) > 1:
@@ -36,7 +38,6 @@ async def cmd_model(thread_id: str, model_name: str) -> CommandResponse:
                 success=False,
                 message=f"Unknown model: {model_name}",
             )
-
     set_thread_model(core.db, thread_id, model_name)
     return CommandResponse(
         success=True,

@@ -47,7 +47,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         instructions = content
                     elif isinstance(content, list):
                         # Handle content arrays (e.g., with text parts)
-                        text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                        text_parts = [
+                            p.get("text", "")
+                            for p in content
+                            if isinstance(p, dict) and p.get("type") in ("text", "input_text")
+                        ]
                         instructions = "\n".join(text_parts)
                     else:
                         instructions = str(content)

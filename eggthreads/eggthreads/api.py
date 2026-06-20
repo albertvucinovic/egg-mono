@@ -26,16 +26,69 @@ def _get_default_model_key(models_path: str = "models.json") -> Optional[str]:
         return env_model
     if not os.path.exists(models_path):
         return None
+    if EGGLLM_AVAILABLE:
+        try:
+            models_config, providers_config = load_models_config(models_path)
+            registry = ModelRegistry(models_config, providers_config, None)
+            default_chat = registry.default_chat_model_key()
+            if default_chat:
+                return default_chat
+        except Exception:
+            pass
     try:
         with open(models_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if isinstance(data, dict):
             dm = data.get('default_model')
             if isinstance(dm, str) and dm.strip():
-                return dm.strip()
+                providers = data.get('providers')
+                if isinstance(providers, dict):
+                    for provider_cfg in providers.values():
+                        if not isinstance(provider_cfg, dict):
+                            continue
+                        provider_kind = _raw_provider_model_kind(provider_cfg)
+                        models = provider_cfg.get('models')
+                        if not isinstance(models, dict) or dm not in models:
+                            continue
+                        model_cfg = models.get(dm)
+                        if not _raw_model_is_chat(model_cfg, provider_kind):
+                            break
+                        return dm.strip()
+                else:
+                    return dm.strip()
+            providers = data.get('providers')
+            if isinstance(providers, dict):
+                for provider_cfg in providers.values():
+                    if not isinstance(provider_cfg, dict):
+                        continue
+                    provider_kind = _raw_provider_model_kind(provider_cfg)
+                    models = provider_cfg.get('models')
+                    if not isinstance(models, dict):
+                        continue
+                    for name, model_cfg in models.items():
+                        if not isinstance(name, str) or not name.strip():
+                            continue
+                        if not _raw_model_is_chat(model_cfg, provider_kind):
+                            continue
+                        return name.strip()
     except Exception:
         pass
     return None
+
+
+def _normalize_model_kind(value: Any) -> str:
+    return str(value or 'chat').strip().lower().replace('-', '_') or 'chat'
+
+
+def _raw_provider_model_kind(provider_cfg: Mapping[str, Any]) -> str:
+    return _normalize_model_kind(provider_cfg.get('model_kind') if isinstance(provider_cfg, Mapping) else None)
+
+
+def _raw_model_is_chat(model_cfg: Any, provider_kind: str = 'chat') -> bool:
+    if isinstance(model_cfg, Mapping):
+        return _normalize_model_kind(model_cfg.get('model_kind') or provider_kind) == 'chat'
+    # String shorthand models inherit the provider-level kind.
+    return _normalize_model_kind(provider_kind) == 'chat'
 
 
 def _utcnow_iso() -> str:
@@ -69,7 +122,15 @@ def validate_model_handle(model_handle: str, models_path: str = "models.json",
             catalog = AllModelsCatalog(all_models_path)
             registry = ModelRegistry(models_config, providers_config, catalog)
             resolved = registry.resolve(model_handle)
-            return resolved is not None
+            if resolved is None:
+                return False
+            try:
+                from eggllm.capabilities import is_chat_model
+
+                cfg = registry.get_effective_model_config(resolved) if hasattr(registry, 'get_effective_model_config') else registry.get_model_config(resolved)
+                return is_chat_model(cfg)
+            except Exception:
+                return True
         except Exception:
             pass
 
@@ -85,6 +146,10 @@ def validate_model_handle(model_handle: str, models_path: str = "models.json",
         for provider_data in providers.values():
             models = provider_data.get('models', {})
             if model_handle in models:
+                provider_kind = _raw_provider_model_kind(provider_data) if isinstance(provider_data, Mapping) else 'chat'
+                model_cfg = models.get(model_handle)
+                if not _raw_model_is_chat(model_cfg, provider_kind):
+                    return False
                 return True
         # Fallback for all: prefix - if it starts with all:provider:model, accept it
         # as long as the provider exists in models.json
@@ -92,6 +157,9 @@ def validate_model_handle(model_handle: str, models_path: str = "models.json",
             rest = model_handle[4:]
             if ':' in rest:
                 prov = rest.split(':', 1)[0]
+                provider_cfg = providers.get(prov)
+                if isinstance(provider_cfg, dict) and _raw_provider_model_kind(provider_cfg) != 'chat':
+                    return False
                 if prov in providers:
                     return True
         return False
@@ -153,8 +221,12 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json",
             if not isinstance(models_map, dict):
                 continue
             if model_key in models_map:
-                model_cfg = models_map[model_key]
-                if not isinstance(model_cfg, dict):
+                raw_model_cfg = models_map[model_key]
+                if isinstance(raw_model_cfg, dict):
+                    model_cfg = raw_model_cfg
+                elif isinstance(raw_model_cfg, str):
+                    model_cfg = {"model_name": raw_model_cfg}
+                else:
                     model_cfg = {}
                 provider_dict = {}
                 if "api_base" in provider_cfg:
@@ -163,6 +235,15 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json",
                     provider_dict["api_key_env"] = provider_cfg["api_key_env"]
                 if "parameters" in provider_cfg and isinstance(provider_cfg["parameters"], dict):
                     provider_dict["parameters"] = provider_cfg["parameters"]
+                for key in (
+                    "input_modalities",
+                    "output_modalities",
+                    "model_kind",
+                    "task_capabilities",
+                    "attachment_capabilities",
+                ):
+                    if key in provider_cfg:
+                        provider_dict[key] = provider_cfg[key]
                 model_dict = {k: v for k, v in model_cfg.items() if k != "provider"}
                 if "model_name" not in model_dict:
                     model_dict["model_name"] = model_key
@@ -179,6 +260,34 @@ def _get_concrete_model_info(model_key: str, models_path: str = "models.json",
         raise ValueError(f"Model key '{model_key}' not found in {models_path}")
     # Old flat format not supported
     raise ValueError(f"Model key '{model_key}' not found in {models_path}")
+
+
+def _model_kind_from_concrete_info(concrete_model_info: Optional[Dict[str, Any]]) -> str:
+    """Return normalized model_kind from nested concrete model info."""
+
+    if not isinstance(concrete_model_info, dict):
+        return 'chat'
+    providers = concrete_model_info.get('providers')
+    if not isinstance(providers, dict):
+        return 'chat'
+    for provider_info in providers.values():
+        if not isinstance(provider_info, dict):
+            continue
+        provider_kind = _raw_provider_model_kind(provider_info)
+        models = provider_info.get('models')
+        if not isinstance(models, dict):
+            continue
+        for model_cfg in models.values():
+            if isinstance(model_cfg, Mapping):
+                return _normalize_model_kind(model_cfg.get('model_kind') or provider_kind)
+            return provider_kind
+    return 'chat'
+
+
+def _ensure_concrete_model_is_chat(model_key: str, concrete_model_info: Optional[Dict[str, Any]]) -> None:
+    kind = _model_kind_from_concrete_info(concrete_model_info)
+    if kind != 'chat':
+        raise ValueError(f"Model '{model_key}' has model_kind '{kind}' and cannot be used for normal chat.")
 
 def _ulid_like() -> str:
     # Real ULID using Crockford's Base32. Minimal local implementation to avoid extra deps.
@@ -3275,8 +3384,14 @@ def set_thread_model(db: ThreadsDB, thread_id: str, model_key: str, reason: str 
         try:
             concrete_model_info = _get_concrete_model_info(model_key, models_path,
                                                            all_models_path=all_models_path)
-        except Exception:
+        except Exception as e:
+            # Preserve legacy programmatic use when no default models.json is
+            # present, but fail closed when callers point at an explicit or
+            # existing config and the handle cannot be resolved there.
+            if os.path.exists(models_path) or str(models_path) != "models.json":
+                raise ValueError(f"Unknown model: {model_key}") from e
             concrete_model_info = {}
+    _ensure_concrete_model_is_chat(model_key, concrete_model_info)
     if concrete_model_info:
         payload['concrete_model_info'] = concrete_model_info
     db.append_event(

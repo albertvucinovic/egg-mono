@@ -143,7 +143,10 @@ async def create_thread(request: CreateThreadRequest):
     if not core.db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    model_key = request.model_key or core.default_model_key or next(iter(core.models_config.keys()), None)
+    chat_keys = core.chat_model_keys(core.models_config, core.llm_client)
+    model_key = request.model_key or core.default_model_key or (chat_keys[0] if chat_keys else None)
+    if model_key and not core.is_chat_model_key(model_key, core.models_config.get(model_key) or {}, core.llm_client):
+        raise HTTPException(status_code=400, detail="Model is not usable for normal chat")
 
     models_path = str(core.MODELS_PATH)
 

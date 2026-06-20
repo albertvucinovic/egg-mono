@@ -8,6 +8,7 @@ from .provider_http import build_provider_headers
 from .registry import ModelRegistry
 from .providers.factory import AdapterFactory
 from .providers.base import ProviderAdapter
+from .capabilities import is_chat_model
 
 
 class LLMClient:
@@ -21,15 +22,22 @@ class LLMClient:
         self.catalog = AllModelsCatalog(self.all_models_path)
         self.registry = ModelRegistry(models_config, providers_config, self.catalog)
 
-        # Model selection precedence: EG_CHILD_MODEL > DEFAULT_MODEL > config default > first
-        desired = os.environ.get("EG_CHILD_MODEL") or os.environ.get("DEFAULT_MODEL") or self.registry.default_model_key()
+        # Model selection precedence: EG_CHILD_MODEL > DEFAULT_MODEL > config
+        # conversational default > first chat model.  Explicit environment
+        # choices are validated and clearly rejected when they are non-chat;
+        # a non-chat config default is simply not picked for normal chat.
+        explicit_desired = os.environ.get("EG_CHILD_MODEL") or os.environ.get("DEFAULT_MODEL")
+        desired = explicit_desired or self.registry.default_chat_model_key()
         self.current_model_key: Optional[str] = None
         if desired:
             resolved = self.registry.resolve(desired)
             if resolved:
+                self._ensure_chat_model(resolved)
                 self.current_model_key = resolved
         if not self.current_model_key:
-            self.current_model_key = list(models_config.keys())[0]
+            self.current_model_key = self.registry.default_chat_model_key()
+        if not self.current_model_key:
+            raise ValueError("No chat models configured in models.json")
 
     # Public: configuration / model management
     def get_providers(self) -> List[str]:
@@ -41,10 +49,17 @@ class LLMClient:
             v.sort()
         return dict(sorted(byp.items()))
 
+    def _ensure_chat_model(self, key: str) -> None:
+        cfg = self.registry.get_effective_model_config(key)
+        if not is_chat_model(cfg):
+            kind = str(cfg.get("model_kind") or "chat")
+            raise ValueError(f"Model '{key}' has model_kind '{kind}' and cannot be used for normal chat.")
+
     def set_model(self, key: str) -> str:
         resolved = self.registry.resolve(key)
         if not resolved:
             raise KeyError(f"Unknown model: {key}")
+        self._ensure_chat_model(resolved)
         self.current_model_key = resolved
         # Also propagate as environment for consumers that rely on it
         os.environ["EG_CHILD_MODEL"] = resolved
@@ -60,12 +75,19 @@ class LLMClient:
         The provider and model config will be added as ephemeral entries,
         making the model available even if not present in models.json.
         """
-        if concrete_model_info is not None:
-            # Add ephemeral entry; the display key will be 'key'
-            self.registry.add_ephemeral_from_concrete_info(concrete_model_info, display_key=key)
+        # Prefer the currently loaded models.json entry when it already
+        # resolves.  Persisted thread events can contain older concrete model
+        # info; using it to overwrite a configured model would discard newly
+        # added capability metadata such as image support.  Concrete info is
+        # therefore only hydrated for truly ephemeral/unconfigured models.
         resolved = self.registry.resolve(key)
+        ephemeral = getattr(self.registry, "_ephemeral", {})
+        if concrete_model_info is not None and (not resolved or resolved in ephemeral):
+            # Add ephemeral entry; the display key will be 'key'.
+            resolved = self.registry.add_ephemeral_from_concrete_info(concrete_model_info, display_key=key)
         if not resolved:
             raise KeyError(f"Unknown model: {key}")
+        self._ensure_chat_model(resolved)
         self.current_model_key = resolved
         os.environ["EG_CHILD_MODEL"] = resolved
         os.environ["DEFAULT_MODEL"] = resolved
@@ -302,7 +324,18 @@ class LLMClient:
             deleting an arbitrary thinking key.
             """
             sanitized = []
-            keys_to_remove = {"model_key", "local_tool", "api_usage", "provider_usage"}
+            keys_to_remove = {
+                "model_key",
+                "local_tool",
+                "api_usage",
+                "provider_usage",
+                # eggthreads uses these to correlate/localize messages before
+                # the final provider boundary (for compaction and attachment
+                # lowering).  They are not provider API fields.
+                "msg_id",
+                "event_seq",
+                "ts",
+            }
             for m in msgs:
                 if not isinstance(m, dict):
                     continue
@@ -363,7 +396,17 @@ class LLMClient:
 
         def _sanitize(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             sanitized = []
-            keys_to_remove = {"model_key", "local_tool", "api_usage", "provider_usage"}
+            keys_to_remove = {
+                "model_key",
+                "local_tool",
+                "api_usage",
+                "provider_usage",
+                # Local message identity used by eggthreads before this final
+                # provider boundary; never send it to model providers.
+                "msg_id",
+                "event_seq",
+                "ts",
+            }
             for m in msgs:
                 if not isinstance(m, dict):
                     continue
@@ -424,7 +467,15 @@ class LLMClient:
         provider_name, base_url, headers = self.current_provider_and_url()
 
         def _sanitize(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            keys_to_remove = {"model_key", "local_tool", "api_usage", "provider_usage"}
+            keys_to_remove = {
+                "model_key",
+                "local_tool",
+                "api_usage",
+                "provider_usage",
+                "msg_id",
+                "event_seq",
+                "ts",
+            }
             out: List[Dict[str, Any]] = []
             for m in msgs:
                 if not isinstance(m, dict):
