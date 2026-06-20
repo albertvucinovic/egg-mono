@@ -186,6 +186,7 @@ from .provider_output_artifacts import (
     provider_output_record_dir,
     provider_output_root_dir,
     provider_output_root_relative_dir,
+    promote_provider_output_to_input,
     resolve_provider_output_bytes,
     resolve_provider_output_metadata,
     resolve_provider_output_owner_thread_id,

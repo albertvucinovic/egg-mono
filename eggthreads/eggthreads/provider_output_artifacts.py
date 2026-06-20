@@ -11,7 +11,7 @@ reads.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .owned_byte_artifacts import (
     ARTIFACT_HASH_ALGORITHM,
@@ -28,6 +28,9 @@ from .owned_byte_artifacts import (
     thread_artifact_relative_dir,
     validate_artifact_id,
 )
+
+if TYPE_CHECKING:
+    from .input_artifacts import SavedInputArtifact
 
 
 PROVIDER_OUTPUT_ARTIFACT_ID_LENGTH = 8
@@ -202,6 +205,81 @@ def resolve_provider_output_bytes(
     )
 
 
+def promote_provider_output_to_input(
+    workspace: Path | str | None,
+    db: Any,
+    calling_thread_id: str,
+    artifact_id: str,
+    *,
+    descendant_thread_id: str | None = None,
+) -> tuple["SavedInputArtifact", dict[str, Any]]:
+    """Promote a provider-output artifact into the caller's input namespace.
+
+    Provider-output artifacts are not automatically reusable as model inputs.
+    This helper performs the explicit, access-checked copy into
+    ``.egg/egg_inputs/<calling_thread_id>/...`` and returns both the saved input
+    record and its canonical ``attachment`` content part.
+
+    The source artifact is resolved with the normal provider-output access
+    rules: own thread directly, or a descendant only when selected with
+    ``descendant_thread_id``.  The promoted input is always owned by the calling
+    thread for this slice; this avoids implicit cross-thread writes.
+    """
+
+    source_metadata, data = resolve_provider_output_bytes(
+        workspace,
+        db,
+        calling_thread_id,
+        artifact_id,
+        descendant_thread_id=descendant_thread_id,
+    )
+    source_artifact_id = str(source_metadata.get("artifact_id") or "")
+    source_owner_thread_id = str(source_metadata.get("owner_thread_id") or "")
+    source_sha256 = str(source_metadata.get("sha256") or "")
+    source_provenance = dict(source_metadata.get("provenance") or {})
+    source_provider_refs = dict(source_metadata.get("provider_refs") or {})
+
+    provenance = {
+        "kind": "provider_output_promotion",
+        "source_artifact_id": source_artifact_id,
+        "source_owner_thread_id": source_owner_thread_id,
+        "source_sha256": source_sha256,
+        "source_filename": source_metadata.get("filename"),
+        "source_mime_type": source_metadata.get("mime_type"),
+        "source_presentation": source_metadata.get("presentation"),
+        "source_provenance": source_provenance,
+        "source_provider_refs": source_provider_refs,
+    }
+    provider_refs = {
+        "source_provider_output": {
+            "artifact_id": source_artifact_id,
+            "owner_thread_id": source_owner_thread_id,
+            "sha256": source_sha256,
+        },
+        "source_provider_refs": source_provider_refs,
+    }
+
+    # Local imports avoid a module import cycle: content_parts imports this
+    # module for artifact-id validation.
+    from .content_parts import attachment_part_from_input_metadata
+    from .input_artifacts import save_input_bytes
+
+    saved = save_input_bytes(
+        workspace,
+        calling_thread_id,
+        data,
+        filename=source_metadata.get("filename"),
+        mime_type=source_metadata.get("mime_type"),
+        presentation=source_metadata.get("presentation"),
+        provenance=provenance,
+        derived=dict(source_metadata.get("derived") or {}),
+        provider_refs=provider_refs,
+    )
+    if saved.metadata.get("sha256") != source_sha256 or saved.metadata.get("size_bytes") != source_metadata.get("size_bytes"):
+        raise ProviderOutputArtifactError("promoted input metadata does not match source provider-output bytes.")
+    return saved, attachment_part_from_input_metadata(saved.metadata)
+
+
 __all__ = [
     "PROVIDER_OUTPUT_ARTIFACT_ID_LENGTH",
     "PROVIDER_OUTPUT_HASH_ALGORITHM",
@@ -213,6 +291,7 @@ __all__ = [
     "provider_output_record_dir",
     "provider_output_root_dir",
     "provider_output_root_relative_dir",
+    "promote_provider_output_to_input",
     "resolve_provider_output_bytes",
     "resolve_provider_output_metadata",
     "resolve_provider_output_owner_thread_id",

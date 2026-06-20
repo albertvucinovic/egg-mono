@@ -15,12 +15,14 @@ from eggthreads.provider_output_artifacts import (
     ProviderOutputArtifactAccessError,
     ProviderOutputArtifactNotFoundError,
     provider_output_root_dir,
+    promote_provider_output_to_input,
     resolve_provider_output_bytes,
     resolve_provider_output_metadata,
     save_provider_output_bytes,
     thread_provider_output_dir,
     validate_provider_output_artifact_id,
 )
+from eggthreads.input_artifacts import resolve_input_bytes
 
 
 def _make_db(tmp_path: Path) -> ts.ThreadsDB:
@@ -233,3 +235,137 @@ def test_docker_sandbox_does_not_mount_provider_output_namespace(tmp_path, monke
 
     mounts = _docker_mount_specs(argv)
     assert not any("egg_provider_output" in spec for spec in mounts)
+
+
+def test_promote_provider_output_to_input_own_thread_creates_attachment_record(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    data = b"\x89PNG\r\n\x1a\nprovider-image"
+    source = save_provider_output_bytes(
+        tmp_path,
+        tid,
+        data,
+        filename="generated.png",
+        mime_type="image/png",
+        presentation="image",
+        provenance={"kind": "openai_image_generation", "request_id": "req-123"},
+        derived={"width": 1024, "height": 1024},
+        provider_refs={"openai": {"response_id": "resp-123"}},
+    )
+
+    promoted, attachment_part = promote_provider_output_to_input(tmp_path, db, tid, source.artifact_id)
+    source_after = resolve_provider_output_metadata(tmp_path, db, tid, source.artifact_id)
+    promoted_metadata, promoted_bytes = resolve_input_bytes(tmp_path, db, tid, promoted.input_id)
+
+    assert source_after == source.metadata
+    assert promoted_bytes == data
+    assert promoted_metadata == promoted.metadata
+    assert promoted.metadata["owner_thread_id"] == tid
+    assert promoted.metadata["filename"] == "generated.png"
+    assert promoted.metadata["mime_type"] == "image/png"
+    assert promoted.metadata["presentation"] == "image"
+    assert promoted.metadata["size_bytes"] == source.metadata["size_bytes"]
+    assert promoted.metadata["sha256"] == source.metadata["sha256"]
+    assert promoted.metadata["derived"] == {"width": 1024, "height": 1024}
+    assert promoted.metadata["provenance"] == {
+        "kind": "provider_output_promotion",
+        "source_artifact_id": source.artifact_id,
+        "source_owner_thread_id": tid,
+        "source_sha256": source.metadata["sha256"],
+        "source_filename": "generated.png",
+        "source_mime_type": "image/png",
+        "source_presentation": "image",
+        "source_provenance": {"kind": "openai_image_generation", "request_id": "req-123"},
+        "source_provider_refs": {"openai": {"response_id": "resp-123"}},
+    }
+    assert promoted.metadata["provider_refs"] == {
+        "source_provider_output": {
+            "artifact_id": source.artifact_id,
+            "owner_thread_id": tid,
+            "sha256": source.metadata["sha256"],
+        },
+        "source_provider_refs": {"openai": {"response_id": "resp-123"}},
+    }
+    assert attachment_part == {
+        "type": "attachment",
+        "input_id": promoted.input_id,
+        "owner_thread_id": tid,
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "generated.png",
+        "size_bytes": len(data),
+        "sha256": source.metadata["sha256"],
+        "options": {},
+    }
+    assert promoted.record_dir.parent == tmp_path / ".egg" / "egg_inputs" / tid
+    assert promoted.blob_path != source.blob_path
+    assert promoted.blob_path.is_relative_to(tmp_path / ".egg" / "egg_inputs" / "_blobs")
+
+
+def test_promote_provider_output_parent_can_promote_child_with_explicit_selector(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    source = save_provider_output_bytes(tmp_path, child, b"child generated", filename="child.txt", mime_type="text/plain", presentation="file")
+
+    promoted, attachment_part = promote_provider_output_to_input(tmp_path, db, parent, source.artifact_id, descendant_thread_id=child)
+    promoted_metadata, data = resolve_input_bytes(tmp_path, db, parent, promoted.input_id)
+
+    assert data == b"child generated"
+    assert promoted_metadata["owner_thread_id"] == parent
+    assert promoted_metadata["sha256"] == source.metadata["sha256"]
+    assert promoted_metadata["provenance"]["source_artifact_id"] == source.artifact_id
+    assert promoted_metadata["provenance"]["source_owner_thread_id"] == child
+    assert attachment_part["owner_thread_id"] == parent
+    assert attachment_part["input_id"] == promoted.input_id
+
+
+def test_promote_provider_output_parent_without_selector_gets_not_found_and_no_input(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    source = save_provider_output_bytes(tmp_path, child, b"child generated")
+    before = list((tmp_path / ".egg" / "egg_inputs" / parent).glob("*")) if (tmp_path / ".egg" / "egg_inputs" / parent).exists() else []
+
+    with pytest.raises(ProviderOutputArtifactNotFoundError):
+        promote_provider_output_to_input(tmp_path, db, parent, source.artifact_id)
+
+    after_dir = tmp_path / ".egg" / "egg_inputs" / parent
+    after = list(after_dir.glob("*")) if after_dir.exists() else []
+    assert after == before
+
+
+def test_promote_provider_output_descendant_denied_ancestor_and_sibling_denied(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    sibling = ts.create_child_thread(db, parent, name="sibling")
+    parent_source = save_provider_output_bytes(tmp_path, parent, b"parent generated")
+    sibling_source = save_provider_output_bytes(tmp_path, sibling, b"sibling generated")
+
+    with pytest.raises(ProviderOutputArtifactAccessError, match="access denied"):
+        promote_provider_output_to_input(tmp_path, db, child, parent_source.artifact_id, descendant_thread_id=parent)
+    with pytest.raises(ProviderOutputArtifactAccessError, match="access denied"):
+        promote_provider_output_to_input(tmp_path, db, child, sibling_source.artifact_id, descendant_thread_id=sibling)
+
+    child_inputs = tmp_path / ".egg" / "egg_inputs" / child
+    assert not child_inputs.exists()
+
+
+def test_promote_provider_output_rejects_sha_or_pathlike_id_without_authorization(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    source = save_provider_output_bytes(tmp_path, parent, b"secret generated")
+
+    with pytest.raises(ValueError):
+        promote_provider_output_to_input(tmp_path, db, child, source.metadata["sha256"])
+    with pytest.raises(ValueError):
+        promote_provider_output_to_input(tmp_path, db, child, "../bad1")
+    with pytest.raises(ValueError):
+        promote_provider_output_to_input(tmp_path, db, child, str(source.blob_path))
+    with pytest.raises(ProviderOutputArtifactNotFoundError):
+        promote_provider_output_to_input(tmp_path, db, child, source.artifact_id)
+
+    child_inputs = tmp_path / ".egg" / "egg_inputs" / child
+    assert not child_inputs.exists()
