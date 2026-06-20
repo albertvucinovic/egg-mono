@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from eggthreads.attachment_staging import format_staged_attachments, save_local_attachment_for_thread
+from eggthreads.content_parts import format_attachment_placeholder
+from eggthreads.provider_output_artifacts import promote_provider_output_to_input
 
 
 def staged_attachments_for_thread(app: Any, thread_id: str) -> list[dict[str, Any]]:
@@ -47,6 +49,19 @@ def _parse_attach_path(arg: str) -> str:
         raise ValueError(f"Could not parse path: {e}") from e
     if len(parts) != 1:
         raise ValueError("Usage: /attach <path> (quote paths that contain spaces)")
+    return parts[0]
+
+
+def _parse_attach_output_artifact_id(arg: str) -> str:
+    text = (arg or "").strip()
+    if not text:
+        raise ValueError("Usage: /attachOutput <artifact_id>")
+    try:
+        parts = shlex.split(text)
+    except ValueError as e:
+        raise ValueError(f"Could not parse artifact id: {e}") from e
+    if len(parts) != 1:
+        raise ValueError("Usage: /attachOutput <artifact_id>")
     return parts[0]
 
 
@@ -118,6 +133,34 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             ctx.log_system(message)
         return CommandResult(clear_input=True, message=message)
 
+    def attach_output_handler(ctx: Any, arg: str):
+        thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
+        if not thread_id or getattr(ctx, "db", None) is None:
+            message = "/attachOutput failed: no current thread."
+            if ctx.log_system is not None:
+                ctx.log_system(message)
+            return CommandResult(clear_input=False, message=message)
+        try:
+            artifact_id = _parse_attach_output_artifact_id(arg)
+            saved, part = promote_provider_output_to_input(Path.cwd(), ctx.db, thread_id, artifact_id)
+            staged = staged_attachments_for_thread(app, thread_id)
+            staged.append(part)
+            placeholder = format_attachment_placeholder(part, validate=False)
+            message = (
+                f"Promoted provider output {artifact_id} to input {saved.input_id}; "
+                f"staged {len(staged)} attachment{'s' if len(staged) != 1 else ''}.\n"
+                f"{placeholder}"
+            )
+            if ctx.log_system is not None:
+                ctx.log_system(message)
+            _mark_input_dirty(app)
+            return CommandResult(clear_input=True, message=message)
+        except Exception as e:
+            message = f"/attachOutput failed: {e}"
+            if ctx.log_system is not None:
+                ctx.log_system(message)
+            return CommandResult(clear_input=False, message=message)
+
     def clear_handler(ctx: Any, arg: str):
         thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
         count = clear_staged_attachments_for_thread(app, thread_id) if thread_id else 0
@@ -151,6 +194,15 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             category="input",
             usage="/attachments",
             description="List attachments staged for the current thread.",
+        )
+    )
+    register_if_missing(
+        CommandSpec(
+            "attachOutput",
+            attach_output_handler,
+            category="input",
+            usage="/attachOutput <artifact_id>",
+            description="Promote a provider-output artifact and stage it for the next user message.",
         )
     )
     register_if_missing(

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+from eggthreads.input_artifacts import resolve_input_bytes
+from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+from egg.attachments import staged_attachments_for_thread
 
 
 def _snapshot_messages(app):
@@ -97,3 +103,92 @@ def test_input_panel_title_shows_staged_attachment_status(egg_app, tmp_path):
 
     egg_app._update_get_user_message_input_mode()
     assert "1 attachment staged" in egg_app.input_panel.title
+
+
+def test_attach_output_promotes_provider_artifact_and_stages_attachment(egg_app):
+    source = save_provider_output_bytes(
+        Path.cwd(),
+        egg_app.current_thread,
+        b"\x89PNG\r\n\x1a\ngenerated-image",
+        filename="generated.png",
+        mime_type="image/png",
+        presentation="image",
+        provenance={"kind": "openai_image_generation", "request_id": "req-123"},
+        provider_refs={"openai": {"response_id": "resp-123"}},
+    )
+
+    egg_app.handle_command(f"/attachOutput {source.artifact_id}")
+
+    staged = staged_attachments_for_thread(egg_app, egg_app.current_thread)
+    assert len(staged) == 1
+    part = staged[0]
+    assert part["type"] == "attachment"
+    assert part["owner_thread_id"] == egg_app.current_thread
+    assert part["filename"] == "generated.png"
+    assert part["mime_type"] == "image/png"
+    assert part["presentation"] == "image"
+    assert part["sha256"] == source.metadata["sha256"]
+
+    promoted_metadata, promoted_bytes = resolve_input_bytes(Path.cwd(), egg_app.db, egg_app.current_thread, part["input_id"])
+    assert promoted_bytes == b"\x89PNG\r\n\x1a\ngenerated-image"
+    assert promoted_metadata["provenance"]["kind"] == "provider_output_promotion"
+    assert promoted_metadata["provenance"]["source_artifact_id"] == source.artifact_id
+    assert promoted_metadata["provenance"]["source_owner_thread_id"] == egg_app.current_thread
+    assert promoted_metadata["provenance"]["source_provenance"] == {
+        "kind": "openai_image_generation",
+        "request_id": "req-123",
+    }
+    assert promoted_metadata["provider_refs"] == {
+        "source_provider_output": {
+            "artifact_id": source.artifact_id,
+            "owner_thread_id": egg_app.current_thread,
+            "sha256": source.metadata["sha256"],
+        },
+        "source_provider_refs": {"openai": {"response_id": "resp-123"}},
+    }
+    assert any(
+        f"Promoted provider output {source.artifact_id} to input {part['input_id']}" in msg
+        and "[Attachment: image generated.png image/png" in msg
+        for msg in egg_app._system_log
+    )
+
+
+def test_submit_with_promoted_provider_output_attachment_includes_part_and_clears(egg_app):
+    source = save_provider_output_bytes(
+        Path.cwd(),
+        egg_app.current_thread,
+        b"generated text bytes",
+        filename="generated.txt",
+        mime_type="text/plain",
+        presentation="file",
+    )
+
+    egg_app.handle_command(f"/attachOutput {source.artifact_id}")
+    staged = list(staged_attachments_for_thread(egg_app, egg_app.current_thread))
+    assert len(staged) == 1
+
+    assert egg_app.on_submit("reuse this output") is True
+
+    messages = _snapshot_messages(egg_app)
+    user_messages = [m for m in messages if m.get("role") == "user"]
+    content = user_messages[-1]["content"]
+    assert egg_app._staged_attachment_count_for_current_thread() == 0
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "reuse this output"}
+    assert content[1] == staged[0]
+    assert content[1]["filename"] == "generated.txt"
+    assert content[1]["mime_type"] == "text/plain"
+
+
+def test_attach_output_failures_do_not_stage_anything(egg_app):
+    assert egg_app._staged_attachment_count_for_current_thread() == 0
+
+    for command in ("/attachOutput", "/attachOutput ../bad1", "/attachOutput abc12345"):
+        egg_app.handle_command(command)
+        assert egg_app._staged_attachment_count_for_current_thread() == 0
+
+    failure_logs = [msg for msg in egg_app._system_log if "/attachOutput failed" in msg]
+    assert len(failure_logs) >= 3
+    assert any("Usage: /attachOutput <artifact_id>" in msg for msg in failure_logs)
+    assert any("artifact_id must be" in msg for msg in failure_logs)
+    assert any("not found" in msg.lower() for msg in failure_logs)

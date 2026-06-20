@@ -41,7 +41,7 @@ Commands:
   Skills:
     /skills [query], /skill <name> — show packaged skill documents (for example: /skill rlm)
   Attachments:
-    /attach <path>, /attachments, /clearAttachments
+    /attach <path>, /attachOutput <artifact_id>, /attachments, /clearAttachments
   Image generation:
     /imageGenerate [model=<backend>] [n=<1-10>] [size=<size>] <prompt>
   Display:
