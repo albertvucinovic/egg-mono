@@ -11,6 +11,7 @@ import { ApprovalPanel } from "@/components/ApprovalPanel";
 import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
 import { createThread, openThread, interruptThread, fetchThread, executeCommand, fetchSandboxStatus, SandboxStatus, fetchModels, fetchThreadSettings, setThreadModel, setAutoApproval, fetchTokenStats } from "@/lib/api";
+import type { AttachmentContentPart } from "@/lib/contentParts";
 import { useMutation } from "@tanstack/react-query";
 import { PanelRight } from "lucide-react";
 import clsx from "clsx";
@@ -44,6 +45,10 @@ export default function ThreadPage() {
     setDisplayVerbosity,
   } = useAppStore();
   const [showHelp, setShowHelp] = useState(false);
+  const [stagedAttachments, setStagedAttachments] = useState<AttachmentContentPart[]>([]);
+  const stageAttachment = useCallback((attachment: AttachmentContentPart) => {
+    setStagedAttachments((prev) => [...prev, attachment]);
+  }, []);
 
   // Sync URL thread ID to store on mount and when URL changes
   useEffect(() => {
@@ -538,9 +543,19 @@ export default function ThreadPage() {
         {/* Center - Chat */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {panelVisibility.children && <ChildrenPanel showBorders={showBorders} />}
-          {panelVisibility.chat && <ChatPanel showBorders={showBorders} streamingTps={tokenStats?.streaming_tps ?? null} />}
+          {panelVisibility.chat && (
+            <ChatPanel
+              showBorders={showBorders}
+              streamingTps={tokenStats?.streaming_tps ?? null}
+              onStageAttachment={stageAttachment}
+            />
+          )}
           <ApprovalPanel showBorders={showBorders} />
-          <MessageInput showBorders={showBorders} />
+          <MessageInput
+            showBorders={showBorders}
+            stagedAttachments={stagedAttachments}
+            setStagedAttachments={setStagedAttachments}
+          />
         </div>
 
         {/* Right sidebar - System log */}

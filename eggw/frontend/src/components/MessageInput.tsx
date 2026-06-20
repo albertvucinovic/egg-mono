@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, type Dispatch, type SetStateAction } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Paperclip, Send, Loader2, Terminal, StopCircle, X } from "lucide-react";
@@ -11,11 +11,12 @@ import clsx from "clsx";
 
 interface MessageInputProps {
   showBorders?: boolean;
+  stagedAttachments: AttachmentContentPart[];
+  setStagedAttachments: Dispatch<SetStateAction<AttachmentContentPart[]>>;
 }
 
-export function MessageInput({ showBorders = true }: MessageInputProps) {
+export function MessageInput({ showBorders = true, stagedAttachments, setStagedAttachments }: MessageInputProps) {
   const [input, setInput] = useState("");
-  const [stagedAttachments, setStagedAttachments] = useState<AttachmentContentPart[]>([]);
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);

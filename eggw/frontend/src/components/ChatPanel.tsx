@@ -10,7 +10,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
-import { fetchMessages, providerOutputUrl } from "@/lib/api";
+import { fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
 import {
   artifactFilename,
@@ -23,6 +23,7 @@ import {
   isAttachmentPart,
   isContentPartArray,
   isTextPart,
+  type AttachmentContentPart,
   type ContentPart,
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
@@ -225,8 +226,40 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
   );
 }
 
-function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[]; showBorders?: boolean }) {
+function ContentPartsView({
+  parts,
+  showBorders = true,
+  onStageAttachment,
+}: {
+  parts: ContentPart[];
+  showBorders?: boolean;
+  onStageAttachment?: (attachment: AttachmentContentPart) => void;
+}) {
   const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
+  const [promotingArtifactIds, setPromotingArtifactIds] = useState<Record<string, boolean>>({});
+
+  const handleUseAsAttachment = useCallback(async (part: Extract<ContentPart, { type: "artifact" }>) => {
+    if (!currentThreadId || !part.artifact_id || !onStageAttachment) return;
+    const descendantThreadId = part.owner_thread_id && part.owner_thread_id !== currentThreadId
+      ? part.owner_thread_id
+      : undefined;
+    setPromotingArtifactIds((prev) => ({ ...prev, [part.artifact_id]: true }));
+    try {
+      const promoted = await promoteProviderOutput(currentThreadId, part.artifact_id, { descendantThreadId });
+      onStageAttachment(promoted.content_part);
+      addSystemLog(`Staged provider output ${part.artifact_id} as attachment ${promoted.input_id}`, "success");
+    } catch (error) {
+      addSystemLog(error instanceof Error ? error.message : "Failed to use provider output as attachment", "error");
+    } finally {
+      setPromotingArtifactIds((prev) => {
+        const next = { ...prev };
+        delete next[part.artifact_id];
+        return next;
+      });
+    }
+  }, [addSystemLog, currentThreadId, onStageAttachment]);
+
   return (
     <div className="space-y-2">
       {parts.map((part, idx) => {
@@ -262,6 +295,7 @@ function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[];
         }
         if (isArtifactPart(part)) {
           const canLink = Boolean(currentThreadId && part.artifact_id);
+          const canPromote = Boolean(canLink && onStageAttachment);
           const descendantThreadId = canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId
             ? part.owner_thread_id
             : undefined;
@@ -298,6 +332,17 @@ function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[];
                   <a href={downloadUrl} className="underline" style={{ color: "var(--accent)" }}>
                     Download
                   </a>
+                  {canPromote && (
+                    <button
+                      type="button"
+                      onClick={() => handleUseAsAttachment(part)}
+                      disabled={Boolean(promotingArtifactIds[part.artifact_id])}
+                      className="underline disabled:cursor-not-allowed disabled:opacity-50"
+                      style={{ color: "var(--accent)" }}
+                    >
+                      {promotingArtifactIds[part.artifact_id] ? "Staging…" : "Use as attachment"}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -317,6 +362,7 @@ interface MessageBlockProps {
   message: Message;
   showBorders?: boolean;
   displayVerbosity?: DisplayVerbosity;
+  onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }
 
 function CompactionMarker({ message }: { message: Message }) {
@@ -350,7 +396,7 @@ function CompactionMarker({ message }: { message: Message }) {
   );
 }
 
-function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }: MessageBlockProps) {
+function MessageBlock({ message, showBorders = true, displayVerbosity = "max", onStageAttachment }: MessageBlockProps) {
   if (message.kind === "compaction_marker" || message.role === "compaction_marker") {
     return <CompactionMarker message={message} />;
   }
@@ -511,7 +557,7 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
               </pre>
             )
           ) : isContentPartArray(message.content) ? (
-            <ContentPartsView parts={message.content} showBorders={showBorders} />
+            <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />
           ) : (
             /* Regular markdown content with GFM tables and LaTeX support */
             <div className="prose prose-sm max-w-none" style={{ color: "inherit" }}>
@@ -728,10 +774,15 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   return details;
 }
 
-function renderMessagesForVerbosity(messages: Message[], displayVerbosity: DisplayVerbosity, showBorders: boolean): ReactNode[] {
+function renderMessagesForVerbosity(
+  messages: Message[],
+  displayVerbosity: DisplayVerbosity,
+  showBorders: boolean,
+  onStageAttachment?: (attachment: AttachmentContentPart) => void,
+): ReactNode[] {
   if (displayVerbosity !== "min") {
     return messages.map((msg, idx) => (
-      <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity={displayVerbosity} />
+      <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity={displayVerbosity} onStageAttachment={onStageAttachment} />
     ));
   }
 
@@ -758,7 +809,7 @@ function renderMessagesForVerbosity(messages: Message[], displayVerbosity: Displ
       const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;
       hidden.push(...beforeVisibleDetails);
       flushHidden(`before-${msg.id || idx}`);
-      nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" />);
+      nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" onStageAttachment={onStageAttachment} />);
       hidden.push(...afterVisibleDetails);
       return;
     }
@@ -773,9 +824,10 @@ function renderMessagesForVerbosity(messages: Message[], displayVerbosity: Displ
 interface ChatPanelProps {
   showBorders?: boolean;
   streamingTps?: number | null;
+  onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }
 
-export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanelProps) {
+export function ChatPanel({ showBorders = true, streamingTps = null, onStageAttachment }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
@@ -1186,7 +1238,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null }: ChatPanel
             </div>
           ) : (
             <>
-              {renderMessagesForVerbosity(messages, displayVerbosity, showBorders)}
+              {renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment)}
 
               {/* Streaming content */}
               {isStreaming && (

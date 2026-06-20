@@ -120,6 +120,31 @@ export async function uploadAttachment(threadId: string, file: File): Promise<At
   return res.json();
 }
 
+export async function promoteProviderOutput(
+  threadId: string,
+  artifactId: string,
+  options: { descendantThreadId?: string } = {},
+): Promise<AttachmentUploadResponse> {
+  const params = new URLSearchParams();
+  if (options.descendantThreadId) params.set("descendant_thread_id", options.descendantThreadId);
+  const query = params.toString();
+  const res = await fetch(
+    `${API_BASE}/api/threads/${encodeURIComponent(threadId)}/provider-output/${encodeURIComponent(artifactId)}/promote${query ? `?${query}` : ""}`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    let detail = "Failed to use provider output as attachment";
+    try {
+      const payload = await res.json();
+      if (typeof payload?.detail === "string") detail = payload.detail;
+    } catch {
+      // Keep generic message.
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 export function providerOutputUrl(
   threadId: string,
   artifactId: string,
