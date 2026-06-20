@@ -369,3 +369,152 @@ def test_promote_provider_output_rejects_sha_or_pathlike_id_without_authorizatio
 
     child_inputs = tmp_path / ".egg" / "egg_inputs" / child
     assert not child_inputs.exists()
+
+
+def test_generate_openai_image_artifacts_stores_b64_outputs_as_provider_artifacts(tmp_path, monkeypatch):
+    import base64
+
+    from eggthreads.image_generation import generate_openai_image_artifacts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, *, headers, json, timeout):
+            self.posts.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return FakeResponse(
+                {
+                    "id": "img-resp-456",
+                    "created": 456,
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(b"generated-one").decode("ascii"),
+                            "revised_prompt": "Refined prompt",
+                        },
+                        {"b64_json": base64.b64encode(b"generated-two").decode("ascii")},
+                    ],
+                }
+            )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    models_path = tmp_path / "models.json"
+    all_models_path = tmp_path / "all-models.json"
+    models_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "openai-images": {
+                        "api_base": "https://api.openai.com/v1",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "api_type": "openai_images",
+                        "model_kind": "image_generation",
+                        "models": {
+                            "Image Backend": {
+                                "model_name": "gpt-image-1",
+                                "task_capabilities": ["image_generation"],
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    all_models_path.write_text(json.dumps({"providers": {}}), encoding="utf-8")
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    session = FakeSession()
+
+    result = generate_openai_image_artifacts(
+        tmp_path,
+        tid,
+        "Draw an egg",
+        model_key="Image Backend",
+        models_path=models_path,
+        all_models_path=all_models_path,
+        options={"n": 2, "size": "1024x1024", "output_format": "png"},
+        timeout=11,
+        session=session,
+    )
+
+    assert session.posts[0]["url"] == "https://api.openai.com/v1/images/generations"
+    assert session.posts[0]["headers"]["Authorization"] == "Bearer test-key"
+    assert session.posts[0]["json"] == {
+        "model": "gpt-image-1",
+        "prompt": "Draw an egg",
+        "n": 2,
+        "size": "1024x1024",
+        "output_format": "png",
+    }
+    assert result.model_key == "Image Backend"
+    assert result.provider_name == "openai-images"
+    assert result.response_metadata == {"id": "img-resp-456", "created": 456}
+    assert len(result.artifacts) == 2
+    assert len(result.content_parts) == 2
+
+    first = result.artifacts[0]
+    first_metadata, first_bytes = resolve_provider_output_bytes(tmp_path, db, tid, first.artifact_id)
+    assert first_bytes == b"generated-one"
+    assert first_metadata == first.metadata
+    assert first.metadata["filename"] == "generated-1.png"
+    assert first.metadata["mime_type"] == "image/png"
+    assert first.metadata["presentation"] == "image"
+    assert first.metadata["owner_thread_id"] == tid
+    assert first.metadata["provenance"] == {
+        "kind": "openai_image_generation",
+        "provider": "openai-images",
+        "model_key": "Image Backend",
+        "model": "gpt-image-1",
+        "prompt": "Draw an egg",
+        "output_index": 0,
+        "revised_prompt": "Refined prompt",
+        "response_id": "img-resp-456",
+    }
+    assert first.metadata["derived"] == {
+        "width": 1024,
+        "height": 1024,
+        "size": "1024x1024",
+        "output_format": "png",
+        "revised_prompt": "Refined prompt",
+    }
+    assert first.metadata["provider_refs"] == {
+        "openai": {
+            "api_type": "openai_images",
+            "model": "gpt-image-1",
+            "model_key": "Image Backend",
+            "output_index": 0,
+            "source": "b64_json",
+            "response_id": "img-resp-456",
+            "response_created": 456,
+            "request_options": {"n": 2, "size": "1024x1024", "output_format": "png"},
+        }
+    }
+    assert first.content_part == {
+        "type": "artifact",
+        "artifact_id": first.artifact_id,
+        "owner_thread_id": tid,
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "generated-1.png",
+        "size_bytes": len(b"generated-one"),
+        "sha256": first.metadata["sha256"],
+        "provenance": first.metadata["provenance"],
+        "options": {},
+    }
+    assert "generated-one" not in json.dumps(first.content_part)
+    assert "b64_json" not in json.dumps(first.content_part)
+
+    second_metadata, second_bytes = resolve_provider_output_bytes(tmp_path, db, tid, result.artifacts[1].artifact_id)
+    assert second_bytes == b"generated-two"
+    assert second_metadata["filename"] == "generated-2.png"
+    assert second_metadata["provenance"]["output_index"] == 1

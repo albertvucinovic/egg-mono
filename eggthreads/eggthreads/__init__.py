@@ -195,6 +195,11 @@ from .provider_output_artifacts import (
     thread_provider_output_relative_dir,
     validate_provider_output_artifact_id,
 )
+from .image_generation import (
+    GeneratedProviderOutputArtifact,
+    ImageGenerationArtifactResult,
+    generate_openai_image_artifacts,
+)
 from .tools_config import (
     ToolsConfig,
     get_thread_tools_config,
@@ -404,5 +409,7 @@ __all__ = [
     'build_message_content_with_attachments', 'format_staged_attachments',
     'infer_attachment_mime_and_presentation', 'safe_display_filename',
     'save_attachment_bytes_for_thread', 'save_local_attachment_for_thread',
+    'GeneratedProviderOutputArtifact', 'ImageGenerationArtifactResult',
+    'generate_openai_image_artifacts',
 ]
 from .event_watcher import EventWatcher
