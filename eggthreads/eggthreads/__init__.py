@@ -183,6 +183,7 @@ from .provider_output_artifacts import (
     ProviderOutputArtifactError,
     ProviderOutputArtifactNotFoundError,
     SavedProviderOutputArtifact,
+    list_provider_output_artifact_metadata,
     provider_output_record_dir,
     provider_output_root_dir,
     provider_output_root_relative_dir,
@@ -410,6 +411,7 @@ __all__ = [
     'build_message_content_with_attachments', 'format_staged_attachments',
     'infer_attachment_mime_and_presentation', 'safe_display_filename',
     'save_attachment_bytes_for_thread', 'save_local_attachment_for_thread',
+    'list_provider_output_artifact_metadata',
     'GeneratedProviderOutputArtifact', 'ImageGenerationArtifactResult',
     'generate_openai_image_artifacts', 'image_generation_result_content_parts',
 ]

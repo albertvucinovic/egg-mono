@@ -10,6 +10,13 @@ from typing import Optional, List
 from fastapi import APIRouter
 
 from eggthreads import list_threads, create_default_tools
+from eggthreads.artifact_completion import (
+    artifact_workspace_from_db,
+    filesystem_completion_items,
+    is_provider_artifact_export_path_position,
+    is_provider_artifact_id_position,
+    provider_artifact_completion_items,
+)
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS
 from eggthreads.skills import list_skills
@@ -24,6 +31,10 @@ def get_tool_names() -> List[str]:
         return sorted(registry._tools.keys())
     except Exception:
         return []
+
+
+def _filesystem_suggestions(token: str, *, limit: int = 20) -> List[dict]:
+    return filesystem_completion_items(token, limit=limit)
 
 # Available themes (text-colored variants first, then background variants)
 THEMES = [
@@ -211,26 +222,25 @@ async def get_autocomplete(
 
             elif cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
                 # Filesystem path suggestions
-                if arg_tok:
-                    expanded = os.path.expanduser(arg_tok)
-                    base_dir = os.path.dirname(expanded) or '.'
-                    needle = os.path.basename(expanded)
-                    try:
-                        if os.path.isdir(base_dir):
-                            entries = os.listdir(base_dir)
-                            for name in sorted(entries)[:20]:
-                                if needle and not name.lower().startswith(needle.lower()):
-                                    continue
-                                path = os.path.join(base_dir, name)
-                                suffix = '/' if os.path.isdir(path) else ''
-                                full_path = path + suffix
-                                suggestions.append({
-                                    "display": name + suffix,
-                                    "insert": full_path,
-                                    "replace": len(arg_tok),
-                                })
-                    except:
-                        pass
+                suggestions.extend(_filesystem_suggestions(arg_tok, limit=20))
+
+            elif cmd == '/attach':
+                suggestions.extend(_filesystem_suggestions(arg_tok, limit=20))
+
+            elif cmd in ('/attachOutput', '/saveProviderArtifact', '/saveProviderOutput'):
+                if is_provider_artifact_id_position(cmd, arg):
+                    suggestions.extend(
+                        provider_artifact_completion_items(
+                            artifact_workspace_from_db(core.db),
+                            core.db,
+                            thread_id,
+                            arg_tok,
+                            limit=50,
+                        )
+                    )
+                elif is_provider_artifact_export_path_position(cmd, arg):
+                    path_tok = '' if arg.endswith((' ', '\t')) else arg_tok
+                    suggestions.extend(_filesystem_suggestions(path_tok, limit=20))
 
             elif cmd == '/updateAllModels':
                 # Provider name suggestions

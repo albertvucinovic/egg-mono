@@ -145,11 +145,15 @@ def _complete_attach_path(ctx: Any, arg: str):
         db = getattr(ctx, "db", None)
         thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
         working_dir = get_thread_working_directory(db, thread_id) if db is not None and thread_id else Path.cwd()
-        base = Path(text).expanduser()
-        if not base.is_absolute():
-            base = Path(working_dir) / base
-        search_dir = base.parent if text and (text.endswith("/") or base.parent != Path(working_dir)) else Path(working_dir)
-        prefix = "" if text.endswith("/") else base.name
+        if not text:
+            search_dir = Path(working_dir)
+            prefix = ""
+        else:
+            base = Path(text).expanduser()
+            if not base.is_absolute():
+                base = Path(working_dir) / base
+            search_dir = base if text.endswith(("/", "\\")) else base.parent
+            prefix = "" if text.endswith(("/", "\\")) else base.name
         out = []
         for path in sorted(search_dir.glob(prefix + "*"))[:50]:
             display = str(path) + ("/" if path.is_dir() else "")
@@ -161,6 +165,29 @@ def _complete_attach_path(ctx: Any, arg: str):
 
 def register_attachment_commands(registry: Any, app: Any) -> None:
     from eggthreads.command_catalog import CommandResult, CommandSpec
+
+    def complete_provider_artifact_command(command: str, ctx: Any, arg: str):
+        try:
+            from eggthreads.artifact_completion import (
+                artifact_workspace_from_db,
+                is_provider_artifact_export_path_position,
+                is_provider_artifact_id_position,
+                provider_artifact_completion_items,
+            )
+        except Exception:
+            return []
+
+        current_fragment = str(arg or '').split()[-1] if str(arg or '').split() and not str(arg or '').endswith((' ', '\t')) else ''
+        if is_provider_artifact_id_position(command, arg):
+            return provider_artifact_completion_items(
+                artifact_workspace_from_db(getattr(ctx, 'db', None)),
+                getattr(ctx, 'db', None),
+                getattr(ctx, 'current_thread', None),
+                current_fragment,
+            )
+        if is_provider_artifact_export_path_position(command, arg):
+            return _complete_attach_path(ctx, current_fragment)
+        return []
 
     def attach_handler(ctx: Any, arg: str):
         thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
@@ -306,6 +333,7 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             category="input",
             usage="/attachOutput <artifact_id>",
             description="Promote a provider-output artifact and stage it for the next user message.",
+            complete=lambda ctx, arg: complete_provider_artifact_command('/attachOutput', ctx, arg),
         )
     )
     register_if_missing(
@@ -316,6 +344,7 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             category="input",
             usage="/saveProviderArtifact <artifact_id> [path]",
             description="Copy a provider-output artifact from Egg storage into the current working directory.",
+            complete=lambda ctx, arg: complete_provider_artifact_command('/saveProviderArtifact', ctx, arg),
         )
     )
     register_if_missing(

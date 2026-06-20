@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Iterable, List, Dict, Mapping, Optional
 
 import re
@@ -40,6 +39,13 @@ from eggthreads.command_catalog import (  # type: ignore
 )
 from eggthreads.content_parts import content_to_plain_text
 from eggllm.capabilities import is_chat_model
+from eggthreads.artifact_completion import (
+    artifact_workspace_from_db,
+    filesystem_completion_items,
+    is_provider_artifact_export_path_position,
+    is_provider_artifact_id_position,
+    provider_artifact_completion_items,
+)
 
 
 class ModelCompleter(Completer):
@@ -189,22 +195,7 @@ class EggCompleter(Completer):
 
     # ---- Helpers --------------------------------------------------------
     def _get_filesystem_suggestions(self, prefix: str):
-        import glob as _glob
-        import os as _os
-        try:
-            expanded = _os.path.expanduser(prefix)
-            escaped = _glob.escape(expanded)
-            matches = _glob.glob(escaped + '*')
-            out = []
-            for m in matches:
-                m2 = m.replace('\\', '/')
-                if _os.path.isdir(m2):
-                    out.append(m2 + '/')
-                else:
-                    out.append(m2)
-            return out
-        except Exception:
-            return []
+        return [item["insert"] for item in filesystem_completion_items(prefix, limit=50)]
 
     def _recent_words(self, tid: str, limit_msgs: int = 200):
         # Extract recent words from snapshot messages for this thread
@@ -341,6 +332,36 @@ class EggCompleter(Completer):
                 if name.startswith(prefix):
                     yield Completion(name, start_position=-len(prefix))
             return
+
+        for command in ('/attachOutput', '/saveProviderArtifact', '/saveProviderOutput'):
+            marker = command + ' '
+            if text.startswith(marker):
+                arg = text[len(marker):]
+                if arg.endswith((' ', '\t')):
+                    current_fragment = ''
+                else:
+                    try:
+                        current_fragment = document.get_word_before_cursor(WORD=True)
+                    except Exception:
+                        current_fragment = arg.split()[-1] if arg.split() else ''
+                if is_provider_artifact_id_position(command, arg):
+                    for item in provider_artifact_completion_items(
+                        artifact_workspace_from_db(self.db),
+                        self.db,
+                        tid,
+                        current_fragment,
+                    ):
+                        yield Completion(
+                            item.get('insert', ''),
+                            start_position=-len(current_fragment),
+                            display=item.get('display'),
+                        )
+                    return
+                if is_provider_artifact_export_path_position(command, arg):
+                    suggestions = self._get_filesystem_suggestions(current_fragment)
+                    for s in suggestions:
+                        yield Completion(s, start_position=-len(current_fragment))
+                    return
 
         # 3) /thread: suggest thread ids (with name/recap meta)
         if text.startswith('/thread '):
@@ -591,28 +612,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         return items[:50]
 
     def _fs_suggestions(token: str) -> List[str]:
-        import os as _os
-        if not token:
-            return []
-        expanded = _os.path.expanduser(token)
-        base_dir = expanded
-        needle = ''
-        if not _os.path.isdir(expanded):
-            base_dir = _os.path.dirname(expanded) or '.'
-            needle = _os.path.basename(expanded)
-        try:
-            entries = _os.listdir(base_dir)
-        except Exception:
-            return []
-        results: List[str] = []
-        for name in entries:
-            if needle and not name.startswith(needle):
-                continue
-            path = _os.path.join(base_dir, name)
-            suffix = '/' if _os.path.isdir(path) else ''
-            results.append(_os.path.join(base_dir, name) + suffix)
-        results.sort(key=lambda s: (0 if s.endswith('/') else 1, s))
-        return results[:50]
+        return [item["insert"] for item in filesystem_completion_items(token, limit=50)]
 
     def _conversation_suggestions(tid: str, fragment: str) -> List[str]:
         if not fragment:
@@ -776,6 +776,19 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
         # /spawnChildThread and /spawnAutoApprovedChildThread -> filesystem suggestions for arg
         if cmd in ('/spawnChildThread', '/spawnAutoApprovedChildThread'):
             return _mk_items(_fs_suggestions(arg_tok), arg_tok)
+
+        if cmd in ('/attachOutput', '/saveProviderArtifact', '/saveProviderOutput'):
+            if is_provider_artifact_id_position(cmd, sub):
+                return provider_artifact_completion_items(
+                    artifact_workspace_from_db(db),
+                    db,
+                    get_current_thread(),
+                    arg_tok,
+                )
+            if is_provider_artifact_export_path_position(cmd, sub):
+                path_tok = '' if sub.endswith((' ', '\t')) else arg_tok
+                return _mk_items(_fs_suggestions(path_tok), path_tok)
+            return []
 
         # /disabletool, /enabletool, /toolInfo: suggest known tool names from
         # the default ToolRegistry. We keep this best-effort and

@@ -185,6 +185,70 @@ def resolve_provider_output_metadata(
     )
 
 
+def list_provider_output_artifact_metadata(
+    workspace: Path | str | None,
+    db: Any,
+    calling_thread_id: str,
+    *,
+    descendant_thread_id: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """List accessible provider-output artifact metadata records.
+
+    This is intentionally metadata-only: callers such as UI autocomplete need
+    user-facing artifact ids, filenames, MIME types, and sizes, but must not
+    bypass the normal provider-output access rules or read artifact bytes.
+
+    The access direction matches :func:`resolve_provider_output_metadata`: a
+    thread may list its own provider-output namespace, or an ancestor may list a
+    descendant namespace only when ``descendant_thread_id`` is explicit.
+    Malformed individual records are skipped so a single bad on-disk record does
+    not break interactive command completion.
+    """
+
+    owner_thread_id = resolve_provider_output_owner_thread_id(
+        db,
+        calling_thread_id,
+        descendant_thread_id=descendant_thread_id,
+    )
+    base_dir = thread_provider_output_dir(workspace, owner_thread_id)
+    if not base_dir.is_dir():
+        return []
+
+    records: list[tuple[str, int, str, dict[str, Any]]] = []
+    try:
+        children = list(base_dir.iterdir())
+    except Exception:
+        return []
+
+    for child in children:
+        if not child.is_dir():
+            continue
+        artifact_id = child.name
+        try:
+            validate_provider_output_artifact_id(artifact_id)
+            metadata = resolve_provider_output_metadata(
+                workspace,
+                db,
+                calling_thread_id,
+                artifact_id,
+                descendant_thread_id=descendant_thread_id,
+            )
+        except Exception:
+            continue
+        try:
+            mtime_ns = (child / "metadata.json").stat().st_mtime_ns
+        except Exception:
+            mtime_ns = 0
+        records.append((str(metadata.get("created_at") or ""), mtime_ns, artifact_id, dict(metadata)))
+
+    records.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    metadata_records = [metadata for _created_at, _mtime_ns, _artifact_id, metadata in records]
+    if limit is not None and limit >= 0:
+        return metadata_records[:limit]
+    return metadata_records
+
+
 def resolve_provider_output_bytes(
     workspace: Path | str | None,
     db: Any,
@@ -288,6 +352,7 @@ __all__ = [
     "ProviderOutputArtifactError",
     "ProviderOutputArtifactNotFoundError",
     "SavedProviderOutputArtifact",
+    "list_provider_output_artifact_metadata",
     "provider_output_record_dir",
     "provider_output_root_dir",
     "provider_output_root_relative_dir",

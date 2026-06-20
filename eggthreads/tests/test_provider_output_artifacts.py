@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -587,3 +588,21 @@ def test_generate_openai_image_artifacts_preserves_codex_image_refs(tmp_path):
             "request_options": {"size": "1024x1024"},
         }
     }
+
+
+def test_list_provider_output_artifact_metadata_uses_access_rules_and_sorting(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    first = save_provider_output_bytes(tmp_path, child, b"first", filename="first.png")
+    time.sleep(0.002)
+    second = save_provider_output_bytes(tmp_path, child, b"second", filename="second.png")
+
+    records = ts.list_provider_output_artifact_metadata(tmp_path, db, parent, descendant_thread_id=child)
+
+    assert [record["artifact_id"] for record in records] == [second.artifact_id, first.artifact_id]
+    assert records[0]["filename"] == "second.png"
+
+    assert ts.list_provider_output_artifact_metadata(tmp_path, db, parent) == []
+    with pytest.raises(ProviderOutputArtifactAccessError):
+        ts.list_provider_output_artifact_metadata(tmp_path, db, child, descendant_thread_id=parent)

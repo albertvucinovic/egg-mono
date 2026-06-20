@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from pathlib import Path
 
 import pytest
 
 from egg.completion import ModelCompleter, EggCompleter, get_autocomplete_items
 import egg.completion as completion_mod
+from eggthreads.provider_output_artifacts import save_provider_output_bytes
 
 
 class MockDocument:
@@ -260,6 +262,51 @@ class TestEggCompleter:
         texts = [c.text for c in completions]
         assert 'testing' in texts or 'Hello' in texts or 'world' in texts
 
+    def test_completes_provider_artifacts_for_attach_output(self, isolated_db):
+        """Artifact-using commands should suggest current thread provider outputs."""
+        from eggthreads import create_root_thread, create_snapshot
+
+        thread = create_root_thread(isolated_db, name="ArtifactThread")
+        create_snapshot(isolated_db, thread)
+        saved = save_provider_output_bytes(
+            Path.cwd(),
+            thread,
+            b"generated image bytes",
+            filename="generated-cat.png",
+            mime_type="image/png",
+            presentation="image",
+        )
+
+        completer = EggCompleter(isolated_db, lambda: thread, None)
+        completions = list(completer.get_completions(MockDocument("/attachOutput "), None))
+
+        assert saved.artifact_id in [c.text for c in completions]
+        assert any("generated-cat.png" in str(c.display) for c in completions)
+
+    def test_save_provider_artifact_completes_path_after_artifact_id(self, isolated_db, tmp_path, monkeypatch):
+        """The optional export path should use filesystem completion, not artifact ids."""
+        from eggthreads import create_root_thread, create_snapshot
+
+        thread = create_root_thread(isolated_db, name="ArtifactThread")
+        create_snapshot(isolated_db, thread)
+        saved = save_provider_output_bytes(
+            Path.cwd(),
+            thread,
+            b"generated image bytes",
+            filename="generated-cat.png",
+            mime_type="image/png",
+            presentation="image",
+        )
+        (tmp_path / "exports").mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        completer = EggCompleter(isolated_db, lambda: thread, None)
+        completions = list(completer.get_completions(MockDocument(f"/saveProviderArtifact {saved.artifact_id} exp"), None))
+
+        texts = [c.text for c in completions]
+        assert any("exports/" in t for t in texts)
+        assert saved.artifact_id not in texts
+
 
 class TestGetAutocompleteItems:
     """Tests for get_autocomplete_items()."""
@@ -390,6 +437,49 @@ class TestGetAutocompleteItems:
         assert 'chat' in displays
         assert 'children' in displays
         assert 'system' in displays
+
+    def test_returns_provider_artifact_completions(self, isolated_db):
+        """Should return provider-output artifact completions for Egg display."""
+        from eggthreads import create_root_thread, create_snapshot
+
+        thread = create_root_thread(isolated_db, name="ArtifactThread")
+        create_snapshot(isolated_db, thread)
+        saved = save_provider_output_bytes(
+            Path.cwd(),
+            thread,
+            b"generated image bytes",
+            filename="generated-cat.png",
+            mime_type="image/png",
+            presentation="image",
+        )
+
+        items = get_autocomplete_items("/saveProviderArtifact ", 22, isolated_db, lambda: thread, None)
+
+        assert any(item["insert"] == saved.artifact_id for item in items)
+        assert any("generated-cat.png" in item["display"] for item in items)
+
+    def test_save_provider_artifact_autocomplete_switches_to_filesystem_for_path(self, isolated_db, tmp_path, monkeypatch):
+        from eggthreads import create_root_thread, create_snapshot
+
+        thread = create_root_thread(isolated_db, name="ArtifactThread")
+        create_snapshot(isolated_db, thread)
+        saved = save_provider_output_bytes(
+            Path.cwd(),
+            thread,
+            b"generated image bytes",
+            filename="generated-cat.png",
+            mime_type="image/png",
+            presentation="image",
+        )
+        (tmp_path / "exports").mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        line = f"/saveProviderArtifact {saved.artifact_id} exp"
+        items = get_autocomplete_items(line, len(line), isolated_db, lambda: thread, None)
+
+        inserts = [item["insert"] for item in items]
+        assert any("exports/" in insert for insert in inserts)
+        assert saved.artifact_id not in inserts
 
     def test_returns_filesystem_completions_for_plain_text(self, isolated_db, tmp_path, monkeypatch):
         """Should return filesystem completions for plain text."""

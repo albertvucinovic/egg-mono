@@ -2495,3 +2495,41 @@ class TestAutocomplete:
         assert "python" in displays
         assert "bash" in displays
         assert "all" in displays
+
+    def test_artifact_command_argument_autocomplete(self, client, test_db_path, tmp_path, monkeypatch):
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Artifact Autocomplete"})
+        thread_id = create_resp.json()["id"]
+        workspace = Path(test_db_path).resolve().parent.parent
+        saved = save_provider_output_bytes(
+            workspace,
+            thread_id,
+            b"generated image bytes",
+            filename="generated-cat.png",
+            mime_type="image/png",
+            presentation="image",
+        )
+
+        response = client.get(
+            "/api/autocomplete",
+            params={"line": "/attachOutput ", "cursor": len("/attachOutput "), "thread_id": thread_id},
+        )
+
+        assert response.status_code == 200
+        suggestions = response.json()["suggestions"]
+        assert any(s["insert"] == saved.artifact_id for s in suggestions)
+        assert any("generated-cat.png" in s["display"] for s in suggestions)
+
+        (tmp_path / "exports").mkdir(exist_ok=True)
+        monkeypatch.chdir(tmp_path)
+        line = f"/saveProviderArtifact {saved.artifact_id} exp"
+        response = client.get(
+            "/api/autocomplete",
+            params={"line": line, "cursor": len(line), "thread_id": thread_id},
+        )
+
+        assert response.status_code == 200
+        inserts = [s["insert"] for s in response.json()["suggestions"]]
+        assert any("exports/" in item for item in inserts)
+        assert saved.artifact_id not in inserts
