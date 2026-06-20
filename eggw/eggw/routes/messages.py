@@ -29,6 +29,12 @@ from eggthreads.image_generation import (
     normalize_image_generation_model_key,
     normalize_openai_image_generation_options,
 )
+from eggthreads.input_artifacts import (
+    InputArtifactAccessError,
+    InputArtifactError,
+    InputArtifactNotFoundError,
+    resolve_input_bytes,
+)
 from eggthreads.provider_output_artifacts import (
     ProviderOutputArtifactAccessError,
     ProviderOutputArtifactError,
@@ -388,6 +394,51 @@ async def upload_attachment(thread_id: str, file: UploadFile = File(...)):
         metadata=saved.metadata,
         content_part=content_part,
         content_text=content_to_plain_text([content_part], validate=True),
+    )
+
+
+@router.get("/{thread_id}/attachments/{input_id}")
+async def get_input_attachment(
+    thread_id: str,
+    input_id: str,
+    descendant_thread_id: str | None = None,
+    download: bool = False,
+):
+    """Return input attachment bytes after thread access checks."""
+    if not core.db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = core.db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    try:
+        metadata, data = resolve_input_bytes(
+            _attachment_workspace(),
+            core.db,
+            thread_id,
+            input_id,
+            descendant_thread_id=descendant_thread_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid input attachment id") from None
+    except InputArtifactAccessError:
+        raise HTTPException(status_code=403, detail="Access denied for input attachment") from None
+    except InputArtifactNotFoundError:
+        raise HTTPException(status_code=404, detail="Input attachment not found") from None
+    except InputArtifactError:
+        raise HTTPException(status_code=400, detail="Input attachment is invalid") from None
+
+    media_type = str(metadata.get("mime_type") or "application/octet-stream").strip().lower() or "application/octet-stream"
+    filename = str(metadata.get("filename") or metadata.get("input_id") or "attachment")
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": _content_disposition(disposition, filename),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

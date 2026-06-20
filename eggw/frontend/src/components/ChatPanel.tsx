@@ -10,7 +10,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
-import { fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
+import { attachmentUrl, fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
 import {
   artifactFilename,
@@ -271,6 +271,16 @@ function ContentPartsView({
           );
         }
         if (isAttachmentPart(part)) {
+          const canLink = Boolean(currentThreadId && part.input_id);
+          const descendantThreadId = canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId
+            ? part.owner_thread_id
+            : undefined;
+          const openUrl = canLink
+            ? attachmentUrl(currentThreadId!, part.input_id, { descendantThreadId })
+            : null;
+          const downloadUrl = canLink
+            ? attachmentUrl(currentThreadId!, part.input_id, { descendantThreadId, download: true })
+            : null;
           return (
             <div
               key={`${part.input_id || "attachment"}-${idx}`}
@@ -290,6 +300,16 @@ function ContentPartsView({
               <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
                 {attachmentPlaceholder(part)}
               </div>
+              {openUrl && downloadUrl && (
+                <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                  <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
+                    Open
+                  </a>
+                  <a href={downloadUrl} className="underline" style={{ color: "var(--accent)" }}>
+                    Download
+                  </a>
+                </div>
+              )}
             </div>
           );
         }

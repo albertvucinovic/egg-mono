@@ -124,6 +124,18 @@ export async function uploadAttachment(threadId: string, file: File): Promise<At
   return res.json();
 }
 
+export function attachmentUrl(
+  threadId: string,
+  inputId: string,
+  options: { descendantThreadId?: string; download?: boolean } = {},
+): string {
+  const params = new URLSearchParams();
+  if (options.descendantThreadId) params.set("descendant_thread_id", options.descendantThreadId);
+  if (options.download) params.set("download", "true");
+  const query = params.toString();
+  return `${API_BASE}/api/threads/${encodeURIComponent(threadId)}/attachments/${encodeURIComponent(inputId)}${query ? `?${query}` : ""}`;
+}
+
 export async function promoteProviderOutput(
   threadId: string,
   artifactId: string,

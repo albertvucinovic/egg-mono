@@ -513,6 +513,116 @@ class TestMessageOperations:
         assert sent["content"] == content
         assert sent["content_text"].startswith("see attached\n[Attachment: file note.txt text/plain")
 
+    def test_get_attachment_returns_bytes_and_headers(self, client, test_db_path):
+        from eggthreads.input_artifacts import save_input_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Attachment Download"})
+        thread_id = create_resp.json()["id"]
+        workspace = Path(test_db_path).parent.parent
+        data = b"\x89PNG\r\n\x1a\ninput-image"
+        saved = save_input_bytes(
+            workspace,
+            thread_id,
+            data,
+            filename="input image.png",
+            mime_type="image/png",
+            presentation="image",
+        )
+
+        inline = client.get(f"/api/threads/{thread_id}/attachments/{saved.input_id}")
+        download = client.get(f"/api/threads/{thread_id}/attachments/{saved.input_id}?download=true")
+
+        assert inline.status_code == 200
+        assert inline.content == data
+        assert inline.headers["content-type"].startswith("image/png")
+        assert inline.headers["x-content-type-options"] == "nosniff"
+        assert inline.headers["content-disposition"].startswith("inline;")
+        assert "input%20image.png" in inline.headers["content-disposition"]
+        assert download.status_code == 200
+        assert download.content == data
+        assert download.headers["content-disposition"].startswith("attachment;")
+
+    def test_get_attachment_parent_can_read_child_with_explicit_selector(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.input_artifacts import save_input_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Attachment Parent"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        workspace = Path(test_db_path).parent.parent
+        saved = save_input_bytes(workspace, child_id, b"child input", filename="child.txt", mime_type="text/plain", presentation="file")
+
+        response = client.get(
+            f"/api/threads/{parent_id}/attachments/{saved.input_id}",
+            params={"descendant_thread_id": child_id},
+        )
+
+        assert response.status_code == 200
+        assert response.content == b"child input"
+        assert response.headers["content-type"].startswith("text/plain")
+
+    def test_get_attachment_parent_without_selector_gets_404(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.input_artifacts import save_input_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Attachment Missing Selector"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        workspace = Path(test_db_path).parent.parent
+        saved = save_input_bytes(workspace, child_id, b"child input")
+
+        response = client.get(f"/api/threads/{parent_id}/attachments/{saved.input_id}")
+
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_get_attachment_denies_child_and_sibling_access(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.input_artifacts import save_input_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Attachment Denied"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        sibling_id = create_child_thread(core_state.db, parent_id, name="sibling")
+        workspace = Path(test_db_path).parent.parent
+        parent_saved = save_input_bytes(workspace, parent_id, b"parent input")
+        sibling_saved = save_input_bytes(workspace, sibling_id, b"sibling input")
+
+        parent_response = client.get(
+            f"/api/threads/{child_id}/attachments/{parent_saved.input_id}",
+            params={"descendant_thread_id": parent_id},
+        )
+        sibling_response = client.get(
+            f"/api/threads/{child_id}/attachments/{sibling_saved.input_id}",
+            params={"descendant_thread_id": sibling_id},
+        )
+
+        assert parent_response.status_code == 403
+        assert sibling_response.status_code == 403
+
+    def test_get_attachment_rejects_bad_ids_without_path_leak(self, client, test_db_path):
+        from eggthreads.input_artifacts import save_input_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Attachment Bad IDs"})
+        thread_id = create_resp.json()["id"]
+        workspace = Path(test_db_path).parent.parent
+        saved = save_input_bytes(workspace, thread_id, b"secret input bytes")
+
+        sha_response = client.get(f"/api/threads/{thread_id}/attachments/{saved.metadata['sha256']}")
+        upper_response = client.get(f"/api/threads/{thread_id}/attachments/{saved.input_id.upper()}")
+        path_response = client.get(f"/api/threads/{thread_id}/attachments/..%2Fbad1")
+
+        assert sha_response.status_code == 400
+        assert upper_response.status_code == 400
+        assert path_response.status_code == 404
+        joined_details = " ".join(
+            str(response.json().get("detail"))
+            for response in (sha_response, upper_response, path_response)
+        )
+        assert str(workspace) not in joined_details
+        assert ".egg" not in joined_details
+        assert "secret input bytes" not in joined_details
+
     def test_upload_attachment_unknown_thread_returns_404(self, client):
         response = client.post(
             "/api/threads/missing-thread/attachments",
