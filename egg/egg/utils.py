@@ -40,6 +40,8 @@ Commands:
     /pythonRepl <code>, /bashRepl <script>
   Skills:
     /skills [query], /skill <name> — show packaged skill documents (for example: /skill rlm)
+  Attachments:
+    /attach <path>, /attachments, /clearAttachments
   Display:
     /togglePanel (chat|children|system)
     /toggleBorders

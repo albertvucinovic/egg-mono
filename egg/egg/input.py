@@ -336,7 +336,11 @@ class InputMixin:
             # No pending approval (or unrecognized answer), treat Ctrl+D
             # as normal send.
             text = self.input_panel.get_text().strip()
-            if text:
+            try:
+                has_staged_attachments = int(self._staged_attachment_count_for_current_thread()) > 0
+            except Exception:
+                has_staged_attachments = False
+            if text or has_staged_attachments:
                 try:
                     should_clear = self.on_submit(text)
                 except Exception as e:
@@ -395,7 +399,11 @@ class InputMixin:
                 return True
             if self.enter_sends:
                 text = self.input_panel.get_text().strip()
-                if text:
+                try:
+                    has_staged_attachments = int(self._staged_attachment_count_for_current_thread()) > 0
+                except Exception:
+                    has_staged_attachments = False
+                if text or has_staged_attachments:
                     try:
                         should_clear = self.on_submit(text)
                     except Exception as e:

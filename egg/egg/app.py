@@ -74,6 +74,12 @@ from .approval import ApprovalMixin
 from .streaming import StreamingMixin
 from .input import InputMixin
 from .theme import apply_theme as apply_terminal_theme, register_theme_command
+from .attachments import (
+    clear_staged_attachments_for_thread,
+    register_attachment_commands,
+    staged_attachment_count,
+    staged_attachments_for_thread,
+)
 from .commands import (
     ModelCommandsMixin,
     ThreadCommandsMixin,
@@ -168,6 +174,8 @@ class EggDisplayApp(
         self._reload_requested: bool = False
         self.command_registry = create_default_command_registry()
         register_theme_command(self.command_registry, self)
+        self._staged_attachments_by_thread: Dict[str, List[Dict[str, Any]]] = {}
+        register_attachment_commands(self.command_registry, self)
         self.input_prefix_registry = create_default_input_prefix_registry()
         reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
         reloaded_existing_thread = False
@@ -476,7 +484,16 @@ class EggDisplayApp(
         if text.startswith('/'):
             self.handle_command(text)
             return True
-        append_message(self.db, self.current_thread, 'user', text)
+        staged = list(staged_attachments_for_thread(self, self.current_thread))
+        if staged:
+            from eggthreads.attachment_staging import build_message_content_with_attachments
+
+            content = build_message_content_with_attachments(text, staged)
+        else:
+            content = text
+        append_message(self.db, self.current_thread, 'user', content)
+        if staged:
+            clear_staged_attachments_for_thread(self, self.current_thread)
         create_snapshot(self.db, self.current_thread)
         self.ensure_scheduler_for(self.current_thread)
         self.log_system("User message queued; scheduler will stream the response.")
@@ -502,6 +519,9 @@ class EggDisplayApp(
             approve_tool_calls=approve_tool_calls_for_thread,
             app=self,
         )
+
+    def _staged_attachment_count_for_current_thread(self) -> int:
+        return staged_attachment_count(self, self.current_thread)
 
     def handle_input_prefix(self, text: str):
         """Dispatch non-slash input prefixes through the prefix registry."""

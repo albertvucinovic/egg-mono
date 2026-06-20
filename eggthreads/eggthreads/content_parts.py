@@ -169,6 +169,34 @@ def validate_message_content(content: Any) -> MessageContent:
     raise ContentPartError("message content must be a string or a list of Egg content parts.")
 
 
+def attachment_part_from_input_metadata(
+    metadata: Mapping[str, Any],
+    *,
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a canonical attachment content part from saved input metadata.
+
+    ``save_input_bytes`` metadata is Egg's durable source of truth for an input
+    artifact.  UI/API staging paths should derive message attachment parts from
+    that metadata instead of hand-copying field lists in each frontend.
+    """
+
+    if not isinstance(metadata, Mapping):
+        raise ContentPartError("input metadata must be an object.")
+    part = {
+        "type": ATTACHMENT_PART_TYPE,
+        "input_id": metadata.get("input_id"),
+        "owner_thread_id": metadata.get("owner_thread_id"),
+        "presentation": metadata.get("presentation"),
+        "mime_type": metadata.get("mime_type"),
+        "filename": metadata.get("filename"),
+        "size_bytes": metadata.get("size_bytes"),
+        "sha256": metadata.get("sha256"),
+        "options": dict(options or {}),
+    }
+    return validate_content_part(part)
+
+
 def normalize_content_to_parts(content: Any) -> list[dict[str, Any]]:
     """Return Egg content parts for a string or validated content array.
 
@@ -299,6 +327,7 @@ __all__ = [
     "ContentPartError",
     "MessageContent",
     "TEXT_PART_TYPE",
+    "attachment_part_from_input_metadata",
     "content_has_attachments",
     "content_to_plain_text",
     "extract_attachment_refs",

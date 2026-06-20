@@ -132,6 +132,168 @@ def _is_relative_to_path(child: Path, parent: Path) -> bool:
         return False
 
 
+def _sandbox_filesystem_values(settings: Dict[str, Any], key: str) -> List[str]:
+    fs = settings.get("filesystem") if isinstance(settings, dict) else None
+    if not isinstance(fs, dict):
+        return []
+    raw = fs.get(key)
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    out: List[str] = []
+    for value in raw:
+        if isinstance(value, str) and value.strip():
+            out.append(value.strip())
+    return out
+
+
+def _resolve_sandbox_policy_path(value: str, working_dir: Path) -> Optional[Path]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        p = Path(value.strip()).expanduser()
+        if not p.is_absolute():
+            p = working_dir / p
+        return p.resolve()
+    except Exception:
+        return None
+
+
+def _resolved_sandbox_policy_paths(settings: Dict[str, Any], key: str, working_dir: Path) -> List[Path]:
+    paths: List[Path] = []
+    for raw in _sandbox_filesystem_values(settings, key):
+        path = _resolve_sandbox_policy_path(raw, working_dir)
+        if path is not None:
+            paths.append(path)
+    return paths
+
+
+def _docker_read_roots(settings: Dict[str, Any], working_dir: Path) -> List[Path]:
+    roots = [working_dir.resolve()]
+    extra_mounts = settings.get("extra_mounts") if isinstance(settings, dict) else None
+    if isinstance(extra_mounts, list):
+        for mount in extra_mounts:
+            if not isinstance(mount, dict):
+                continue
+            src = mount.get("src")
+            dst = mount.get("dst")
+            if not isinstance(src, str) or not src.strip() or not isinstance(dst, str) or not dst.strip():
+                continue
+            try:
+                roots.append(Path(src).expanduser().resolve())
+            except Exception:
+                continue
+    # Keep broader roots first and drop nested duplicates.
+    out: List[Path] = []
+    for root in sorted(set(roots), key=lambda item: len(item.parts)):
+        if any(root == existing or _is_relative_to_path(root, existing) for existing in out):
+            continue
+        out.append(root)
+    return out
+
+
+def sandbox_read_policy_decision(
+    *,
+    enabled: bool,
+    provider: str,
+    settings: Dict[str, Any],
+    source_path: str | Path,
+    working_dir: str | Path | None = None,
+) -> tuple[bool, str]:
+    """Return whether a host path may be read under Egg's filesystem policy.
+
+    This helper is intentionally conservative for host-side operations such as
+    ``/attach`` that must not bypass a thread's sandbox/filesystem policy.  It
+    models the policy Egg already applies to subprocess providers:
+
+    * Egg-private ``.egg`` paths are never readable through this helper.
+    * ``filesystem.denyRead`` denies matching paths when sandboxing is enabled.
+    * A future ``filesystem.allowRead`` narrows reads if present.
+    * Docker reads are restricted to the mounted working directory plus explicit
+      ``extra_mounts`` sources; bwrap and srt are deny-read based in the current
+      implementation.
+    """
+
+    try:
+        wd = Path(working_dir).resolve() if working_dir is not None else Path.cwd().resolve()
+        target = Path(source_path).expanduser().resolve()
+    except Exception as e:
+        return False, f"could not resolve path: {e}"
+
+    for protected in _mandatory_protected_paths_for_working_dir(wd):
+        if target == protected or _is_relative_to_path(target, protected):
+            return False, "path is under Egg-private .egg storage"
+
+    if not enabled:
+        return True, "sandboxing disabled"
+
+    settings = dict(settings or {})
+    provider_name = str(provider or settings.get("provider") or "docker").strip() or "docker"
+
+    for denied in _resolved_sandbox_policy_paths(settings, "denyRead", wd):
+        if target == denied or _is_relative_to_path(target, denied):
+            return False, f"path is denied by filesystem.denyRead: {denied}"
+
+    allow_read = _resolved_sandbox_policy_paths(settings, "allowRead", wd)
+    if allow_read and not any(target == root or _is_relative_to_path(target, root) for root in allow_read):
+        return False, "path is outside filesystem.allowRead"
+
+    if provider_name == "docker":
+        roots = _docker_read_roots(settings, wd)
+        if not any(target == root or _is_relative_to_path(target, root) for root in roots):
+            return False, "path is outside Docker sandbox mounts"
+        return True, "path is inside Docker sandbox mounts"
+
+    if provider_name in {"bwrap", "srt"}:
+        return True, f"path is not denied by {provider_name} read policy"
+
+    return False, f"unknown sandbox provider: {provider_name}"
+
+
+def authorize_thread_path_read(db: "ThreadsDB", thread_id: str, source_path: str | Path) -> Path:
+    """Resolve and authorize a local source path for host-side ingestion.
+
+    Relative paths are interpreted against the thread's effective working
+    directory.  A :class:`PermissionError` means Egg's effective policy denies
+    the read; :class:`FileNotFoundError` and :class:`ValueError` describe local
+    path validation failures.
+    """
+
+    if not str(thread_id or "").strip():
+        raise ValueError("thread_id is required.")
+    if not isinstance(source_path, (str, Path)) or not str(source_path).strip():
+        raise ValueError("source path is required.")
+
+    try:
+        from .api import get_thread_working_directory
+
+        working_dir = get_thread_working_directory(db, thread_id)
+    except Exception:
+        working_dir = Path.cwd().resolve()
+
+    raw = Path(str(source_path).strip()).expanduser()
+    candidate = raw if raw.is_absolute() else Path(working_dir) / raw
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError:
+        raise
+    except Exception as e:
+        raise ValueError(f"could not resolve source path: {e}") from e
+    if not resolved.is_file():
+        raise ValueError(f"source path is not a regular file: {resolved}")
+
+    cfg = get_thread_sandbox_config(db, thread_id)
+    allowed, reason = sandbox_read_policy_decision(
+        enabled=cfg.enabled,
+        provider=cfg.provider,
+        settings=dict(cfg.settings or {}),
+        source_path=resolved,
+        working_dir=working_dir,
+    )
+    if not allowed:
+        raise PermissionError(f"source path is not allowed by the effective sandbox/filesystem policy: {reason}")
+    return resolved
+
+
 def _sandbox_mask_dir(*parts: str) -> Path:
     """Return an empty host directory usable as a read-only bind mask."""
 

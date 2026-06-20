@@ -160,6 +160,7 @@ from .token_count import (
 )
 from .content_parts import (
     ContentPartError,
+    attachment_part_from_input_metadata,
     content_has_attachments,
     content_to_plain_text,
     extract_attachment_refs,
@@ -190,6 +191,8 @@ from .sandbox import (
     wrap_argv_for_sandbox_with_settings,
     SandboxProviderRegistry,
     create_sandbox_provider_registry,
+    authorize_thread_path_read,
+    sandbox_read_policy_decision,
     get_sandbox_status,
     get_provider_names,
     provider_available,
@@ -279,6 +282,12 @@ from .command_catalog import (
     create_default_input_prefix_registry,
     render_command_registry_help,
 )
+from .attachment_staging import (
+    build_message_content_with_attachments,
+    format_staged_attachments,
+    infer_attachment_mime_and_presentation,
+    save_local_attachment_for_thread,
+)
 
 from .tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegistry, ToolStreamContext, create_default_tools, create_tool_registry
 from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill_index, render_skill_tool_output, search_skills
@@ -324,6 +333,7 @@ __all__ = [
     'set_subtree_tools_enabled', 'disable_tool_for_subtree', 'enable_tool_for_subtree',
     'set_thread_allow_raw_tool_output',
     'SandboxProviderRegistry', 'create_sandbox_provider_registry',
+    'authorize_thread_path_read', 'sandbox_read_policy_decision',
     'get_provider_names', 'provider_available',
     'wrap_argv_for_sandbox', 'wrap_argv_for_sandbox_with_config',
     'wrap_argv_for_sandbox_with_settings', 'get_sandbox_status',
@@ -354,6 +364,7 @@ __all__ = [
     'create_eval_context', 'resolve_eval_context', 'dispose_eval_context',
     'repl_bridge_call_tool',
     'CommandContext', 'CommandRegistry', 'CommandResult', 'CommandSpec',
+    'attachment_part_from_input_metadata',
     'ApprovalPolicyRegistry', 'ApprovalRequest', 'ApprovalVerdict',
     'aggregate_approval_verdicts', 'create_approval_policy_registry', 'evaluate_approval_policies',
     'OutputPolicyRegistry', 'OutputPolicyRequest', 'OutputPublicationDecision',
@@ -363,5 +374,7 @@ __all__ = [
     'EGG_COMMAND_COMPLETIONS', 'EGGW_COMMAND_COMPLETIONS',
     'command_completion_names', 'create_default_command_registry', 'create_default_input_prefix_registry',
     'render_command_registry_help',
+    'build_message_content_with_attachments', 'format_staged_attachments',
+    'infer_attachment_mime_and_presentation', 'save_local_attachment_for_thread',
 ]
 from .event_watcher import EventWatcher

@@ -7,6 +7,7 @@ import pytest
 import eggthreads as ts
 from eggthreads.content_parts import (
     ContentPartError,
+    attachment_part_from_input_metadata,
     content_has_attachments,
     content_to_plain_text,
     extract_attachment_refs,
@@ -110,6 +111,33 @@ def test_attachment_placeholder_plain_text_and_ref_extraction():
     assert refs == [validate_message_content([attachment])[0]]
     assert content_has_attachments(content) is True
     assert content_has_attachments("plain") is False
+
+
+def test_attachment_part_from_input_metadata_uses_saved_record_shape():
+    metadata = {
+        "input_id": "a1b2c3d4",
+        "owner_thread_id": "thread-1",
+        "presentation": "IMAGE",
+        "mime_type": "IMAGE/PNG",
+        "filename": "pixel.png",
+        "size_bytes": 3,
+        "sha256": SHA,
+        "provenance": {"kind": "local_path"},
+    }
+
+    part = attachment_part_from_input_metadata(metadata, options={"detail": "low"})
+
+    assert part == {
+        "type": "attachment",
+        "input_id": "a1b2c3d4",
+        "owner_thread_id": "thread-1",
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "pixel.png",
+        "size_bytes": 3,
+        "sha256": SHA,
+        "options": {"detail": "low"},
+    }
 
 
 def test_append_message_string_compatibility_and_array_snapshot_preservation(tmp_path):

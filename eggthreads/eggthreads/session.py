@@ -278,30 +278,15 @@ def docker_session_mount_dir(db: ThreadsDB, runtime_thread_id: str, cfg: Session
 
 
 def _sandbox_path_values(settings: Dict[str, Any], key: str) -> List[str]:
-    fs = settings.get("filesystem") if isinstance(settings, dict) else None
-    if not isinstance(fs, dict):
-        return []
-    raw = fs.get(key)
-    if not isinstance(raw, (list, tuple, set)):
-        return []
-    out: List[str] = []
-    for value in raw:
-        if isinstance(value, str) and value.strip():
-            out.append(value.strip())
-    return out
+    from .sandbox import _sandbox_filesystem_values
+
+    return _sandbox_filesystem_values(settings, key)
 
 
 def _resolve_sandbox_path(value: str, mount_dir: Path) -> Optional[Path]:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    raw = value.strip()
-    try:
-        p = Path(raw)
-        if not p.is_absolute():
-            p = mount_dir / p
-        return p.resolve()
-    except Exception:
-        return None
+    from .sandbox import _resolve_sandbox_policy_path
+
+    return _resolve_sandbox_policy_path(value, mount_dir)
 
 
 def _container_workspace_path(host_path: Path, mount_dir: Path, workspace: str) -> Optional[str]:

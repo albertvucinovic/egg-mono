@@ -890,6 +890,14 @@ class PanelsMixin:
                 title = self._normal_input_panel_title
                 border = self._normal_input_border_style
                 title_style = self._normal_input_title_style
+                try:
+                    count = int(self._staged_attachment_count_for_current_thread())
+                except Exception:
+                    count = 0
+                if count > 0:
+                    suffix = f" — {count} attachment{'s' if count != 1 else ''} staged"
+                    if suffix not in str(title):
+                        title = f"{title}{suffix}"
             changed = (
                 self.input_panel.title != title
                 or self.input_panel.style.border_style != border
