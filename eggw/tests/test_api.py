@@ -786,6 +786,176 @@ class TestMessageOperations:
         assert download.content == data
         assert download.headers["content-disposition"].startswith("attachment;")
 
+    def test_promote_provider_output_returns_attachment_metadata_without_paths_or_bytes(self, client, test_db_path):
+        from eggthreads.input_artifacts import resolve_input_bytes
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Provider Output Promote"})
+        thread_id = create_resp.json()["id"]
+        workspace = Path(test_db_path).parent.parent
+        data = b"\x89PNG\r\n\x1a\nprovider-image"
+        saved = save_provider_output_bytes(
+            workspace,
+            thread_id,
+            data,
+            filename="generated.png",
+            mime_type="image/png",
+            presentation="image",
+            provenance={"kind": "openai_image_generation", "request_id": "req-123"},
+            provider_refs={"openai": {"response_id": "resp-123"}},
+        )
+
+        response = client.post(f"/api/threads/{thread_id}/provider-output/{saved.artifact_id}/promote")
+
+        assert response.status_code == 200
+        payload = response.json()
+        metadata = payload["metadata"]
+        content_part = payload["content_part"]
+        assert payload["input_id"] == metadata["input_id"] == content_part["input_id"]
+        assert metadata["owner_thread_id"] == thread_id
+        assert metadata["filename"] == "generated.png"
+        assert metadata["mime_type"] == "image/png"
+        assert metadata["presentation"] == "image"
+        assert metadata["size_bytes"] == len(data)
+        assert metadata["sha256"] == saved.metadata["sha256"]
+        assert metadata["provenance"]["kind"] == "provider_output_promotion"
+        assert metadata["provenance"]["source_artifact_id"] == saved.artifact_id
+        assert metadata["provenance"]["source_owner_thread_id"] == thread_id
+        assert metadata["provenance"]["source_provenance"] == {
+            "kind": "openai_image_generation",
+            "request_id": "req-123",
+        }
+        assert metadata["provider_refs"] == {
+            "source_provider_output": {
+                "artifact_id": saved.artifact_id,
+                "owner_thread_id": thread_id,
+                "sha256": saved.metadata["sha256"],
+            },
+            "source_provider_refs": {"openai": {"response_id": "resp-123"}},
+        }
+        assert content_part == {
+            "type": "attachment",
+            "input_id": payload["input_id"],
+            "owner_thread_id": thread_id,
+            "presentation": "image",
+            "mime_type": "image/png",
+            "filename": "generated.png",
+            "size_bytes": len(data),
+            "sha256": saved.metadata["sha256"],
+            "options": {},
+        }
+        assert payload["content_text"].startswith("[Attachment: image generated.png image/png")
+
+        resolved_metadata, resolved_bytes = resolve_input_bytes(workspace, core_state.db, thread_id, payload["input_id"])
+        assert resolved_metadata["blob_relpath"]
+        assert resolved_bytes == data
+
+        encoded = json.dumps(payload)
+        assert "blob_relpath" not in encoded
+        assert "record_dir" not in encoded
+        assert "blob_path" not in encoded
+        assert str(workspace) not in encoded
+        assert ".egg" not in encoded
+        assert "provider-image" not in encoded
+
+    def test_promote_provider_output_parent_can_promote_child_with_explicit_selector(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.input_artifacts import resolve_input_bytes
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Provider Output Promote Parent"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        workspace = Path(test_db_path).parent.parent
+        saved = save_provider_output_bytes(
+            workspace,
+            child_id,
+            b"child generated",
+            filename="child.txt",
+            mime_type="text/plain",
+            presentation="file",
+        )
+
+        response = client.post(
+            f"/api/threads/{parent_id}/provider-output/{saved.artifact_id}/promote",
+            params={"descendant_thread_id": child_id},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["metadata"]["owner_thread_id"] == parent_id
+        assert payload["metadata"]["provenance"]["source_artifact_id"] == saved.artifact_id
+        assert payload["metadata"]["provenance"]["source_owner_thread_id"] == child_id
+        assert payload["content_part"]["owner_thread_id"] == parent_id
+        assert payload["content_part"]["filename"] == "child.txt"
+        resolved_metadata, data = resolve_input_bytes(workspace, core_state.db, parent_id, payload["input_id"])
+        assert resolved_metadata["owner_thread_id"] == parent_id
+        assert data == b"child generated"
+
+    def test_promote_provider_output_parent_without_selector_gets_404_and_no_input(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Provider Output Promote Missing Selector"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        workspace = Path(test_db_path).parent.parent
+        saved = save_provider_output_bytes(workspace, child_id, b"child generated")
+
+        response = client.post(f"/api/threads/{parent_id}/provider-output/{saved.artifact_id}/promote")
+
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+        assert not (workspace / ".egg" / "egg_inputs" / parent_id).exists()
+
+    def test_promote_provider_output_denies_child_and_sibling_access_without_input(self, client, test_db_path):
+        from eggthreads import create_child_thread
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        parent_resp = client.post("/api/threads", json={"name": "Provider Output Promote Denied"})
+        parent_id = parent_resp.json()["id"]
+        child_id = create_child_thread(core_state.db, parent_id, name="child")
+        sibling_id = create_child_thread(core_state.db, parent_id, name="sibling")
+        workspace = Path(test_db_path).parent.parent
+        parent_saved = save_provider_output_bytes(workspace, parent_id, b"parent generated")
+        sibling_saved = save_provider_output_bytes(workspace, sibling_id, b"sibling generated")
+
+        parent_response = client.post(
+            f"/api/threads/{child_id}/provider-output/{parent_saved.artifact_id}/promote",
+            params={"descendant_thread_id": parent_id},
+        )
+        sibling_response = client.post(
+            f"/api/threads/{child_id}/provider-output/{sibling_saved.artifact_id}/promote",
+            params={"descendant_thread_id": sibling_id},
+        )
+
+        assert parent_response.status_code == 403
+        assert sibling_response.status_code == 403
+        assert not (workspace / ".egg" / "egg_inputs" / child_id).exists()
+
+    def test_promote_provider_output_rejects_bad_ids_without_path_leak_or_input(self, client, test_db_path):
+        from eggthreads.provider_output_artifacts import save_provider_output_bytes
+
+        create_resp = client.post("/api/threads", json={"name": "Provider Output Promote Bad IDs"})
+        thread_id = create_resp.json()["id"]
+        workspace = Path(test_db_path).parent.parent
+        saved = save_provider_output_bytes(workspace, thread_id, b"secret provider bytes")
+
+        sha_response = client.post(f"/api/threads/{thread_id}/provider-output/{saved.metadata['sha256']}/promote")
+        upper_response = client.post(f"/api/threads/{thread_id}/provider-output/{saved.artifact_id.upper()}/promote")
+        path_response = client.post(f"/api/threads/{thread_id}/provider-output/..%2Fbad1/promote")
+
+        assert sha_response.status_code == 400
+        assert upper_response.status_code == 400
+        assert path_response.status_code == 404
+        joined_details = " ".join(
+            str(response.json().get("detail"))
+            for response in (sha_response, upper_response, path_response)
+        )
+        assert str(workspace) not in joined_details
+        assert ".egg" not in joined_details
+        assert not (workspace / ".egg" / "egg_inputs" / thread_id).exists()
+
     def test_get_provider_output_parent_can_read_child_with_explicit_selector(self, client, test_db_path):
         from eggthreads import create_child_thread
         from eggthreads.provider_output_artifacts import save_provider_output_bytes

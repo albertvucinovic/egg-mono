@@ -33,6 +33,7 @@ from eggthreads.provider_output_artifacts import (
     ProviderOutputArtifactAccessError,
     ProviderOutputArtifactError,
     ProviderOutputArtifactNotFoundError,
+    promote_provider_output_to_input,
     resolve_provider_output_bytes,
 )
 from eggllm.image_generation import ImageGenerationConfigError, ImageGenerationError, ImageGenerationProviderError
@@ -70,6 +71,19 @@ def _content_disposition(disposition: str, filename: str) -> str:
     ascii_name = "".join(ch if 0x20 <= ord(ch) < 0x7F and ch not in {'"', '\\'} else "_" for ch in safe_name)
     ascii_name = ascii_name or "artifact"
     return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe_name)}"
+
+
+def _public_input_metadata(metadata: dict) -> dict:
+    """Return input metadata safe for API staging responses.
+
+    The durable metadata file contains a storage-internal blob relative path.
+    Browser callers only need stable ids/provenance/display fields, and should
+    never learn raw artifact storage paths or bytes.
+    """
+
+    if not isinstance(metadata, dict):
+        return {}
+    return {key: value for key, value in metadata.items() if key != "blob_relpath"}
 
 
 def _image_generation_options(request: ImageGenerationRequest) -> dict[str, object]:
@@ -480,6 +494,45 @@ async def get_provider_output_artifact(
             "Content-Disposition": _content_disposition(disposition, filename),
             "X-Content-Type-Options": "nosniff",
         },
+    )
+
+
+@router.post("/{thread_id}/provider-output/{artifact_id}/promote", response_model=AttachmentUploadResponse)
+async def promote_provider_output_artifact(
+    thread_id: str,
+    artifact_id: str,
+    descendant_thread_id: str | None = None,
+):
+    """Promote a provider-output artifact into a staged input attachment shape."""
+    if not core.db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    t = core.db.get_thread(thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    try:
+        saved, content_part = promote_provider_output_to_input(
+            _attachment_workspace(),
+            core.db,
+            thread_id,
+            artifact_id,
+            descendant_thread_id=descendant_thread_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid provider output artifact id") from None
+    except ProviderOutputArtifactAccessError:
+        raise HTTPException(status_code=403, detail="Access denied for provider output artifact") from None
+    except ProviderOutputArtifactNotFoundError:
+        raise HTTPException(status_code=404, detail="Provider output artifact not found") from None
+    except ProviderOutputArtifactError:
+        raise HTTPException(status_code=400, detail="Provider output artifact is invalid") from None
+
+    return AttachmentUploadResponse(
+        input_id=saved.input_id,
+        metadata=_public_input_metadata(saved.metadata),
+        content_part=content_part,
+        content_text=content_to_plain_text([content_part], validate=True),
     )
 
 
