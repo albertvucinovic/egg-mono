@@ -1,5 +1,6 @@
 from eggthreads import ThreadsDB, create_root_thread
 from eggthreads.token_count import (
+    APPROX_IMAGE_ATTACHMENT_TOKENS,
     _cost_for_usage,
     count_text_tokens,
     extend_snapshot_token_stats,
@@ -239,6 +240,54 @@ def test_snapshot_token_stats_preserves_heuristic_usage_without_api_usage():
     assert usage["estimated_call_count"] == 2
     assert usage["api_confirmed_usage"] == {"actual_call_count": 0, "field_call_counts": {}}
     assert usage["by_model"]["m"]["estimated_call_count"] == 2
+
+
+def _image_attachment_part():
+    return {
+        "type": "attachment",
+        "input_id": "abc12345",
+        "owner_thread_id": "thread",
+        "presentation": "image",
+        "mime_type": "image/png",
+        "filename": "pixel.png",
+        "size_bytes": 10,
+        "sha256": "0123456789abcdef" * 4,
+        "options": {},
+    }
+
+
+def test_snapshot_token_stats_counts_image_attachment_fixed_budget():
+    messages = [
+        {"msg_id": "u1", "role": "user", "content": [{"type": "text", "text": "look"}, _image_attachment_part()]},
+        {"msg_id": "a1", "role": "assistant", "content": "answer", "model_key": "m"},
+    ]
+
+    stats = snapshot_token_stats({"messages": messages})
+
+    expected_user_tokens = count_text_tokens("look") + APPROX_IMAGE_ATTACHMENT_TOKENS
+    assert stats["per_message"]["u1"]["image_tokens"] == APPROX_IMAGE_ATTACHMENT_TOKENS
+    assert stats["per_message"]["u1"]["content_tokens"] == expected_user_tokens
+    assert stats["api_usage"]["total_input_tokens"] == expected_user_tokens
+    assert stats["api_usage"]["total_image_input_tokens"] == APPROX_IMAGE_ATTACHMENT_TOKENS
+    assert stats["api_usage"]["by_model"]["m"]["total_image_input_tokens"] == APPROX_IMAGE_ATTACHMENT_TOKENS
+
+
+def test_thread_cost_includes_heuristic_image_input_tokens(tmp_path):
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", [{"type": "text", "text": "look"}, {**_image_attachment_part(), "owner_thread_id": tid}])
+    ts.append_message(db, tid, "assistant", "answer", extra={"model_key": "m"})
+    ts.create_snapshot(db, tid)
+
+    stats = thread_token_stats(db, tid, llm=_CostLLM({"input_tokens": 1.0, "output_tokens": 0.0}))
+
+    usage = stats["api_usage"]
+    assert usage["total_input_tokens"] >= APPROX_IMAGE_ATTACHMENT_TOKENS
+    assert usage["total_image_input_tokens"] == APPROX_IMAGE_ATTACHMENT_TOKENS
+    assert usage["cost_usd"]["by_model"]["m"]["input"] >= APPROX_IMAGE_ATTACHMENT_TOKENS / 1_000_000
 
 
 class _CostLLM:

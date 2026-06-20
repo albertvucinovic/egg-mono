@@ -414,6 +414,7 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
             "full_thread_tokens": 30,
             "api_usage": {
                 "total_input_tokens": 5,
+                "total_image_input_tokens": 1200,
                 "cached_input_tokens": 1,
                 "cache_creation_input_tokens": 2,
                 "total_output_tokens": 2,
@@ -436,6 +437,7 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
                 "by_model": {
                     "test-model": {
                         "total_input_tokens": 5,
+                        "total_image_input_tokens": 1200,
                         "cached_input_tokens": 1,
                         "cache_creation_input_tokens": 2,
                         "total_output_tokens": 2,
@@ -481,6 +483,7 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
     assert "Full context usage (full effective history):" in cost_text
     assert "Current provider context usage (after last compaction):" in cost_text
     assert "total_input_tokens:    5" in cost_text
+    assert "image_input_tokens:    1200" in cost_text
     assert "total_input_tokens:    3" in cost_text
     assert "cached_input_hit_rate: 20.0%" in cost_text
     assert "cache_creation_input_tokens: 2" in cost_text

@@ -88,6 +88,7 @@ except Exception:  # pragma: no cover - environment dependent
 _ENCODING_NAME = "cl100k_base"
 _encoding = None  # type: ignore[var-annotated]
 _LIVE_LLM_TPS_CACHE: Dict[Tuple[str, int], Tuple[Optional[float], int]] = {}
+APPROX_IMAGE_ATTACHMENT_TOKENS = 1200
 
 
 def _get_encoding():
@@ -359,12 +360,75 @@ class _PerMessageTokens:
     index: int
     role: str
     content_tokens: int
+    image_tokens: int
     reasoning_tokens: int
     tool_calls_tokens: int
 
     @property
     def total_tokens(self) -> int:
         return self.content_tokens + self.reasoning_tokens + self.tool_calls_tokens
+
+
+def _content_text_and_image_tokens(raw_content: Any) -> Tuple[str, int]:
+    """Return provider-ish text plus fixed image token estimate for content.
+
+    Image attachments are sent as provider-native image parts after attachment
+    lowering, not as their readable metadata placeholders.  Count a fixed image
+    budget and avoid also charging the placeholder text for those parts.
+    """
+
+    if isinstance(raw_content, str):
+        return raw_content, 0
+
+    if not isinstance(raw_content, list):
+        try:
+            from .content_parts import content_to_plain_text
+
+            return content_to_plain_text(raw_content), 0
+        except Exception:
+            return "", 0
+
+    try:
+        from .content_parts import ATTACHMENT_PART_TYPE, TEXT_PART_TYPE, content_to_plain_text
+    except Exception:
+        try:
+            from .content_parts import content_to_plain_text
+
+            return content_to_plain_text(raw_content), 0
+        except Exception:
+            return "", 0
+
+    text_parts: List[str] = []
+    image_tokens = 0
+    for part in raw_content:
+        if isinstance(part, dict):
+            part_type = part.get("type")
+            if part_type == TEXT_PART_TYPE:
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+                continue
+            if part_type == "input_text":
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+                continue
+            if part_type == ATTACHMENT_PART_TYPE and str(part.get("presentation") or "").strip().lower() == "image":
+                image_tokens += APPROX_IMAGE_ATTACHMENT_TOKENS
+                continue
+            if part_type in {"image_url", "input_image"}:
+                image_tokens += APPROX_IMAGE_ATTACHMENT_TOKENS
+                continue
+        try:
+            text = content_to_plain_text([part])
+        except Exception:
+            try:
+                text = json.dumps(part, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                text = str(part)
+        if text:
+            text_parts.append(text)
+    return "\n".join(text_parts), int(image_tokens)
 
 
 def _tokens_for_message(msg: Dict[str, Any], index: int) -> _PerMessageTokens:
@@ -378,17 +442,8 @@ def _tokens_for_message(msg: Dict[str, Any], index: int) -> _PerMessageTokens:
 
     role = str(msg.get("role") or "")
 
-    raw_content = msg.get("content")
-    if isinstance(raw_content, str):
-        content = raw_content
-    else:
-        try:
-            from .content_parts import content_to_plain_text
-
-            content = content_to_plain_text(raw_content)
-        except Exception:
-            content = ""
-    content_tokens = _count_text_tokens(content)
+    content, image_tokens = _content_text_and_image_tokens(msg.get("content"))
+    content_tokens = _count_text_tokens(content) + int(image_tokens)
 
     reasoning = msg.get("reasoning") or msg.get("reasoning_content")
     if isinstance(reasoning, str):
@@ -425,6 +480,7 @@ def _tokens_for_message(msg: Dict[str, Any], index: int) -> _PerMessageTokens:
         index=index,
         role=role,
         content_tokens=content_tokens,
+        image_tokens=int(image_tokens),
         reasoning_tokens=reasoning_tokens,
         tool_calls_tokens=tool_calls_tokens,
     )
@@ -515,6 +571,7 @@ def _token_stats_for_messages(
     *,
     base_index: int = 0,
     base_context_tokens: int = 0,
+    base_context_image_tokens: int = 0,
     base_prev_call_input_tokens: Optional[int] = None,
     base_prev_call_model_key: Optional[str] = None,
     base_prev_call_input_tokens_by_model: Optional[Dict[str, int]] = None,
@@ -545,6 +602,7 @@ def _token_stats_for_messages(
 
     per_message: Dict[str, Any] = {}
     context_tokens = 0
+    context_image_tokens = 0
     include_in_context: List[bool] = []
 
     for idx, m in enumerate(msgs):
@@ -563,6 +621,7 @@ def _token_stats_for_messages(
             "index": pm.index,
             "role": pm.role,
             "content_tokens": pm.content_tokens,
+            "image_tokens": pm.image_tokens,
             "reasoning_tokens": pm.reasoning_tokens,
             "tool_calls_tokens": pm.tool_calls_tokens,
             "total_tokens": pm.total_tokens,
@@ -572,13 +631,16 @@ def _token_stats_for_messages(
         no_api = bool(m.get("no_api"))
         if (not no_api) and role in ("system", "user", "assistant", "tool"):
             context_tokens += pm.total_tokens
+            context_image_tokens += pm.image_tokens
             include_in_context.append(True)
         else:
             include_in_context.append(False)
 
     # Prefix sum of context tokens within this list.
     prefix_ctx: List[int] = []
+    prefix_image: List[int] = []
     running = 0
+    running_image = 0
     for idx, m in enumerate(msgs):
         if isinstance(m, dict):
             absolute_idx = int(base_index) + idx
@@ -587,9 +649,12 @@ def _token_stats_for_messages(
                 msg_id = f"idx-{absolute_idx}"
             if include_in_context[idx]:
                 running += int(per_message[msg_id]["total_tokens"])
+                running_image += int(per_message[msg_id].get("image_tokens") or 0)
         prefix_ctx.append(running)
+        prefix_image.append(running_image)
 
     total_input_tokens = 0
+    total_image_input_tokens = 0
     total_output_tokens = 0
     total_reasoning_tokens = 0  # Subset of output tokens (for display, not cost)
     approx_call_count = 0
@@ -634,6 +699,7 @@ def _token_stats_for_messages(
         if k not in by_model:
             by_model[k] = {
                 "total_input_tokens": 0,
+                "total_image_input_tokens": 0,
                 "cached_input_tokens": 0,
                 "cache_creation_input_tokens": 0,
                 "cache_creation_5m_input_tokens": 0,
@@ -662,6 +728,7 @@ def _token_stats_for_messages(
         # Input tokens for this call ~= base_context_tokens + context tokens
         # from this list up to the previous message.
         input_tok = int(base_context_tokens) + (prefix_ctx[idx - 1] if idx > 0 else 0)
+        image_input_tok = int(base_context_image_tokens) + (prefix_image[idx - 1] if idx > 0 else 0)
 
         # Determine the model key for attribution.
         mk = _model_key_from_message(m)
@@ -705,6 +772,7 @@ def _token_stats_for_messages(
                 last_input_tokens_by_model[mk] = int(input_for_call)
 
         total_input_tokens += input_for_call
+        total_image_input_tokens += image_input_tok
         total_output_tokens += out_tok
         total_reasoning_tokens += reason_tok
         cached_input_tokens += cached_for_call
@@ -723,6 +791,7 @@ def _token_stats_for_messages(
         else:
             bm["estimated_call_count"] += 1
         bm["total_input_tokens"] += int(input_for_call)
+        bm["total_image_input_tokens"] += int(image_input_tok)
         bm["cached_input_tokens"] += int(cached_for_call)
         bm["cache_creation_input_tokens"] += int(creation_for_call)
         bm["cache_creation_5m_input_tokens"] += int(creation_5m_for_call)
@@ -732,6 +801,7 @@ def _token_stats_for_messages(
 
     api_usage = {
         "total_input_tokens": int(total_input_tokens),
+        "total_image_input_tokens": int(total_image_input_tokens),
         "total_output_tokens": int(total_output_tokens),
         "total_reasoning_tokens": int(total_reasoning_tokens),  # Subset of output
         "cached_tokens": int(cached_tokens),
@@ -754,6 +824,7 @@ def _token_stats_for_messages(
     return {
         "per_message": per_message,
         "context_tokens": int(context_tokens),
+        "image_tokens": int(context_image_tokens),
         "api_usage": api_usage,
     }
 
@@ -836,6 +907,7 @@ def _usage_since_compaction_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, 
         tail_messages,
         base_index=len(prefix_messages),
         base_context_tokens=int(prefix_stats.get("context_tokens") or 0),
+        base_context_image_tokens=int(prefix_stats.get("image_tokens") or 0),
     )
 
 
@@ -908,6 +980,7 @@ def _full_usage_by_compaction_epoch_stats(db: "ThreadsDB", thread_id: str, messa
             tail_messages,
             base_index=len(prefix_messages),
             base_context_tokens=int(prefix_stats.get("context_tokens") or 0),
+            base_context_image_tokens=int(prefix_stats.get("image_tokens") or 0),
         )
         if int((epoch_stats.get("api_usage") or {}).get("approx_call_count") or 0) > 0:
             add_epoch(epoch_stats)
@@ -976,7 +1049,7 @@ def extend_snapshot_token_stats(snapshot: Dict[str, Any], tail_messages: List[Di
         base = _token_stats_for_messages([m for m in messages[:old_len] if isinstance(m, dict)])
     else:
         base_api = base.get("api_usage") if isinstance(base.get("api_usage"), dict) else {}
-        if "api_confirmed_usage" not in base_api:
+        if "api_confirmed_usage" not in base_api or "image_tokens" not in base or "total_image_input_tokens" not in base_api:
             return snapshot_token_stats(snapshot)
 
     au = base.get("api_usage") if isinstance(base.get("api_usage"), dict) else {}
@@ -985,6 +1058,7 @@ def extend_snapshot_token_stats(snapshot: Dict[str, Any], tail_messages: List[Di
         [m for m in tail_messages if isinstance(m, dict)],
         base_index=max(0, len(messages) - len(tail_messages)),
         base_context_tokens=int(base.get("context_tokens") or 0),
+        base_context_image_tokens=int(base.get("image_tokens") or 0),
         base_prev_call_input_tokens=au.get("last_call_input_tokens") if isinstance(au.get("last_call_input_tokens"), int) else None,
         base_prev_call_model_key=au.get("last_call_model_key") if isinstance(au.get("last_call_model_key"), str) else None,
         base_prev_call_input_tokens_by_model=base_prev_by_model,
@@ -1012,6 +1086,7 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
     """
 
     base_ctx_tokens = 0
+    base_image_tokens = 0
     base_prev_call_input_tokens: Optional[int] = None
     base_prev_call_model_key: Optional[str] = None
     base_prev_call_by_model: Optional[Dict[str, int]] = None
@@ -1042,6 +1117,10 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
                         base_ctx_tokens = int(ts.get("context_tokens") or 0)
                     except Exception:
                         base_ctx_tokens = 0
+                    try:
+                        base_image_tokens = int(ts.get("image_tokens") or 0)
+                    except Exception:
+                        base_image_tokens = 0
                     au = ts.get("api_usage")
                     if isinstance(au, dict):
                         lci = au.get("last_call_input_tokens")
@@ -1247,6 +1326,7 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
     return _token_stats_for_messages(
         [m for m in messages if isinstance(m, dict)],
         base_context_tokens=base_ctx_tokens,
+        base_context_image_tokens=base_image_tokens,
         base_prev_call_input_tokens=base_prev_call_input_tokens,
         base_prev_call_model_key=base_prev_call_model_key,
         base_prev_call_input_tokens_by_model=base_prev_call_by_model,
@@ -1276,10 +1356,12 @@ def _merge_token_stats_with_boundary(
     out: Dict[str, Any] = {
         "per_message": {},
         "context_tokens": _int(a.get("context_tokens")) + _int(b.get("context_tokens")),
+        "image_tokens": _int(a.get("image_tokens")) + _int(b.get("image_tokens")),
         "api_usage": {},
     }
     if include_snapshot_boundary:
         out["snapshot_context_tokens"] = _int(a.get("context_tokens"))
+        out["snapshot_image_tokens"] = _int(a.get("image_tokens"))
 
     pm: Dict[str, Any] = {}
     for src in (a.get("per_message") or {}, b.get("per_message") or {}):
@@ -1291,6 +1373,7 @@ def _merge_token_stats_with_boundary(
     au_b = b.get("api_usage") if isinstance(b.get("api_usage"), dict) else {}
 
     total_input = _int(au_a.get("total_input_tokens")) + _int(au_b.get("total_input_tokens"))
+    total_image_input = _int(au_a.get("total_image_input_tokens")) + _int(au_b.get("total_image_input_tokens"))
     total_output = _int(au_a.get("total_output_tokens")) + _int(au_b.get("total_output_tokens"))
     total_reasoning = _int(au_a.get("total_reasoning_tokens")) + _int(au_b.get("total_reasoning_tokens"))
     cached_in = _int(au_a.get("cached_input_tokens")) + _int(au_b.get("cached_input_tokens"))
@@ -1347,6 +1430,7 @@ def _merge_token_stats_with_boundary(
                 mk,
                 {
                     "total_input_tokens": 0,
+                    "total_image_input_tokens": 0,
                     "cached_input_tokens": 0,
                     "cache_creation_input_tokens": 0,
                     "cache_creation_5m_input_tokens": 0,
@@ -1359,6 +1443,7 @@ def _merge_token_stats_with_boundary(
                 },
             )
             bm["total_input_tokens"] += _int(usage.get("total_input_tokens"))
+            bm["total_image_input_tokens"] += _int(usage.get("total_image_input_tokens"))
             bm["cached_input_tokens"] += _int(usage.get("cached_input_tokens"))
             bm["cache_creation_input_tokens"] += _int(usage.get("cache_creation_input_tokens"))
             bm["cache_creation_5m_input_tokens"] += _int(usage.get("cache_creation_5m_input_tokens"))
@@ -1371,6 +1456,7 @@ def _merge_token_stats_with_boundary(
 
     out["api_usage"] = {
         "total_input_tokens": int(total_input),
+        "total_image_input_tokens": int(total_image_input),
         "total_output_tokens": int(total_output),
         "total_reasoning_tokens": int(total_reasoning),  # Subset of output tokens
         "cached_tokens": int(_int(cached_tokens)),
@@ -1603,7 +1689,11 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
 
                 ts = snap.get("token_stats")
                 ts_api = ts.get("api_usage") if isinstance(ts, dict) and isinstance(ts.get("api_usage"), dict) else {}
-                has_stale_usage_shape = isinstance(ts, dict) and "api_confirmed_usage" not in ts_api
+                has_stale_usage_shape = isinstance(ts, dict) and (
+                    "api_confirmed_usage" not in ts_api
+                    or "image_tokens" not in ts
+                    or "total_image_input_tokens" not in ts_api
+                )
                 if isinstance(ts, dict) and not has_stale_skipped and not has_stale_usage_shape:
                     # Use cached token_stats (for performance) when accurate.
                     snap_stats = ts
@@ -1681,6 +1771,17 @@ def thread_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> D
     except Exception:
         stream_context_tokens = 0
     out["context_tokens"] = int(provider_context_tokens + max(0, stream_context_tokens))
+    try:
+        provider_image_tokens = int((provider or {}).get("image_tokens") or 0)
+    except Exception:
+        provider_image_tokens = int(out.get("image_tokens") or 0)
+    stream_image_tokens = 0
+    try:
+        if "snapshot_context_tokens" in (full or {}):
+            stream_image_tokens = int((full or {}).get("image_tokens") or 0) - int((full or {}).get("snapshot_image_tokens") or 0)
+    except Exception:
+        stream_image_tokens = 0
+    out["image_tokens"] = int(provider_image_tokens + max(0, stream_image_tokens))
     if isinstance(provider, dict) and "per_message" in provider:
         out["provider_per_message"] = provider.get("per_message") or {}
     return out

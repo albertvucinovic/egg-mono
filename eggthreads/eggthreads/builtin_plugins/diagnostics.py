@@ -82,6 +82,7 @@ def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
 
     def _append_usage_section(lines: List[str], title: str, usage: Dict[str, Any]) -> None:
         ti = usage.get("total_input_tokens") or 0
+        image_in = usage.get("total_image_input_tokens") or 0
         to = usage.get("total_output_tokens") or 0
         cached_ctx = usage.get("cached_tokens") or 0
         cached_in = usage.get("cached_input_tokens") or 0
@@ -100,6 +101,8 @@ def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
             cached_hit_rate = 0.0
         lines.append(title)
         lines.append(f"  total_input_tokens:    {ti} ({_fmt_tok(ti)})")
+        if image_in:
+            lines.append(f"  image_input_tokens:    {image_in} ({_fmt_tok(image_in)})")
         lines.append(f"  cached_input_tokens:   {cached_in} ({_fmt_tok(cached_in)})")
         lines.append(f"  cached_input_hit_rate: {cached_hit_rate:.1f}%")
         if cache_creation_in:
