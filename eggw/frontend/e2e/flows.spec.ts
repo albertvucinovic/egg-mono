@@ -221,6 +221,16 @@ test.describe('Image Generation UI', () => {
         },
       });
     });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/provider-output/abc12345`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'image/png' },
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axS6S0AAAAASUVORK5CYII=',
+          'base64',
+        ),
+      });
+    });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
       await route.fulfill({
         status: 200,
@@ -309,6 +319,10 @@ test.describe('Image Generation UI', () => {
     await expect(page.locator('text=Generated 1 artifact; appended result to transcript')).toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=Provider artifact')).toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=generated-egg.png')).toBeVisible({ timeout: 5000 });
+    const preview = page.getByTestId('provider-artifact-preview');
+    await expect(preview).toBeVisible({ timeout: 5000 });
+    await expect(preview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/provider-output/abc12345`);
+    await expect(preview).toHaveAttribute('loading', 'lazy');
   });
 });
 
