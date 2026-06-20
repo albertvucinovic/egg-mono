@@ -3,6 +3,7 @@ from __future__ import annotations
 """Terminal image-generation slash command for Egg."""
 
 import shlex
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,87 @@ def _log_or_print_result(ctx: Any, message: str) -> None:
         logger(message)
 
 
+def _format_bytes(size_bytes: Any) -> str:
+    try:
+        size = int(size_bytes)
+    except Exception:
+        return "unknown size"
+    if size < 0:
+        return "unknown size"
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024.0
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(value)} B"
+    if value >= 100:
+        rendered = f"{value:.0f}"
+    elif value >= 10:
+        rendered = f"{value:.1f}".rstrip("0").rstrip(".")
+    else:
+        rendered = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{rendered} {units[unit_index]}"
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except Exception:
+        return str(path)
+
+
+def _format_image_generation_terminal_result(
+    result: ImageGenerationArtifactResult,
+    content: list[dict[str, Any]],
+) -> str:
+    """Return terminal-friendly result text with export/reuse hints."""
+
+    lines = [content_to_plain_text(content, validate=True).strip()]
+    if result.artifacts:
+        lines.extend(["", "Artifacts:"])
+    for artifact in result.artifacts:
+        metadata = getattr(artifact, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = getattr(artifact, "content_part", None)
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        artifact_id = str(getattr(artifact, "artifact_id", "") or metadata.get("artifact_id") or "unknown")
+        filename = str(metadata.get("filename") or f"{artifact_id}.bin")
+        mime_type = str(metadata.get("mime_type") or "application/octet-stream")
+        presentation = str(metadata.get("presentation") or "file")
+        size = _format_bytes(metadata.get("size_bytes"))
+        saved = getattr(artifact, "saved", None)
+        record_dir = getattr(saved, "record_dir", None)
+        stored = _display_path(Path(record_dir)) if record_dir is not None else ".egg/egg_provider_output"
+        lines.extend(
+            [
+                f"- id: {artifact_id}",
+                f"  file: {filename}",
+                f"  type: {mime_type} ({presentation}, {size})",
+                f"  stored: {stored}",
+                f"  export: /saveProviderArtifact {artifact_id} {shlex.quote(filename)}",
+                f"  reuse: /attachOutput {artifact_id}",
+            ]
+        )
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _finish_image_generation_command(ctx: Any, result: ImageGenerationArtifactResult) -> CommandResult:
+    content = _append_result_message(ctx, result)
+    message = _format_image_generation_terminal_result(result, content)
+    _log_or_print_result(ctx, message)
+    return CommandResult(clear_input=True, message=message)
+
+
+def _log_generation_start(ctx: Any, *, model_key: str | None, prompt: str) -> None:
+    logger = getattr(ctx, "log_system", None)
+    if callable(logger):
+        label = model_key or "default image model"
+        short_prompt = prompt if len(prompt) <= 120 else prompt[:117].rstrip() + "..."
+        logger(f"Generating image with {label}: {short_prompt}")
+
+
 def image_generate_command(ctx: Any, arg: str) -> CommandResult:
     """Generate images through the configured backend and append artifact refs."""
 
@@ -159,6 +241,7 @@ def image_generate_command(ctx: Any, arg: str) -> CommandResult:
         return CommandResult(clear_input=False, message=str(e))
 
     try:
+        _log_generation_start(ctx, model_key=model_key, prompt=prompt)
         result = generate_openai_image_artifacts(
             Path.cwd(),
             thread_id,
@@ -169,10 +252,44 @@ def image_generate_command(ctx: Any, arg: str) -> CommandResult:
             image_generation_models_path=IMAGE_GENERATION_MODELS_PATH,
             options=options,
         )
-        content = _append_result_message(ctx, result)
-        message = content_to_plain_text(content, validate=True)
-        _log_or_print_result(ctx, message)
-        return CommandResult(clear_input=True, message=message)
+        return _finish_image_generation_command(ctx, result)
+    except Exception as e:
+        return CommandResult(clear_input=False, message=f"/imageGenerate failed: {e}")
+
+
+async def image_generate_command_async(ctx: Any, arg: str) -> CommandResult:
+    """Async terminal image generation command for the live UI.
+
+    Provider/network work runs in a worker thread so the terminal can keep
+    repainting the ``Streaming[user command; ...]`` indicator while the image
+    provider is working.  Transcript append/snapshot still happen on the main
+    event-loop thread after the provider call completes.
+    """
+
+    db = getattr(ctx, "db", None)
+    thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
+    if db is None or not thread_id:
+        return CommandResult(clear_input=False, message="/imageGenerate failed: no current thread.")
+
+    try:
+        prompt, model_key, options = _parse_image_generate_args(arg)
+    except ValueError as e:
+        return CommandResult(clear_input=False, message=str(e))
+
+    try:
+        _log_generation_start(ctx, model_key=model_key, prompt=prompt)
+        result = await asyncio.to_thread(
+            generate_openai_image_artifacts,
+            Path.cwd(),
+            thread_id,
+            prompt,
+            model_key=model_key,
+            models_path=MODELS_PATH,
+            all_models_path=ALL_MODELS_PATH,
+            image_generation_models_path=IMAGE_GENERATION_MODELS_PATH,
+            options=options,
+        )
+        return _finish_image_generation_command(ctx, result)
     except Exception as e:
         return CommandResult(clear_input=False, message=f"/imageGenerate failed: {e}")
 
@@ -224,7 +341,7 @@ def register_image_generation_command(registry: Any, app: Any | None = None) -> 
     registry.register(
         CommandSpec(
             _IMAGE_GENERATE_COMMAND,
-            image_generate_command,
+            image_generate_command_async,
             category="image generation",
             usage="/imageGenerate [model=<backend>] [n=<1-10>] [size=<size>] <prompt>",
             description="Generate image artifacts with a configured provider backend.",
@@ -234,6 +351,7 @@ def register_image_generation_command(registry: Any, app: Any | None = None) -> 
 
 
 __all__ = [
+    "image_generate_command_async",
     "image_generate_command",
     "register_image_generation_command",
 ]

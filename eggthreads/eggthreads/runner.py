@@ -33,7 +33,7 @@ from .tool_state import (
 from .tools_config import get_thread_tools_config
 from .tool_call_id import normalize_tool_call_id
 from .terminal_safety import sanitize_terminal_text
-from .content_parts import content_has_artifacts, content_has_attachments, content_to_plain_text
+from .content_parts import content_has_artifacts, content_has_attachments, content_to_plain_text, validate_content_parts
 
 
 # Use SQLite-compatible ISO format without 'T' to allow lexical comparisons in SQL queries
@@ -485,6 +485,33 @@ def _emit_auto_output_approval(
         )
     except Exception:
         pass
+
+
+def _tool_output_content_parts_for_transcript(tool_name: str, output: str) -> Optional[List[Dict[str, Any]]]:
+    """Return canonical content parts for tool outputs that provide them.
+
+    Tool outputs remain stored as plain text in ``tool_call.finished`` for audit
+    and policy decisions.  Some tools, notably ``generate_image``, also return a
+    small JSON envelope containing Egg content parts.  Publishing those parts in
+    the final transcript lets UIs render artifact cards while provider context
+    still receives plain text via ``content_to_plain_text``.
+    """
+
+    if str(tool_name or "") != "generate_image" or not isinstance(output, str) or not output.strip():
+        return None
+    try:
+        payload = json.loads(output)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    parts = payload.get("content_parts")
+    if not isinstance(parts, list):
+        return None
+    try:
+        return validate_content_parts(parts)
+    except Exception:
+        return None
 
 
 def emit_tool_stream_delta(
@@ -2979,7 +3006,8 @@ class ThreadRunner:
                         content = "Output omitted."
                     else:
                         # 'whole' or 'partial' (or unknown) -> use the preview string.
-                        content = str(preview)
+                        structured_content = _tool_output_content_parts_for_transcript(tc.name, finished_output)
+                        content = structured_content if structured_content is not None else str(preview)
 
                 # For user-originated commands ($ / $$), prepend the original
                 # command text so that the message containing the output also

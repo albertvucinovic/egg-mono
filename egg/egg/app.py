@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -324,6 +325,7 @@ class EggDisplayApp(
             "tc_order": [],
         }
         self._watch_task: Optional[asyncio.Task] = None
+        self._user_command_tasks: set[asyncio.Task] = set()
         self.running = False
         # ensure system log exists (double safety)
         if not hasattr(self, '_system_log'):
@@ -486,7 +488,13 @@ class EggDisplayApp(
             self.handle_command(text)
             return False
         if text.startswith('/'):
-            self.handle_command(text)
+            registry = getattr(self, 'command_registry', None)
+            parts = text[1:].split(None, 1)
+            cmd = parts[0] if parts else ''
+            if registry is not None and cmd and getattr(registry, 'is_async', lambda _name: False)(cmd):
+                self._schedule_user_command(text)
+            else:
+                self.handle_command(text)
             return True
         staged = list(staged_attachments_for_thread(self, self.current_thread))
         if staged:
@@ -590,6 +598,128 @@ class EggDisplayApp(
             if block_count == 0:
                 _visible_feedback(text)
 
+    async def handle_command_async(self, text: str) -> None:
+        """Dispatch /command through the command registry without blocking the UI loop."""
+
+        parts = text[1:].split(None, 1)
+        cmd = parts[0]
+        arg = parts[1] if len(parts) > 1 else ''
+
+        def _visible_feedback(message: str, *, border_style: str = 'blue') -> None:
+            try:
+                self.console_print_block(f"/{cmd}", message, border_style=border_style)
+            except Exception:
+                self.log_system(message)
+
+        registry = getattr(self, 'command_registry', None)
+        if registry is None:
+            message = f'Unknown command: /{cmd}'
+            self.log_system(message)
+            _visible_feedback(message, border_style='red')
+            return
+
+        try:
+            registry.get(cmd)
+        except KeyError:
+            message = f'Unknown command: /{cmd}'
+            self.log_system(message)
+            _visible_feedback(message, border_style='red')
+            return
+
+        log_count = len(getattr(self, '_system_log', []))
+        block_count = 0
+        context = self._command_context()
+        original_printer = context.console_print_block
+
+        def capture_console_print_block(*args, **kwargs):
+            nonlocal block_count
+            block_count += 1
+            if original_printer is not None:
+                return original_printer(*args, **kwargs)
+            return None
+
+        self._begin_user_command_stream(cmd)
+        try:
+            result = await registry.execute_async(cmd, replace(context, console_print_block=capture_console_print_block), arg)
+        finally:
+            self._end_user_command_stream()
+        try:
+            message = getattr(result, 'message', None)
+        except Exception:
+            message = None
+        if isinstance(message, str) and message.strip():
+            text_msg = message.strip()
+            new_logs = getattr(self, '_system_log', [])[log_count:]
+            already_logged = any(str(log).strip() == text_msg for log in new_logs)
+            if not already_logged:
+                joined_logs = "\n".join(str(log).strip() for log in new_logs if str(log).strip())
+                already_logged = joined_logs == text_msg
+            if not already_logged:
+                self.log_system(text_msg)
+            if block_count == 0:
+                _visible_feedback(text_msg)
+
+    def _begin_user_command_stream(self, command_name: str) -> None:
+        try:
+            self._live_state = self._make_live_state(
+                active_invoke=f"user-command-{uuid.uuid4().hex[:12]}",
+                stream_kind='user command',
+                started_at=time.time(),
+            )
+        except Exception:
+            self._live_state = {
+                "active_invoke": f"user-command-{uuid.uuid4().hex[:12]}",
+                "stream_kind": "user command",
+                "started_at": time.time(),
+            }
+        self._live_state['command_name'] = command_name
+        self.log_system(f"Running user command /{command_name}...")
+        try:
+            self.system_output.mark_dirty()
+        except Exception:
+            pass
+
+    def _schedule_user_command(self, text: str) -> bool:
+        """Schedule an async user command while keeping the UI repaint loop alive."""
+
+        return self._schedule_user_command_task(self.handle_command_async(text))
+
+    def _schedule_user_command_task(self, awaitable: Any) -> bool:
+        """Schedule an already-created async command awaitable."""
+
+        try:
+            task = asyncio.create_task(awaitable)
+        except RuntimeError:
+            asyncio.run(awaitable)
+            return True
+        self._user_command_tasks.add(task)
+
+        def _done(done_task: asyncio.Task) -> None:
+            self._user_command_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                try:
+                    self._end_user_command_stream()
+                except Exception:
+                    pass
+                self.log_system(f"User command failed: {e}")
+
+        task.add_done_callback(_done)
+        return True
+
+    def _end_user_command_stream(self) -> None:
+        try:
+            self._live_state = self._make_live_state()
+        except Exception:
+            self._live_state = {"active_invoke": None, "stream_kind": None, "started_at": None}
+        try:
+            self.system_output.mark_dirty()
+        except Exception:
+            pass
+
     # ---------------- Main loop ----------------
     async def run(self):
         self.running = True
@@ -652,7 +782,11 @@ class EggDisplayApp(
                             while True:
                                 key = self.input_panel.editor.input_queue.get_nowait()
                                 had_input = True
-                                if not self.handle_key(key):
+                                key_result = self.handle_key(key)
+                                if asyncio.iscoroutine(key_result):
+                                    self._schedule_user_command_task(key_result)
+                                    key_result = True
+                                if not key_result:
                                     self.running = False
                                     break
                         except Exception:

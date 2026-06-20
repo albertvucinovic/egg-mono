@@ -965,6 +965,12 @@ class PanelsMixin:
                     inner = f"tool {tool_name}" if tool_name else "tool"
             if countdown and "timeout in" not in inner:
                 inner = f"{inner}; {countdown}"
+        elif kind == 'user command':
+            command_name = str(ls.get('command_name') or '').strip()
+            elapsed = self._current_user_command_duration()
+            inner = f"user command /{command_name}" if command_name else "user command"
+            if elapsed:
+                inner = f"{inner}; {elapsed}"
         else:
             inner = str(kind)
         # Escape inner brackets so Rich doesn't try to parse them as markup.
@@ -1006,6 +1012,21 @@ class PanelsMixin:
         if limit > 0:
             return f"streaming {elapsed:.0f}s (limit {limit:.0f}s)"
         return f"streaming {elapsed:.0f}s"
+
+    def _current_user_command_duration(self) -> str:
+        """Return elapsed time for a locally running user command."""
+
+        ls = getattr(self, '_live_state', {}) or {}
+        if not ls.get('active_invoke') or ls.get('stream_kind') != 'user command':
+            return ""
+        try:
+            started = float(ls.get('started_at'))
+        except Exception:
+            return ""
+        if started <= 0:
+            return ""
+        elapsed = max(0.0, time.time() - started)
+        return f"running {elapsed:.0f}s"
 
     def current_stream_tps(self) -> str:
         """Return a compact live TPS string for the active LLM stream."""

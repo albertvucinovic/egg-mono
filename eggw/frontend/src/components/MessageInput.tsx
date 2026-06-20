@@ -213,8 +213,8 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
 
   // Command mutation
   const commandMutation = useMutation({
-    mutationFn: (command: string) => executeCommand(currentThreadId!, command),
-    onMutate: (command: string) => {
+    mutationFn: ({ command, staged }: { command: string; staged: AttachmentContentPart[] }) => executeCommand(currentThreadId!, command, staged),
+    onMutate: ({ command }: { command: string; staged: AttachmentContentPart[] }) => {
       setInput("");
       setSuggestions([]);
       setShowSuggestions(false);
@@ -271,6 +271,12 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         if (response.data?.model_key) {
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadSettings", currentThreadId] });
+        }
+
+        if (response.data?.action === "stage_attachment" && response.data?.content_part) {
+          setStagedAttachments((prev) => [...prev, response.data!.content_part as AttachmentContentPart]);
+        } else if (response.data?.action === "clear_staged_attachments") {
+          setStagedAttachments([]);
         }
 
         if (response.data?.reload) {
@@ -532,11 +538,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     // messages are blocked during streaming except while the get-user tool is
     // explicitly waiting for the next normal user message.
     if (isCommand(trimmed)) {
-      if (hasAttachments) {
-        addSystemLog("Attachments cannot be sent with slash or shell commands. Remove staged attachments or send a normal message.", "error");
-        return;
-      }
-      commandMutation.mutate(trimmed);
+      commandMutation.mutate({ command: trimmed, staged: stagedAttachments });
     } else if (!isStreaming || activeGetUserWait) {
       messageMutation.mutate(buildMessageContentWithAttachments(trimmed, stagedAttachments));
     }

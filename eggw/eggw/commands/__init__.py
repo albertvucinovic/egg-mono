@@ -42,6 +42,13 @@ from .session import (
 )
 from .auth import cmd_login, cmd_logout, cmd_auth_status
 from .compaction import cmd_compact, cmd_compact_with_summary, cmd_context, cmd_set_auto_compact_threshold
+from .attachments import (
+    cmd_attach,
+    cmd_attach_output,
+    cmd_attachments,
+    cmd_clear_attachments,
+    cmd_save_provider_artifact,
+)
 from .utility import (
     cmd_toggle_auto_approval,
     cmd_toggle_auto_continue_on_error,
@@ -158,6 +165,12 @@ __all__ = [
     "get_auto_approval_status",
     "cmd_setContextLimit",
     "cmd_setThreadPriority",
+    # Attachment commands
+    "cmd_attach",
+    "cmd_attachments",
+    "cmd_attach_output",
+    "cmd_clear_attachments",
+    "cmd_save_provider_artifact",
     # Auth commands
     "cmd_login",
     "cmd_logout",
@@ -172,7 +185,7 @@ __all__ = [
 ]
 
 
-async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
+async def dispatch_command(thread_id: str, command: str, *, staged_attachments=None) -> CommandResponse:
     """Dispatch a slash command to the appropriate handler.
 
     Returns CommandResponse for the command result.
@@ -236,6 +249,16 @@ async def dispatch_command(thread_id: str, command: str) -> CommandResponse:
             return await cmd_rename(thread_id, command_arg)
         elif command_name == "cost":
             return await cmd_cost(thread_id)
+        elif command_name == "attach":
+            return await cmd_attach(thread_id, command_arg)
+        elif command_name == "attachments":
+            return cmd_attachments(staged_attachments)
+        elif command_name == "attachOutput":
+            return await cmd_attach_output(thread_id, command_arg)
+        elif command_name == "clearAttachments":
+            return cmd_clear_attachments(staged_attachments)
+        elif command_name in {"saveProviderArtifact", "saveProviderOutput"}:
+            return await cmd_save_provider_artifact(thread_id, command_arg)
         elif command_name == "toolsOn":
             return await cmd_tools_on(thread_id)
         elif command_name == "toolsOff":

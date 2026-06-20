@@ -593,6 +593,8 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max", o
             <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
               {contentText}
             </pre>
+          ) : isContentPartArray(message.content) ? (
+            <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />
           ) : message.role === "tool" ? (
             /* Tool output - collapsible if long */
             isLongToolOutput ? (
@@ -609,8 +611,6 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max", o
                 {contentText}
               </pre>
             )
-          ) : isContentPartArray(message.content) ? (
-            <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />
           ) : (
             /* Regular markdown content with GFM tables and LaTeX support */
             <div className="prose prose-sm max-w-none" style={{ color: "inherit" }}>

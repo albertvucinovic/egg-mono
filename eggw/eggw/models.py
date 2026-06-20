@@ -97,6 +97,7 @@ class ImageGenerationResponse(BaseModel):
 class CommandRequest(BaseModel):
     """Request to execute a command."""
     command: str  # The full command string (e.g., "/model GPT 5" or "$ ls -la")
+    staged_attachments: Optional[List[Dict[str, Any]]] = None
 
 
 class CommandResponse(BaseModel):

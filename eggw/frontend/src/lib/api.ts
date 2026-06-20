@@ -210,11 +210,15 @@ export interface CommandResponse {
   data?: Record<string, any>;
 }
 
-export async function executeCommand(threadId: string, command: string): Promise<CommandResponse> {
+export async function executeCommand(
+  threadId: string,
+  command: string,
+  stagedAttachments: ContentPart[] = [],
+): Promise<CommandResponse> {
   const res = await fetch(`${API_BASE}/api/threads/${threadId}/command`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command }),
+    body: JSON.stringify({ command, staged_attachments: stagedAttachments }),
   });
   if (!res.ok) throw new Error("Failed to execute command");
   return res.json();

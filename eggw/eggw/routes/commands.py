@@ -20,4 +20,4 @@ async def execute_command(thread_id: str, request: CommandRequest):
     if not t:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    return await dispatch_command(thread_id, request.command)
+    return await dispatch_command(thread_id, request.command, staged_attachments=request.staged_attachments)

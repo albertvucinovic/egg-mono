@@ -3,10 +3,12 @@ from __future__ import annotations
 """Shared UI command/autocomplete catalog for Egg frontends."""
 
 import os
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Mapping
+from inspect import isawaitable, iscoroutinefunction
+from typing import Any, Awaitable, Callable, Iterable, List, Mapping
 
 
 def _normalize_command_name(name: str) -> str:
@@ -58,7 +60,7 @@ class CommandContext:
     app: Any = None
 
 
-CommandHandler = Callable[[CommandContext, str], CommandResult | None]
+CommandHandler = Callable[[CommandContext, str], CommandResult | None | Awaitable[CommandResult | None]]
 CommandCompleter = Callable[[CommandContext, str], Iterable[str | Mapping[str, Any]]]
 InputPrefixHandler = Callable[[CommandContext, str], CommandResult | None]
 
@@ -134,6 +136,13 @@ class CommandRegistry:
 
         run_context = replace(context, log_system=capture_log)
         raw_result = spec.handler(run_context, arg)
+        if isawaitable(raw_result):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                raw_result = asyncio.run(raw_result)
+            else:
+                raise RuntimeError(f"Command /{normalized} is async; use execute_async().")
         result = raw_result if isinstance(raw_result, CommandResult) else CommandResult()
         message = result.message.strip() if isinstance(result.message, str) else ""
         if not message:
@@ -146,6 +155,41 @@ class CommandRegistry:
             else:
                 message = f"/{normalized} did not complete."
         return replace(result, message=message)
+
+    async def execute_async(self, name: str, context: CommandContext, arg: str = "") -> CommandResult:
+        normalized = _normalize_command_name(name)
+        spec = self.get(normalized)
+        logged_messages: list[str] = []
+        original_log_system = context.log_system
+
+        def capture_log(message: str) -> None:
+            text = str(message).strip()
+            if text:
+                logged_messages.append(text)
+            if original_log_system is not None:
+                original_log_system(message)
+
+        run_context = replace(context, log_system=capture_log)
+        raw_result = spec.handler(run_context, arg)
+        if isawaitable(raw_result):
+            raw_result = await raw_result
+        result = raw_result if isinstance(raw_result, CommandResult) else CommandResult()
+        message = result.message.strip() if isinstance(result.message, str) else ""
+        if not message:
+            if logged_messages:
+                message = "\n".join(logged_messages)
+            elif result.exit_app:
+                message = f"/{normalized} accepted."
+            elif result.clear_input:
+                message = f"/{normalized} completed."
+            else:
+                message = f"/{normalized} did not complete."
+        return replace(result, message=message)
+
+    def is_async(self, name: str) -> bool:
+        """Return True when the command handler is declared async."""
+
+        return iscoroutinefunction(self.get(name).handler)
 
     def complete(self, name: str, context: CommandContext, arg: str = "") -> list[str | Mapping[str, Any]]:
         completer = self.get(name).complete
@@ -413,6 +457,12 @@ EGG_COMMAND_COMPLETIONS: List[str] = command_completion_names()
 
 EGGW_COMMAND_COMPLETIONS: List[str] = [
     *EGG_COMMAND_COMPLETIONS,
+    '/attach',
+    '/attachments',
+    '/attachOutput',
+    '/saveProviderArtifact',
+    '/saveProviderOutput',
+    '/clearAttachments',
     # Web-only options.
     '/rename',
     '/theme',

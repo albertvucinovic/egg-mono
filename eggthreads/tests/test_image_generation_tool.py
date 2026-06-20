@@ -204,6 +204,55 @@ def test_generate_image_tool_calls_shared_service_and_returns_artifact_metadata(
     assert after_message_count == before_message_count
 
 
+def test_generate_image_tool_publishes_artifact_content_parts_in_runner_transcript(tmp_path, monkeypatch):
+    import asyncio
+    import eggthreads.builtin_plugins.image_generation as image_generation_tool
+    from eggthreads.tools import ToolRegistry
+
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+    tool_call_id = "call-generate-image"
+    ts.append_message(
+        db,
+        thread_id,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "Paint an egg"})},
+                }
+            ]
+        },
+    )
+    db.append_event("approve", thread_id, "tool_call.approval", {"tool_call_id": tool_call_id, "decision": "granted"})
+
+    def fake_generate(*args, **kwargs):
+        return _FakeImageGenerationResult(thread_id=thread_id, prompt="Paint an egg")
+
+    monkeypatch.setattr(image_generation_tool, "generate_openai_image_artifacts", fake_generate)
+
+    tools = ToolRegistry()
+    image_generation_tool.register_image_generation_tools(tools)
+    runner = ts.ThreadRunner(db, thread_id, llm=object(), tools=tools)
+
+    assert asyncio.run(runner.run_once()) is True
+    assert ts.build_tool_call_states(db, thread_id)[tool_call_id].state == "TC5"
+    assert asyncio.run(runner.run_once()) is True
+
+    messages = ts.create_snapshot(db, thread_id)["messages"]
+    tool_message = next(msg for msg in messages if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id)
+    content = tool_message["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert "Generated 1 image artifact" in content[0]["text"]
+    assert content[1]["type"] == "artifact"
+    assert content[1]["artifact_id"] == "abc12345"
+    assert "Provider artifact: image generated-1.png" in ts.content_to_plain_text(content)
+
+
 def test_generate_image_tool_rejects_missing_prompt_without_calling_service(monkeypatch):
     import eggthreads.builtin_plugins.image_generation as image_generation_tool
 

@@ -453,6 +453,13 @@ EggW-only commands:
     /rename <name> — Rename the current thread.
     /theme [name] — List or switch browser themes.
 
+Attachments:
+    /attach <path> — Stage a server-side local file path for the next message.
+    /attachments — List attachments staged in this browser composer.
+    /attachOutput <artifact_id> — Stage a generated provider artifact as an attachment.
+    /saveProviderArtifact <artifact_id> [path] — Export a provider artifact to cwd.
+    /clearAttachments — Clear staged attachments in this browser composer.
+
 EggW behavior notes:
     /redraw — No-op in EggW; the browser UI updates automatically.
     /displayMode — Terminal-only; EggW uses the browser layout.

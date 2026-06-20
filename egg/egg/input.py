@@ -342,6 +342,15 @@ class InputMixin:
                 has_staged_attachments = False
             if text or has_staged_attachments:
                 try:
+                    if text.startswith('/'):
+                        registry = getattr(self, 'command_registry', None)
+                        parts = text[1:].split(None, 1)
+                        cmd = parts[0] if parts else ''
+                        if registry is not None and cmd and getattr(registry, 'is_async', lambda _name: False)(cmd):
+                            self.input_panel.clear_text()
+                            self.input_panel.increment_message_count()
+                            self._schedule_user_command(text)
+                            return True
                     should_clear = self.on_submit(text)
                 except Exception as e:
                     self.log_system(f"Submit error: {e}")
@@ -405,6 +414,15 @@ class InputMixin:
                     has_staged_attachments = False
                 if text or has_staged_attachments:
                     try:
+                        if text.startswith('/'):
+                            registry = getattr(self, 'command_registry', None)
+                            parts = text[1:].split(None, 1)
+                            cmd = parts[0] if parts else ''
+                            if registry is not None and cmd and getattr(registry, 'is_async', lambda _name: False)(cmd):
+                                self.input_panel.clear_text()
+                                self.input_panel.increment_message_count()
+                                self._schedule_user_command(text)
+                                return True
                         should_clear = self.on_submit(text)
                     except Exception as e:
                         self.log_system(f"Submit error: {e}")

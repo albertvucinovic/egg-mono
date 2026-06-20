@@ -9,6 +9,7 @@ from typing import Any
 from eggthreads.attachment_staging import format_staged_attachments, save_local_attachment_for_thread
 from eggthreads.content_parts import format_attachment_placeholder
 from eggthreads.provider_output_artifacts import promote_provider_output_to_input
+from eggthreads.provider_output_export import export_provider_output_artifact
 
 
 def _current_model_config(ctx: Any, thread_id: str) -> tuple[str | None, dict[str, Any]]:
@@ -110,6 +111,23 @@ def _parse_attach_output_artifact_id(arg: str) -> str:
     if len(parts) != 1:
         raise ValueError("Usage: /attachOutput <artifact_id>")
     return parts[0]
+
+
+def _parse_save_provider_artifact_args(arg: str) -> tuple[str, str | None]:
+    text = (arg or "").strip()
+    if not text:
+        raise ValueError("Usage: /saveProviderArtifact <artifact_id> [path]")
+    try:
+        parts = shlex.split(text)
+    except ValueError as e:
+        raise ValueError(f"Could not parse artifact id/path: {e}") from e
+    if len(parts) not in {1, 2}:
+        raise ValueError("Usage: /saveProviderArtifact <artifact_id> [path]")
+    return parts[0], parts[1] if len(parts) == 2 else None
+
+
+def _copy_provider_artifact_to_path(ctx: Any, thread_id: str, artifact_id: str, output_path: str | None) -> tuple[Path, dict[str, Any]]:
+    return export_provider_output_artifact(Path.cwd(), ctx.db, thread_id, artifact_id, output_path)
 
 
 def _mark_input_dirty(app: Any) -> None:
@@ -219,6 +237,33 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
                 ctx.log_system(message)
             return CommandResult(clear_input=False, message=message)
 
+    def save_provider_artifact_handler(ctx: Any, arg: str):
+        thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
+        if not thread_id or getattr(ctx, "db", None) is None:
+            message = "/saveProviderArtifact failed: no current thread."
+            if ctx.log_system is not None:
+                ctx.log_system(message)
+            return CommandResult(clear_input=False, message=message)
+        try:
+            artifact_id, output_path = _parse_save_provider_artifact_args(arg)
+            target, metadata = _copy_provider_artifact_to_path(ctx, thread_id, artifact_id, output_path)
+            try:
+                display_target = target.relative_to(Path.cwd().resolve())
+            except Exception:
+                display_target = target
+            message = (
+                f"Saved provider artifact {artifact_id} to {display_target} "
+                f"({metadata.get('mime_type') or 'application/octet-stream'}, {metadata.get('size_bytes')} bytes)."
+            )
+            if ctx.log_system is not None:
+                ctx.log_system(message)
+            return CommandResult(clear_input=True, message=message)
+        except Exception as e:
+            message = f"/saveProviderArtifact failed: {e}"
+            if ctx.log_system is not None:
+                ctx.log_system(message)
+            return CommandResult(clear_input=False, message=message)
+
     def clear_handler(ctx: Any, arg: str):
         thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
         count = clear_staged_attachments_for_thread(app, thread_id) if thread_id else 0
@@ -261,6 +306,16 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             category="input",
             usage="/attachOutput <artifact_id>",
             description="Promote a provider-output artifact and stage it for the next user message.",
+        )
+    )
+    register_if_missing(
+        CommandSpec(
+            "saveProviderArtifact",
+            save_provider_artifact_handler,
+            aliases=("saveProviderOutput",),
+            category="input",
+            usage="/saveProviderArtifact <artifact_id> [path]",
+            description="Copy a provider-output artifact from Egg storage into the current working directory.",
         )
     )
     register_if_missing(
