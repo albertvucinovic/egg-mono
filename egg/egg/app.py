@@ -80,6 +80,7 @@ from .attachments import (
     staged_attachment_count,
     staged_attachments_for_thread,
 )
+from .image_generation import register_image_generation_command
 from .commands import (
     ModelCommandsMixin,
     ThreadCommandsMixin,
@@ -176,6 +177,7 @@ class EggDisplayApp(
         register_theme_command(self.command_registry, self)
         self._staged_attachments_by_thread: Dict[str, List[Dict[str, Any]]] = {}
         register_attachment_commands(self.command_registry, self)
+        register_image_generation_command(self.command_registry, self)
         self.input_prefix_registry = create_default_input_prefix_registry()
         reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
         reloaded_existing_thread = False

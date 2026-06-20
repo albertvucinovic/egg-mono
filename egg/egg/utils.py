@@ -42,6 +42,8 @@ Commands:
     /skills [query], /skill <name> — show packaged skill documents (for example: /skill rlm)
   Attachments:
     /attach <path>, /attachments, /clearAttachments
+  Image generation:
+    /imageGenerate [model=<backend>] [n=<1-10>] [size=<size>] <prompt>
   Display:
     /togglePanel (chat|children|system)
     /toggleBorders
