@@ -510,6 +510,39 @@ def test_openai_responses_image_tool_request_and_parse_call_result(tmp_path, mon
     assert "result" not in result.images[0].metadata
 
 
+def test_openai_responses_image_tool_ignores_single_image_n_option(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())
+    session = FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]})
+
+    result = generate_openai_responses_image_tool(
+        "single image",
+        model_key="Responses Image Tool",
+        models_path=models_path,
+        all_models_path=all_models_path,
+        options={"n": 1, "size": "1024x1024"},
+        session=session,
+    )
+
+    assert result.request_options == {"size": "1024x1024"}
+    assert session.posts[0]["json"]["tools"] == [{"type": "image_generation", "size": "1024x1024"}]
+
+
+def test_openai_responses_image_tool_rejects_multi_image_n_option(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())
+
+    with pytest.raises(ImageGenerationConfigError, match="one image per call"):
+        generate_openai_responses_image_tool(
+            "two images",
+            model_key="Responses Image Tool",
+            models_path=models_path,
+            all_models_path=all_models_path,
+            options={"n": 2},
+            session=FakeSession({"output": [{"type": "image_generation_call", "result": _b64(b"img")}]},),
+        )
+
+
 def test_generate_images_dispatches_to_responses_image_tool_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     models_path, all_models_path = _write_models(tmp_path, _responses_image_tool_models())

@@ -135,7 +135,14 @@ def register_image_generation_tools(registry: ToolRegistry) -> None:
                 "prompt": {"type": "string", "description": "Required text prompt for image generation."},
                 "model": {"type": "string", "description": "Optional image-generation model/backend key."},
                 "backend": {"type": "string", "description": "Optional alias for model; must match model when both are provided."},
-                "n": {"type": "integer", "description": "Optional number of images to generate, from 1 to 10."},
+                "n": {
+                    "type": "integer",
+                    "description": (
+                        "Optional number of images to generate, from 1 to 10, for backends that support "
+                        "multiple images. OpenAI Responses image_generation backends generate one image per "
+                        "call; Egg ignores n=1 and rejects n>1 for those backends."
+                    ),
+                },
                 "size": {"type": "string", "description": "Optional provider-supported image size, for example 1024x1024."},
                 "quality": {"type": "string", "description": "Optional provider-supported image quality."},
                 "output_format": {"type": "string", "description": "Optional output format: png, jpeg, or webp."},

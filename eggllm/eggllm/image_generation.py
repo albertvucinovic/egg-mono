@@ -195,19 +195,37 @@ def _filter_openai_responses_image_tool_options(
 ) -> dict[str, Any]:
     if not isinstance(options, Mapping):
         return {}
+    normalized: dict[str, Any] = {}
     unknown = sorted(
         str(key)
         for key, value in options.items()
-        if value is not None and str(key) not in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS
+        if value is not None and str(key) not in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS and str(key) != "n"
     )
+    n_value = options.get("n")
+    if n_value is not None:
+        try:
+            n_int = int(n_value)
+        except (TypeError, ValueError):
+            unknown.append("n")
+        else:
+            if isinstance(n_value, bool) or n_int != 1:
+                if reject_unknown:
+                    raise ImageGenerationConfigError(
+                        "OpenAI Responses image_generation currently supports one image per call; "
+                        "omit n or use n=1, or choose an openai_images backend for multi-image generation."
+                    )
+            # n=1 is the default/single-image case for this backend.  The
+            # Responses image_generation tool does not accept an explicit ``n``
+            # option, but LLMs often include n=1 because Egg's generic
+            # generate_image schema has to cover both Images and Responses
+            # backends.  Treat n=1 as harmless and drop it.
     if unknown and reject_unknown:
         joined = ", ".join(unknown)
         raise ImageGenerationConfigError(f"Unsupported OpenAI Responses image_generation option(s): {joined}")
-    return {
-        str(key): value
-        for key, value in options.items()
-        if value is not None and str(key) in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS
-    }
+    for key, value in options.items():
+        if value is not None and str(key) in OPENAI_RESPONSES_IMAGE_TOOL_OPTION_KEYS:
+            normalized[str(key)] = value
+    return normalized
 
 
 def _filter_openai_responses_payload_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
