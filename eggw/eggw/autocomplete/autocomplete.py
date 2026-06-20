@@ -19,6 +19,7 @@ from eggthreads.artifact_completion import (
 )
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, SESSION_ON_COMPLETIONS, SESSION_TARGET_COMPLETIONS
+from eggthreads.image_generation import complete_image_generate_args
 from eggthreads.skills import list_skills
 
 from .. import core
@@ -241,6 +242,20 @@ async def get_autocomplete(
                 elif is_provider_artifact_export_path_position(cmd, arg):
                     path_tok = '' if arg.endswith((' ', '\t')) else arg_tok
                     suggestions.extend(_filesystem_suggestions(path_tok, limit=20))
+
+            elif cmd == '/imageGenerate':
+                current = last_token(arg) if not arg.endswith((' ', '\t')) else ''
+                for item in complete_image_generate_args(
+                    arg,
+                    image_generation_models_path=core.IMAGE_GENERATION_MODELS_PATH,
+                    models_path=core.MODELS_PATH,
+                ):
+                    replace_len = len(current)
+                    suggestions.append({
+                        "display": item,
+                        "insert": item,
+                        "replace": replace_len,
+                    })
 
             elif cmd == '/updateAllModels':
                 # Provider name suggestions

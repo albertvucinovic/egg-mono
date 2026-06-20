@@ -24,8 +24,6 @@ from eggthreads import (
 from eggthreads.attachment_staging import safe_display_filename, save_attachment_bytes_for_thread
 from eggthreads.content_parts import content_to_plain_text
 from eggthreads.image_generation import (
-    generate_openai_image_artifacts,
-    image_generation_result_content_parts,
     normalize_image_generation_model_key,
     normalize_openai_image_generation_options,
 )
@@ -53,6 +51,7 @@ from ..models import (
 )
 from .. import core
 from ..core import ensure_scheduler_for, get_thread_root_id
+from ..image_generation_service import generate_and_append_thread_image
 
 router = APIRouter(prefix="/api/threads", tags=["messages"])
 
@@ -466,19 +465,11 @@ async def generate_thread_image(thread_id: str, request: ImageGenerationRequest)
     model_key = _image_generation_model_key(request)
 
     try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: generate_openai_image_artifacts(
-                _attachment_workspace(),
-                thread_id,
-                prompt,
-                model_key=model_key,
-                models_path=core.MODELS_PATH,
-                all_models_path=core.ALL_MODELS_PATH,
-                image_generation_models_path=core.IMAGE_GENERATION_MODELS_PATH,
-                options=options,
-            ),
+        result, content_parts, message_id = await generate_and_append_thread_image(
+            thread_id,
+            prompt,
+            model_key=model_key,
+            options=options,
         )
     except ImageGenerationConfigError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
@@ -486,10 +477,6 @@ async def generate_thread_image(thread_id: str, request: ImageGenerationRequest)
         raise HTTPException(status_code=502, detail=str(e)) from None
     except ImageGenerationError as e:
         raise HTTPException(status_code=502, detail=str(e)) from None
-
-    content_parts = image_generation_result_content_parts(result)
-    message_id = append_message(core.db, thread_id, role="assistant", content=content_parts)
-    create_snapshot(core.db, thread_id)
 
     return ImageGenerationResponse(
         message_id=message_id,

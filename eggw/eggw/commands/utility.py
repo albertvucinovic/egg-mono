@@ -460,6 +460,9 @@ Attachments:
     /saveProviderArtifact <artifact_id> [path] — Export a provider artifact to cwd.
     /clearAttachments — Clear staged attachments in this browser composer.
 
+Image generation:
+    /imageGenerate [model=<backend>] [n=<1-10>] [size=<size>] <prompt> — Generate image artifacts and append them to the transcript.
+
 EggW behavior notes:
     /redraw — No-op in EggW; the browser UI updates automatically.
     /displayMode — Terminal-only; EggW uses the browser layout.

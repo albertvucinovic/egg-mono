@@ -277,6 +277,9 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           setStagedAttachments((prev) => [...prev, response.data!.content_part as AttachmentContentPart]);
         } else if (response.data?.action === "clear_staged_attachments") {
           setStagedAttachments([]);
+        } else if (response.data?.action === "image_generation") {
+          queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
         }
 
         if (response.data?.reload) {
@@ -1011,6 +1014,12 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
             <Loader2 className="w-3 h-3 animate-spin" />
             {activeGetUserWait ? "Waiting for get-user answer..." : "Streaming..."}
+          </span>
+        )}
+        {commandMutation.isPending && (
+          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Running command...
           </span>
         )}
         <span title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>

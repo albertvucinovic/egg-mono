@@ -595,7 +595,9 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 continue
             # Check if candidate matches (prefix or containment)
             if base_l:
-                if not (c.lower().startswith(base_l.lower()) or base_l.lower() in c.lower()):
+                c_match = c.lower().replace("'", "").replace('"', "")
+                base_match = base_l.lower().replace("'", "").replace('"', "")
+                if not (c_match.startswith(base_match) or base_match in c_match):
                     continue
             # Always return full value and replace the typed token
             # This handles the case where user types more after suggestions are fetched

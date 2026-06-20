@@ -136,6 +136,59 @@ def test_image_generate_command_invokes_service_appends_artifact_refs_and_render
     assert any("Provider artifact: image generated-1.png" in entry for entry in egg_app._system_log)
 
 
+def test_image_generate_command_completion_uses_shared_backend_keys(egg_app, monkeypatch, tmp_path):
+    import json
+    import egg.image_generation as image_generation
+    from egg.completion import get_autocomplete_items
+
+    models_path = tmp_path / "models.json"
+    image_models_path = tmp_path / "image-generation-models.json"
+    models_path.write_text(
+        json.dumps({
+            "providers": {
+                "openai-images": {
+                    "api_base": "https://api.openai.com/v1/images/generations",
+                    "api_key_env": "OPENAI_API_KEY",
+                    "models": {},
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    image_models_path.write_text(
+        json.dumps({
+            "models": {
+                "Image Backend": {
+                    "provider": "openai-images",
+                    "api_type": "openai_images",
+                    "model_name": "gpt-image-1",
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(image_generation, "MODELS_PATH", models_path)
+    monkeypatch.setattr(image_generation, "IMAGE_GENERATION_MODELS_PATH", image_models_path)
+
+    items = egg_app.command_registry.complete(
+        "imageGenerate",
+        egg_app._command_context(),
+        "model=I",
+    )
+
+    assert "model='Image Backend'" in items
+
+    display_items = get_autocomplete_items(
+        "/imageGenerate model=I",
+        len("/imageGenerate model=I"),
+        egg_app.db,
+        lambda: egg_app.current_thread,
+        egg_app.llm_client,
+        egg_app.command_registry,
+    )
+    assert any(item["insert"] == "model='Image Backend'" for item in display_items)
+
+
 
 def test_image_generate_command_requires_prompt_and_does_not_call_service(egg_app, monkeypatch):
     import egg.image_generation as image_generation

@@ -49,6 +49,7 @@ from .attachments import (
     cmd_clear_attachments,
     cmd_save_provider_artifact,
 )
+from .image_generation import cmd_image_generate
 from .utility import (
     cmd_toggle_auto_approval,
     cmd_toggle_auto_continue_on_error,
@@ -171,6 +172,8 @@ __all__ = [
     "cmd_attach_output",
     "cmd_clear_attachments",
     "cmd_save_provider_artifact",
+    # Image generation commands
+    "cmd_image_generate",
     # Auth commands
     "cmd_login",
     "cmd_logout",
@@ -259,6 +262,8 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
             return cmd_clear_attachments(staged_attachments)
         elif command_name in {"saveProviderArtifact", "saveProviderOutput"}:
             return await cmd_save_provider_artifact(thread_id, command_arg)
+        elif command_name == "imageGenerate":
+            return await cmd_image_generate(thread_id, command_arg)
         elif command_name == "toolsOn":
             return await cmd_tools_on(thread_id)
         elif command_name == "toolsOff":

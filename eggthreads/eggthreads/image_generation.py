@@ -3,14 +3,152 @@ from __future__ import annotations
 """Thread-owned storage service for provider-backed image generation."""
 
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from eggllm.config import load_image_generation_models_config
 from eggllm.image_generation import ImageGenerationResult, generate_images
 
-from .content_parts import artifact_part_from_provider_output_metadata
+from .content_parts import artifact_part_from_provider_output_metadata, content_to_plain_text
 from .provider_output_artifacts import SavedProviderOutputArtifact, save_provider_output_bytes
+
+
+IMAGE_GENERATE_OPTION_KEYS = {
+    "background",
+    "model",
+    "backend",
+    "n",
+    "output_format",
+    "quality",
+    "size",
+}
+
+
+def image_generate_usage() -> str:
+    return (
+        "Usage: /imageGenerate [model=<backend>] [n=<1-10>] [size=<size>] "
+        "[quality=<quality>] [output_format=<png|jpeg|webp>] "
+        "[background=<background>] <prompt>"
+    )
+
+
+def parse_image_generate_args(arg: str) -> tuple[str, str | None, dict[str, Any]]:
+    """Parse the textual ``/imageGenerate`` command arguments.
+
+    Named options are parsed only before the first prompt token (or before
+    ``--``).  This keeps arbitrary prompts predictable while still supporting a
+    compact command form in both terminal Egg and EggW.
+    """
+
+    text = str(arg or "").strip()
+    if not text:
+        raise ValueError(image_generate_usage())
+    try:
+        tokens = shlex.split(text)
+    except ValueError as e:
+        raise ValueError(f"Could not parse /imageGenerate arguments: {e}") from e
+    if not tokens:
+        raise ValueError(image_generate_usage())
+
+    prompt_tokens: list[str] = []
+    options: dict[str, Any] = {}
+    model_key: str | None = None
+    parsing_options = True
+
+    for token in tokens:
+        if parsing_options and token == "--":
+            parsing_options = False
+            continue
+        if parsing_options and "=" in token:
+            raw_key, raw_value = token.split("=", 1)
+            key = raw_key.strip()
+            value = raw_value.strip()
+            if key in IMAGE_GENERATE_OPTION_KEYS:
+                if not value:
+                    raise ValueError(f"/imageGenerate option {key}= requires a value.")
+                if key in {"model", "backend"}:
+                    model_key = value
+                elif key == "n":
+                    try:
+                        n_value = int(value)
+                    except ValueError as e:
+                        raise ValueError("/imageGenerate option n= must be an integer from 1 to 10.") from e
+                    if n_value < 1 or n_value > 10:
+                        raise ValueError("/imageGenerate option n= must be an integer from 1 to 10.")
+                    options[key] = n_value
+                elif key == "output_format":
+                    fmt = value.strip().lower().lstrip(".")
+                    if fmt == "jpg":
+                        fmt = "jpeg"
+                    if fmt not in {"png", "jpeg", "webp"}:
+                        raise ValueError("/imageGenerate option output_format= must be png, jpeg, or webp.")
+                    options[key] = fmt
+                else:
+                    options[key] = value
+                continue
+            if not prompt_tokens:
+                raise ValueError(f"Unsupported /imageGenerate option: {key}")
+
+        parsing_options = False
+        prompt_tokens.append(token)
+
+    prompt = " ".join(prompt_tokens).strip()
+    if not prompt:
+        raise ValueError(image_generate_usage())
+    return prompt, model_key, options
+
+
+def configured_image_generation_backend_keys(
+    *,
+    image_generation_models_path: str | Path | None = None,
+    models_path: str | Path = "models.json",
+) -> list[str]:
+    try:
+        models_config, _providers_config = load_image_generation_models_config(
+            image_generation_models_path,
+            models_path=models_path,
+        )
+        return list(models_config.keys())
+    except Exception:
+        return []
+
+
+def complete_image_generate_args(
+    arg: str,
+    *,
+    image_generation_models_path: str | Path | None = None,
+    models_path: str | Path = "models.json",
+) -> list[str]:
+    """Return UI-neutral completions for ``/imageGenerate`` arguments."""
+
+    text = str(arg or "")
+    current = text.rsplit(None, 1)[-1] if text and not text.endswith(" ") else ""
+
+    for prefix in ("model=", "backend="):
+        if current.startswith(prefix):
+            partial = current[len(prefix):].strip("'\"").lower()
+            return [
+                f"{prefix}{shlex.quote(key)}"
+                for key in configured_image_generation_backend_keys(
+                    image_generation_models_path=image_generation_models_path,
+                    models_path=models_path,
+                )
+                if key.lower().startswith(partial)
+            ]
+
+    fragments = [
+        "model=",
+        "n=1",
+        "size=1024x1024",
+        "quality=high",
+        "output_format=png",
+        "output_format=webp",
+        "background=transparent",
+        "-- ",
+    ]
+    return [fragment for fragment in fragments if fragment.startswith(current)]
 
 
 def normalize_image_generation_model_key(model: Any = None, backend: Any = None) -> str | None:
@@ -119,6 +257,76 @@ def image_generation_result_content_parts(
     model_label = result.model_key or result.model_name
     summary = f"Generated {count} {noun} via {model_label} ({result.model_name}).\nPrompt: {result.prompt}"
     return [{"type": "text", "text": summary}, *result.content_parts]
+
+
+def _format_bytes(size_bytes: Any) -> str:
+    try:
+        size = int(size_bytes)
+    except Exception:
+        return "unknown size"
+    if size < 0:
+        return "unknown size"
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024.0
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(value)} B"
+    if value >= 100:
+        rendered = f"{value:.0f}"
+    elif value >= 10:
+        rendered = f"{value:.1f}".rstrip("0").rstrip(".")
+    else:
+        rendered = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{rendered} {units[unit_index]}"
+
+
+def format_image_generation_artifact_result(
+    result: ImageGenerationArtifactResult,
+    content: list[dict[str, Any]] | None = None,
+    *,
+    display_path: Callable[[Path], str] | None = None,
+) -> str:
+    """Return user-facing result text with export/reuse hints.
+
+    Command surfaces should append canonical provider-output artifact parts to
+    the transcript, then show a text summary that helps users discover the
+    generated artifact ids and the follow-up commands that act on them.
+    """
+
+    parts = content if content is not None else image_generation_result_content_parts(result)
+    lines = [content_to_plain_text(parts, validate=True).strip()]
+    if result.artifacts:
+        lines.extend(["", "Artifacts:"])
+    for artifact in result.artifacts:
+        metadata = getattr(artifact, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = getattr(artifact, "content_part", None)
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        artifact_id = str(getattr(artifact, "artifact_id", "") or metadata.get("artifact_id") or "unknown")
+        filename = str(metadata.get("filename") or f"{artifact_id}.bin")
+        mime_type = str(metadata.get("mime_type") or "application/octet-stream")
+        presentation = str(metadata.get("presentation") or "file")
+        size = _format_bytes(metadata.get("size_bytes"))
+        saved = getattr(artifact, "saved", None)
+        record_dir = getattr(saved, "record_dir", None)
+        if record_dir is not None:
+            stored = display_path(Path(record_dir)) if display_path is not None else str(Path(record_dir))
+        else:
+            stored = ".egg/egg_provider_output"
+        lines.extend(
+            [
+                f"- id: {artifact_id}",
+                f"  file: {filename}",
+                f"  type: {mime_type} ({presentation}, {size})",
+                f"  stored: {stored}",
+                f"  export: /saveProviderArtifact {artifact_id} {shlex.quote(filename)}",
+                f"  reuse: /attachOutput {artifact_id}",
+            ]
+        )
+    return "\n".join(line for line in lines if line is not None).strip()
 
 
 def _size_dimensions(size: Any) -> dict[str, int]:
@@ -257,10 +465,16 @@ def generate_openai_image_artifacts(
 
 
 __all__ = [
+    "IMAGE_GENERATE_OPTION_KEYS",
     "GeneratedProviderOutputArtifact",
     "ImageGenerationArtifactResult",
+    "complete_image_generate_args",
+    "configured_image_generation_backend_keys",
+    "format_image_generation_artifact_result",
     "generate_openai_image_artifacts",
     "image_generation_result_content_parts",
+    "image_generate_usage",
     "normalize_image_generation_model_key",
     "normalize_openai_image_generation_options",
+    "parse_image_generate_args",
 ]
