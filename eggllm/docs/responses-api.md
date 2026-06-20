@@ -51,7 +51,7 @@ eggllm supports both APIs through model-level configuration. Each model can spec
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `api_type` | `"chat_completions"` or `"responses"` | `"chat_completions"` |
+| `api_type` | `"chat_completions"`, `"responses"`, or `"anthropic_messages"` | `"chat_completions"` |
 | `api_base` | Model-level URL override (optional) | Uses provider's `api_base` |
 
 ### Automatic URL Rewriting

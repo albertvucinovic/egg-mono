@@ -252,7 +252,7 @@ class LLMClient:
 
     def _get_adapter_for_current_model(self) -> ProviderAdapter:
         """Get the appropriate adapter based on current model's api_type config."""
-        mc = self.registry.get_model_config(self.current_model_key)
+        mc = self.registry.get_effective_model_config(self.current_model_key)
         api_type = mc.get("api_type", "chat_completions")
         return AdapterFactory.get_adapter(api_type)
 

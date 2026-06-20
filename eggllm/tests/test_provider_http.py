@@ -78,3 +78,20 @@ def test_build_provider_headers_requires_oauth_login(monkeypatch):
             {"auth_type": "chatgpt_oauth"},
             accept_sse=False,
         )
+
+
+def test_build_provider_headers_for_anthropic_api_key_provider(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+
+    headers = build_provider_headers(
+        "anthropic",
+        {"api_key_env": "ANTHROPIC_API_KEY", "api_type": "anthropic_messages"},
+        accept_sse=True,
+    )
+
+    assert headers == {
+        "Content-Type": "application/json",
+        "x-api-key": "anthropic-key",
+        "anthropic-version": "2023-06-01",
+        "accept": "text/event-stream",
+    }

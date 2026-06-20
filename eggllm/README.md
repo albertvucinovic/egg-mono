@@ -77,7 +77,7 @@ Important fields:
 - `models.<display>.model_name`: provider API model id.
 - `models.<display>.alias`: optional alternative names.
 - `models.<display>.api_type`: optional adapter selection; supported values are
-  `chat_completions` (default) and `responses`.
+  `chat_completions` (default), `responses`, and `anthropic_messages`.
 - `models.<display>.max_tokens`: model context-window length. Egg uses this for
   context budgeting/compaction threshold derivation.
 - `models.<display>.parameters`: model-level request overrides.

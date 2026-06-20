@@ -8,6 +8,7 @@ like OpenAI to support both old and new API styles.
 from typing import Dict, Type
 
 from .base import ProviderAdapter
+from .anthropic import AnthropicMessagesAdapter
 from .openai_compat import OpenAICompatAdapter
 from .openai_responses import OpenAIResponsesAdapter
 
@@ -17,6 +18,8 @@ class AdapterFactory:
 
     # Registry of api_type -> adapter class
     _adapters: Dict[str, Type[ProviderAdapter]] = {
+        "anthropic": AnthropicMessagesAdapter,
+        "anthropic_messages": AnthropicMessagesAdapter,
         "chat_completions": OpenAICompatAdapter,
         "responses": OpenAIResponsesAdapter,
     }

@@ -33,8 +33,11 @@ class AttachmentLoweringError(ValueError):
 
 
 _OPENAI_ATTACHMENT_API_TYPES = {"chat_completions", "responses"}
+_ANTHROPIC_ATTACHMENT_API_TYPES = {"anthropic", "anthropic_messages"}
 _OPENAI_FILE_PRESENTATIONS = {"document", "file"}
-_OPENAI_NATIVE_ATTACHMENT_PART_TYPES = {"image_url", "input_image", "file", "input_file"}
+_ANTHROPIC_DOCUMENT_MIME_PREFIXES = ("text/", "application/vnd.")
+_ANTHROPIC_DOCUMENT_MIME_TYPES = {"application/pdf"}
+_NATIVE_ATTACHMENT_PART_TYPES = {"image_url", "input_image", "file", "input_file", "image", "document"}
 
 
 @dataclass(frozen=True)
@@ -62,10 +65,26 @@ def _is_openai_file_attachment(part: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_anthropic_document_attachment(part: Mapping[str, Any]) -> bool:
+    if str(part.get("type") or "") != ATTACHMENT_PART_TYPE:
+        return False
+    presentation = str(part.get("presentation") or "").strip().lower()
+    if presentation == "document":
+        return True
+    if presentation != "file":
+        return False
+    mime_type = str(part.get("mime_type") or "").strip().lower()
+    return mime_type in _ANTHROPIC_DOCUMENT_MIME_TYPES or any(mime_type.startswith(prefix) for prefix in _ANTHROPIC_DOCUMENT_MIME_PREFIXES)
+
+
 def _data_url(part: Mapping[str, Any], data: bytes) -> str:
     mime_type = str(part.get("mime_type") or "application/octet-stream").strip().lower() or "application/octet-stream"
     encoded = base64.b64encode(data).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def _raw_base64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
 
 
 def _owner_selector(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> str | None:
@@ -131,6 +150,16 @@ def _can_lower_openai_file(ctx: AttachmentLoweringContext, part: Mapping[str, An
     )
 
 
+def _can_lower_anthropic_document(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> bool:
+    if not _is_anthropic_document_attachment(part):
+        return False
+    return supports_attachment_presentation(
+        ctx.model_config,
+        "document",
+        mime_type=str(part.get("mime_type") or ""),
+    )
+
+
 def _placeholder(part: Mapping[str, Any]) -> str:
     try:
         return format_attachment_placeholder(part, validate=False)
@@ -146,7 +175,18 @@ def _lower_text_part(part: Mapping[str, Any], provider_api_type: str) -> Dict[st
 
 
 def _lower_image_part(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> Dict[str, Any]:
-    data_url = _data_url(part, _resolve_attachment_bytes(ctx, part))
+    data = _resolve_attachment_bytes(ctx, part)
+    if ctx.provider_api_type in _ANTHROPIC_ATTACHMENT_API_TYPES:
+        mime_type = str(part.get("mime_type") or "application/octet-stream").strip().lower() or "application/octet-stream"
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": _raw_base64(data),
+            },
+        }
+    data_url = _data_url(part, data)
     if ctx.provider_api_type == "responses":
         out: Dict[str, Any] = {"type": "input_image", "image_url": data_url}
     else:
@@ -178,6 +218,23 @@ def _lower_openai_file_part(ctx: AttachmentLoweringContext, part: Mapping[str, A
     return {"type": "file", "file": {"filename": filename, "file_data": data_url}}
 
 
+def _lower_anthropic_document_part(ctx: AttachmentLoweringContext, part: Mapping[str, Any]) -> Dict[str, Any]:
+    data = _resolve_attachment_bytes(ctx, part)
+    mime_type = str(part.get("mime_type") or "application/octet-stream").strip().lower() or "application/octet-stream"
+    out: Dict[str, Any] = {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": mime_type,
+            "data": _raw_base64(data),
+        },
+    }
+    filename = _attachment_filename(part)
+    if filename:
+        out["title"] = filename
+    return out
+
+
 def _lower_content_array(
     ctx: AttachmentLoweringContext,
     content: list[dict[str, Any]],
@@ -206,7 +263,7 @@ def _lower_content_array(
                 raise AttachmentLoweringError(f"Unsupported content part type: {part_type}")
             lowered.append({"type": "text", "text": content_to_plain_text([part])})
             continue
-        if _is_image_attachment(part) and ctx.provider_api_type in _OPENAI_ATTACHMENT_API_TYPES and _can_lower_image(ctx, part):
+        if _is_image_attachment(part) and ctx.provider_api_type in (_OPENAI_ATTACHMENT_API_TYPES | _ANTHROPIC_ATTACHMENT_API_TYPES) and _can_lower_image(ctx, part):
             try:
                 lowered.append(_lower_image_part(ctx, part))
             except Exception as e:
@@ -226,8 +283,16 @@ def _lower_content_array(
                     raise AttachmentLoweringError(_unsupported_message(part, ctx, str(e))) from e
                 lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": _placeholder(part)}, ctx.provider_api_type))
             continue
-        # TODO(Phase 3+): add Anthropic-native image/document/file lowering
-        # when an Anthropic adapter path exists.
+        if _is_anthropic_document_attachment(part) and ctx.provider_api_type in _ANTHROPIC_ATTACHMENT_API_TYPES and _can_lower_anthropic_document(ctx, part):
+            try:
+                lowered.append(_lower_anthropic_document_part(ctx, part))
+            except Exception as e:
+                if current_message:
+                    if isinstance(e, AttachmentLoweringError):
+                        raise
+                    raise AttachmentLoweringError(_unsupported_message(part, ctx, str(e))) from e
+                lowered.append(_lower_text_part({"type": TEXT_PART_TYPE, "text": _placeholder(part)}, ctx.provider_api_type))
+            continue
         reason = "unsupported attachment type or missing attachment capability"
         if current_message:
             raise AttachmentLoweringError(_unsupported_message(part, ctx, reason))
@@ -235,7 +300,7 @@ def _lower_content_array(
 
     if (
         not current_message
-        and not any(isinstance(item, dict) and item.get("type") in _OPENAI_NATIVE_ATTACHMENT_PART_TYPES for item in lowered)
+        and not any(isinstance(item, dict) and item.get("type") in _NATIVE_ATTACHMENT_PART_TYPES for item in lowered)
     ):
         return "\n".join(str(item.get("text") or "") for item in lowered)
     return lowered

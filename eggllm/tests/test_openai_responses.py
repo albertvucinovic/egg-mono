@@ -8,6 +8,7 @@ import pytest
 
 from eggllm.providers.openai_responses import OpenAIResponsesAdapter
 from eggllm.providers.factory import AdapterFactory
+from eggllm.providers.anthropic import AnthropicMessagesAdapter
 from eggllm.providers.openai_compat import OpenAICompatAdapter
 from eggllm.client import LLMClient
 
@@ -437,6 +438,11 @@ class TestAdapterFactory:
         adapter = AdapterFactory.get_adapter("responses")
         assert isinstance(adapter, OpenAIResponsesAdapter)
 
+    def test_anthropic_messages_type(self):
+        """'anthropic_messages' should return AnthropicMessagesAdapter."""
+        adapter = AdapterFactory.get_adapter("anthropic_messages")
+        assert isinstance(adapter, AnthropicMessagesAdapter)
+
     def test_unknown_type_raises(self):
         """Unknown api_type should raise ValueError."""
         with pytest.raises(ValueError) as exc_info:
@@ -452,6 +458,7 @@ class TestAdapterFactory:
     def test_supported_types(self):
         """supported_types should list all available types."""
         types = AdapterFactory.supported_types()
+        assert "anthropic_messages" in types
         assert "chat_completions" in types
         assert "responses" in types
 
@@ -693,6 +700,31 @@ class TestUrlRewriting:
         client.set_model("GPT-4o Responses")
         adapter = client._get_adapter_for_current_model()
         assert isinstance(adapter, OpenAIResponsesAdapter)
+
+    def test_adapter_selection_uses_provider_level_api_type(self, tmp_path: Path, monkeypatch):
+        """Provider-level api_type defaults should select adapters for child models."""
+        models = {
+            "providers": {
+                "anthropic": {
+                    "api_base": "https://api.anthropic.com/v1/messages",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                    "api_type": "anthropic_messages",
+                    "models": {"Claude": {"model_name": "claude-test"}},
+                }
+            }
+        }
+        mpath = tmp_path / "models.json"
+        apath = tmp_path / "all-models.json"
+        mpath.write_text(json.dumps(models))
+        apath.write_text(json.dumps({"providers": {}}))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.delenv("EG_CHILD_MODEL", raising=False)
+        monkeypatch.delenv("DEFAULT_MODEL", raising=False)
+
+        client = LLMClient(models_path=mpath, all_models_path=apath)
+
+        client.set_model("Claude")
+        assert isinstance(client._get_adapter_for_current_model(), AnthropicMessagesAdapter)
 
 
 class TestResponsesReasoningSummaries:
@@ -1030,3 +1062,84 @@ class TestResponsesUsageCapture:
             "total_output_tokens": 1,
         }
         assert out[-1]["message"]["provider_usage"] == usage
+
+
+class TestAnthropicMessagesAdapter:
+    class _FakeResponse:
+        def __init__(self, events):
+            self._events = events
+
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            for event in self._events:
+                yield ("data: " + json.dumps(event)).encode("utf-8")
+
+    class _FakeSession:
+        def __init__(self, events):
+            self.events = events
+            self.payload = None
+            self.headers = None
+
+        def post(self, _url, headers=None, json=None, **_kwargs):
+            self.headers = headers
+            self.payload = json
+            return TestAnthropicMessagesAdapter._FakeResponse(self.events)
+
+    def test_payload_and_usage_are_normalized(self):
+        adapter = AnthropicMessagesAdapter()
+        session = self._FakeSession(
+            [
+                {"type": "message_start", "message": {"usage": {"input_tokens": 10}}},
+                {"type": "content_block_delta", "delta": {"text": "Hi"}},
+                {"type": "message_delta", "delta": {"usage": {"output_tokens": 2}}},
+            ]
+        )
+
+        out = list(
+            adapter.stream(
+                "https://api.anthropic.com/v1/messages",
+                {},
+                {
+                    "model": "claude-test",
+                    "messages": [
+                        {"role": "system", "content": "System prompt"},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "look"},
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+                            ],
+                        },
+                    ],
+                    "max_tokens": 123,
+                },
+                session=session,
+            )
+        )
+
+        assert session.payload == {
+            "model": "claude-test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+                    ],
+                }
+            ],
+            "stream": True,
+            "max_tokens": 123,
+            "system": "System prompt",
+        }
+        assert out[-1] == {
+            "type": "done",
+            "message": {
+                "role": "assistant",
+                "content": "Hi",
+                "api_usage": {"total_input_tokens": 10, "total_output_tokens": 2},
+                "provider_usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+        }

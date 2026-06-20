@@ -169,6 +169,30 @@ def test_openai_responses_image_attachment_lowers_to_input_image_data_url(tmp_pa
     }
 
 
+def test_anthropic_image_attachment_lowers_to_image_base64_source(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    saved = save_input_bytes(tmp_path, tid, b"png-bytes", filename="pixel.png", mime_type="image/png", presentation="image")
+    model_config = {"input_modalities": ["text", "image"], "attachment_capabilities": {"images": True}}
+
+    lowered = lower_messages_for_provider(
+        [{"msg_id": "u1", "role": "user", "content": _content(saved, tid)}],
+        _ctx(tmp_path, db, tid, model_config, "anthropic_messages"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "text", "text": "look"}
+    assert content[1] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64.b64encode(b"png-bytes").decode("ascii"),
+        },
+    }
+
+
 def test_openai_responses_document_attachment_lowers_to_input_file_data_url(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
@@ -198,6 +222,105 @@ def test_openai_responses_document_attachment_lowers_to_input_file_data_url(tmp_
         "filename": "guide.pdf",
         "file_data": "data:application/pdf;base64," + base64.b64encode(data).decode("ascii"),
     }
+
+
+def test_anthropic_pdf_attachment_lowers_to_document_base64_source(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    data = b"%PDF-1.7\nbody"
+    saved = save_input_bytes(tmp_path, tid, data, filename="guide.pdf", mime_type="application/pdf", presentation="document")
+    model_config = {
+        "input_modalities": ["text", "document"],
+        "attachment_capabilities": {"documents": {"mime_types": ["application/pdf"]}},
+    }
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "u1",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "read"},
+                    _file_part(saved, owner_thread_id=tid, presentation="document", mime_type="application/pdf", filename="guide.pdf"),
+                ],
+            }
+        ],
+        _ctx(tmp_path, db, tid, model_config, "anthropic_messages"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "text", "text": "read"}
+    assert content[1] == {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": base64.b64encode(data).decode("ascii"),
+        },
+        "title": "guide.pdf",
+    }
+
+
+def test_anthropic_text_file_attachment_lowers_to_document_base64_source(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    data = b"hello notes"
+    saved = save_input_bytes(tmp_path, tid, data, filename="notes.txt", mime_type="text/plain", presentation="file")
+    model_config = {
+        "input_modalities": ["text", "document"],
+        "attachment_capabilities": {"documents": {"mime_types": ["text/plain"]}},
+    }
+
+    lowered = lower_messages_for_provider(
+        [
+            {
+                "msg_id": "u1",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "read"},
+                    _file_part(saved, owner_thread_id=tid, presentation="file", mime_type="text/plain", filename="notes.txt"),
+                ],
+            }
+        ],
+        _ctx(tmp_path, db, tid, model_config, "anthropic_messages"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "text", "text": "read"}
+    assert content[1] == {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "text/plain",
+            "data": base64.b64encode(data).decode("ascii"),
+        },
+        "title": "notes.txt",
+    }
+
+
+def test_anthropic_generic_file_attachment_fails_fast(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    saved = save_input_bytes(tmp_path, tid, b"binary", filename="archive.zip", mime_type="application/zip", presentation="file")
+    model_config = {
+        "input_modalities": ["text", "document"],
+        "attachment_capabilities": {"documents": True},
+    }
+
+    with pytest.raises(AttachmentLoweringError, match="cannot be sent"):
+        lower_messages_for_provider(
+            [
+                {
+                    "msg_id": "u1",
+                    "role": "user",
+                    "content": [_file_part(saved, owner_thread_id=tid, presentation="file", mime_type="application/zip", filename="archive.zip")],
+                }
+            ],
+            _ctx(tmp_path, db, tid, model_config, "anthropic_messages"),
+            current_msg_id="u1",
+        )
 
 
 def test_openai_chat_document_attachment_lowers_to_file_data_url(tmp_path):

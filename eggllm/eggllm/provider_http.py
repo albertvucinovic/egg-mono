@@ -58,6 +58,13 @@ def build_provider_headers(
                 raise EnvironmentError(
                     f"Env var '{api_key_env}' is not set for '{provider_name}'"
                 )
-            headers["Authorization"] = f"Bearer {api_key}"
+            api_type = str(provider_config.get("api_type") or "").strip().lower()
+            if provider_name == "anthropic" or api_type in {"anthropic", "anthropic_messages"}:
+                headers["x-api-key"] = api_key
+                headers["anthropic-version"] = str(provider_config.get("anthropic_version") or "2023-06-01")
+                if accept_sse:
+                    headers["accept"] = "text/event-stream"
+            else:
+                headers["Authorization"] = f"Bearer {api_key}"
 
     return headers
