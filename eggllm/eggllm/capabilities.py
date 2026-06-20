@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import Any, Dict, List
 
 DEFAULT_MODEL_KIND = "chat"
-DEFAULT_INPUT_MODALITIES = ["text"]
+DEFAULT_INPUT_MODALITIES = ["text", "image"]
 DEFAULT_OUTPUT_MODALITIES = ["text"]
 DEFAULT_TASK_CAPABILITIES = ["chat"]
 DEFAULT_ATTACHMENT_CAPABILITIES: Dict[str, Any] = {}
@@ -144,6 +144,24 @@ def effective_model_config(
                 out[key] = merge_mapping(out[key], value)
             else:
                 out[key] = value
+        # A model-level modality list is an explicit statement about that
+        # model.  If a provider enables images by default but one model says
+        # it only accepts text, do not let the provider image default leak
+        # through unless the model also explicitly re-enables images in its
+        # own attachment_capabilities.
+        if "input_modalities" in model_config:
+            explicit_modalities = _string_list(model_config.get("input_modalities"), [])
+            model_caps = model_config.get("attachment_capabilities")
+            model_caps_has_image = isinstance(model_caps, Mapping) and _capability_entry(model_caps, "image") is not None
+            if "image" not in explicit_modalities and not model_caps_has_image:
+                caps = dict(out.get("attachment_capabilities")) if isinstance(out.get("attachment_capabilities"), Mapping) else {}
+                caps["images"] = False
+                out["attachment_capabilities"] = caps
+            elif "image" in explicit_modalities and not model_caps_has_image:
+                caps = dict(out.get("attachment_capabilities")) if isinstance(out.get("attachment_capabilities"), Mapping) else {}
+                if _entry_disabled(_capability_entry(caps, "image")):
+                    caps["images"] = True
+                    out["attachment_capabilities"] = caps
     return out
 
 
@@ -198,6 +216,23 @@ def _entry_enabled(entry: Any) -> bool:
     return False
 
 
+def _entry_disabled(entry: Any) -> bool:
+    """Return whether a capability entry is an explicit opt-out.
+
+    Missing capability metadata now means "try the common image path" for
+    OpenAI-compatible providers.  Explicit opt-outs therefore need to win over
+    default input modalities and provider-level defaults.
+    """
+
+    if isinstance(entry, bool):
+        return entry is False
+    if isinstance(entry, Mapping):
+        for key in ("enabled", "supported", "allow", "allowed"):
+            if key in entry:
+                return not bool(entry.get(key))
+    return False
+
+
 def _entry_mime_types(entry: Any, presentation: str, *, default_image: bool = True) -> List[str]:
     if isinstance(entry, Mapping):
         raw = None
@@ -245,6 +280,8 @@ def supports_attachment_presentation(
         return False
     caps = attachment_capabilities(model_config)
     entry = _capability_entry(caps, presentation_token)
+    if _entry_disabled(entry):
+        return False
     top_level_mimes = [
         mime
         for mime in _entry_mime_types(caps, presentation_token, default_image=False)

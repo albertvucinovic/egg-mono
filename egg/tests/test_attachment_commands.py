@@ -96,6 +96,27 @@ def test_attach_denied_by_effective_sandbox_policy_does_not_stage(egg_app, tmp_p
     assert any("/attach failed" in msg and "denyRead" in msg for msg in egg_app._system_log)
 
 
+def test_attach_image_rejected_for_explicit_text_only_model(egg_app, tmp_path, monkeypatch):
+    source = tmp_path / "pixel.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+
+    class Registry:
+        def get_effective_model_config(self, _model_key):
+            return {"model_name": "text-only", "input_modalities": ["text"]}
+
+    class LLM:
+        current_model_key = "Text Only"
+        registry = Registry()
+
+    egg_app.llm_client = LLM()
+    monkeypatch.setattr(egg_app, "current_model_for_thread", lambda _tid: "Text Only")
+
+    egg_app.handle_command(f"/attach {source}")
+
+    assert egg_app._staged_attachment_count_for_current_thread() == 0
+    assert any("/attach failed" in msg and "not supporting image attachments" in msg for msg in egg_app._system_log)
+
+
 def test_input_panel_title_shows_staged_attachment_status(egg_app, tmp_path):
     source = tmp_path / "note.txt"
     source.write_text("hello", encoding="utf-8")

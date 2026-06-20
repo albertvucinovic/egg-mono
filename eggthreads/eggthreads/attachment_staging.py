@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .content_parts import attachment_part_from_input_metadata, format_attachment_placeholder, validate_content_part
 from .input_artifacts import SavedInputArtifact, save_input_bytes
@@ -88,16 +88,23 @@ def save_local_attachment_for_thread(
     source_path: str | Path,
     *,
     workspace: str | Path | None = None,
+    validate_candidate: Callable[[str, str, str], None] | None = None,
 ) -> tuple[SavedInputArtifact, dict[str, Any]]:
     """Authorize, ingest, and return an attachment part for a local path."""
 
     resolved = authorize_thread_path_read(db, thread_id, source_path)
     data = resolved.read_bytes()
+    display_name = safe_display_filename(resolved.name)
+    mime_type, presentation = infer_attachment_mime_and_presentation(display_name, data)
+    if validate_candidate is not None:
+        validate_candidate(display_name, mime_type, presentation)
     return save_attachment_bytes_for_thread(
         Path.cwd() if workspace is None else workspace,
         thread_id,
         data,
-        filename=resolved.name,
+        filename=display_name,
+        mime_type=mime_type,
+        presentation=presentation,
         provenance={"kind": "local_path"},
     )
 
@@ -108,13 +115,17 @@ def save_attachment_bytes_for_thread(
     data: bytes | bytearray | memoryview,
     *,
     filename: str | Path | None = None,
+    mime_type: str | None = None,
+    presentation: str | None = None,
     provenance: Mapping[str, Any] | None = None,
 ) -> tuple[SavedInputArtifact, dict[str, Any]]:
     """Save uploaded/staged bytes and return a canonical attachment part."""
 
     data_bytes = bytes(data)
     display_name = safe_display_filename(filename)
-    mime_type, presentation = infer_attachment_mime_and_presentation(display_name, data_bytes)
+    inferred_mime_type, inferred_presentation = infer_attachment_mime_and_presentation(display_name, data_bytes)
+    mime_type = str(mime_type or inferred_mime_type).strip().lower() or inferred_mime_type
+    presentation = str(presentation or inferred_presentation).strip().lower() or inferred_presentation
     provenance_data = dict(provenance or {})
     provenance_data.setdefault("kind", "bytes")
     provenance_data["display_name"] = display_name

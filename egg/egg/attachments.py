@@ -11,6 +11,53 @@ from eggthreads.content_parts import format_attachment_placeholder
 from eggthreads.provider_output_artifacts import promote_provider_output_to_input
 
 
+def _current_model_config(ctx: Any, thread_id: str) -> tuple[str | None, dict[str, Any]]:
+    llm = getattr(ctx, "llm_client", None)
+    model_key: str | None = None
+    try:
+        if ctx.get_current_model is not None:
+            value = ctx.get_current_model(thread_id)
+            if isinstance(value, str) and value.strip():
+                model_key = value.strip()
+    except Exception:
+        model_key = None
+    if not model_key:
+        value = getattr(llm, "current_model_key", None)
+        if isinstance(value, str) and value.strip():
+            model_key = value.strip()
+
+    registry = getattr(llm, "registry", None)
+    if model_key and registry is not None:
+        try:
+            if hasattr(registry, "get_effective_model_config"):
+                cfg = registry.get_effective_model_config(model_key)
+            else:
+                cfg = registry.get_model_config(model_key)
+            if isinstance(cfg, dict):
+                return model_key, cfg
+        except Exception:
+            pass
+    return model_key, {}
+
+
+def _validate_current_model_attachment(ctx: Any, thread_id: str, filename: str, mime_type: str, presentation: str) -> None:
+    if str(presentation or "").lower() != "image":
+        return
+    try:
+        from eggllm.capabilities import supports_attachment_presentation
+    except Exception:
+        return
+
+    model_key, cfg = _current_model_config(ctx, thread_id)
+    if supports_attachment_presentation(cfg, "image", mime_type=mime_type):
+        return
+    model = model_key or "current model"
+    raise ValueError(
+        f"{model} is configured as not supporting image attachments ({mime_type}) for {filename}. "
+        "Choose a vision-capable model or update the model/provider attachment capabilities."
+    )
+
+
 def staged_attachments_for_thread(app: Any, thread_id: str) -> list[dict[str, Any]]:
     staged_by_thread = getattr(app, "_staged_attachments_by_thread", None)
     if not isinstance(staged_by_thread, dict):
@@ -106,7 +153,18 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             return CommandResult(clear_input=False, message=message)
         try:
             source_path = _parse_attach_path(arg)
-            _saved, part = save_local_attachment_for_thread(ctx.db, thread_id, source_path)
+            _saved, part = save_local_attachment_for_thread(
+                ctx.db,
+                thread_id,
+                source_path,
+                validate_candidate=lambda filename, mime_type, presentation: _validate_current_model_attachment(
+                    ctx,
+                    thread_id,
+                    filename,
+                    mime_type,
+                    presentation,
+                ),
+            )
             staged = staged_attachments_for_thread(app, thread_id)
             staged.append(part)
             message = f"Attached {part.get('filename') or '(unnamed)'} as {part.get('presentation')} ({part.get('mime_type')}); {len(staged)} staged."

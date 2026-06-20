@@ -31,17 +31,29 @@ def _write_models(tmp_path: Path, models: dict) -> tuple[Path, Path]:
     return mpath, apath
 
 
-def test_model_metadata_defaults_preserve_legacy_chat_models():
+def test_model_metadata_defaults_optimistically_allow_images_for_chat_models():
     metadata = model_metadata({"model_name": "gpt-test"})
 
     assert metadata["model_kind"] == "chat"
-    assert metadata["input_modalities"] == ["text"]
+    assert metadata["input_modalities"] == ["text", "image"]
     assert metadata["output_modalities"] == ["text"]
     assert metadata["task_capabilities"] == ["chat"]
     assert metadata["attachment_capabilities"] == {}
-    assert supports_attachment_presentation({"model_name": "gpt-test"}, "image") is False
+    assert supports_attachment_presentation({"model_name": "gpt-test"}, "image") is True
     assert supports_task_capability({"model_name": "gpt-test"}, "chat") is True
     assert supports_task_capability({"model_name": "gpt-test"}, "image_generation") is False
+
+
+def test_explicit_text_only_model_disables_image_attachments():
+    cfg = {"model_name": "text-only", "input_modalities": ["text"]}
+
+    assert supports_attachment_presentation(cfg, "image", mime_type="image/png") is False
+
+
+def test_explicit_image_capability_false_disables_default_image_support():
+    cfg = {"model_name": "text-only", "attachment_capabilities": {"images": False}}
+
+    assert supports_attachment_presentation(cfg, "image", mime_type="image/png") is False
 
 
 def test_model_kind_and_task_capability_helpers_normalize_tokens():
@@ -351,6 +363,48 @@ def test_provider_level_capability_metadata_defaults_models(tmp_path):
 
     assert registry.get_model_metadata("Vision")["input_modalities"] == ["text", "image"]
     assert registry.get_model_metadata("Vision")["attachment_capabilities"] == {"images": True}
+
+
+def test_model_level_text_only_overrides_provider_image_default(tmp_path):
+    models = {
+        "providers": {
+            "openai": {
+                "api_base": "x",
+                "api_key_env": "OPENAI_API_KEY",
+                "input_modalities": ["text", "image"],
+                "attachment_capabilities": {"images": True},
+                "models": {"Text Only": {"model_name": "text-only", "input_modalities": ["text"]}},
+            }
+        }
+    }
+    mpath, _apath = _write_models(tmp_path, models)
+    models_config, providers_config = load_models_config(mpath)
+    registry = ModelRegistry(models_config, providers_config, DummyCatalog())
+
+    cfg = registry.get_effective_model_config("Text Only")
+    assert cfg["input_modalities"] == ["text"]
+    assert supports_attachment_presentation(cfg, "image", mime_type="image/png") is False
+
+
+def test_model_level_image_modality_overrides_provider_image_disable(tmp_path):
+    models = {
+        "providers": {
+            "local": {
+                "api_base": "x",
+                "api_key_env": "LOCAL_API_KEY",
+                "input_modalities": ["text"],
+                "attachment_capabilities": {"images": False},
+                "models": {"Vision": {"model_name": "vision", "input_modalities": ["text", "image"]}},
+            }
+        }
+    }
+    mpath, _apath = _write_models(tmp_path, models)
+    models_config, providers_config = load_models_config(mpath)
+    registry = ModelRegistry(models_config, providers_config, DummyCatalog())
+
+    cfg = registry.get_effective_model_config("Vision")
+    assert cfg["input_modalities"] == ["text", "image"]
+    assert supports_attachment_presentation(cfg, "image", mime_type="image/png") is True
 
 
 def test_model_attachment_capabilities_merge_provider_defaults(tmp_path):

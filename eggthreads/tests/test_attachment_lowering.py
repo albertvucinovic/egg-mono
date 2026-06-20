@@ -131,6 +131,23 @@ def test_openai_chat_image_attachment_lowers_to_image_url_data_url(tmp_path):
     assert content[1]["image_url"]["detail"] == "low"
 
 
+def test_openai_chat_image_attachment_lowers_with_default_image_support(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    saved = save_input_bytes(tmp_path, tid, b"png-bytes", filename="pixel.png", mime_type="image/png", presentation="image")
+
+    lowered = lower_messages_for_provider(
+        [{"msg_id": "u1", "role": "user", "content": _content(saved, tid)}],
+        _ctx(tmp_path, db, tid, {"model_name": "local-qwen"}, "chat_completions"),
+        current_msg_id="u1",
+    )
+
+    content = lowered[0]["content"]
+    assert content[0] == {"type": "text", "text": "look"}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(b"png-bytes").decode("ascii")
+
+
 def test_openai_responses_image_attachment_lowers_to_input_image_data_url(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
@@ -387,7 +404,7 @@ def test_current_provider_artifact_part_lowers_to_plain_placeholder_not_input(tm
     )
 
 
-def test_current_attachment_without_capability_fails_fast(tmp_path):
+def test_current_attachment_explicitly_text_only_fails_fast(tmp_path):
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
     saved = save_input_bytes(tmp_path, tid, b"png-bytes")
@@ -395,7 +412,7 @@ def test_current_attachment_without_capability_fails_fast(tmp_path):
     with pytest.raises(AttachmentLoweringError, match="cannot be sent"):
         lower_messages_for_provider(
             [{"msg_id": "u1", "role": "user", "content": _content(saved, tid)}],
-            _ctx(tmp_path, db, tid, {"model_name": "text-only"}),
+            _ctx(tmp_path, db, tid, {"model_name": "text-only", "input_modalities": ["text"]}),
             current_msg_id="u1",
         )
 
@@ -447,7 +464,7 @@ def test_historical_unsupported_attachment_becomes_placeholder(tmp_path):
             {"msg_id": "old", "role": "user", "content": _content(saved, tid)},
             {"msg_id": "new", "role": "user", "content": "next"},
         ],
-        _ctx(tmp_path, db, tid, {"model_name": "text-only"}),
+        _ctx(tmp_path, db, tid, {"model_name": "text-only", "input_modalities": ["text"]}),
         current_msg_id="new",
     )
 
