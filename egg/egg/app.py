@@ -529,6 +529,9 @@ class EggDisplayApp(
             append_message=append_message,
             create_snapshot=create_snapshot,
             approve_tool_calls=approve_tool_calls_for_thread,
+            models_path=str(MODELS_PATH),
+            all_models_path=str(ALL_MODELS_PATH),
+            image_generation_models_path=str(IMAGE_GENERATION_MODELS_PATH),
             app=self,
         )
 

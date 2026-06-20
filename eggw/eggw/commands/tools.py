@@ -1,8 +1,7 @@
 """Tool management commands for eggw backend."""
 from __future__ import annotations
 
-import json
-from typing import Dict, List, Any
+from typing import Any, Dict
 
 from eggthreads import (
     build_tool_call_states,
@@ -11,8 +10,8 @@ from eggthreads import (
     set_thread_allow_raw_tool_output,
     get_thread_tools_config,
     get_tool_statuses_for_config,
-    create_default_tools,
 )
+from eggthreads.tool_help import collect_tool_entries, render_tool_help_request
 
 from ..models import CommandResponse
 from .. import core
@@ -23,14 +22,7 @@ def get_available_tools() -> Dict[str, Dict[str, Any]]:
 
     Returns a dict mapping tool name to {"spec": ..., "local_only": bool}
     """
-    registry = create_default_tools()
-    tools = {}
-    for name, entry in registry._tools.items():
-        tools[name] = {
-            "spec": entry["spec"],
-            "local_only": entry.get("local_only", False),
-        }
-    return tools
+    return collect_tool_entries()
 
 
 async def cmd_tools_on(thread_id: str) -> CommandResponse:
@@ -193,7 +185,7 @@ async def cmd_tools_secrets(thread_id: str, mode: str) -> CommandResponse:
 
 
 async def cmd_tool_info(thread_id: str, tool_name: str) -> CommandResponse:
-    """Handle /toolInfo command - show tool description in JSON format."""
+    """Handle /toolInfo command using the shared tool help renderer."""
     tool_name = tool_name.strip()
     if not tool_name:
         return CommandResponse(
@@ -203,45 +195,31 @@ async def cmd_tool_info(thread_id: str, tool_name: str) -> CommandResponse:
 
     try:
         available_tools = get_available_tools()
-
-        # Try exact match first, then case-insensitive
-        tool_info = available_tools.get(tool_name)
-        if not tool_info:
-            # Try case-insensitive match
-            for name, info in available_tools.items():
-                if name.lower() == tool_name.lower():
-                    tool_info = info
-                    tool_name = name  # Use the canonical name
-                    break
-
-        if not tool_info:
-            available_names = sorted(available_tools.keys())
-            return CommandResponse(
-                success=False,
-                message=f"Tool '{tool_name}' not found.\nAvailable tools: {', '.join(available_names)}",
-            )
-
-        spec = tool_info["spec"]
-        local_only = tool_info.get("local_only", False)
-
-        # Format as JSON for display
-        formatted_spec = json.dumps(spec, indent=2)
-
-        lines = [
-            f"Tool: {tool_name}",
-            f"Local-only: {local_only}",
-            "",
-            "Spec (sent to LLM):",
-            formatted_spec,
-        ]
+        result = render_tool_help_request(
+            {"tool_name": tool_name},
+            entries=available_tools,
+            db=core.db,
+            thread_id=thread_id,
+            raw_context={
+                "models_path": str(core.MODELS_PATH),
+                "all_models_path": str(core.ALL_MODELS_PATH),
+                "image_generation_models_path": str(core.IMAGE_GENERATION_MODELS_PATH),
+            },
+            default_include_schema=True,
+            default_include_unavailable=True,
+        )
+        if not result.found:
+            return CommandResponse(success=False, message=result.text)
+        resolved_name = result.tool_name or tool_name
+        tool_info = available_tools.get(resolved_name, {})
 
         return CommandResponse(
             success=True,
-            message="\n".join(lines),
+            message=result.text,
             data={
-                "name": tool_name,
-                "spec": spec,
-                "local_only": local_only,
+                "name": resolved_name,
+                "spec": tool_info.get("spec"),
+                "local_only": bool(tool_info.get("local_only", False)),
             },
         )
     except Exception as e:

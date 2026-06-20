@@ -34,7 +34,7 @@ Commands:
     /toggleAutoApproval, /toolsOn, /toolsOff, /disableTool <name>, /enableTool <name>
     /toggleSandboxing, /setSandboxConfiguration <file.json>
     /getSandboxingConfig
-    /toolsSecrets <on|off>, /toolsStatus
+    /toolsSecrets <on|off>, /toolsStatus, /toolInfo <name>
   Persistent REPL sessions:
     /sessionStatus, /sessionOn [provider=docker|memory] [image=...] [share_with_children=true] [share_repl=true]
     /sessionOff, /sessionStop [python|bash|all], /sessionReset [python|bash|all]

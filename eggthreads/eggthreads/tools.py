@@ -301,6 +301,9 @@ class ToolRegistry:
         if tool_timeout is not None and "_tool_timeout_sec" not in timeout_args:
             timeout_args["_tool_timeout_sec"] = tool_timeout
 
+        raw_context = dict(context)
+        raw_context["tool_registry"] = self
+
         tool_ctx = ToolContext(
             db=context.get("db"),
             thread_id=thread_id,
@@ -310,7 +313,7 @@ class ToolRegistry:
             timeout_sec=resolve_tool_timeout_arg(timeout_args),
             cancel_check=cancel_check,
             working_dir=context.get("working_dir"),
-            raw=dict(context),
+            raw=raw_context,
             stream=context.get("stream"),
         )
 
@@ -365,7 +368,7 @@ class ToolRegistry:
 def create_tool_registry() -> ToolRegistry:
     """Create a plugin-populated ToolRegistry with Egg's built-in tools."""
 
-    from .builtin_plugins import AnswerUserPlugin, CompactionPlugin, ExecutionPlugin, ImageGenerationPlugin, LongOutputPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, WebPlugin
+    from .builtin_plugins import AnswerUserPlugin, CompactionPlugin, ExecutionPlugin, ImageGenerationPlugin, LongOutputPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ToolHelpPlugin, WebPlugin
     from .plugins import ToolPluginContext, register_plugins
 
     reg = ToolRegistry()
@@ -378,6 +381,7 @@ def create_tool_registry() -> ToolRegistry:
             LongOutputPlugin(),
             ExecutionPlugin(),
             ImageGenerationPlugin(),
+            ToolHelpPlugin(),
             SessionPlugin(),
             SubagentsPlugin(),
             WebPlugin(),

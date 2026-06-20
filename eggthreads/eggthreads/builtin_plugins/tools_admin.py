@@ -39,16 +39,9 @@ def _target(context: Any, command_name: str) -> tuple[Any, str] | None:
 
 
 def available_tools() -> dict[str, dict[str, Any]]:
-    from ..tools import create_default_tools
+    from ..tool_help import collect_tool_entries
 
-    registry = create_default_tools()
-    return {
-        name: {
-            "spec": entry["spec"],
-            "local_only": entry.get("local_only", False),
-        }
-        for name, entry in registry._tools.items()
-    }
+    return collect_tool_entries()
 
 
 def _tools_enabled_command(context: Any, enabled: bool):
@@ -193,39 +186,43 @@ def tools_status_command(context: Any, arg: str):
 
 def tool_info_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
+    from ..tool_help import render_tool_help_request
 
     tool_name = (arg or "").strip()
     if not tool_name:
         _log(context, "Usage: /toolInfo <tool_name>")
         return CommandResult(clear_input=False)
 
-    tools = available_tools()
-    tool_info = tools.get(tool_name)
-    if not tool_info:
-        for name, info in tools.items():
-            if name.lower() == tool_name.lower():
-                tool_info = info
-                tool_name = name
-                break
-
-    if not tool_info:
-        available_names = sorted(tools.keys())
-        _log(context, f"Tool '{tool_name}' not found.\nAvailable tools: {', '.join(available_names)}")
+    db = context.db if context.db is not None else getattr(context.app, "db", None)
+    thread_id = context.current_thread or getattr(context.app, "current_thread", None)
+    raw_context = {
+        key: value
+        for key, value in {
+            "models_path": getattr(context, "models_path", None),
+            "all_models_path": getattr(context, "all_models_path", None),
+            "image_generation_models_path": getattr(context, "image_generation_models_path", None),
+        }.items()
+        if value is not None
+    }
+    result = render_tool_help_request(
+        {"tool_name": tool_name},
+        entries=available_tools(),
+        db=db,
+        thread_id=thread_id,
+        raw_context=raw_context,
+        default_include_schema=True,
+        default_include_unavailable=True,
+    )
+    text = result.text
+    if not result.found:
+        _log(context, text)
         return CommandResult(clear_input=False)
 
-    text = "\n".join(
-        [
-            f"Tool: {tool_name}",
-            f"Local-only: {tool_info.get('local_only', False)}",
-            "",
-            "Spec (sent to LLM):",
-            json.dumps(tool_info["spec"], indent=2),
-        ]
-    )
+    resolved_name = result.tool_name or tool_name
     try:
-        _log(context, f"Tool info: {tool_name} (see console for full).")
+        _log(context, f"Tool info: {resolved_name} (see console for full).")
         if context.console_print_block is not None:
-            context.console_print_block(f"Tool: {tool_name}", text, border_style="blue")
+            context.console_print_block(f"Tool: {resolved_name}", text, border_style="blue")
         else:
             _log(context, text)
     except Exception:

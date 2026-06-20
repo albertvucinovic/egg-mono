@@ -81,6 +81,7 @@ def test_context_aware_tool_receives_tool_context() -> None:
     assert ctx.timeout_sec == 3
     assert ctx.cancel_check is cancel_check
     assert ctx.working_dir == "/workspace"
+    assert ctx.raw["tool_registry"] is registry
 
 
 def test_legacy_tool_still_receives_private_context_args() -> None:

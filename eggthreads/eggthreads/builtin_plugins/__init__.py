@@ -16,10 +16,11 @@ from .session import SessionPlugin
 from .skills import SkillsPlugin
 from .subagents import SubagentsPlugin
 from .thread_ui import ThreadUiPlugin
+from .tool_help import ToolHelpPlugin
 from .tools_admin import ToolsAdminPlugin
 from .web import WebPlugin
 
-__all__ = ["AnswerUserPlugin", "ApprovalPoliciesPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ImageGenerationPlugin", "LongOutputPlugin", "ModelPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolsAdminPlugin", "WebPlugin"]
+__all__ = ["AnswerUserPlugin", "ApprovalPoliciesPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ImageGenerationPlugin", "LongOutputPlugin", "ModelPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolHelpPlugin", "ToolsAdminPlugin", "WebPlugin"]
 
 
 def __getattr__(name: str):

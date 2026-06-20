@@ -57,6 +57,9 @@ class CommandContext:
     append_message: Callable[..., Any] | None = None
     create_snapshot: Callable[..., Any] | None = None
     approve_tool_calls: Callable[..., Any] | None = None
+    models_path: str | Path | None = None
+    all_models_path: str | Path | None = None
+    image_generation_models_path: str | Path | None = None
     app: Any = None
 
 
