@@ -8,7 +8,11 @@ from typing import Any
 
 from eggthreads.command_catalog import CommandResult, CommandSpec
 from eggthreads.content_parts import content_to_plain_text
-from eggthreads.image_generation import ImageGenerationArtifactResult, generate_openai_image_artifacts
+from eggthreads.image_generation import (
+    ImageGenerationArtifactResult,
+    generate_openai_image_artifacts,
+    image_generation_result_content_parts,
+)
 
 from .utils import ALL_MODELS_PATH, MODELS_PATH
 
@@ -99,23 +103,13 @@ def _parse_image_generate_args(arg: str) -> tuple[str, str | None, dict[str, Any
     return prompt, model_key, options
 
 
-def _content_parts_for_result(result: ImageGenerationArtifactResult) -> list[dict[str, Any]]:
-    count = len(result.artifacts)
-    noun = "image artifact" if count == 1 else "image artifacts"
-    model_label = result.model_key or result.model_name
-    summary = f"Generated {count} {noun} via {model_label} ({result.model_name}).\nPrompt: {result.prompt}"
-    parts: list[dict[str, Any]] = [{"type": "text", "text": summary}]
-    parts.extend(result.content_parts)
-    return parts
-
-
 def _append_result_message(ctx: Any, result: ImageGenerationArtifactResult) -> list[dict[str, Any]]:
     db = getattr(ctx, "db", None)
     thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
     if db is None or not thread_id:
         raise ValueError("/imageGenerate requires an active thread.")
 
-    content = _content_parts_for_result(result)
+    content = image_generation_result_content_parts(result)
     append = getattr(ctx, "append_message", None)
     if callable(append):
         append(db, thread_id, "assistant", content)

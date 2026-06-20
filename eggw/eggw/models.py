@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ThreadInfo(BaseModel):
@@ -65,6 +65,33 @@ class AttachmentUploadResponse(BaseModel):
     metadata: Dict[str, Any]
     content_part: Dict[str, Any]
     content_text: str
+
+
+class ImageGenerationRequest(BaseModel):
+    """Request to generate provider-backed image artifacts for a thread."""
+
+    prompt: Optional[str] = None
+    model: Optional[str] = None
+    backend: Optional[str] = None
+    n: Optional[int] = None
+    size: Optional[str] = None
+    quality: Optional[str] = None
+    output_format: Optional[str] = None
+    background: Optional[str] = None
+
+
+class ImageGenerationResponse(BaseModel):
+    """Response for a thread-scoped image generation request."""
+
+    message_id: str
+    prompt: str
+    model_key: str
+    provider_name: str
+    model_name: str
+    metadata: List[Dict[str, Any]]
+    content_parts: List[Dict[str, Any]]
+    content_text: str
+    response_metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class CommandRequest(BaseModel):

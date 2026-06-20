@@ -50,6 +50,24 @@ class ImageGenerationArtifactResult:
         return [dict(artifact.metadata) for artifact in self.artifacts]
 
 
+def image_generation_result_content_parts(
+    result: ImageGenerationArtifactResult,
+) -> list[dict[str, Any]]:
+    """Return textual summary plus canonical artifact parts for a result.
+
+    User commands and APIs should store/display generated images as provider
+    artifact references, never as inline bytes/base64.  Keeping this small
+    presentation shape here lets terminal and web entrypoints share the same
+    default transcript representation.
+    """
+
+    count = len(result.artifacts)
+    noun = "image artifact" if count == 1 else "image artifacts"
+    model_label = result.model_key or result.model_name
+    summary = f"Generated {count} {noun} via {model_label} ({result.model_name}).\nPrompt: {result.prompt}"
+    return [{"type": "text", "text": summary}, *result.content_parts]
+
+
 def _size_dimensions(size: Any) -> dict[str, int]:
     match = re.fullmatch(r"\s*(\d+)\s*x\s*(\d+)\s*", str(size or ""))
     if not match:
@@ -184,4 +202,5 @@ __all__ = [
     "GeneratedProviderOutputArtifact",
     "ImageGenerationArtifactResult",
     "generate_openai_image_artifacts",
+    "image_generation_result_content_parts",
 ]

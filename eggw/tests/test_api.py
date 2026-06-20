@@ -533,6 +533,149 @@ class TestMessageOperations:
         assert response.status_code == 400
         assert "empty" in response.json()["detail"].lower()
 
+    def test_image_generation_route_appends_artifact_message_and_returns_metadata(self, client, monkeypatch, test_db_path):
+        import eggw.routes.messages as messages_route
+
+        sha = "0123456789abcdef" * 4
+
+        class FakeArtifact:
+            def __init__(self, owner_thread_id):
+                self.content_part = {
+                    "type": "artifact",
+                    "artifact_id": "abc12345",
+                    "owner_thread_id": owner_thread_id,
+                    "presentation": "image",
+                    "mime_type": "image/png",
+                    "filename": "generated-1.png",
+                    "size_bytes": 11,
+                    "sha256": sha,
+                    "provenance": {
+                        "kind": "openai_image_generation",
+                        "provider": "openai-images",
+                        "model_key": "Image Backend",
+                    },
+                    "options": {},
+                }
+                self.metadata = {
+                    "artifact_id": "abc12345",
+                    "owner_thread_id": owner_thread_id,
+                    "presentation": "image",
+                    "mime_type": "image/png",
+                    "filename": "generated-1.png",
+                    "size_bytes": 11,
+                    "sha256": sha,
+                }
+
+        class FakeResult:
+            def __init__(self, owner_thread_id, prompt):
+                self.model_key = "Image Backend"
+                self.provider_name = "openai-images"
+                self.model_name = "gpt-image-1"
+                self.prompt = prompt
+                self.response_metadata = {"id": "img-resp-test"}
+                self.artifacts = (FakeArtifact(owner_thread_id),)
+
+            @property
+            def content_parts(self):
+                return [artifact.content_part for artifact in self.artifacts]
+
+            @property
+            def metadata(self):
+                return [artifact.metadata for artifact in self.artifacts]
+
+        calls = []
+
+        def fake_generate(workspace, thread_id, prompt, *, model_key, models_path, all_models_path, options):
+            calls.append(
+                {
+                    "workspace": Path(workspace),
+                    "thread_id": thread_id,
+                    "prompt": prompt,
+                    "model_key": model_key,
+                    "models_path": Path(models_path),
+                    "all_models_path": Path(all_models_path),
+                    "options": options,
+                }
+            )
+            return FakeResult(thread_id, prompt)
+
+        monkeypatch.setattr(messages_route, "generate_openai_image_artifacts", fake_generate)
+
+        create_resp = client.post("/api/threads", json={"name": "Image Generation"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/image-generation",
+            json={
+                "prompt": "Paint a bright egg",
+                "model": "Image Backend",
+                "n": 2,
+                "size": "1024x1024",
+                "quality": "high",
+                "output_format": "jpg",
+                "background": "transparent",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["prompt"] == "Paint a bright egg"
+        assert payload["model_key"] == "Image Backend"
+        assert payload["provider_name"] == "openai-images"
+        assert payload["model_name"] == "gpt-image-1"
+        assert payload["response_metadata"] == {"id": "img-resp-test"}
+        assert payload["metadata"] == [FakeArtifact(thread_id).metadata]
+        assert payload["content_parts"][0]["type"] == "text"
+        assert "Generated 1 image artifact" in payload["content_parts"][0]["text"]
+        assert payload["content_parts"][1]["artifact_id"] == "abc12345"
+        assert payload["content_text"].startswith("Generated 1 image artifact")
+        assert "Provider artifact: image generated-1.png" in payload["content_text"]
+
+        assert calls == [
+            {
+                "workspace": Path(test_db_path).parent.parent,
+                "thread_id": thread_id,
+                "prompt": "Paint a bright egg",
+                "model_key": "Image Backend",
+                "models_path": calls[0]["models_path"],
+                "all_models_path": calls[0]["all_models_path"],
+                "options": {
+                    "n": 2,
+                    "size": "1024x1024",
+                    "quality": "high",
+                    "background": "transparent",
+                    "output_format": "jpeg",
+                },
+            }
+        ]
+
+        messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        appended = next(m for m in messages if m["id"] == payload["message_id"])
+        assert appended["role"] == "assistant"
+        assert appended["content"] == payload["content_parts"]
+        assert "generated-bytes" not in json.dumps(appended["content"])
+
+    def test_image_generation_route_rejects_empty_prompt_without_calling_service(self, client, monkeypatch):
+        import eggw.routes.messages as messages_route
+
+        called = False
+
+        def fake_generate(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("service should not be called without a prompt")
+
+        monkeypatch.setattr(messages_route, "generate_openai_image_artifacts", fake_generate)
+
+        create_resp = client.post("/api/threads", json={"name": "Image Generation Prompt"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(f"/api/threads/{thread_id}/image-generation", json={"prompt": "   "})
+
+        assert response.status_code == 400
+        assert "prompt" in response.json()["detail"].lower()
+        assert called is False
+
     def test_get_provider_output_returns_bytes_and_headers(self, client, test_db_path):
         from eggthreads.provider_output_artifacts import save_provider_output_bytes
 

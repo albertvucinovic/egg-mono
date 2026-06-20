@@ -199,6 +199,7 @@ from .image_generation import (
     GeneratedProviderOutputArtifact,
     ImageGenerationArtifactResult,
     generate_openai_image_artifacts,
+    image_generation_result_content_parts,
 )
 from .tools_config import (
     ToolsConfig,
@@ -410,6 +411,6 @@ __all__ = [
     'infer_attachment_mime_and_presentation', 'safe_display_filename',
     'save_attachment_bytes_for_thread', 'save_local_attachment_for_thread',
     'GeneratedProviderOutputArtifact', 'ImageGenerationArtifactResult',
-    'generate_openai_image_artifacts',
+    'generate_openai_image_artifacts', 'image_generation_result_content_parts',
 ]
 from .event_watcher import EventWatcher
