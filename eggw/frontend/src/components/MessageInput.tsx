@@ -3,8 +3,9 @@
 import { useState, useRef, useEffect, useCallback, type Dispatch, type SetStateAction } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Paperclip, Send, Loader2, Terminal, StopCircle, X } from "lucide-react";
-import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, AutocompleteSuggestion } from "@/lib/api";
+import { Paperclip, Send, Loader2, Terminal, StopCircle, X, ImageIcon } from "lucide-react";
+import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, generateThreadImage } from "@/lib/api";
+import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
 import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
@@ -21,6 +22,11 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showImageForm, setShowImageForm] = useState(false);
+  const [imagePrompt, setImagePrompt] = useState("");
+  const [imageModel, setImageModel] = useState("");
+  const [imageCount, setImageCount] = useState("");
+  const [imageSize, setImageSize] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
@@ -94,6 +100,34 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     },
     onError: (error) => {
       addSystemLog(error instanceof Error ? error.message : "Failed to upload attachment", "error");
+    },
+  });
+
+  const imageGenerationMutation = useMutation({
+    mutationFn: async ({ threadId, request }: { threadId: string; request: ImageGenerationRequest }) => {
+      const response = await generateThreadImage(threadId, request);
+      return {
+        artifactCount: response.content_parts.filter((part) => part.type === "artifact").length,
+      };
+    },
+    onSuccess: (result, variables) => {
+      if (variables.threadId === currentThreadId) {
+        setImagePrompt("");
+        setImageModel("");
+        setImageCount("");
+        setImageSize("");
+        setShowImageForm(false);
+        queryClient.invalidateQueries({ queryKey: ["threadState", variables.threadId] });
+      }
+      queryClient.invalidateQueries({ queryKey: ["messages", variables.threadId] });
+      const count = result.artifactCount;
+      addSystemLog(
+        `Generated ${count || "image"} artifact${count === 1 ? "" : "s"}; appended result to transcript`,
+        "success",
+      );
+    },
+    onError: (error) => {
+      addSystemLog(error instanceof Error ? error.message : "Failed to generate image", "error");
     },
   });
 
@@ -378,6 +412,11 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
 
   useEffect(() => {
     setStagedAttachments([]);
+    setShowImageForm(false);
+    setImagePrompt("");
+    setImageModel("");
+    setImageCount("");
+    setImageSize("");
   }, [currentThreadId]);
 
   // Global key capture - focus input when user starts typing
@@ -385,7 +424,8 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       // Skip if already focused on an input/textarea
       if (document.activeElement?.tagName === "INPUT" ||
-          document.activeElement?.tagName === "TEXTAREA") {
+          document.activeElement?.tagName === "TEXTAREA" ||
+          document.activeElement?.tagName === "SELECT") {
         return;
       }
       // Skip modifier keys, function keys, etc.
@@ -453,6 +493,25 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     uploadMutation.mutate(files);
   };
 
+  const handleGenerateImage = () => {
+    if (!currentThreadId) return;
+    if (isStreaming) {
+      addSystemLog("Wait for streaming to finish before generating an image", "error");
+      return;
+    }
+    if (!imagePrompt.trim()) {
+      addSystemLog("Image prompt is required", "error");
+      return;
+    }
+    const request: ImageGenerationRequest = {
+      prompt: imagePrompt.trim(),
+      ...(imageModel.trim() ? { model: imageModel.trim() } : {}),
+      ...(imageCount ? { n: Number(imageCount) } : {}),
+      ...(imageSize.trim() ? { size: imageSize.trim() } : {}),
+    };
+    imageGenerationMutation.mutate({ threadId: currentThreadId, request });
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Handle autocomplete navigation
     if (showSuggestions && suggestions.length > 0) {
@@ -496,10 +555,11 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     }
   };
 
-  const isPending = messageMutation.isPending || commandMutation.isPending || uploadMutation.isPending;
+  const isPending = messageMutation.isPending || commandMutation.isPending || uploadMutation.isPending || imageGenerationMutation.isPending;
   const inputIsCommand = isCommand(input);
   const showGetUserAnswerButton = isStreaming && activeGetUserWait && !inputIsCommand;
   const canSend = Boolean(currentThreadId) && (Boolean(input.trim()) || stagedAttachments.length > 0);
+  const canGenerateImage = Boolean(currentThreadId) && Boolean(imagePrompt.trim()) && !isStreaming && !imageGenerationMutation.isPending;
 
   return (
     <div
@@ -585,6 +645,92 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         </div>
       )}
 
+      {showImageForm && (
+        <div
+          className={`mb-3 rounded p-3 text-sm ${showBorders ? "border" : ""}`}
+          style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+          data-testid="image-generation-form"
+        >
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-medium">
+              <ImageIcon className="h-4 w-4" />
+              Generate image
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowImageForm(false)}
+              className="rounded p-1 hover:bg-slate-700/60"
+              title="Close image generation"
+              aria-label="Close image generation"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <textarea
+            value={imagePrompt}
+            onChange={(e) => setImagePrompt(e.target.value)}
+            placeholder="Describe the image to generate..."
+            disabled={!currentThreadId || imageGenerationMutation.isPending}
+            className={`w-full rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+            style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+            rows={2}
+            data-testid="image-generation-prompt"
+          />
+          <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(8rem,auto)_auto]">
+            <input
+              value={imageModel}
+              onChange={(e) => setImageModel(e.target.value)}
+              placeholder="Model/backend (optional)"
+              disabled={!currentThreadId || imageGenerationMutation.isPending}
+              className={`rounded px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+              style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              data-testid="image-generation-model"
+            />
+            <select
+              value={imageCount}
+              onChange={(e) => setImageCount(e.target.value)}
+              disabled={!currentThreadId || imageGenerationMutation.isPending}
+              className={`rounded px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+              style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              title="Number of images"
+              data-testid="image-generation-count"
+            >
+              <option value="">n: default</option>
+              <option value="1">n: 1</option>
+              <option value="2">n: 2</option>
+              <option value="4">n: 4</option>
+            </select>
+            <input
+              value={imageSize}
+              onChange={(e) => setImageSize(e.target.value)}
+              placeholder="Size (optional)"
+              disabled={!currentThreadId || imageGenerationMutation.isPending}
+              className={`rounded px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+              style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              data-testid="image-generation-size"
+            />
+            <button
+              type="button"
+              onClick={handleGenerateImage}
+              disabled={!canGenerateImage}
+              className="rounded bg-purple-600 px-4 py-2 text-sm hover:bg-purple-500 disabled:cursor-not-allowed disabled:opacity-50 flex items-center justify-center gap-2"
+              title={isStreaming ? "Wait for streaming to finish before generating" : "Generate image"}
+              data-testid="image-generation-submit"
+            >
+              {imageGenerationMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <ImageIcon className="h-4 w-4" />
+              )}
+              Generate
+            </button>
+          </div>
+          <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+            Generated bytes stay in provider-output storage; the backend appends artifact references to the transcript.
+          </div>
+        </div>
+      )}
+
       <div className="flex gap-2 items-end">
         <input
           ref={fileInputRef}
@@ -608,6 +754,22 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
             <Paperclip className="w-4 h-4" />
           )}
           Attach
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowImageForm((prev) => !prev)}
+          disabled={!currentThreadId || imageGenerationMutation.isPending}
+          className="px-3 py-2 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          title="Generate image"
+          aria-pressed={showImageForm}
+          data-testid="image-generation-toggle"
+        >
+          {imageGenerationMutation.isPending ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <ImageIcon className="w-4 h-4" />
+          )}
+          Image
         </button>
         <textarea
           ref={textareaRef}

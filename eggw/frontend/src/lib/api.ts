@@ -1,6 +1,17 @@
-import type { AttachmentUploadResponse, EggMessageContent } from "./contentParts";
+import type { AttachmentUploadResponse, ContentPart, EggMessageContent } from "./contentParts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+async function readErrorDetail(res: Response, fallback: string): Promise<string> {
+  try {
+    const payload = await res.json();
+    if (typeof payload?.detail === "string") return payload.detail;
+    if (payload?.detail !== undefined) return JSON.stringify(payload.detail);
+  } catch {
+    // Keep generic message.
+  }
+  return fallback;
+}
 
 export async function fetchThreads() {
   const res = await fetch(`${API_BASE}/api/threads`);
@@ -108,14 +119,7 @@ export async function uploadAttachment(threadId: string, file: File): Promise<At
     body: formData,
   });
   if (!res.ok) {
-    let detail = "Failed to upload attachment";
-    try {
-      const payload = await res.json();
-      if (typeof payload?.detail === "string") detail = payload.detail;
-    } catch {
-      // Keep generic message.
-    }
-    throw new Error(detail);
+    throw new Error(await readErrorDetail(res, "Failed to upload attachment"));
   }
   return res.json();
 }
@@ -133,14 +137,45 @@ export async function promoteProviderOutput(
     { method: "POST" },
   );
   if (!res.ok) {
-    let detail = "Failed to use provider output as attachment";
-    try {
-      const payload = await res.json();
-      if (typeof payload?.detail === "string") detail = payload.detail;
-    } catch {
-      // Keep generic message.
-    }
-    throw new Error(detail);
+    throw new Error(await readErrorDetail(res, "Failed to use provider output as attachment"));
+  }
+  return res.json();
+}
+
+export interface ImageGenerationRequest {
+  prompt: string;
+  model?: string;
+  backend?: string;
+  n?: number;
+  size?: string;
+  quality?: string;
+  output_format?: string;
+  background?: string;
+}
+
+export interface ImageGenerationResponse {
+  message_id: string;
+  prompt: string;
+  model_key: string;
+  provider_name: string;
+  model_name: string;
+  metadata: Record<string, unknown>[];
+  content_parts: ContentPart[];
+  content_text: string;
+  response_metadata: Record<string, unknown>;
+}
+
+export async function generateThreadImage(
+  threadId: string,
+  request: ImageGenerationRequest,
+): Promise<ImageGenerationResponse> {
+  const res = await fetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/image-generation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    throw new Error(await readErrorDetail(res, "Failed to generate image"));
   }
   return res.json();
 }
