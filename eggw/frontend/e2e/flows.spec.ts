@@ -96,6 +96,28 @@ test.describe('Thread Operations', () => {
     // Should see "Message sent" in system log
     await expect(page.locator('text=Message sent')).toBeVisible({ timeout: 5000 });
   });
+
+  test('can upload, stage, and send an attachment', async ({ page }) => {
+    await ensureThread(page);
+
+    const input = page.locator('[data-testid="message-input"]');
+    await expect(input).toBeVisible({ timeout: 5000 });
+
+    await page.locator('[data-testid="attachment-file-input"]').setInputFiles({
+      name: 'note.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('hello attachment'),
+    });
+
+    await expect(page.locator('[data-testid="staged-attachments"]')).toContainText('note.txt', { timeout: 5000 });
+    await input.fill('See attached');
+    await input.press('Enter');
+
+    await expect(page.locator('text=Message sent')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('[data-testid="staged-attachments"]')).not.toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=Attachment')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('text=note.txt')).toBeVisible({ timeout: 5000 });
+  });
 });
 
 test.describe('Streaming', () => {

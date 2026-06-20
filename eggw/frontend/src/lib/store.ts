@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { EggMessageContent } from "./contentParts";
 
 export interface Thread {
   id: string;
@@ -11,7 +12,8 @@ export interface Thread {
 export interface Message {
   id: string;
   role: string;
-  content?: string;
+  content?: EggMessageContent;
+  content_text?: string;
   kind?: string;
   start_msg_id?: string;
   start_event_seq?: number;

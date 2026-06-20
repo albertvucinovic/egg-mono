@@ -12,6 +12,16 @@ import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { fetchMessages } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
+import {
+  attachmentFilename,
+  attachmentPlaceholder,
+  contentToPlainText,
+  formatBytes,
+  isAttachmentPart,
+  isContentPartArray,
+  isTextPart,
+  type ContentPart,
+} from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
 
@@ -165,7 +175,7 @@ function isImportantSystemMessage(message: Message): boolean {
   if (message.role !== "system") return false;
   if (message.recovery_notice) return true;
   if (message.id?.startsWith("cmd-")) return true;
-  const content = (message.content || "").trim().toLowerCase();
+  const content = contentToPlainText(message.content, message.content_text || "").trim().toLowerCase();
   return content.startsWith("llm error:") ||
     content.startsWith("error:") ||
     content.startsWith("usage:") ||
@@ -212,6 +222,50 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
   );
 }
 
+function ContentPartsView({ parts, showBorders = true }: { parts: ContentPart[]; showBorders?: boolean }) {
+  return (
+    <div className="space-y-2">
+      {parts.map((part, idx) => {
+        if (isTextPart(part)) {
+          return (
+            <div key={`text-${idx}`} className="whitespace-pre-wrap text-sm">
+              {part.text}
+            </div>
+          );
+        }
+        if (isAttachmentPart(part)) {
+          return (
+            <div
+              key={`${part.input_id || "attachment"}-${idx}`}
+              className={`rounded p-3 text-sm ${showBorders ? "border" : ""}`}
+              style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              title={attachmentPlaceholder(part)}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">Attachment</span>
+                <span>{attachmentFilename(part)}</span>
+                <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "var(--panel-bg)", color: "var(--muted)" }}>
+                  {part.presentation || "file"}
+                </span>
+                <span className="text-xs" style={{ color: "var(--muted)" }}>{part.mime_type || "application/octet-stream"}</span>
+                <span className="text-xs" style={{ color: "var(--muted)" }}>{formatBytes(part.size_bytes)}</span>
+              </div>
+              <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
+                {attachmentPlaceholder(part)}
+              </div>
+            </div>
+          );
+        }
+        return (
+          <pre key={`unknown-${idx}`} className="text-xs p-2 rounded overflow-auto" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+            {JSON.stringify(part, null, 2)}
+          </pre>
+        );
+      })}
+    </div>
+  );
+}
+
 interface MessageBlockProps {
   message: Message;
   showBorders?: boolean;
@@ -239,7 +293,7 @@ function CompactionMarker({ message }: { message: Message }) {
           border: `1px solid ${markerColor}`,
           background: "rgba(239, 68, 68, 0.10)",
         }}
-        title={message.content || undefined}
+        title={contentToPlainText(message.content, message.content_text || "") || undefined}
       >
         Compaction boundary: API context now starts at {startShort ? `msg_${startShort}` : "the selected message"}
         {details && <span className="ml-2 font-normal" style={{ color: "var(--muted)" }}>({details})</span>}
@@ -280,21 +334,21 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
 
   // Check if this is a shell command (starts with $ or $$)
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
+  const contentText = contentToPlainText(message.content, message.content_text || "");
+  const stringContent = typeof message.content === "string" ? message.content : contentText;
   const isShellCommand = message.role === "user" &&
-    message.content?.match(/^\$\$?\s*\S/);
+    typeof message.content === "string" && message.content.match(/^\$\$?\s*\S/);
 
   // Check if this is a system/command message (should render as monospace)
   const isCommandOutput = message.role === "system";
 
   // For tool messages, check if content is long
-  const isLongToolOutput = message.role === "tool" &&
-    message.content && message.content.length > 500;
+  const isLongToolOutput = message.role === "tool" && contentText.length > 500;
 
   const shellStyle: React.CSSProperties = { background: "var(--code-bg)", borderColor: "var(--panel-border)" };
 
   const messageTps = formatStreamingTps(message.tps);
   const tokenText = formatTokenCount(message.tokens);
-  const contentText = message.content || "";
   const toolCalls = message.tool_calls || [];
   const toolStreamEntries = stringRecordEntries(message.tool_stream);
   const toolCallStreamEntries = stringRecordEntries(message.tool_calls_stream);
@@ -386,12 +440,12 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
           {/* Shell command display */}
           {isShellCommand ? (
             <pre className="text-sm font-mono p-2 rounded overflow-auto" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-              {message.content}
+              {stringContent}
             </pre>
           ) : isCommandOutput ? (
             /* Command output (system messages) - monospace for tree/list formatting */
             <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
-              {message.content}
+              {contentText}
             </pre>
           ) : message.role === "tool" ? (
             /* Tool output - collapsible if long */
@@ -401,14 +455,16 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max" }:
                   Output ({contentText.length.toLocaleString()} chars) - click to expand
                 </summary>
                 <pre className="p-2 text-xs overflow-auto max-h-96 whitespace-pre-wrap" style={{ color: "var(--tool-msg-text, var(--foreground))" }}>
-                  {message.content}
+                  {contentText}
                 </pre>
               </details>
             ) : (
               <pre className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
-                {message.content}
+                {contentText}
               </pre>
             )
+          ) : isContentPartArray(message.content) ? (
+            <ContentPartsView parts={message.content} showBorders={showBorders} />
           ) : (
             /* Regular markdown content with GFM tables and LaTeX support */
             <div className="prose prose-sm max-w-none" style={{ color: "inherit" }}>
@@ -601,7 +657,8 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     });
   }
   if (message.role === "tool") {
-    const label = message.content ? `Tool Result (${message.content.length.toLocaleString()} chars)` : "Tool Result";
+    const contentText = contentToPlainText(message.content, message.content_text || "");
+    const label = contentText ? `Tool Result (${contentText.length.toLocaleString()} chars)` : "Tool Result";
     const name = message.name || "tool";
     details.push({ kind: "tool_results", name, tokens: takeTokens(), header: messageMetadataText(message, `${label}: ${name}`) });
   }
@@ -648,7 +705,7 @@ function renderMessagesForVerbosity(messages: Message[], displayVerbosity: Displ
     }
 
     const hiddenDetails = collectHiddenDetailsForMessage(msg);
-    const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean((msg.content || "").trim());
+    const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
       const beforeVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind === "reasoning") : [];
       const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;

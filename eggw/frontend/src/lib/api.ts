@@ -1,3 +1,5 @@
+import type { AttachmentUploadResponse, EggMessageContent } from "./contentParts";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export async function fetchThreads() {
@@ -88,13 +90,33 @@ export async function fetchMessages(threadId: string) {
   return res.json();
 }
 
-export async function sendMessage(threadId: string, content: string) {
+export async function sendMessage(threadId: string, content: EggMessageContent) {
   const res = await fetch(`${API_BASE}/api/threads/${threadId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
   if (!res.ok) throw new Error("Failed to send message");
+  return res.json();
+}
+
+export async function uploadAttachment(threadId: string, file: File): Promise<AttachmentUploadResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/attachments`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    let detail = "Failed to upload attachment";
+    try {
+      const payload = await res.json();
+      if (typeof payload?.detail === "string") detail = payload.detail;
+    } catch {
+      // Keep generic message.
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 

@@ -3,8 +3,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, Loader2, Terminal, StopCircle } from "lucide-react";
-import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, AutocompleteSuggestion } from "@/lib/api";
+import { Paperclip, Send, Loader2, Terminal, StopCircle, X } from "lucide-react";
+import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocomplete, fetchThreadState, uploadAttachment, AutocompleteSuggestion } from "@/lib/api";
+import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
@@ -14,11 +15,13 @@ interface MessageInputProps {
 
 export function MessageInput({ showBorders = true }: MessageInputProps) {
   const [input, setInput] = useState("");
+  const [stagedAttachments, setStagedAttachments] = useState<AttachmentContentPart[]>([]);
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
   const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const router = useRouter();
@@ -52,13 +55,14 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
 
   // Regular message mutation
   const messageMutation = useMutation({
-    mutationFn: (content: string) => sendMessage(currentThreadId!, content),
-    onMutate: (content: string) => {
+    mutationFn: (content: EggMessageContent) => sendMessage(currentThreadId!, content),
+    onMutate: (content: EggMessageContent) => {
       // Immediately add message to store for instant display
       addMessage({
         id: `temp-${Date.now()}`,
         role: "user",
         content: content,
+        content_text: typeof content === "string" ? content : undefined,
       });
       setInput("");
       setSuggestions([]);
@@ -67,12 +71,28 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
       textareaRef.current?.focus();
     },
     onSuccess: () => {
+      setStagedAttachments([]);
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
       queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Message sent", "success");
     },
     onError: () => {
       addSystemLog("Failed to send message", "error");
+    },
+  });
+
+  const uploadMutation = useMutation({
+    mutationFn: async (files: File[]) => {
+      if (!currentThreadId) throw new Error("No thread selected");
+      return Promise.all(files.map((file) => uploadAttachment(currentThreadId, file)));
+    },
+    onSuccess: (uploads) => {
+      setStagedAttachments((prev) => [...prev, ...uploads.map((upload) => upload.content_part)]);
+      addSystemLog(`Attached ${uploads.length} file${uploads.length === 1 ? "" : "s"}`, "success");
+      textareaRef.current?.focus();
+    },
+    onError: (error) => {
+      addSystemLog(error instanceof Error ? error.message : "Failed to upload attachment", "error");
     },
   });
 
@@ -355,6 +375,10 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     }
   }, [currentThreadId, isStreaming, activeGetUserWait]);
 
+  useEffect(() => {
+    setStagedAttachments([]);
+  }, [currentThreadId]);
+
   // Global key capture - focus input when user starts typing
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -404,16 +428,28 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
 
   const handleSubmit = () => {
     const trimmed = input.trim();
-    if (!trimmed || !currentThreadId) return;
+    const hasAttachments = stagedAttachments.length > 0;
+    if ((!trimmed && !hasAttachments) || !currentThreadId) return;
 
     // Commands can run during streaming (navigation, status, etc.). Regular
     // messages are blocked during streaming except while the get-user tool is
     // explicitly waiting for the next normal user message.
     if (isCommand(trimmed)) {
+      if (hasAttachments) {
+        addSystemLog("Attachments cannot be sent with slash or shell commands. Remove staged attachments or send a normal message.", "error");
+        return;
+      }
       commandMutation.mutate(trimmed);
     } else if (!isStreaming || activeGetUserWait) {
-      messageMutation.mutate(trimmed);
+      messageMutation.mutate(buildMessageContentWithAttachments(trimmed, stagedAttachments));
     }
+  };
+
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length || !currentThreadId) return;
+    uploadMutation.mutate(files);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -459,9 +495,10 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
     }
   };
 
-  const isPending = messageMutation.isPending || commandMutation.isPending;
+  const isPending = messageMutation.isPending || commandMutation.isPending || uploadMutation.isPending;
   const inputIsCommand = isCommand(input);
   const showGetUserAnswerButton = isStreaming && activeGetUserWait && !inputIsCommand;
+  const canSend = Boolean(currentThreadId) && (Boolean(input.trim()) || stagedAttachments.length > 0);
 
   return (
     <div
@@ -517,7 +554,60 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
         </div>
       )}
 
+      {stagedAttachments.length > 0 && (
+        <div className="mb-3 flex flex-wrap gap-2" data-testid="staged-attachments">
+          {stagedAttachments.map((attachment, index) => (
+            <div
+              key={`${attachment.input_id}-${index}`}
+              className={`flex max-w-full items-center gap-2 rounded px-3 py-2 text-xs ${showBorders ? "border" : ""}`}
+              style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              title={attachmentPlaceholder(attachment)}
+            >
+              <Paperclip className="h-3.5 w-3.5 flex-shrink-0" />
+              <div className="min-w-0">
+                <div className="truncate font-medium">{attachmentFilename(attachment)}</div>
+                <div className="truncate" style={{ color: "var(--muted)" }}>
+                  {attachment.presentation || "file"} · {attachment.mime_type || "application/octet-stream"} · {formatBytes(attachment.size_bytes)}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStagedAttachments((prev) => prev.filter((_, i) => i !== index))}
+                className="ml-1 rounded p-1 hover:bg-red-500/20"
+                title="Remove attachment"
+                aria-label={`Remove attachment ${attachmentFilename(attachment)}`}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="flex gap-2 items-end">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFileChange}
+          data-testid="attachment-file-input"
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!currentThreadId || isPending}
+          className="px-3 py-2 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          title="Attach files"
+          data-testid="attach-button"
+        >
+          {uploadMutation.isPending ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Paperclip className="w-4 h-4" />
+          )}
+          Attach
+        </button>
         <textarea
           ref={textareaRef}
           value={input}
@@ -555,7 +645,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
         {showGetUserAnswerButton && (
           <button
             onClick={handleSubmit}
-            disabled={!input.trim() || !currentThreadId || isPending}
+            disabled={!canSend || isPending}
             className="px-4 py-2 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             style={{ background: "#c026d3", color: "white" }}
             title="Answer the waiting get-user tool"
@@ -585,7 +675,7 @@ export function MessageInput({ showBorders = true }: MessageInputProps) {
         ) : (
           <button
             onClick={handleSubmit}
-            disabled={!input.trim() || !currentThreadId || isPending}
+            disabled={!canSend || isPending}
             className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {isPending ? (
