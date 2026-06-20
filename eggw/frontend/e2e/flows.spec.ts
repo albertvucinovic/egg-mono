@@ -181,6 +181,151 @@ test.describe('Thread Operations', () => {
 
 });
 
+test.describe('Attachment Composer UX', () => {
+  test('can drag and drop an image attachment into staging with mocked backend', async ({ page }) => {
+    const threadId = 'drop-thread-1';
+    let uploadCalled = false;
+
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: '',
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/messages`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/attachments`, async (route, request) => {
+      uploadCalled = true;
+      expect(request.method()).toBe('POST');
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          input_id: 'drop1234',
+          metadata: {
+            input_id: 'drop1234',
+            owner_thread_id: threadId,
+            filename: 'drop-egg.png',
+            mime_type: 'image/png',
+            presentation: 'image',
+            size_bytes: 3,
+            sha256: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+          },
+          content_part: {
+            type: 'attachment',
+            input_id: 'drop1234',
+            owner_thread_id: threadId,
+            filename: 'drop-egg.png',
+            mime_type: 'image/png',
+            presentation: 'image',
+            size_bytes: 3,
+            sha256: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+            options: {},
+          },
+          content_text: '[Attachment: image drop-egg.png image/png 3 B sha256:abcdef01]',
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/attachments/drop1234`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'image/png' },
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axS6S0AAAAASUVORK5CYII=',
+          'base64',
+        ),
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          input_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0,
+          cached_tokens: 0,
+          context_tokens: 0,
+          full_thread_tokens: 0,
+          total_tokens: 0,
+          cost_usd: 0,
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { enabled: false, effective: false, available: false, user_control_enabled: true },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { state: 'waiting_user', active_get_user_wait: false },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: false } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { id: threadId, name: 'Drop UI Test', has_children: false },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/roots`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: [{ id: threadId, name: 'Drop UI Test', has_children: false }],
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/models`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: [{ id: threadId, name: 'Drop UI Test', has_children: false }],
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const composer = page.getByTestId('message-composer');
+    await expect(composer).toBeVisible({ timeout: 5000 });
+
+    const dataTransfer = await page.evaluateHandle(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array([1, 2, 3])], 'drop-egg.png', { type: 'image/png' }));
+      return transfer;
+    });
+    await composer.dispatchEvent('dragenter', { dataTransfer: dataTransfer as any });
+    await expect(page.getByTestId('attachment-drop-overlay')).toBeVisible({ timeout: 5000 });
+    await composer.dispatchEvent('drop', { dataTransfer: dataTransfer as any });
+
+    await expect.poll(() => uploadCalled).toBe(true);
+    await expect(page.getByTestId('staged-attachments')).toContainText('drop-egg.png', { timeout: 5000 });
+    const stagedPreview = page.getByTestId('staged-attachment-preview');
+    await expect(stagedPreview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/attachments/drop1234`);
+    await expect(stagedPreview).toHaveAttribute('loading', 'lazy');
+  });
+});
+
 test.describe('Image Generation UI', () => {
   test('can generate an image from the composer with mocked backend', async ({ page }) => {
     const threadId = 'image-thread-1';

@@ -16,12 +16,50 @@ interface MessageInputProps {
   setStagedAttachments: Dispatch<SetStateAction<AttachmentContentPart[]>>;
 }
 
+function dataTransferHasFiles(dataTransfer: DataTransfer | null): boolean {
+  if (!dataTransfer) return false;
+  if (Array.from(dataTransfer.types || []).includes("Files")) return true;
+  return Array.from(dataTransfer.items || []).some((item) => item.kind === "file");
+}
+
+function fallbackExtensionForMime(mimeType: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized === "image/png") return "png";
+  if (normalized === "image/jpeg") return "jpg";
+  if (normalized === "image/gif") return "gif";
+  if (normalized === "image/webp") return "webp";
+  if (normalized === "text/plain") return "txt";
+  return "bin";
+}
+
+function ensureFileName(file: File, index: number): File {
+  if (file.name.trim()) return file;
+  const extension = fallbackExtensionForMime(file.type || "application/octet-stream");
+  return new File([file], `clipboard-${index + 1}.${extension}`, {
+    type: file.type || "application/octet-stream",
+    lastModified: file.lastModified,
+  });
+}
+
+function filesFromDataTransfer(dataTransfer: DataTransfer | null): File[] {
+  if (!dataTransfer) return [];
+  const directFiles = Array.from(dataTransfer.files || []);
+  const files = directFiles.length
+    ? directFiles
+    : Array.from(dataTransfer.items || [])
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+  return files.map((file, index) => ensureFileName(file, index));
+}
+
 export function MessageInput({ showBorders = true, stagedAttachments, setStagedAttachments }: MessageInputProps) {
   const [input, setInput] = useState("");
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [showImageForm, setShowImageForm] = useState(false);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageModel, setImageModel] = useState("");
@@ -31,6 +69,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
   const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const dragDepthRef = useRef(0);
   const router = useRouter();
   const queryClient = useQueryClient();
   const {
@@ -102,6 +141,15 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       addSystemLog(error instanceof Error ? error.message : "Failed to upload attachment", "error");
     },
   });
+
+  const uploadFiles = (files: File[]) => {
+    if (!files.length) return;
+    if (!currentThreadId) {
+      addSystemLog("Select a thread before attaching files", "error");
+      return;
+    }
+    uploadMutation.mutate(files);
+  };
 
   const imageGenerationMutation = useMutation({
     mutationFn: async ({ threadId, request }: { threadId: string; request: ImageGenerationRequest }) => {
@@ -489,8 +537,49 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
-    if (!files.length || !currentThreadId) return;
-    uploadMutation.mutate(files);
+    uploadFiles(files);
+  };
+
+  const handleDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current += 1;
+    setIsDraggingFiles(true);
+  };
+
+  const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    setIsDraggingFiles(true);
+  };
+
+  const handleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDraggingFiles(false);
+    }
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDraggingFiles(false);
+    uploadFiles(filesFromDataTransfer(event.dataTransfer));
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = filesFromDataTransfer(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    uploadFiles(files);
   };
 
   const handleGenerateImage = () => {
@@ -563,9 +652,26 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
 
   return (
     <div
-      className={`p-4 bg-[var(--panel-bg)] relative ${showBorders || activeGetUserWait ? 'border-t' : ''}`}
+      className={clsx(
+        "p-4 bg-[var(--panel-bg)] relative transition-shadow",
+        (showBorders || activeGetUserWait) && "border-t",
+        isDraggingFiles && "ring-2 ring-blue-500/80",
+      )}
       style={{ borderColor: activeGetUserWait ? "#d946ef" : "var(--panel-border)" }}
+      data-testid="message-composer"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
+      {isDraggingFiles && (
+        <div
+          className="pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-blue-400 bg-blue-500/10 text-sm font-medium text-blue-200"
+          data-testid="attachment-drop-overlay"
+        >
+          Drop files to attach
+        </div>
+      )}
       {activeGetUserWait && (
         <div
           data-testid="get-user-input-mode"
@@ -794,6 +900,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onPaste={handlePaste}
           onKeyDown={handleKeyDown}
           placeholder={
             currentThreadId
