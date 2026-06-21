@@ -243,9 +243,9 @@
             "reasoning_effort": "xhigh"
           },
           "cost": {
-            "input_tokens": 0,
-            "cached_input": 0,
-            "output_tokens": 0
+            "input_tokens": 5,
+            "cached_input": 0.5,
+            "output_tokens": 30
           }
         },
         "Pro: GPT-5.3-Codex-Spark": {
