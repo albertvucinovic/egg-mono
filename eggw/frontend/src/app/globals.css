@@ -1321,6 +1321,14 @@ code {
   font-size: 0.86rem;
 }
 
+.prose img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1rem auto;
+  border-radius: 0.75rem;
+}
+
 .prose table {
   font-size: 0.9em;
   line-height: 1.5;

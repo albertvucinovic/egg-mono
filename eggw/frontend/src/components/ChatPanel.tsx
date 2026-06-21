@@ -262,7 +262,7 @@ function ContentPartsView({
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const [promotingArtifactIds, setPromotingArtifactIds] = useState<Record<string, boolean>>({});
-  const imagePreviewClassName = clsx("block max-w-full rounded object-contain", showBorders && "border");
+  const imagePreviewClassName = clsx("mx-auto block max-w-full rounded object-contain", showBorders && "border");
   const imagePreviewStyle = {
     maxHeight: MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT,
     borderColor: "var(--panel-border)",
@@ -331,7 +331,7 @@ function ContentPartsView({
                 {attachmentPlaceholder(part)}
               </div>
               {openUrl && isImageContentPart(part) && (
-                <a href={openUrl} target="_blank" rel="noreferrer" className="mt-2 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
+                <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
                   <img
                     src={openUrl}
                     alt={`Preview of ${attachmentFilename(part)}`}
@@ -391,7 +391,7 @@ function ContentPartsView({
                 {artifactPlaceholder(part)}
               </div>
               {openUrl && isImageContentPart(part) && (
-                <a href={openUrl} target="_blank" rel="noreferrer" className="mt-2 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
+                <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
                   <img
                     src={openUrl}
                     alt={`Preview of ${artifactFilename(part)}`}
