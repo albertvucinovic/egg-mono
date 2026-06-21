@@ -155,6 +155,7 @@ interface HiddenDetail {
   kind: HiddenDetailKind;
   header: string;
   name?: string;
+  tool_call_id?: string;
   tokens?: number;
   body?: string;
   source?: "reasoning" | "tool_call" | "tool_result" | "tool_stream" | "tool_call_stream";
@@ -254,15 +255,9 @@ function messageMetadataText(message: Message, label: string): string {
 }
 
 function isImportantSystemMessage(message: Message): boolean {
-  if (message.role !== "system") return false;
-  if (message.recovery_notice) return true;
-  if (message.id?.startsWith("cmd-")) return true;
-  const content = contentToPlainText(message.content, message.content_text || "").trim().toLowerCase();
-  return content.startsWith("llm error:") ||
-    content.startsWith("error:") ||
-    content.startsWith("usage:") ||
-    content.startsWith("unknown command:") ||
-    content.startsWith("/");
+  // Match terminal Egg's min-verbosity behavior: system messages are part of
+  // the visible conversation skeleton, including the initial system prompt.
+  return message.role === "system";
 }
 
 function plural(count: number, singular: string, pluralText?: string): string {
@@ -283,7 +278,71 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
 
 function hiddenToolDetails(details: HiddenDetail[]): HiddenDetail[] {
   const structuredToolCalls = details.filter((detail) => detail.source === "tool_call" && Boolean(detail.name));
-  if (structuredToolCalls.length > 0) return structuredToolCalls;
+  if (structuredToolCalls.length > 0) {
+    const toolResultDetails = details.filter((detail) => detail.source === "tool_result");
+    const streamResultDetails = details.filter((detail) => detail.source === "tool_stream");
+    // Prefer the final tool-role result.  Fall back to persisted streamed
+    // previews only for older/incomplete transcripts that do not have a tool
+    // result message in the hidden run.
+    const resultDetails = toolResultDetails.length > 0 ? toolResultDetails : streamResultDetails;
+    const resultByToolCallId = new Map<string, HiddenDetail>();
+    resultDetails.forEach((detail) => {
+      if (detail.tool_call_id && !resultByToolCallId.has(detail.tool_call_id)) {
+        resultByToolCallId.set(detail.tool_call_id, detail);
+      }
+    });
+    const usedResultIndexes = new Set<number>();
+
+    return structuredToolCalls.map((call, callIndex) => {
+      let result: HiddenDetail | undefined;
+      if (call.tool_call_id) {
+        result = resultByToolCallId.get(call.tool_call_id);
+      }
+      if (!result) {
+        // Older/imported transcripts may not have stable tool_call_id fields.
+        // Fall back to the corresponding result by order/name so each repeated
+        // `bash, bash, bash` entry still opens the nearest matching result.
+        const exactIndex = resultDetails.findIndex((candidate, index) => (
+          !usedResultIndexes.has(index) &&
+          Boolean(candidate.name) &&
+          Boolean(call.name) &&
+          candidate.name === call.name
+        ));
+        const fallbackIndex = exactIndex >= 0
+          ? exactIndex
+          : resultDetails.findIndex((_, index) => !usedResultIndexes.has(index) && index >= callIndex);
+        if (fallbackIndex >= 0) {
+          usedResultIndexes.add(fallbackIndex);
+          result = resultDetails[fallbackIndex];
+        }
+      }
+
+      const callHeader = [
+        `Tool call: ${call.name || "tool"}`,
+        call.tool_call_id ? `tool_call_id: ${call.tool_call_id}` : "",
+      ].filter(Boolean).join("\n");
+      const bodyParts = [
+        callHeader,
+        "",
+        "Arguments:",
+        call.body || "(none)",
+      ];
+      if (result) {
+        bodyParts.push(
+          "",
+          "Result:",
+          result.body || "(empty)",
+        );
+      } else {
+        bodyParts.push("", "Result:", "(not found in the loaded transcript)");
+      }
+
+      return {
+        ...call,
+        body: bodyParts.join("\n"),
+      };
+    });
+  }
 
   const toolCalls = details.filter((detail) => detail.kind === "tool_calls" && Boolean(detail.name));
   if (toolCalls.length > 0) return toolCalls;
@@ -1086,6 +1145,7 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
       details.push({
         kind: "tool_calls",
         name,
+        tool_call_id: toolCallId,
         tokens: takeTokens(),
         header: name ? `ToolCall: ${name}` : "ToolCall",
         body: formatHiddenDetailBody({
@@ -1100,7 +1160,15 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   if (message.role === "tool") {
     const contentText = contentToPlainText(message.content, message.content_text || "");
     const name = message.name || "tool";
-    details.push({ kind: "tool_results", name, tokens: takeTokens(), header: name ? `Tool Result: ${name}` : "Tool Result", body: contentText, source: "tool_result" });
+    details.push({
+      kind: "tool_results",
+      name,
+      tool_call_id: message.tool_call_id,
+      tokens: takeTokens(),
+      header: name ? `Tool Result: ${name}` : "Tool Result",
+      body: contentText,
+      source: "tool_result",
+    });
   }
   stringRecordEntries(message.tool_stream).forEach(([name, text]) => {
     details.push({
