@@ -6,7 +6,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from eggthreads.attachment_staging import format_staged_attachments, save_local_attachment_for_thread
+from eggthreads.attachment_staging import format_attachments_overview, save_local_attachment_for_thread
 from eggthreads.content_parts import format_attachment_placeholder
 from eggthreads.provider_output_artifacts import promote_provider_output_to_input
 from eggthreads.provider_output_export import export_provider_output_artifact
@@ -225,8 +225,29 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
 
     def attachments_handler(ctx: Any, arg: str):
         thread_id = str(getattr(ctx, "current_thread", "") or "").strip()
+        db = getattr(ctx, "db", None)
         staged = list(staged_attachments_for_thread(app, thread_id)) if thread_id else []
-        message = format_staged_attachments(staged)
+        messages: list[dict[str, Any]] = []
+        if thread_id and db is not None:
+            try:
+                snapshot = getattr(ctx, "create_snapshot", None)
+                if callable(snapshot):
+                    snap = snapshot(db, thread_id)
+                else:
+                    from eggthreads import create_snapshot
+
+                    snap = create_snapshot(db, thread_id)
+                if isinstance(snap, dict):
+                    raw_messages = snap.get("messages")
+                else:
+                    import json
+
+                    raw_messages = json.loads(snap).get("messages") if isinstance(snap, str) else None
+                if isinstance(raw_messages, list):
+                    messages = [m for m in raw_messages if isinstance(m, dict)]
+            except Exception:
+                messages = []
+        message = format_attachments_overview(staged, messages)
         if ctx.console_print_block is not None:
             try:
                 ctx.console_print_block("Attachments", message, border_style="green", markup=False)
@@ -323,7 +344,7 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             attachments_handler,
             category="input",
             usage="/attachments",
-            description="List attachments staged for the current thread.",
+            description="List current staged attachments and historical attachments used in the conversation.",
         )
     )
     register_if_missing(

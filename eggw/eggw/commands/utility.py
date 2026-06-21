@@ -455,7 +455,7 @@ EggW-only commands:
 
 Attachments:
     /attach <path> — Stage a server-side local file path for the next message.
-    /attachments — List attachments staged in this browser composer.
+    /attachments — List staged attachments and attachments already used in this conversation.
     /attachOutput <artifact_id> — Stage a generated provider artifact as an attachment.
     /saveProviderArtifact <artifact_id> [path] — Export a provider artifact to cwd.
     /clearAttachments — Clear staged attachments in this browser composer.

@@ -34,6 +34,15 @@ def image_generate_usage() -> str:
     )
 
 
+def format_image_generation_start_message(*, model_key: str | None, prompt: str) -> str:
+    """Return short user-facing text for an image-generation command start."""
+
+    label = model_key or "default image model"
+    clean_prompt = " ".join(str(prompt or "").split())
+    short_prompt = clean_prompt if len(clean_prompt) <= 120 else clean_prompt[:117].rstrip() + "..."
+    return f"Generating image with {label}: {short_prompt}"
+
+
 def parse_image_generate_args(arg: str) -> tuple[str, str | None, dict[str, Any]]:
     """Parse the textual ``/imageGenerate`` command arguments.
 
@@ -470,6 +479,7 @@ __all__ = [
     "ImageGenerationArtifactResult",
     "complete_image_generate_args",
     "configured_image_generation_backend_keys",
+    "format_image_generation_start_message",
     "format_image_generation_artifact_result",
     "generate_openai_image_artifacts",
     "image_generation_result_content_parts",

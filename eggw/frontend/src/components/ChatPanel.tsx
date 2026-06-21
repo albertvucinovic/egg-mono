@@ -83,6 +83,28 @@ function toolTimeoutCountdown(timeout: StreamingToolTimeout | undefined, nowMs: 
   return `timeout in ${remainingSec.toFixed(0)}s (limit ${limit.toFixed(0)}s)`;
 }
 
+function elapsedSecondsText(startedAtMs: number | null | undefined, nowMs: number, label = "streaming"): string | null {
+  const started = Number(startedAtMs);
+  if (!Number.isFinite(started) || started <= 0) return null;
+  const elapsedSec = Math.max(0, (nowMs - started) / 1000);
+  return `${label} ${elapsedSec.toFixed(0)}s`;
+}
+
+function providerTimingText(
+  request: { startedAtMs: number; timeoutSec?: number } | null | undefined,
+  nowMs: number,
+): string | null {
+  if (!request) return null;
+  const started = Number(request.startedAtMs);
+  if (!Number.isFinite(started) || started <= 0) return null;
+  const elapsedSec = Math.max(0, (nowMs - started) / 1000);
+  const limit = Number(request.timeoutSec || 0);
+  if (Number.isFinite(limit) && limit > 0) {
+    return `streaming ${elapsedSec.toFixed(0)}s (limit ${limit.toFixed(0)}s)`;
+  }
+  return `streaming ${elapsedSec.toFixed(0)}s`;
+}
+
 type HiddenDetailKind = "reasoning" | "tool_calls" | "tool_results";
 
 interface HiddenDetail {
@@ -901,21 +923,30 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     streamingToolOutputs,
     streamingModelKey,
     streamingKind,
+    streamingStartedAtMs,
+    streamingProviderRequest,
     isStreaming,
     scrollTrigger,
     displayVerbosity,
   } = useAppStore();
-  const hasActiveToolTimeout = Object.values(streamingToolOutputs).some((tool) => Boolean(tool.timeout));
+  const hasActiveToolTiming = Object.values(streamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
+  const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
   const primaryToolTimeoutText = Object.values(streamingToolOutputs)
     .map((tool) => toolTimeoutCountdown(tool.timeout, nowMs))
     .find((text): text is string => Boolean(text));
+  const providerTimeText = streamingKind === "llm"
+    ? providerTimingText(streamingProviderRequest, nowMs) || elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
+    : null;
+  const genericStreamingTimeText = streamingKind !== "llm"
+    ? elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
+    : null;
 
   useEffect(() => {
-    if (!hasActiveToolTimeout) return;
+    if (!shouldUpdateTiming) return;
     setNowMs(Date.now());
     const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(intervalId);
-  }, [hasActiveToolTimeout]);
+  }, [shouldUpdateTiming]);
 
   // Stick-to-bottom scrolling: track if user intentionally scrolled away
   const stickToBottomRef = useRef(true);
@@ -1260,7 +1291,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className={`px-3 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)", background: "var(--panel-bg)" }}>
-        <span>Chat Messages{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}</span>
+        <span>
+          Chat Messages{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
+          {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
+          {isStreaming && !providerTimeText && genericStreamingTimeText ? ` | ${genericStreamingTimeText}` : ""}
+        </span>
       </div>
       <div
         ref={scrollRef}
@@ -1305,6 +1340,12 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                       <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
                     )}
                     <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                    {providerTimeText && (
+                      <span className="ml-2" style={{ color: "var(--accent)" }}>{providerTimeText}</span>
+                    )}
+                    {!providerTimeText && genericStreamingTimeText && (
+                      <span className="ml-2" style={{ color: "var(--accent)" }}>{genericStreamingTimeText}</span>
+                    )}
                     {streamingKind === "tool" && primaryToolTimeoutText && (
                       <span data-testid="streaming-tool-timeout-header" className="ml-2" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
                         {primaryToolTimeoutText}
@@ -1380,6 +1421,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                       <div className="mt-2 space-y-2">
                         {Object.entries(streamingToolOutputs).map(([toolId, tool]) => {
                           const timeoutText = toolTimeoutCountdown(tool.timeout, nowMs);
+                          const elapsedText = tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
                           return (
                             <details
                               key={toolId}
@@ -1393,6 +1435,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                                   {toolId.slice(-8)}
                                 </span>
                                 <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
+                                {elapsedText && (
+                                  <span data-testid="streaming-tool-elapsed-summary" className="text-xs" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+                                    {elapsedText}
+                                  </span>
+                                )}
                                 {timeoutText && (
                                   <span data-testid="streaming-tool-timeout-summary" className="text-xs" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
                                     {timeoutText}
@@ -1400,6 +1447,15 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                                 )}
                               </summary>
                               <div className="px-2 pb-2">
+                                {elapsedText && (
+                                  <div
+                                    data-testid="streaming-tool-elapsed"
+                                    className="mb-2 text-xs"
+                                    style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                                  >
+                                    {elapsedText}
+                                  </div>
+                                )}
                                 {timeoutText && (
                                   <div
                                     data-testid="streaming-tool-timeout"

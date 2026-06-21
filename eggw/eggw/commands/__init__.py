@@ -255,7 +255,7 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
         elif command_name == "attach":
             return await cmd_attach(thread_id, command_arg)
         elif command_name == "attachments":
-            return cmd_attachments(staged_attachments)
+            return cmd_attachments(thread_id, staged_attachments)
         elif command_name == "attachOutput":
             return await cmd_attach_output(thread_id, command_arg)
         elif command_name == "clearAttachments":

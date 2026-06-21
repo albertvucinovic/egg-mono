@@ -34,6 +34,21 @@ def test_attach_command_stages_lists_and_clear_attachments(egg_app, tmp_path):
     assert any("Cleared 1 staged attachment" in msg for msg in egg_app._system_log)
 
 
+def test_attachments_command_lists_historical_attachments(egg_app, tmp_path):
+    source = tmp_path / "note.txt"
+    source.write_text("hello", encoding="utf-8")
+
+    egg_app.handle_command(f"/attach {source}")
+    assert egg_app.on_submit("use this") is True
+
+    egg_app.handle_command("/attachments")
+
+    overview = "\n".join(egg_app._system_log)
+    assert "No attachments currently staged." in overview
+    assert "Historical attachments used in this conversation:" in overview
+    assert "note.txt" in overview
+
+
 def test_submit_with_staged_attachment_appends_content_parts_and_clears(egg_app, tmp_path):
     source = tmp_path / "pixel.png"
     source.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")

@@ -133,6 +133,7 @@ def test_image_generate_command_invokes_service_appends_artifact_refs_and_render
         "model_key": "Image Backend",
     }
     assert not any("generated-bytes" in json.dumps(part) for part in content)
+    assert any("Generating image with Image Backend: Paint a bright egg" in entry for entry in egg_app._system_log)
     assert any("Provider artifact: image generated-1.png" in entry for entry in egg_app._system_log)
 
 

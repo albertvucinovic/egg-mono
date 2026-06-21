@@ -10,6 +10,12 @@ import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttac
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
 
+function formatElapsed(startedAtMs: number | null | undefined): string | null {
+  const started = Number(startedAtMs);
+  if (!Number.isFinite(started) || started <= 0) return null;
+  return `${Math.max(0, (Date.now() - started) / 1000).toFixed(0)}s`;
+}
+
 interface MessageInputProps {
   showBorders?: boolean;
   stagedAttachments: AttachmentContentPart[];
@@ -65,6 +71,9 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const [imageModel, setImageModel] = useState("");
   const [imageCount, setImageCount] = useState("");
   const [imageSize, setImageSize] = useState("");
+  const [commandPendingStartedAtMs, setCommandPendingStartedAtMs] = useState<number | null>(null);
+  const [imagePendingStartedAtMs, setImagePendingStartedAtMs] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
@@ -81,6 +90,8 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     setStreamingToolCalls,
     setStreamingToolOutputs,
     setStreamingKind,
+    setStreamingStartedAtMs,
+    setStreamingProviderRequest,
     addSystemLog,
     addMessage,
     setTheme,
@@ -88,6 +99,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     toggleBorders,
     setEnterMode,
     setDisplayVerbosity,
+    activeUserCommand,
     enterMode,
   } = useAppStore();
 
@@ -166,7 +178,14 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         artifactCount: response.content_parts.filter((part) => part.type === "artifact").length,
       };
     },
+    onMutate: (variables) => {
+      setImagePendingStartedAtMs(Date.now());
+      const label = variables.request.model || variables.request.backend || imageDefaultModel || "default image model";
+      const prompt = variables.request.prompt.length > 120 ? `${variables.request.prompt.slice(0, 117).trimEnd()}...` : variables.request.prompt;
+      addSystemLog(`Generating image with ${label}: ${prompt}`, "info");
+    },
     onSuccess: (result, variables) => {
+      setImagePendingStartedAtMs(null);
       if (variables.threadId === currentThreadId) {
         setImagePrompt("");
         setImageModel("");
@@ -183,6 +202,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       );
     },
     onError: (error) => {
+      setImagePendingStartedAtMs(null);
       addSystemLog(error instanceof Error ? error.message : "Failed to generate image", "error");
     },
   });
@@ -196,6 +216,8 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       setStreamingToolCalls({});
       setStreamingToolOutputs({});
       setStreamingKind(null);
+      setStreamingStartedAtMs(null);
+      setStreamingProviderRequest(null);
       setIsStreaming(false);
       // Refetch messages to get the saved partial content from backend
       queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
@@ -215,6 +237,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const commandMutation = useMutation({
     mutationFn: ({ command, staged }: { command: string; staged: AttachmentContentPart[] }) => executeCommand(currentThreadId!, command, staged),
     onMutate: ({ command }: { command: string; staged: AttachmentContentPart[] }) => {
+      setCommandPendingStartedAtMs(Date.now());
       setInput("");
       setSuggestions([]);
       setShowSuggestions(false);
@@ -228,8 +251,16 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           content: command,
         });
       }
+      if (command.startsWith('/imageGenerate')) {
+        addMessage({
+          id: `cmd-start-${Date.now()}`,
+          role: "system",
+          content: "Starting /imageGenerate — generating image artifact and appending it to the transcript...",
+        });
+      }
     },
     onSuccess: (response) => {
+      setCommandPendingStartedAtMs(null);
       if (response.success) {
         // Show every command response in Chat Messages. The System Log stays
         // as a compact event log, but command output should be visible in the
@@ -343,9 +374,18 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       }
     },
     onError: () => {
+      setCommandPendingStartedAtMs(null);
       addSystemLog("Failed to execute command", "error");
     },
   });
+
+  useEffect(() => {
+    const active = commandMutation.isPending || imageGenerationMutation.isPending || Boolean(activeUserCommand);
+    if (!active) return;
+    setNowMs(Date.now());
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [commandMutation.isPending, imageGenerationMutation.isPending, activeUserCommand]);
 
   // Fetch autocomplete suggestions
   const fetchSuggestions = useCallback(async (value: string, cursorPos: number) => {
@@ -662,6 +702,16 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const showGetUserAnswerButton = isStreaming && activeGetUserWait && !inputIsCommand;
   const canSend = Boolean(currentThreadId) && (Boolean(input.trim()) || stagedAttachments.length > 0);
   const canGenerateImage = Boolean(currentThreadId) && Boolean(imagePrompt.trim()) && !isStreaming && !imageGenerationMutation.isPending;
+  const commandPendingElapsed = commandMutation.isPending ? formatElapsed(commandPendingStartedAtMs) : null;
+  const imagePendingElapsed = imageGenerationMutation.isPending ? formatElapsed(imagePendingStartedAtMs) : null;
+  const activeCommandElapsed = activeUserCommand ? `${Math.max(0, (nowMs - activeUserCommand.startedAtMs) / 1000).toFixed(0)}s` : null;
+  const displayedCommandElapsed = activeCommandElapsed || commandPendingElapsed;
+  const displayedCommandLabel = activeUserCommand
+    ? activeUserCommand.name.startsWith("$") ? activeUserCommand.name : `/${activeUserCommand.name}`
+    : "command";
+  const activeCommandTimeout = activeUserCommand?.timeoutSec && activeUserCommand.timeoutSec > 0
+    ? `; timeout in ${Math.max(0, activeUserCommand.timeoutSec - Math.max(0, (nowMs - activeUserCommand.startedAtMs) / 1000)).toFixed(0)}s (limit ${activeUserCommand.timeoutSec.toFixed(0)}s)`
+    : "";
 
   return (
     <div
@@ -1019,7 +1069,19 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         {commandMutation.isPending && (
           <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
             <Loader2 className="w-3 h-3 animate-spin" />
-            Running command...
+            Running {displayedCommandLabel}{displayedCommandElapsed ? ` ${displayedCommandElapsed}` : ""}{activeCommandTimeout}...
+          </span>
+        )}
+        {!commandMutation.isPending && activeUserCommand && (
+          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Running {activeUserCommand.name.startsWith("$") ? activeUserCommand.name : `/${activeUserCommand.name}`}{activeCommandElapsed ? ` ${activeCommandElapsed}` : ""}{activeCommandTimeout}...
+          </span>
+        )}
+        {imageGenerationMutation.isPending && (
+          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Generating image{imagePendingElapsed ? ` ${imagePendingElapsed}` : ""}...
           </span>
         )}
         <span title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>

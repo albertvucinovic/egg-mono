@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping
 
 from eggthreads import current_thread_model
 from eggthreads.attachment_staging import (
-    format_staged_attachments,
+    format_attachments_overview,
     save_local_attachment_for_thread,
 )
 from eggthreads.content_parts import content_to_plain_text, format_attachment_placeholder, validate_content_part
@@ -158,15 +158,39 @@ async def cmd_attach(thread_id: str, arg: str) -> CommandResponse:
         return CommandResponse(success=False, message=f"/attach failed: {e}")
 
 
-def cmd_attachments(staged_attachments: Iterable[Mapping[str, Any]] | None = None) -> CommandResponse:
-    """List attachments currently staged by the EggW client."""
+def _thread_messages(thread_id: str) -> list[dict[str, Any]]:
+    if core.db is None:
+        return []
+    try:
+        from eggthreads import create_snapshot
+
+        snap = create_snapshot(core.db, thread_id)
+        messages = snap.get("messages") if isinstance(snap, dict) else None
+        return [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
+    except Exception:
+        return []
+
+
+def cmd_attachments(thread_id: str, staged_attachments: Iterable[Mapping[str, Any]] | None = None) -> CommandResponse:
+    """List current staged attachments and historical conversation attachments."""
 
     try:
         staged = _validate_client_attachments(staged_attachments)
+        messages = _thread_messages(thread_id)
         return CommandResponse(
             success=True,
-            message=format_staged_attachments(staged),
-            data={"action": "list_staged_attachments", "count": len(staged)},
+            message=format_attachments_overview(staged, messages),
+            data={
+                "action": "list_attachments",
+                "staged_count": len(staged),
+                "historical_count": sum(
+                    1
+                    for message in messages
+                    if isinstance(message.get("content"), list)
+                    for part in message.get("content", [])
+                    if isinstance(part, Mapping) and part.get("type") == "attachment"
+                ),
+            },
         )
     except Exception as e:
         return CommandResponse(success=False, message=f"/attachments failed: {e}")

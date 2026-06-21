@@ -107,6 +107,19 @@ class CommandResponse(BaseModel):
     data: Optional[Dict[str, Any]] = None
 
 
+class CommandLifecycleResponse(BaseModel):
+    """Response from command execution with command lifecycle timing metadata."""
+
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
+    command_id: str
+    command_name: str
+    started_at: datetime
+    finished_at: datetime
+    elapsed_sec: float
+
+
 class CreateThreadRequest(BaseModel):
     """Request to create a new thread."""
     name: Optional[str] = None

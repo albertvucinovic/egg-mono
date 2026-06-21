@@ -10,6 +10,7 @@ from eggthreads.command_catalog import CommandResult, CommandSpec
 from eggthreads.image_generation import (
     ImageGenerationArtifactResult,
     complete_image_generate_args,
+    format_image_generation_start_message,
     format_image_generation_artifact_result,
     generate_openai_image_artifacts,
     image_generation_result_content_parts,
@@ -79,9 +80,7 @@ def _finish_image_generation_command(ctx: Any, result: ImageGenerationArtifactRe
 def _log_generation_start(ctx: Any, *, model_key: str | None, prompt: str) -> None:
     logger = getattr(ctx, "log_system", None)
     if callable(logger):
-        label = model_key or "default image model"
-        short_prompt = prompt if len(prompt) <= 120 else prompt[:117].rstrip() + "..."
-        logger(f"Generating image with {label}: {short_prompt}")
+        logger(format_image_generation_start_message(model_key=model_key, prompt=prompt))
 
 
 def image_generate_command(ctx: Any, arg: str) -> CommandResult:

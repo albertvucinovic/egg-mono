@@ -35,6 +35,8 @@ export default function ThreadPage() {
     setStreamingToolCalls,
     setStreamingToolOutputs,
     setStreamingKind,
+    setStreamingStartedAtMs,
+    setStreamingProviderRequest,
     panelVisibility,
     togglePanel,
     showBorders,
@@ -181,6 +183,8 @@ export default function ThreadPage() {
           setStreamingToolCalls({});
           setStreamingToolOutputs({});
           setStreamingKind(null);
+          setStreamingStartedAtMs(null);
+          setStreamingProviderRequest(null);
           setIsStreaming(false);
           // Refetch messages to get the saved partial content from backend
           queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
@@ -281,7 +285,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingToolOutputs, setStreamingKind, router]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingToolOutputs, setStreamingKind, setStreamingStartedAtMs, setStreamingProviderRequest, router]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);

@@ -1,11 +1,13 @@
 """Image-generation slash commands for eggw backend."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from eggllm.image_generation import ImageGenerationConfigError, ImageGenerationError, ImageGenerationProviderError
 from eggthreads.artifact_completion import artifact_workspace_from_db
 from eggthreads.image_generation import (
+    format_image_generation_start_message,
     format_image_generation_artifact_result,
     parse_image_generate_args,
 )
@@ -34,6 +36,20 @@ async def cmd_image_generate(thread_id: str, arg: str) -> CommandResponse:
         prompt, model_key, options = parse_image_generate_args(arg)
     except ValueError as e:
         return CommandResponse(success=False, message=str(e))
+
+    try:
+        core.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="user_command.status",
+            payload={
+                "command_name": "imageGenerate",
+                "message": format_image_generation_start_message(model_key=model_key, prompt=prompt),
+                "timeout": 600,
+            },
+        )
+    except Exception:
+        pass
 
     try:
         result, content_parts, message_id = await generate_and_append_thread_image(

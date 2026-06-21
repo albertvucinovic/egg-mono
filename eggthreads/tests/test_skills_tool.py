@@ -34,6 +34,16 @@ def test_skill_tool_lists_and_loads_documents() -> None:
     assert "Spawn template" in worker_doc
 
 
+def test_compaction_checkpoint_skill_includes_assistant_notes() -> None:
+    tools = ts.create_default_tools()
+    doc = tools.execute("skill", {"name": "compaction-checkpoint"})
+
+    assert "Assistant Notes" in doc
+    assert "answer_user_preserve_turn" in doc
+    assert "source_tool_name" in doc
+    assert "omitted_empty_assistant" in doc
+
+
 def test_eggtools_exposes_skill_helper_in_memory_repl(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")

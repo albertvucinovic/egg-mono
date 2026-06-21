@@ -58,7 +58,22 @@ export interface StreamingToolOutput {
   suppressed: boolean;
   suppressedFrames: number;
   summary?: string;
+  startedAtMs?: number;
   timeout?: StreamingToolTimeout;
+}
+
+export interface StreamingProviderRequest {
+  startedAtMs: number;
+  timeoutSec?: number;
+  modelKey?: string | null;
+}
+
+export interface ActiveUserCommand {
+  id: string;
+  name: string;
+  command: string;
+  startedAtMs: number;
+  timeoutSec?: number;
 }
 
 export interface SystemLog {
@@ -102,7 +117,7 @@ interface AppState {
   streamingToolOutputs: Record<string, StreamingToolOutput>;
   setStreamingToolOutputs: (outputs: Record<string, StreamingToolOutput>) => void;
   upsertStreamingToolOutput: (id: string, name: string, suppressed?: boolean, summary?: string) => void;
-  markStreamingToolStarted: (id: string, name: string, startedAtMs: number, timeoutSec: number) => void;
+  markStreamingToolStarted: (id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => void;
   clearStreamingToolTimeout: (id: string) => void;
 
   // Tool calls
@@ -125,6 +140,12 @@ interface AppState {
   setStreamingModelKey: (key: string | null) => void;
   streamingKind: string | null;
   setStreamingKind: (kind: string | null) => void;
+  streamingStartedAtMs: number | null;
+  setStreamingStartedAtMs: (startedAtMs: number | null) => void;
+  streamingProviderRequest: StreamingProviderRequest | null;
+  setStreamingProviderRequest: (request: StreamingProviderRequest | null) => void;
+  activeUserCommand: ActiveUserCommand | null;
+  setActiveUserCommand: (command: ActiveUserCommand | null) => void;
 
   // Panel visibility
   panelVisibility: { chat: boolean; children: boolean; system: boolean };
@@ -162,6 +183,9 @@ export const useAppStore = create<AppState>((set) => ({
     streamingToolOutputs: {},
     streamingModelKey: null,
     streamingKind: null,
+    streamingStartedAtMs: null,
+    streamingProviderRequest: null,
+    activeUserCommand: null,
     isStreaming: false,
   }),
 
@@ -242,12 +266,13 @@ export const useAppStore = create<AppState>((set) => ({
             suppressed: existing.suppressed || suppressed,
             suppressedFrames: existing.suppressedFrames + (suppressed ? 1 : 0),
             summary: summary !== undefined ? summary : existing.summary,
+            startedAtMs: existing.startedAtMs,
             timeout: existing.timeout,
           },
         },
       };
     }),
-  markStreamingToolStarted: (id, name, startedAtMs, timeoutSec) =>
+  markStreamingToolStarted: (id, name, startedAtMs, timeoutSec = null) =>
     set((state) => {
       const existing = state.streamingToolOutputs[id] || {
         id,
@@ -262,7 +287,8 @@ export const useAppStore = create<AppState>((set) => ({
           [id]: {
             ...existing,
             name: name || existing.name,
-            timeout: { startedAtMs, timeoutSec },
+            startedAtMs,
+            ...(timeoutSec && timeoutSec > 0 ? { timeout: { startedAtMs, timeoutSec } } : {}),
           },
         },
       };
@@ -306,6 +332,12 @@ export const useAppStore = create<AppState>((set) => ({
   setStreamingModelKey: (key) => set({ streamingModelKey: key }),
   streamingKind: null,
   setStreamingKind: (kind) => set({ streamingKind: kind }),
+  streamingStartedAtMs: null,
+  setStreamingStartedAtMs: (startedAtMs) => set({ streamingStartedAtMs: startedAtMs }),
+  streamingProviderRequest: null,
+  setStreamingProviderRequest: (request) => set({ streamingProviderRequest: request }),
+  activeUserCommand: null,
+  setActiveUserCommand: (command) => set({ activeUserCommand: command }),
 
   // Panel visibility (sidebar hidden by default to maximize screen space)
   panelVisibility: { chat: true, children: true, system: false },

@@ -9,6 +9,7 @@ Create a concise durable checkpoint of the work state, then choose whether to st
 The checkpoint should preserve:
 
 - the pending user request or task;
+- Assistant Notes / interim answers, especially manager-worker progress notes;
 - important decisions, invariants, and design constraints;
 - files changed or intended to change;
 - commands/tests already run and their results;
@@ -72,12 +73,20 @@ def is_assistant_note(m):
     """Best-effort detection of answer_user_while_preserving_llm_turn notes.
 
     Raw DB payloads have answer_user_preserve_turn=True. Hydrated context may
-    omit that flag, but usually preserves the note's tool_call_id. Normal final
-    assistant messages should not have tool_call_id.
+    omit that flag, but usually preserves source/awaiting/tool-call metadata.
+    Normal final assistant messages should not have a tool_call_id without
+    tool_calls.
     """
     if not isinstance(m, dict) or m.get("role") != "assistant":
         return False
     if m.get("answer_user_preserve_turn"):
+        return True
+    if m.get("source_tool_name") in {
+        "answer_user_while_preserving_llm_turn",
+        "get_user_message_while_preserving_llm_turn",
+    }:
+        return True
+    if m.get("awaiting_user_message_tool_call_id"):
         return True
     return bool(m.get("tool_call_id") and m.get("content") and not m.get("tool_calls"))
 
@@ -160,6 +169,8 @@ def format_line(n, m, snippet_limit, current_ids, current_seqs, current_start_se
         base += f" ts={ts}"
     if kind == "NOTE" and m.get("tool_call_id"):
         base += f" note_call={suffix(m.get('tool_call_id'), 10)}"
+    if kind == "NOTE" and m.get("source_tool_name"):
+        base += f" source={m.get('source_tool_name')}"
     text = clean_text(m.get("content"), snippet_limit)
     return base + (f" | {text}" if text else "")
 
@@ -199,6 +210,14 @@ omitted_tool_call_only_assistant = sum(
     and not selected_kind(m)
     and m.get("tool_calls")
 )
+omitted_empty_assistant = sum(
+    1
+    for m in messages
+    if m.get("role") == "assistant"
+    and not selected_kind(m)
+    and not str(m.get("content") or "").strip()
+    and not m.get("tool_calls")
+)
 
 candidates = []
 for older_limit in OLDER_SNIPPET_STEPS:
@@ -233,6 +252,7 @@ print(
 print("selected_counts=" + ", ".join(f"{k}={kind_counts[k]}" for k in sorted(kind_counts)))
 print("visible_role_counts=" + ", ".join(f"{k}={role_counts[k]}" for k in sorted(role_counts)))
 print(f"omitted_tool_call_only_assistant={omitted_tool_call_only_assistant}")
+print(f"omitted_empty_assistant={omitted_empty_assistant}")
 if globals().get("compactions"):
     print(
         f"compactions={len(compactions)} "
@@ -242,6 +262,17 @@ if globals().get("compactions"):
 print("Legend: P=in current provider prompt, C=after current compaction start but provider-hidden/not in prompt, O=older visible history.")
 print("Kinds: USER=user message, ASST=contentful LLM assistant message, NOTE=Assistant Note/interim answer.")
 print("Use msg/seq identifiers for targeted follow-up with get_message(), print_message(), search_thread(), or raw DB inspection.")
+if selected:
+    latest_user = next((m for m in reversed(selected) if selected_kind(m) == "USER"), None)
+    latest_note = next((m for m in reversed(selected) if selected_kind(m) == "NOTE"), None)
+    latest_asst = next((m for m in reversed(selected) if selected_kind(m) == "ASST"), None)
+    print("Latest selected ids: " + ", ".join(
+        part for part in [
+            f"USER={msg_id(latest_user)}" if latest_user else "",
+            f"NOTE={msg_id(latest_note)}" if latest_note else "",
+            f"ASST={msg_id(latest_asst)}" if latest_asst else "",
+        ] if part
+    ))
 print("\n--- skeleton ---")
 print(body)
 ```
@@ -249,6 +280,7 @@ print(body)
 After this first pass:
 
 - identify the latest actionable user request(s), especially entries marked `P` or `C`;
+- treat `NOTE` rows as first-class progress/status messages, not disposable chatter;
 - scan older `O` entries for relevant prior design decisions, failed attempts, commits, and constraints;
 - inspect any important truncated entry by full `msg_id` or `event_seq` before relying on it;
 - only then write the checkpoint.

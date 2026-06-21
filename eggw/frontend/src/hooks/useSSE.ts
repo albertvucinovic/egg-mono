@@ -50,6 +50,9 @@ export function useSSE(threadId: string | null) {
     setIsStreaming,
     setStreamingModelKey,
     setStreamingKind,
+    setStreamingStartedAtMs,
+    setStreamingProviderRequest,
+    setActiveUserCommand,
     addSystemLog,
   } = useAppStore();
 
@@ -66,6 +69,9 @@ export function useSSE(threadId: string | null) {
     setStreamingToolCalls({});
     setStreamingToolOutputs({});
     setStreamingKind(null);
+    setStreamingStartedAtMs(null);
+    setStreamingProviderRequest(null);
+    setActiveUserCommand(null);
     setIsStreaming(false);
 
     const es = createEventSource(threadId);
@@ -100,6 +106,13 @@ export function useSSE(threadId: string | null) {
         setStreamingToolOutputs({});
         setStreamingModelKey(modelKey);
         setStreamingKind(streamKind);
+        try {
+          const data = JSON.parse(e.data);
+          setStreamingStartedAtMs(eventStartedAtMs(data.ts));
+        } catch {
+          setStreamingStartedAtMs(Date.now());
+        }
+        setStreamingProviderRequest(null);
         setIsStreaming(true);
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
         addSystemLog(`Streaming started${modelKey ? ` (${modelKey})` : ""}`, "info");
@@ -177,6 +190,8 @@ export function useSSE(threadId: string | null) {
         setStreamingToolOutputs({});
         setStreamingModelKey(null);
         setStreamingKind(null);
+        setStreamingStartedAtMs(null);
+        setStreamingProviderRequest(null);
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
         queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
@@ -213,13 +228,88 @@ export function useSSE(threadId: string | null) {
         addSystemLog(`Tool executing: ${toolName || "unknown"}`, "info");
         setStreamingKind("tool");
         setIsStreaming(true);
-        if (toolId && timeoutSec !== null) {
+        if (toolId) {
           markStreamingToolStarted(String(toolId), String(toolName || "tool"), eventStartedAtMs(data.ts), timeoutSec);
         }
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse tool_call.execution_started:", err);
+      }
+    });
+
+    es.addEventListener("provider_request.started", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const timeoutSec = positiveTimeout(payload.timeout ?? payload.timeout_sec);
+        setStreamingProviderRequest({
+          startedAtMs: eventStartedAtMs(data.ts),
+          ...(timeoutSec !== null ? { timeoutSec } : {}),
+          modelKey: typeof payload.model_key === "string" ? payload.model_key : null,
+        });
+        if (typeof payload.model_key === "string" && payload.model_key) {
+          setStreamingModelKey(payload.model_key);
+        }
+        setStreamingKind("llm");
+        setIsStreaming(true);
+      } catch (err) {
+        console.error("Failed to parse provider_request.started:", err);
+      }
+    });
+
+    es.addEventListener("user_command.started", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const commandName = String(payload.command_name || "command");
+        const commandText = String(payload.command || "");
+        const commandId = String(payload.command_id || data.event_seq || commandName);
+        setActiveUserCommand({
+          id: commandId,
+          name: commandName,
+          command: commandText,
+          startedAtMs: eventStartedAtMs(data.ts || payload.started_at),
+        });
+        addSystemLog(`Running command: ${commandName.startsWith("$") ? commandName : `/${commandName}`}`, "info");
+      } catch (err) {
+        console.error("Failed to parse user_command.started:", err);
+      }
+    });
+
+    es.addEventListener("user_command.finished", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const elapsed = typeof payload.elapsed_sec === "number" ? ` in ${payload.elapsed_sec.toFixed(1)}s` : "";
+        const commandName = String(payload.command_name || "command");
+        setActiveUserCommand(null);
+        addSystemLog(`Command finished: ${commandName.startsWith("$") ? commandName : `/${commandName}`}${elapsed}`, payload.success === false ? "error" : "success");
+      } catch (err) {
+        console.error("Failed to parse user_command.finished:", err);
+      }
+    });
+
+    es.addEventListener("user_command.status", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const message = typeof payload.message === "string" ? payload.message : "";
+        const timeoutSec = timeoutFromPayload(payload);
+        if (payload.command_name === "imageGenerate" && timeoutSec !== null) {
+          const streamingState = useAppStore.getState();
+          if (streamingState.activeUserCommand) {
+            setActiveUserCommand({
+              ...streamingState.activeUserCommand,
+              timeoutSec,
+            });
+          }
+        }
+        if (message) {
+          addSystemLog(message, "info");
+        }
+      } catch (err) {
+        console.error("Failed to parse user_command.status:", err);
       }
     });
 
@@ -334,6 +424,9 @@ export function useSSE(threadId: string | null) {
     setIsStreaming,
     setStreamingModelKey,
     setStreamingKind,
+    setStreamingStartedAtMs,
+    setStreamingProviderRequest,
+    setActiveUserCommand,
     addSystemLog,
     queryClient,
   ]);

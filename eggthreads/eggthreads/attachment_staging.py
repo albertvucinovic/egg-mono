@@ -167,8 +167,81 @@ def format_staged_attachments(attachments: Iterable[Mapping[str, Any]]) -> str:
     return "Staged attachments:\n" + "\n".join(lines)
 
 
+def conversation_attachment_entries(messages: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return attachment parts already used by messages in a conversation.
+
+    ``/attachments`` needs to show more than the ephemeral staged list: once a
+    user sends a message, the durable source of truth is the message content
+    part embedded in the thread snapshot.  This helper keeps both frontends on
+    the same interpretation of "historical attachments".
+    """
+
+    entries: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for index, raw_part in enumerate(content, start=1):
+            if not isinstance(raw_part, Mapping) or raw_part.get("type") != "attachment":
+                continue
+            try:
+                part = validate_content_part(raw_part)
+            except Exception:
+                continue
+            entries.append(
+                {
+                    "message_id": str(message.get("msg_id") or message.get("id") or ""),
+                    "role": str(message.get("role") or "message"),
+                    "part_index": index,
+                    "part": part,
+                }
+            )
+    return entries
+
+
+def format_attachments_overview(
+    staged_attachments: Iterable[Mapping[str, Any]],
+    messages: Iterable[Mapping[str, Any]] = (),
+) -> str:
+    """Render current staged attachments plus historical conversation usage."""
+
+    staged = [validate_content_part(part) for part in staged_attachments]
+    historical = conversation_attachment_entries(messages)
+
+    lines: list[str] = []
+    if staged:
+        lines.append("Staged attachments:")
+        lines.extend(
+            f"{index}. {format_attachment_placeholder(part, validate=False)}"
+            for index, part in enumerate(staged, start=1)
+        )
+    else:
+        lines.append("No attachments currently staged.")
+
+    lines.append("")
+    if historical:
+        lines.append("Historical attachments used in this conversation:")
+        for index, entry in enumerate(historical, start=1):
+            msg_id = str(entry.get("message_id") or "")
+            msg_suffix = msg_id[-8:] if msg_id else "unknown"
+            role = str(entry.get("role") or "message")
+            part = entry.get("part") if isinstance(entry.get("part"), Mapping) else {}
+            lines.append(
+                f"{index}. msg {msg_suffix} ({role}) part {entry.get('part_index')}: "
+                f"{format_attachment_placeholder(part, validate=False)}"
+            )
+    else:
+        lines.append("No historical attachments used in this conversation.")
+
+    return "\n".join(lines)
+
+
 __all__ = [
     "build_message_content_with_attachments",
+    "conversation_attachment_entries",
+    "format_attachments_overview",
     "format_staged_attachments",
     "infer_attachment_mime_and_presentation",
     "safe_display_filename",
