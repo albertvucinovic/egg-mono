@@ -95,8 +95,11 @@ export async function interruptThread(threadId: string) {
   return res.json();
 }
 
-export async function fetchMessages(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/messages`);
+export async function fetchMessages(threadId: string, options: { limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (options.limit && options.limit > 0) params.set("limit", String(Math.trunc(options.limit)));
+  const query = params.toString();
+  const res = await fetch(`${API_BASE}/api/threads/${threadId}/messages${query ? `?${query}` : ""}`);
   if (!res.ok) throw new Error("Failed to fetch messages");
   return res.json();
 }

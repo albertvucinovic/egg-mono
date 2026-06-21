@@ -32,6 +32,7 @@ import clsx from "clsx";
 
 const STICKY_BOTTOM_THRESHOLD_PX = 4;
 const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
+const INITIAL_TRANSCRIPT_MESSAGE_LIMIT = 300;
 
 /**
  * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
@@ -1273,7 +1274,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["messages", currentThreadId],
-    queryFn: () => fetchMessages(currentThreadId!),
+    queryFn: () => fetchMessages(currentThreadId!, { limit: INITIAL_TRANSCRIPT_MESSAGE_LIMIT }),
     enabled: !!currentThreadId,
     retry: 3,
     retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 5000),
@@ -1375,7 +1376,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className={`eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
         <span>
-          Chat Messages{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
+              Chat Messages · latest {INITIAL_TRANSCRIPT_MESSAGE_LIMIT}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
           {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
           {isStreaming && !providerTimeText && genericStreamingTimeText ? ` | ${genericStreamingTimeText}` : ""}
         </span>
