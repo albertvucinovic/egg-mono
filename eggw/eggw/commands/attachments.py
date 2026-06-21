@@ -8,11 +8,15 @@ from typing import Any, Iterable, Mapping
 from eggthreads import current_thread_model
 from eggthreads.attachment_staging import (
     format_attachments_overview,
-    save_local_attachment_for_thread,
+)
+from eggthreads.attachment_tools import (
+    artifact_workspace_from_db,
+    attach_local_file_operation,
+    attach_provider_output_operation,
+    save_provider_artifact_operation,
+    thread_working_directory,
 )
 from eggthreads.content_parts import content_to_plain_text, format_attachment_placeholder, validate_content_part
-from eggthreads.provider_output_artifacts import promote_provider_output_to_input
-from eggthreads.provider_output_export import export_provider_output_artifact
 
 from .. import core
 from ..models import CommandResponse
@@ -21,24 +25,14 @@ from ..models import CommandResponse
 def _workspace() -> Path:
     """Return the workspace root used for EggW artifacts."""
 
-    try:
-        db_path = Path(core.db.path).resolve()  # type: ignore[union-attr]
-        if db_path.parent.name == ".egg":
-            return db_path.parent.parent
-    except Exception:
-        pass
-    return Path.cwd().resolve()
+    return artifact_workspace_from_db(core.db)
 
 
 def _thread_working_directory(thread_id: str) -> Path:
     try:
-        from eggthreads import get_thread_working_directory
-
-        if core.db is not None:
-            return get_thread_working_directory(core.db, thread_id).resolve()
+        return thread_working_directory(core.db, thread_id, fallback=_workspace())
     except Exception:
-        pass
-    return _workspace()
+        return _workspace()
 
 
 def _public_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -140,7 +134,7 @@ async def cmd_attach(thread_id: str, arg: str) -> CommandResponse:
         return CommandResponse(success=False, message="/attach failed: database not initialized")
     try:
         source_path = _parse_attach_path(arg)
-        saved, part = save_local_attachment_for_thread(
+        result = attach_local_file_operation(
             core.db,
             thread_id,
             source_path,
@@ -152,6 +146,8 @@ async def cmd_attach(thread_id: str, arg: str) -> CommandResponse:
                 presentation,
             ),
         )
+        saved = result.saved
+        part = result.content_part
         message = f"Attached {part.get('filename') or '(unnamed)'} as {part.get('presentation')} ({part.get('mime_type')}); 1 staged."
         return _stage_response(message, saved=saved, content_part=part)
     except Exception as e:
@@ -203,7 +199,9 @@ async def cmd_attach_output(thread_id: str, arg: str) -> CommandResponse:
         return CommandResponse(success=False, message="/attachOutput failed: database not initialized")
     try:
         artifact_id = _parse_attach_output_artifact_id(arg)
-        saved, part = promote_provider_output_to_input(_workspace(), core.db, thread_id, artifact_id)
+        result = attach_provider_output_operation(core.db, thread_id, artifact_id, workspace=_workspace())
+        saved = result.saved
+        part = result.content_part
         placeholder = format_attachment_placeholder(part, validate=False)
         message = f"Promoted provider output {artifact_id} to input {saved.input_id}; staged attachment.\n{placeholder}"
         return _stage_response(message, saved=saved, content_part=part)
@@ -232,30 +230,18 @@ async def cmd_save_provider_artifact(thread_id: str, arg: str) -> CommandRespons
         return CommandResponse(success=False, message="/saveProviderArtifact failed: database not initialized")
     try:
         artifact_id, output_path = _parse_save_provider_artifact_args(arg)
-        target, metadata = export_provider_output_artifact(
-            _workspace(),
+        result = save_provider_artifact_operation(
             core.db,
             thread_id,
             artifact_id,
             output_path,
+            workspace=_workspace(),
             export_workspace=_thread_working_directory(thread_id),
         )
-        try:
-            display_target = target.relative_to(_thread_working_directory(thread_id))
-        except Exception:
-            display_target = target
         return CommandResponse(
             success=True,
-            message=(
-                f"Saved provider artifact {artifact_id} to {display_target} "
-                f"({metadata.get('mime_type') or 'application/octet-stream'}, {metadata.get('size_bytes')} bytes)."
-            ),
-            data={
-                "action": "save_provider_artifact",
-                "artifact_id": artifact_id,
-                "path": str(display_target),
-                "metadata": _public_metadata(metadata),
-            },
+            message=result.message,
+            data=result.public_payload(),
         )
     except Exception as e:
         return CommandResponse(success=False, message=f"/saveProviderArtifact failed: {e}")

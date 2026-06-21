@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .attachment_staging import safe_display_filename
-from .provider_output_artifacts import resolve_provider_output_bytes
+from .provider_output_artifacts import resolve_provider_output_bytes, resolve_provider_output_metadata
 
 
 def safe_provider_artifact_export_filename(value: Any, *, default: str = "provider-artifact") -> str:
@@ -73,7 +73,7 @@ def export_provider_output_artifact(
     overwritten; callers should ask the user to pick another path instead.
     """
 
-    metadata, data = resolve_provider_output_bytes(
+    metadata = resolve_provider_output_metadata(
         workspace,
         db,
         thread_id,
@@ -84,6 +84,16 @@ def export_provider_output_artifact(
         workspace if export_workspace is None else export_workspace,
         output_path,
         metadata,
+    )
+    from .sandbox import authorize_thread_path_write
+
+    authorize_thread_path_write(db, thread_id, target)
+    metadata, data = resolve_provider_output_bytes(
+        workspace,
+        db,
+        thread_id,
+        artifact_id,
+        descendant_thread_id=descendant_thread_id,
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():

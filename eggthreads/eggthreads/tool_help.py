@@ -134,6 +134,58 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
             '{"model": "OpenAI Image: gpt-image-1", "prompt": "A tiny robot painting an egg", "size": "1024x1024", "output_format": "png"}',
         ],
     },
+    "attach": {
+        "details": "Ingest a local file path as an Egg input attachment for the current thread, using the same shared operation as `/attach`.",
+        "use_when": [
+            "The user asks you to attach a local file before sending or continuing a message.",
+            "You need to turn a sandbox-authorized project/workspace file into a durable Egg attachment content part.",
+        ],
+        "notes": [
+            "Relative paths are resolved against the current thread working directory, not arbitrary process state.",
+            "The source path must pass the thread's effective sandbox/filesystem read policy; Egg-private `.egg` storage is not attachable by path.",
+            "The tool copies bytes into `.egg/egg_inputs` and returns metadata/content-part references only; it never returns inline bytes or base64.",
+            "The resulting attachment content part is type-aware (`presentation`, `mime_type`) and provider-specific lowering still happens later at the provider boundary.",
+        ],
+        "examples": [
+            '{"path": "notes/design.pdf"}',
+            '{"path": "screenshots/example.png"}',
+        ],
+    },
+    "attach_output": {
+        "details": "Promote a provider-output artifact into the current thread's input attachment storage, using the same shared operation as `/attachOutput`.",
+        "use_when": [
+            "A generated/provider artifact should be reused as a model input in a later message.",
+            "The user asks to attach an image or file artifact produced by `generate_image` or another provider-output flow.",
+        ],
+        "notes": [
+            "Provider-output artifacts are outputs first; this tool performs the explicit copy into `.egg/egg_inputs` needed for reuse as input.",
+            "Access is thread-owned: the current thread can read its own artifacts; an ancestor may read a descendant only with explicit `descendant_thread_id`; descendants and siblings are denied.",
+            "The result includes an attachment content part and safe metadata, not raw storage paths, bytes, or base64.",
+            "The promoted input preserves provenance back to the source provider artifact for audit/debugging.",
+        ],
+        "examples": [
+            '{"artifact_id": "abc12345"}',
+            '{"artifact_id": "abc12345", "descendant_thread_id": "01K...child"}',
+        ],
+    },
+    "save_provider_artifact": {
+        "details": "Export an accessible provider-output artifact to a user-visible file under the current thread working directory, using the same shared operation as `/saveProviderArtifact`.",
+        "use_when": [
+            "The user wants a generated/provider artifact saved into the workspace so they can open, commit, or edit it outside Egg storage.",
+            "You need a convenience copy of a provider artifact while leaving canonical bytes in `.egg/egg_provider_output`.",
+        ],
+        "notes": [
+            "This is an export/copy operation; canonical provider-output storage remains under `.egg/egg_provider_output`.",
+            "The target path must stay under the current thread working directory, must not be under `.egg`, must pass the effective sandbox/filesystem write policy, and must not overwrite an existing file.",
+            "Omit `path` to use the artifact's safe filename; pass a directory or filename to control the export location.",
+            "The same provider-output access rules as `attach_output` apply, including explicit `descendant_thread_id` for ancestor-to-descendant reads.",
+        ],
+        "examples": [
+            '{"artifact_id": "abc12345"}',
+            '{"artifact_id": "abc12345", "path": "exports/generated.png"}',
+            '{"artifact_id": "abc12345", "path": "exports/", "descendant_thread_id": "01K...child"}',
+        ],
+    },
     "python_repl": {
         "details": "Run code in this thread's persistent Python REPL session, with thread context helpers preloaded.",
         "use_when": [

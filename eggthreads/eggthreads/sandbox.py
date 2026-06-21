@@ -249,6 +249,82 @@ def sandbox_read_policy_decision(
     return False, f"unknown sandbox provider: {provider_name}"
 
 
+def sandbox_write_policy_decision(
+    *,
+    enabled: bool,
+    provider: str,
+    settings: Dict[str, Any],
+    target_path: str | Path,
+    working_dir: str | Path | None = None,
+) -> tuple[bool, str]:
+    """Return whether a host path may be written under Egg's filesystem policy.
+
+    Host-side helpers such as provider-artifact export write files directly from
+    the Egg process, so they must apply the same effective filesystem policy as
+    sandboxed tools instead of bypassing it.  This is the write-side companion
+    to :func:`sandbox_read_policy_decision`:
+
+    * Egg-private ``.egg`` paths are never writable through this helper.
+    * ``filesystem.denyWrite`` denies matching paths when sandboxing is enabled.
+    * ``filesystem.allowWrite`` is an allow-list when present; an explicit empty
+      allow-list denies all writes.
+    * If no allow-list is configured, writes are limited to the effective thread
+      working directory (plus Docker ``extra_mounts`` for Docker configs).
+    """
+
+    try:
+        wd = Path(working_dir).resolve() if working_dir is not None else Path.cwd().resolve()
+        raw = Path(target_path).expanduser()
+        target = raw if raw.is_absolute() else wd / raw
+        target = target.resolve(strict=False)
+    except Exception as e:
+        return False, f"could not resolve path: {e}"
+
+    for protected in _mandatory_protected_paths_for_working_dir(wd):
+        if target == protected or _is_relative_to_path(target, protected):
+            return False, "path is under Egg-private .egg storage"
+
+    if not enabled:
+        return True, "sandboxing disabled"
+
+    settings = dict(settings or {})
+    provider_name = str(provider or settings.get("provider") or "docker").strip() or "docker"
+
+    for denied in _resolved_sandbox_policy_paths(settings, "denyWrite", wd):
+        if target == denied or _is_relative_to_path(target, denied):
+            return False, f"path is denied by filesystem.denyWrite: {denied}"
+
+    fs = settings.get("filesystem") if isinstance(settings, dict) else None
+    has_explicit_allow_write = isinstance(fs, dict) and "allowWrite" in fs
+    allow_write = _resolved_sandbox_policy_paths(settings, "allowWrite", wd)
+
+    if has_explicit_allow_write:
+        if not allow_write:
+            return False, "path is outside filesystem.allowWrite"
+        if not any(target == root or _is_relative_to_path(target, root) for root in allow_write):
+            return False, "path is outside filesystem.allowWrite"
+    else:
+        if provider_name == "docker":
+            roots = _docker_read_roots(settings, wd)
+        elif provider_name in {"bwrap", "srt"}:
+            roots = [wd]
+        else:
+            return False, f"unknown sandbox provider: {provider_name}"
+        if not any(target == root or _is_relative_to_path(target, root) for root in roots):
+            return False, f"path is outside {provider_name} writable roots"
+
+    if provider_name == "docker":
+        roots = _docker_read_roots(settings, wd)
+        if not any(target == root or _is_relative_to_path(target, root) for root in roots):
+            return False, "path is outside Docker sandbox mounts"
+        return True, "path is inside Docker sandbox writable roots"
+
+    if provider_name in {"bwrap", "srt"}:
+        return True, f"path is allowed by {provider_name} write policy"
+
+    return False, f"unknown sandbox provider: {provider_name}"
+
+
 def authorize_thread_path_read(db: "ThreadsDB", thread_id: str, source_path: str | Path) -> Path:
     """Resolve and authorize a local source path for host-side ingestion.
 
@@ -291,6 +367,47 @@ def authorize_thread_path_read(db: "ThreadsDB", thread_id: str, source_path: str
     )
     if not allowed:
         raise PermissionError(f"source path is not allowed by the effective sandbox/filesystem policy: {reason}")
+    return resolved
+
+
+def authorize_thread_path_write(db: "ThreadsDB", thread_id: str, target_path: str | Path) -> Path:
+    """Resolve and authorize a local target path for host-side writes.
+
+    Relative paths are interpreted against the thread's effective working
+    directory.  A :class:`PermissionError` means Egg's effective policy denies
+    the write; :class:`ValueError` describes local path validation failures.
+    The path does not need to exist yet.
+    """
+
+    if not str(thread_id or "").strip():
+        raise ValueError("thread_id is required.")
+    if not isinstance(target_path, (str, Path)) or not str(target_path).strip():
+        raise ValueError("target path is required.")
+
+    try:
+        from .api import get_thread_working_directory
+
+        working_dir = get_thread_working_directory(db, thread_id)
+    except Exception:
+        working_dir = Path.cwd().resolve()
+
+    raw = Path(str(target_path).strip()).expanduser()
+    candidate = raw if raw.is_absolute() else Path(working_dir) / raw
+    try:
+        resolved = candidate.resolve(strict=False)
+    except Exception as e:
+        raise ValueError(f"could not resolve target path: {e}") from e
+
+    cfg = get_thread_sandbox_config(db, thread_id)
+    allowed, reason = sandbox_write_policy_decision(
+        enabled=cfg.enabled,
+        provider=cfg.provider,
+        settings=dict(cfg.settings or {}),
+        target_path=resolved,
+        working_dir=working_dir,
+    )
+    if not allowed:
+        raise PermissionError(f"target path is not allowed by the effective sandbox/filesystem policy: {reason}")
     return resolved
 
 

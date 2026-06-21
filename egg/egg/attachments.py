@@ -6,10 +6,13 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from eggthreads.attachment_staging import format_attachments_overview, save_local_attachment_for_thread
+from eggthreads.attachment_staging import format_attachments_overview
+from eggthreads.attachment_tools import (
+    attach_local_file_operation,
+    attach_provider_output_operation,
+    save_provider_artifact_operation,
+)
 from eggthreads.content_parts import format_attachment_placeholder
-from eggthreads.provider_output_artifacts import promote_provider_output_to_input
-from eggthreads.provider_output_export import export_provider_output_artifact
 
 
 def _current_model_config(ctx: Any, thread_id: str) -> tuple[str | None, dict[str, Any]]:
@@ -126,10 +129,6 @@ def _parse_save_provider_artifact_args(arg: str) -> tuple[str, str | None]:
     return parts[0], parts[1] if len(parts) == 2 else None
 
 
-def _copy_provider_artifact_to_path(ctx: Any, thread_id: str, artifact_id: str, output_path: str | None) -> tuple[Path, dict[str, Any]]:
-    return export_provider_output_artifact(Path.cwd(), ctx.db, thread_id, artifact_id, output_path)
-
-
 def _mark_input_dirty(app: Any) -> None:
     try:
         app.input_panel.mark_dirty()
@@ -198,7 +197,7 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             return CommandResult(clear_input=False, message=message)
         try:
             source_path = _parse_attach_path(arg)
-            _saved, part = save_local_attachment_for_thread(
+            result = attach_local_file_operation(
                 ctx.db,
                 thread_id,
                 source_path,
@@ -210,6 +209,7 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
                     presentation,
                 ),
             )
+            part = result.content_part
             staged = staged_attachments_for_thread(app, thread_id)
             staged.append(part)
             message = f"Attached {part.get('filename') or '(unnamed)'} as {part.get('presentation')} ({part.get('mime_type')}); {len(staged)} staged."
@@ -266,7 +266,9 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             return CommandResult(clear_input=False, message=message)
         try:
             artifact_id = _parse_attach_output_artifact_id(arg)
-            saved, part = promote_provider_output_to_input(Path.cwd(), ctx.db, thread_id, artifact_id)
+            result = attach_provider_output_operation(ctx.db, thread_id, artifact_id)
+            saved = result.saved
+            part = result.content_part
             staged = staged_attachments_for_thread(app, thread_id)
             staged.append(part)
             placeholder = format_attachment_placeholder(part, validate=False)
@@ -294,15 +296,8 @@ def register_attachment_commands(registry: Any, app: Any) -> None:
             return CommandResult(clear_input=False, message=message)
         try:
             artifact_id, output_path = _parse_save_provider_artifact_args(arg)
-            target, metadata = _copy_provider_artifact_to_path(ctx, thread_id, artifact_id, output_path)
-            try:
-                display_target = target.relative_to(Path.cwd().resolve())
-            except Exception:
-                display_target = target
-            message = (
-                f"Saved provider artifact {artifact_id} to {display_target} "
-                f"({metadata.get('mime_type') or 'application/octet-stream'}, {metadata.get('size_bytes')} bytes)."
-            )
+            result = save_provider_artifact_operation(ctx.db, thread_id, artifact_id, output_path)
+            message = result.message
             if ctx.log_system is not None:
                 ctx.log_system(message)
             return CommandResult(clear_input=True, message=message)

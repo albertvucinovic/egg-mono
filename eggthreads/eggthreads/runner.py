@@ -497,7 +497,7 @@ def _tool_output_content_parts_for_transcript(tool_name: str, output: str) -> Op
     still receives plain text via ``content_to_plain_text``.
     """
 
-    if str(tool_name or "") != "generate_image" or not isinstance(output, str) or not output.strip():
+    if str(tool_name or "") not in {"generate_image", "attach", "attach_output"} or not isinstance(output, str) or not output.strip():
         return None
     try:
         payload = json.loads(output)

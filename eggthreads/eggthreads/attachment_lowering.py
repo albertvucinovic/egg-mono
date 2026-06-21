@@ -322,7 +322,14 @@ def lower_message_attachments_for_provider(
     out = dict(message)
     content = out.get("content")
     if isinstance(content, list):
-        out["content"] = _lower_content_array(ctx, content, current_message=current_message)
+        if str(out.get("role") or "") != "user" and content_has_attachments(content, validate=False):
+            # Attachments are provider inputs, not structured tool/assistant
+            # outputs.  Non-user messages that contain attachment references
+            # should reach providers as readable metadata/placeholders rather
+            # than native input_image/input_file blocks in an invalid role.
+            out["content"] = content_to_plain_text(content)
+        else:
+            out["content"] = _lower_content_array(ctx, content, current_message=current_message)
     return out
 
 
