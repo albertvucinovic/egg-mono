@@ -263,6 +263,9 @@ function ContentPartsView({
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const [promotingArtifactIds, setPromotingArtifactIds] = useState<Record<string, boolean>>({});
   const imagePreviewClassName = clsx("mx-auto block max-w-full rounded object-contain", showBorders && "border");
+  const hasImagePart = parts.some(
+    (part) => (isAttachmentPart(part) || isArtifactPart(part)) && isImageContentPart(part),
+  );
   const imagePreviewStyle = {
     maxHeight: MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT,
     borderColor: "var(--panel-border)",
@@ -295,12 +298,13 @@ function ContentPartsView({
       {parts.map((part, idx) => {
         if (isTextPart(part)) {
           return (
-            <div key={`text-${idx}`} className="whitespace-pre-wrap text-sm">
+            <div key={`text-${idx}`} className={clsx("whitespace-pre-wrap text-sm", hasImagePart && "text-center")}>
               {part.text}
             </div>
           );
         }
         if (isAttachmentPart(part)) {
+          const isImage = isImageContentPart(part);
           const canLink = Boolean(currentThreadId && part.input_id);
           const descendantThreadId = canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId
             ? part.owner_thread_id
@@ -314,11 +318,11 @@ function ContentPartsView({
           return (
             <div
               key={`${part.input_id || "attachment"}-${idx}`}
-              className={`rounded p-3 text-sm ${showBorders ? "border" : ""}`}
+              className={clsx("rounded p-3 text-sm", isImage && "text-center", showBorders && "border")}
               style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               title={attachmentPlaceholder(part)}
             >
-              <div className="flex flex-wrap items-center gap-2">
+              <div className={clsx("flex flex-wrap items-center gap-2", isImage && "justify-center")}>
                 <span className="font-medium">Attachment</span>
                 <span>{attachmentFilename(part)}</span>
                 <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "var(--panel-bg)", color: "var(--muted)" }}>
@@ -330,7 +334,7 @@ function ContentPartsView({
               <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
                 {attachmentPlaceholder(part)}
               </div>
-              {openUrl && isImageContentPart(part) && (
+              {openUrl && isImage && (
                 <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
                   <img
                     src={openUrl}
@@ -347,7 +351,7 @@ function ContentPartsView({
                 </a>
               )}
               {openUrl && downloadUrl && (
-                <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
                   <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
                     Open
                   </a>
@@ -360,6 +364,7 @@ function ContentPartsView({
           );
         }
         if (isArtifactPart(part)) {
+          const isImage = isImageContentPart(part);
           const canLink = Boolean(currentThreadId && part.artifact_id);
           const canPromote = Boolean(canLink && onStageAttachment);
           const descendantThreadId = canLink && part.owner_thread_id && part.owner_thread_id !== currentThreadId
@@ -374,11 +379,11 @@ function ContentPartsView({
           return (
             <div
               key={`${part.artifact_id || "artifact"}-${idx}`}
-              className={`rounded p-3 text-sm ${showBorders ? "border" : ""}`}
+              className={clsx("rounded p-3 text-sm", isImage && "text-center", showBorders && "border")}
               style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               title={artifactPlaceholder(part)}
             >
-              <div className="flex flex-wrap items-center gap-2">
+              <div className={clsx("flex flex-wrap items-center gap-2", isImage && "justify-center")}>
                 <span className="font-medium">Provider artifact</span>
                 <span>{artifactFilename(part)}</span>
                 <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "var(--panel-bg)", color: "var(--muted)" }}>
@@ -390,7 +395,7 @@ function ContentPartsView({
               <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
                 {artifactPlaceholder(part)}
               </div>
-              {openUrl && isImageContentPart(part) && (
+              {openUrl && isImage && (
                 <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
                   <img
                     src={openUrl}
@@ -407,7 +412,7 @@ function ContentPartsView({
                 </a>
               )}
               {openUrl && downloadUrl && (
-                <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
                   <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
                     Open
                   </a>
