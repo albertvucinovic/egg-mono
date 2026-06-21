@@ -197,3 +197,69 @@ def test_attachment_tool_outputs_publish_attachment_content_parts_in_runner_tran
     assert content[1]["type"] == "attachment"
     assert content[1]["filename"] == "note.txt"
     assert "[Attachment: file note.txt" in ts.content_to_plain_text(content)
+
+
+def test_tool_attachment_result_is_expanded_into_visual_provider_context(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="root")
+    source = tmp_path / "pixel.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+    attached = json.loads(ts.create_default_tools().execute("attach", {"path": "pixel.png"}, db=db, thread_id=tid))
+    tool_msg_id = "tool-msg-attach-image"
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-attach-image",
+                    "type": "function",
+                    "function": {"name": "attach", "arguments": json.dumps({"path": "pixel.png"})},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-attach-image",
+            "msg_id": tool_msg_id,
+            "content": attached["content_parts"],
+        },
+    ]
+
+    from eggthreads.attachment_lowering import (
+        AttachmentLoweringContext,
+        expand_tool_attachment_messages_for_provider,
+        lower_messages_for_provider,
+    )
+
+    expanded = expand_tool_attachment_messages_for_provider(messages)
+
+    assert len(expanded) == 3
+    assert expanded[1]["role"] == "tool"
+    assert isinstance(expanded[1]["content"], str)
+    assert "[Attachment: image pixel.png" in expanded[1]["content"]
+    assert expanded[2]["role"] == "user"
+    assert expanded[2]["content"] == attached["content_parts"]
+
+    lowered = lower_messages_for_provider(
+        expanded,
+        AttachmentLoweringContext(
+            workspace=tmp_path,
+            db=db,
+            calling_thread_id=tid,
+            model_key="vision-model",
+            model_config={"input_modalities": ["text", "image"]},
+            provider_api_type="responses",
+        ),
+        current_msg_id=tool_msg_id,
+    )
+
+    assert lowered[1]["role"] == "tool"
+    assert isinstance(lowered[1]["content"], str)
+    assert lowered[2]["role"] == "user"
+    content = lowered[2]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "input_text", "text": attached["message"]}
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")

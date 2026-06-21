@@ -1807,7 +1807,7 @@ class ThreadRunner:
         # Current-turn unsupported attachments fail fast; older unsupported
         # attachments become explicit textual placeholders.
         try:
-            from .attachment_lowering import AttachmentLoweringContext, lower_messages_for_provider
+            from .attachment_lowering import AttachmentLoweringContext, expand_tool_attachment_messages_for_provider, lower_messages_for_provider
 
             model_cfg: Dict[str, Any] = {}
             try:
@@ -1819,6 +1819,7 @@ class ThreadRunner:
             except Exception:
                 model_cfg = {}
             api_type = str(model_cfg.get('api_type') or 'chat_completions') if isinstance(model_cfg, dict) else 'chat_completions'
+            base_messages = expand_tool_attachment_messages_for_provider(base_messages)
             base_messages = lower_messages_for_provider(
                 base_messages,
                 AttachmentLoweringContext(

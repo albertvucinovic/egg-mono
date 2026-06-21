@@ -333,6 +333,47 @@ def lower_message_attachments_for_provider(
     return out
 
 
+def expand_tool_attachment_messages_for_provider(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Add provider-visible user input messages for attachment-producing tools.
+
+    The OpenAI-style tools protocol requires an assistant ``tool_calls`` message
+    to be answered by a ``role='tool'`` message.  Most providers do not accept
+    multimodal input blocks directly on that tool message, so a tool such as
+    ``attach`` or ``attach_output`` would otherwise give the model only a text
+    placeholder.  Preserve the protocol tool result as text, then append a
+    synthetic user-role message carrying the same Egg attachment content parts;
+    normal provider-bound lowering can turn that user message into image/file
+    input blocks for the current model.
+    """
+
+    out: List[Dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            out.append(message)
+            continue
+        content = message.get("content")
+        if str(message.get("role") or "") != "tool" or not isinstance(content, list):
+            out.append(message)
+            continue
+        if not content_has_attachments(content, validate=False):
+            out.append(message)
+            continue
+
+        tool_message = dict(message)
+        tool_message["content"] = content_to_plain_text(content)
+        out.append(tool_message)
+
+        user_message: Dict[str, Any] = {"role": "user", "content": content}
+        # Keep msg_id/event_seq so current-turn detection treats the synthetic
+        # visual-context message as the current tool result when appropriate.
+        if message.get("msg_id"):
+            user_message["msg_id"] = message.get("msg_id")
+        if message.get("event_seq") is not None:
+            user_message["event_seq"] = message.get("event_seq")
+        out.append(user_message)
+    return out
+
+
 def lower_messages_for_provider(
     messages: List[Dict[str, Any]],
     ctx: AttachmentLoweringContext,
@@ -352,6 +393,7 @@ def lower_messages_for_provider(
 __all__ = [
     "AttachmentLoweringContext",
     "AttachmentLoweringError",
+    "expand_tool_attachment_messages_for_provider",
     "lower_message_attachments_for_provider",
     "lower_messages_for_provider",
     "message_has_attachments",
