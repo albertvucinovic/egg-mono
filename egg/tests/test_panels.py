@@ -49,7 +49,7 @@ class TestUpdatePanels:
         monkeypatch.setattr(
             egg_app,
             "current_token_stats",
-            lambda **kwargs: (1234, {"total_input_tokens": 99}),
+            lambda **kwargs: (1234, {"total_input_tokens": 99, "cost_usd": {"total": 0.0123}}),
         )
         monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda **kwargs: "8.0 tps")
 
@@ -58,11 +58,13 @@ class TestUpdatePanels:
 
         assert "ctx 1.23k" in egg_app.system_output.title
         assert "8.0 tps" in egg_app.system_output.title
+        assert "$0.0123 cost" in egg_app.system_output.title
         assert egg_app.system_output.title.count("8.0 tps") == 1
         title = egg_app.system_output.title
         assert title.index("Model") < title.index("ctx 1.23k")
         assert title.index("ctx 1.23k") < title.index("8.0 tps")
-        assert title.index("8.0 tps") < title.index("Sandboxing")
+        assert title.index("8.0 tps") < title.index("$0.0123 cost")
+        assert title.index("$0.0123 cost") < title.index("Sandboxing")
         assert title.index("Sandboxing") < title.index("Autoapproval")
         assert title.index("Autoapproval") < title.index("Streaming")
         assert "Chat Messages" not in [getattr(item, "title", "") for item in group._renderables]
@@ -70,15 +72,17 @@ class TestUpdatePanels:
     def test_inline_keeps_chat_metrics_in_chat_title(self, egg_app, monkeypatch):
         """Inline mode keeps ctx/TPS on the Chat Messages panel."""
         egg_app._display_is_inline = True
-        monkeypatch.setattr(egg_app, "current_token_stats", lambda **kwargs: (42, {}))
+        monkeypatch.setattr(egg_app, "current_token_stats", lambda **kwargs: (42, {"cost_usd": {"total": 0.0042}}))
         monkeypatch.setattr(egg_app, "current_chat_header_tps", lambda **kwargs: "8.0 tps")
 
         egg_app.update_panels()
 
         assert "ctx 42" in egg_app.chat_output.title
         assert "8.0 tps" in egg_app.chat_output.title
+        assert "$0.0042 cost" in egg_app.chat_output.title
         assert "ctx 42" not in egg_app.system_output.title
         assert "8.0 tps" not in egg_app.system_output.title
+        assert "$0.0042 cost" not in egg_app.system_output.title
 
     def test_update_panels_reads_chat_header_tps_once(self, egg_app, monkeypatch):
         """Panel update should reuse one chat header TPS computation."""

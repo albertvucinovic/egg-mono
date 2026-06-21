@@ -539,6 +539,30 @@ class TestComposeChatPanelText:
         assert "Streaming content here" in text
         assert "(streaming)" in text.lower() or "streaming" in text.lower()
 
+    def test_chat_panel_header_includes_cached_total_cost(self, egg_app, monkeypatch):
+        """Chat panel text shows total cost without doing a separate stats scan."""
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "user", "Test message")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        calls = {"stats": 0}
+
+        def fake_token_stats(**kwargs):
+            calls["stats"] += 1
+            return 42, {
+                "total_input_tokens": 100,
+                "total_output_tokens": 20,
+                "approx_call_count": 1,
+                "cost_usd": {"total": 0.0123},
+            }
+
+        monkeypatch.setattr(egg_app, "current_token_stats", fake_token_stats)
+
+        text = egg_app.compose_chat_panel_text()
+
+        assert "$0.0123 cost" in text.splitlines()[0]
+        assert calls["stats"] == 1
+
 
 class TestCurrentTokenStats:
     """Tests for current_token_stats()."""

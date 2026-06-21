@@ -687,8 +687,11 @@ class PanelsMixin:
             chat_header_tps = ""
 
         ctx_tokens: Optional[int] = None
+        api_usage: Dict[str, Any] = {}
         try:
-            ctx_tokens, _api_usage = self.current_token_stats(snapshot_seq=snapshot_seq)
+            ctx_tokens, api_usage = self.current_token_stats(snapshot_seq=snapshot_seq)
+            if not isinstance(api_usage, dict):
+                api_usage = {}
 
             def fmt_tok(v: int) -> str:
                 return self._fmt_compact_count(v)
@@ -708,6 +711,12 @@ class PanelsMixin:
 
                 if chat_header_tps:
                     title_parts.append(chat_header_tps)
+                try:
+                    cost_text = self.header_cost_metric(api_usage)
+                except Exception:
+                    cost_text = ""
+                if cost_text:
+                    title_parts.append(cost_text)
                 self.chat_output.title = "  |  ".join(title_parts)
         except Exception:
             # Leave existing title unchanged on any error.
@@ -724,6 +733,12 @@ class PanelsMixin:
                 pass
             if chat_header_tps:
                 metric_parts.append(chat_header_tps)
+            try:
+                cost_text = self.header_cost_metric(api_usage)
+            except Exception:
+                cost_text = ""
+            if cost_text:
+                metric_parts.append(cost_text)
 
         system_status_key = None
         try:

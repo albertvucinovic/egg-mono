@@ -849,26 +849,13 @@ def snapshot_token_stats(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 def _usage_since_compaction_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
     """Return API-usage stats for calls after the effective compaction marker.
 
-    Input tokens for those calls still include the provider-context prefix that
-    survives compaction, but assistant calls before the marker are not counted.
+    Assistant calls before the marker are not counted, and input tokens for
+    post-marker calls are estimated from exactly the current provider context
+    prefix plus messages after the marker.  Messages compacted away before the
+    selected start message must not be charged as if they were still sent.
     """
 
-    messages: List[Dict[str, Any]] = []
-    try:
-        th = db.get_thread(thread_id)
-    except Exception:
-        th = None
-    if th is not None:
-        snap_raw = getattr(th, "snapshot_json", None)
-        if isinstance(snap_raw, str) and snap_raw:
-            try:
-                snap = json.loads(snap_raw)
-            except Exception:
-                snap = None
-            if isinstance(snap, dict):
-                raw_messages = snap.get("messages") or []
-                if isinstance(raw_messages, list):
-                    messages = [m for m in raw_messages if isinstance(m, dict)]
+    messages = _load_completed_thread_messages(db, thread_id)
 
     try:
         from .api import filter_messages_for_compaction_provider_context
@@ -1001,28 +988,17 @@ def _message_event_seq(message: Dict[str, Any]) -> Optional[int]:
 def _epoch_usage_token_stats(db: "ThreadsDB", thread_id: str, base_stats: Dict[str, Any]) -> Dict[str, Any]:
     """Return token stats with context from *base_stats* and usage summed per compaction epoch."""
 
-    messages: List[Dict[str, Any]] = []
     try:
-        th = db.get_thread(thread_id)
+        from .api import _effective_thread_compactions_for_repl
+
+        if not _effective_thread_compactions_for_repl(db, thread_id):
+            return base_stats
     except Exception:
-        th = None
-    if th is not None:
-        snap_raw = getattr(th, "snapshot_json", None)
-        if isinstance(snap_raw, str) and snap_raw:
-            try:
-                snap = json.loads(snap_raw)
-            except Exception:
-                snap = None
-            if isinstance(snap, dict):
-                raw_messages = snap.get("messages") or []
-                if isinstance(raw_messages, list):
-                    messages = [m for m in raw_messages if isinstance(m, dict)]
-    if not messages:
         return base_stats
 
-    skipped_msg_ids = _get_skipped_msg_ids(db, thread_id)
-    if skipped_msg_ids:
-        messages = [m for m in messages if m.get("msg_id") not in skipped_msg_ids]
+    messages = _load_completed_thread_messages(db, thread_id)
+    if not messages:
+        return base_stats
 
     usage_stats = _full_usage_by_compaction_epoch_stats(db, thread_id, messages)
     usage_api = usage_stats.get("api_usage") if isinstance(usage_stats.get("api_usage"), dict) else {}
@@ -1643,6 +1619,148 @@ def _get_skipped_msg_ids(db: "ThreadsDB", thread_id: str) -> set:
     return skipped
 
 
+def _message_mutations(db: "ThreadsDB", thread_id: str) -> Tuple[set, set, Dict[str, Dict[str, Any]]]:
+    """Return skipped ids, deleted ids, and normal message edits for a thread.
+
+    Token/cost accounting is often called without forcing a snapshot rebuild,
+    because the live Egg UI reads it from header refreshes.  This helper keeps
+    those reads faithful to the effective message view when a post-snapshot
+    ``msg.edit``/``msg.delete`` exists.
+    """
+
+    skipped: set = set()
+    deleted: set = set()
+    edits_by_msg_id: Dict[str, Dict[str, Any]] = {}
+    try:
+        cur = db.conn.execute(
+            "SELECT type, msg_id, payload_json FROM events "
+            "WHERE thread_id=? AND type IN ('msg.edit', 'msg.delete') ORDER BY event_seq ASC",
+            (thread_id,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+
+    for type_, msg_id, payload_json in rows:
+        if not msg_id:
+            continue
+        msg_id_s = str(msg_id)
+        if type_ == "msg.delete":
+            deleted.add(msg_id_s)
+            continue
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("skipped_on_continue"):
+            skipped.add(msg_id_s)
+            continue
+        edits_by_msg_id.setdefault(msg_id_s, {}).update(payload)
+    return skipped, deleted, edits_by_msg_id
+
+
+def _message_from_create_row(row: Any) -> Dict[str, Any]:
+    """Build a snapshot-shaped message dict from a ``msg.create`` event row."""
+
+    try:
+        payload_json = row["payload_json"]
+    except Exception:
+        payload_json = row[8] if len(row) > 8 else None
+    try:
+        payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+    except Exception:
+        payload = {}
+    msg: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {}
+
+    def _row_value(name: str, index: int) -> Any:
+        try:
+            return row[name]
+        except Exception:
+            try:
+                return row[index]
+            except Exception:
+                return None
+
+    msg_id = _row_value("msg_id", 5)
+    msg["msg_id"] = msg_id
+    msg["role"] = msg.get("role")
+    ts_value = _row_value("ts", 2)
+    if ts_value is not None:
+        msg["ts"] = ts_value
+    event_seq = _row_value("event_seq", 0)
+    if event_seq is not None:
+        try:
+            msg["event_seq"] = int(event_seq)
+        except Exception:
+            msg["event_seq"] = event_seq
+    return msg
+
+
+def _load_completed_thread_messages(db: "ThreadsDB", thread_id: str) -> List[Dict[str, Any]]:
+    """Return snapshot messages plus completed post-snapshot ``msg.create`` tail.
+
+    ``total_token_stats`` already combines cached snapshot stats with a live
+    streaming tail for fast context-size display.  Historical API-usage/cost
+    accounting, however, must be recomputed by compaction epoch so that a call
+    after a compaction boundary is not estimated as if pre-boundary messages
+    were still sent.  Reading only ``threads.snapshot_json`` can miss recent
+    completed messages when callers intentionally avoid rebuilding the snapshot
+    on every UI tick, so this helper appends the cheap post-snapshot message
+    tail and applies skip/delete edits.
+    """
+
+    messages: List[Dict[str, Any]] = []
+    after_seq = -1
+    try:
+        th = db.get_thread(thread_id)
+    except Exception:
+        th = None
+    if th is not None:
+        snap_raw = getattr(th, "snapshot_json", None)
+        if isinstance(snap_raw, str) and snap_raw:
+            try:
+                snap = json.loads(snap_raw)
+            except Exception:
+                snap = None
+            if isinstance(snap, dict):
+                raw_messages = snap.get("messages") or []
+                if isinstance(raw_messages, list):
+                    messages = [dict(m) for m in raw_messages if isinstance(m, dict)]
+                    try:
+                        after_seq = int(getattr(th, "snapshot_last_event_seq", -1) or -1)
+                    except Exception:
+                        after_seq = -1
+
+    try:
+        cur = db.conn.execute(
+            "SELECT * FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>? ORDER BY event_seq ASC",
+            (thread_id, int(after_seq)),
+        )
+        for row in cur.fetchall():
+            messages.append(_message_from_create_row(row))
+    except Exception:
+        pass
+
+    skipped, deleted, edits_by_msg_id = _message_mutations(db, thread_id)
+    if not (skipped or deleted or edits_by_msg_id):
+        return messages
+
+    out: List[Dict[str, Any]] = []
+    for message in messages:
+        msg_id = message.get("msg_id")
+        msg_id_s = str(msg_id) if isinstance(msg_id, str) and msg_id else ""
+        if msg_id_s and (msg_id_s in skipped or msg_id_s in deleted):
+            continue
+        if msg_id_s and msg_id_s in edits_by_msg_id:
+            edited = dict(message)
+            edited.update(edits_by_msg_id[msg_id_s])
+            message = edited
+        out.append(message)
+    return out
+
+
 def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Dict[str, Any]:
     """Return snapshot+streaming token stats (optionally including cost).
 
@@ -1680,15 +1798,18 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
             except Exception:
                 snap = None
             if isinstance(snap, dict):
-                # Query current skipped msg_ids from msg.edit events.
-                # This is the source of truth for which messages are excluded.
-                skipped_msg_ids = _get_skipped_msg_ids(db, thread_id)
+                # Query current message mutations from the event log.  These
+                # are the source of truth when the cached snapshot token_stats
+                # predates a /continue skip, edit, or delete.
+                skipped_msg_ids, deleted_msg_ids, edits_by_msg_id = _message_mutations(db, thread_id)
 
-                # Check if any skipped messages are in the snapshot's message list.
-                # If so, the cached token_stats is stale and we must recalculate.
+                # Check whether any mutation applies to the cached snapshot's
+                # message list.  If so, cached token_stats is stale and must be
+                # recomputed from the effective snapshot messages.
                 msgs = snap.get("messages") or []
                 snap_msg_ids = {m.get("msg_id") for m in msgs if isinstance(m, dict)}
-                has_stale_skipped = bool(skipped_msg_ids & snap_msg_ids)
+                stale_mutated_msg_ids = (skipped_msg_ids | deleted_msg_ids | set(edits_by_msg_id.keys())) & snap_msg_ids
+                has_stale_mutations = bool(stale_mutated_msg_ids)
 
                 ts = snap.get("token_stats")
                 ts_api = ts.get("api_usage") if isinstance(ts, dict) and isinstance(ts.get("api_usage"), dict) else {}
@@ -1697,16 +1818,25 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
                     or "image_tokens" not in ts
                     or "total_image_input_tokens" not in ts_api
                 )
-                if isinstance(ts, dict) and not has_stale_skipped and not has_stale_usage_shape:
+                if isinstance(ts, dict) and not has_stale_mutations and not has_stale_usage_shape:
                     # Use cached token_stats (for performance) when accurate.
                     snap_stats = ts
                 else:
-                    # Recalculate with filtered messages to exclude skipped ones.
-                    filtered_msgs = [
-                        m for m in msgs
-                        if isinstance(m, dict) and m.get("msg_id") not in skipped_msg_ids
-                    ]
-                    snap_stats = _token_stats_for_messages(filtered_msgs)
+                    # Recalculate with effective messages: exclude skipped /
+                    # deleted rows and apply normal msg.edit payloads.
+                    effective_msgs: List[Dict[str, Any]] = []
+                    for raw_message in msgs:
+                        if not isinstance(raw_message, dict):
+                            continue
+                        msg_id = raw_message.get("msg_id")
+                        msg_id_s = str(msg_id) if isinstance(msg_id, str) and msg_id else ""
+                        if msg_id_s and (msg_id_s in skipped_msg_ids or msg_id_s in deleted_msg_ids):
+                            continue
+                        message = dict(raw_message)
+                        if msg_id_s and msg_id_s in edits_by_msg_id:
+                            message.update(edits_by_msg_id[msg_id_s])
+                        effective_msgs.append(message)
+                    snap_stats = _token_stats_for_messages(effective_msgs)
 
     stream_stats = streaming_token_stats(db, thread_id)
 
@@ -1723,18 +1853,29 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
     if llm is not None:
         total = _attach_costs(total, llm=llm)
 
+    has_compaction = False
     try:
-        compacted_stats = _usage_since_compaction_stats(db, thread_id)
+        from .api import latest_effective_thread_compaction
+
+        has_compaction = latest_effective_thread_compaction(db, thread_id) is not None
     except Exception:
-        compacted_stats = {}
-    if isinstance(compacted_stats, dict):
-        if llm is not None:
-            try:
-                compacted_stats = _attach_costs(compacted_stats, llm=llm)
-            except Exception:
-                pass
-        compacted_api = compacted_stats.get("api_usage") if isinstance(compacted_stats.get("api_usage"), dict) else {}
-        total["api_usage_since_compaction"] = compacted_api
+        has_compaction = False
+    if not has_compaction:
+        api = total.get("api_usage") if isinstance(total.get("api_usage"), dict) else {}
+        total["api_usage_since_compaction"] = dict(api)
+    else:
+        try:
+            compacted_stats = _usage_since_compaction_stats(db, thread_id)
+        except Exception:
+            compacted_stats = {}
+        if isinstance(compacted_stats, dict):
+            if llm is not None:
+                try:
+                    compacted_stats = _attach_costs(compacted_stats, llm=llm)
+                except Exception:
+                    pass
+            compacted_api = compacted_stats.get("api_usage") if isinstance(compacted_stats.get("api_usage"), dict) else {}
+            total["api_usage_since_compaction"] = compacted_api
     return total
 
 
@@ -1747,9 +1888,10 @@ def thread_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> D
     fields remain based on the full effective history so historical usage does
     not disappear after compaction.
 
-    When a snapshot/compaction boundary exists, ``api_usage_since_compaction``
+    When a compaction boundary exists, ``api_usage_since_compaction``
     (propagated from :func:`total_token_stats`) provides the token usage and
-    cost for events after the most recent snapshot only.
+    cost for assistant calls after the latest effective compaction marker,
+    estimated from the same provider-context boundary.
     """
 
     full = total_token_stats(db, thread_id, llm=llm)
@@ -1767,24 +1909,12 @@ def thread_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> D
         provider_context_tokens = int((provider or {}).get("context_tokens") or 0)
     except Exception:
         provider_context_tokens = int(out.get("full_thread_tokens") or 0)
-    stream_context_tokens = 0
-    try:
-        if "snapshot_context_tokens" in (full or {}):
-            stream_context_tokens = int((full or {}).get("context_tokens") or 0) - int((full or {}).get("snapshot_context_tokens") or 0)
-    except Exception:
-        stream_context_tokens = 0
-    out["context_tokens"] = int(provider_context_tokens + max(0, stream_context_tokens))
+    out["context_tokens"] = int(provider_context_tokens)
     try:
         provider_image_tokens = int((provider or {}).get("image_tokens") or 0)
     except Exception:
         provider_image_tokens = int(out.get("image_tokens") or 0)
-    stream_image_tokens = 0
-    try:
-        if "snapshot_context_tokens" in (full or {}):
-            stream_image_tokens = int((full or {}).get("image_tokens") or 0) - int((full or {}).get("snapshot_image_tokens") or 0)
-    except Exception:
-        stream_image_tokens = 0
-    out["image_tokens"] = int(provider_image_tokens + max(0, stream_image_tokens))
+    out["image_tokens"] = int(provider_image_tokens)
     if isinstance(provider, dict) and "per_message" in provider:
         out["provider_per_message"] = provider.get("per_message") or {}
     return out
@@ -1799,22 +1929,7 @@ def provider_context_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, A
     not full UI/raw-history size.
     """
 
-    messages: List[Dict[str, Any]] = []
-    try:
-        th = db.get_thread(thread_id)
-    except Exception:
-        th = None
-    if th is not None:
-        snap_raw = getattr(th, "snapshot_json", None)
-        if isinstance(snap_raw, str) and snap_raw:
-            try:
-                snap = json.loads(snap_raw)
-            except Exception:
-                snap = None
-            if isinstance(snap, dict):
-                raw_messages = snap.get("messages") or []
-                if isinstance(raw_messages, list):
-                    messages = [m for m in raw_messages if isinstance(m, dict)]
+    messages = _load_completed_thread_messages(db, thread_id)
 
     try:
         from .api import filter_messages_for_compaction_provider_context

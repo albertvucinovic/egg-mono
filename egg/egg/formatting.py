@@ -29,6 +29,25 @@ from .min_run_summary import (
 class FormattingMixin:
     """Mixin providing display/formatting methods for EggDisplayApp."""
 
+    def header_cost_metric(self, api_usage: Dict[str, Any]) -> str:
+        """Return compact total-cost text for panel headers.
+
+        The caller passes the already-cached ``api_usage`` returned by
+        ``current_token_stats()``.  This keeps header rendering cheap: no extra
+        token/cost scan is triggered just to show the cost.
+        """
+
+        if not isinstance(api_usage, dict):
+            return ""
+        cost_info = api_usage.get("cost_usd")
+        if not isinstance(cost_info, dict):
+            return ""
+        cost_total = cost_info.get("total")
+        try:
+            return self._fmt_header_metric(cost_total, 'cost')
+        except Exception:
+            return ""
+
     def _snapshot_last_event_seq(self, thread_id: str) -> int:
         """Return the thread snapshot watermark without loading snapshot JSON."""
         try:
@@ -704,6 +723,7 @@ class FormattingMixin:
             ti = api_usage.get("total_input_tokens")
             to = api_usage.get("total_output_tokens")
             cc = api_usage.get("approx_call_count")
+            cost_text = self.header_cost_metric(api_usage)
             pieces: List[str] = []
             if isinstance(ti, int):
                 tok_text = fmt_tok(ti)
@@ -717,6 +737,8 @@ class FormattingMixin:
                 calls_text = self._fmt_header_metric(cc, 'calls')
                 if calls_text:
                     pieces.append(calls_text)
+            if cost_text:
+                pieces.append(cost_text)
             if pieces:
                 head_parts.append(" ".join(pieces))
 

@@ -116,6 +116,53 @@ def test_thread_token_stats_usage_since_compaction_uses_provider_context(tmp_pat
     assert current_api["total_input_tokens"] < full_api["total_input_tokens"]
 
 
+def test_thread_token_stats_since_compaction_excludes_pre_boundary_input_tokens(tmp_path):
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "old prompt " * 100)
+    start = ts.append_message(db, tid, "assistant", "summary", extra={"model_key": "m"})
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.append_message(db, tid, "user", "current prompt")
+    ts.append_message(db, tid, "assistant", "current answer", extra={"model_key": "m"})
+    ts.create_snapshot(db, tid)
+
+    stats = thread_token_stats(db, tid)
+    current_api = stats["api_usage_since_compaction"]
+    expected_current_input = count_text_tokens("summary") + count_text_tokens("current prompt")
+
+    assert current_api["approx_call_count"] == 1
+    assert current_api["total_input_tokens"] == expected_current_input
+    assert current_api["total_input_tokens"] < count_text_tokens("old prompt " * 100)
+
+
+def test_thread_token_stats_compaction_usage_includes_post_snapshot_tail_only(tmp_path):
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "old prompt " * 100)
+    start = ts.append_message(db, tid, "assistant", "summary", extra={"model_key": "m"})
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.create_snapshot(db, tid)
+
+    ts.append_message(db, tid, "user", "current prompt")
+    ts.append_message(db, tid, "assistant", "current answer", extra={"model_key": "m"})
+
+    stats = thread_token_stats(db, tid)
+    current_api = stats["api_usage_since_compaction"]
+    expected_current_input = count_text_tokens("summary") + count_text_tokens("current prompt")
+    expected_provider_context = expected_current_input + count_text_tokens("current answer")
+
+    assert current_api["approx_call_count"] == 1
+    assert current_api["total_input_tokens"] == expected_current_input
+    assert stats["context_tokens"] == expected_provider_context
+    assert stats["full_thread_tokens"] > stats["context_tokens"]
+
+
 def test_full_api_usage_sums_compaction_epochs_not_raw_full_prompt(tmp_path):
     import eggthreads as ts
 
