@@ -16,6 +16,14 @@ function formatElapsed(startedAtMs: number | null | undefined): string | null {
   return `${Math.max(0, (Date.now() - started) / 1000).toFixed(0)}s`;
 }
 
+function commandNameFromText(command: string): string {
+  const text = command.trim();
+  if (text.startsWith("$$")) return "$$";
+  if (text.startsWith("$")) return "$";
+  if (text.startsWith("/")) return text.slice(1).split(/\s+/, 1)[0] || "/";
+  return "command";
+}
+
 interface MessageInputProps {
   showBorders?: boolean;
   stagedAttachments: AttachmentContentPart[];
@@ -256,7 +264,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         });
       }
     },
-    onSuccess: (response) => {
+    onSuccess: (response, variables) => {
       setCommandPendingStartedAtMs(null);
       if (response.success) {
         // Show every command response in Chat Messages. The System Log stays
@@ -267,6 +275,8 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
             id: `cmd-${Date.now()}`,
             role: "system",
             content: response.message,
+            command_name: response.command_name || commandNameFromText(variables.command),
+            command_data: response.data,
           });
         }
         addSystemLog(response.message || "Command completed", "success");

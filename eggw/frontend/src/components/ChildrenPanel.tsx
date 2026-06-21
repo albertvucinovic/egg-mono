@@ -2,8 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Plus } from "lucide-react";
-import { fetchThreadChildren } from "@/lib/api";
+import { ArrowUp, ChevronRight, Plus } from "lucide-react";
+import { fetchThread, fetchThreadChildren } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 
 interface ChildThread {
@@ -21,14 +21,20 @@ export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
   const router = useRouter();
   const currentThreadId = useAppStore((state) => state.currentThreadId);
 
+  const { data: currentThread } = useQuery({
+    queryKey: ["thread", currentThreadId],
+    queryFn: () => fetchThread(currentThreadId!),
+    enabled: !!currentThreadId,
+  });
+
   const { data: children = [], isLoading } = useQuery({
     queryKey: ["threadChildren", currentThreadId],
     queryFn: () => fetchThreadChildren(currentThreadId!),
     enabled: !!currentThreadId,
   });
 
-  const navigateToChild = (childId: string) => {
-    router.push(`/${childId}`);
+  const navigateToThread = (threadId: string) => {
+    router.push(`/${threadId}`);
   };
 
   if (!currentThreadId) {
@@ -41,6 +47,22 @@ export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
         <span>Children ({children.length})</span>
       </div>
 
+      {currentThread?.parent_id && (
+        <button
+          type="button"
+          onClick={() => navigateToThread(currentThread.parent_id)}
+          className={`w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 group ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}
+          style={{ color: "var(--foreground)" }}
+          title={`Open parent thread ${currentThread.parent_id}`}
+        >
+          <ArrowUp className="w-3 h-3" style={{ color: "var(--muted)" }} />
+          <span className="flex-1 truncate">Parent</span>
+          <span className="text-xs font-mono" style={{ color: "var(--accent)" }}>
+            {currentThread.parent_id.slice(-8)}
+          </span>
+        </button>
+      )}
+
       {isLoading ? (
         <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>Loading...</div>
       ) : children.length === 0 ? (
@@ -52,7 +74,7 @@ export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
           {children.map((child: ChildThread) => (
             <button
               key={child.id}
-              onClick={() => navigateToChild(child.id)}
+              onClick={() => navigateToThread(child.id)}
               className="w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 group"
               style={{ color: "var(--foreground)" }}
             >

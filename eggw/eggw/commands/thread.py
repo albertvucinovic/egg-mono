@@ -212,7 +212,7 @@ async def cmd_list_threads() -> CommandResponse:
     return CommandResponse(
         success=True,
         message=f"Threads ({total} total, {len(roots)} roots):\n" + "\n".join(lines),
-        data={"threads": roots, "total": total},
+        data={"threads": roots, "thread_ids": all_tids, "total": total},
     )
 
 

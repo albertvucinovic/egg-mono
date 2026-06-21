@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode, type WheelEvent } from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -34,6 +35,7 @@ const STICKY_BOTTOM_THRESHOLD_PX = 4;
 const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
 const INITIAL_TRANSCRIPT_MESSAGE_LIMIT = 300;
 const TRANSCRIPT_SCROLLBACK_THRESHOLD_PX = 240;
+const THREAD_LINK_SUFFIX_LENGTH = 8;
 
 /**
  * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
@@ -154,6 +156,8 @@ interface HiddenDetail {
   header: string;
   name?: string;
   tokens?: number;
+  body?: string;
+  source?: "reasoning" | "tool_call" | "tool_result" | "tool_stream" | "tool_call_stream";
 }
 
 function oneLinePreview(value: unknown, maxChars = 160): string {
@@ -210,6 +214,15 @@ function toolCallArgs(tc: any): unknown {
   return args;
 }
 
+function formatHiddenDetailBody(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
 function messageTimestampText(timestamp?: string): string | null {
   if (!timestamp) return null;
   try {
@@ -256,7 +269,7 @@ function plural(count: number, singular: string, pluralText?: string): string {
   return `${count} ${count === 1 ? singular : (pluralText || `${singular}s`)}`;
 }
 
-function hiddenSummaryText(details: HiddenDetail[]): string {
+function hiddenSummaryCountsText(details: HiddenDetail[]): string {
   const counts: Record<HiddenDetailKind, number> = { reasoning: 0, tool_calls: 0, tool_results: 0 };
   details.forEach((detail) => { counts[detail.kind] += 1; });
   const parts: string[] = [];
@@ -265,24 +278,217 @@ function hiddenSummaryText(details: HiddenDetail[]): string {
   if (counts.reasoning > 0) parts.push(plural(counts.reasoning, "reasoning block"));
   const tokenTotal = details.reduce((total, detail) => total + (Number.isFinite(detail.tokens || 0) ? Math.max(0, Math.trunc(detail.tokens || 0)) : 0), 0);
   if (tokenTotal > 0) parts.push(`total tokens ${tokenTotal.toLocaleString()}`);
-  const toolNames = details
-    .map((detail) => detail.name)
-    .filter((name): name is string => Boolean(name));
-  const uniqueToolNames = Array.from(new Set(toolNames));
-  const summary = parts.join(", ") || "Hidden details";
-  return uniqueToolNames.length ? `${summary}\nTools: ${uniqueToolNames.join(", ")}` : summary;
+  return parts.join(", ") || "Hidden details";
+}
+
+function hiddenToolDetails(details: HiddenDetail[]): HiddenDetail[] {
+  const structuredToolCalls = details.filter((detail) => detail.source === "tool_call" && Boolean(detail.name));
+  if (structuredToolCalls.length > 0) return structuredToolCalls;
+
+  const toolCalls = details.filter((detail) => detail.kind === "tool_calls" && Boolean(detail.name));
+  if (toolCalls.length > 0) return toolCalls;
+  return details.filter((detail) => detail.kind === "tool_results" && Boolean(detail.name));
 }
 
 function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
+  const [selectedDetail, setSelectedDetail] = useState<HiddenDetail | null>(null);
   if (!details.length) return null;
+  const toolDetails = hiddenToolDetails(details);
   return (
     <div
       className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
       style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" }}
       data-testid="hidden-details"
     >
-      <div className="whitespace-pre-wrap text-sm font-medium">{hiddenSummaryText(details)}</div>
+      <div className="whitespace-pre-wrap text-sm font-medium">{hiddenSummaryCountsText(details)}</div>
+      {toolDetails.length > 0 && (
+        <div className="mt-1 text-sm font-mono" style={{ color: "var(--tool-msg-text, var(--foreground))" }}>
+          <span>Tools: </span>
+          {toolDetails.map((detail, index) => (
+            <span key={`${detail.kind}-${index}-${detail.name || "tool"}`}>
+              <button
+                type="button"
+                className="underline-offset-2 hover:underline"
+                style={{ color: "var(--accent)" }}
+                title={detail.body ? `Show ${detail.header}` : detail.header}
+                onClick={() => setSelectedDetail(detail)}
+              >
+                {detail.name}
+              </button>
+              {index < toolDetails.length - 1 ? ", " : null}
+            </span>
+          ))}
+        </div>
+      )}
+      {selectedDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0, 0, 0, 0.45)" }}
+          role="presentation"
+          onClick={() => setSelectedDetail(null)}
+        >
+          <div
+            className="w-full max-w-3xl rounded-lg border p-4 shadow-xl"
+            style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+            role="dialog"
+            aria-modal="true"
+            aria-label={selectedDetail.header}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold">{selectedDetail.header}</div>
+                {selectedDetail.name && (
+                  <div className="text-xs font-mono" style={{ color: "var(--muted)" }}>{selectedDetail.name}</div>
+                )}
+              </div>
+              <button
+                type="button"
+                className="rounded px-2 py-1 text-xs"
+                style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
+                onClick={() => setSelectedDetail(null)}
+              >
+                Close
+              </button>
+            </div>
+            <pre
+              className="max-h-[70vh] overflow-auto rounded p-3 text-xs whitespace-pre-wrap break-words"
+              style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
+            >
+              {selectedDetail.body || selectedDetail.header}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function messageIdentity(message: Message | undefined): string | null {
+  const id = typeof message?.id === "string" ? message.id : "";
+  return id ? id : null;
+}
+
+function isLocalOnlyTranscriptMessage(message: Message): boolean {
+  const id = messageIdentity(message) || "";
+  return id.startsWith("cmd-") || id.startsWith("temp-");
+}
+
+function shouldPreserveLocalTranscriptMessage(message: Message): boolean {
+  const id = messageIdentity(message) || "";
+  return id.startsWith("cmd-") && Boolean(message.command_name);
+}
+
+function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[]): { messages: Message[]; preservedLoadedScrollback: boolean } {
+  if (!existing.length || !fetched.length) {
+    return { messages: fetched, preservedLoadedScrollback: false };
+  }
+
+  const fetchedIds = new Set(fetched.map(messageIdentity).filter((id): id is string => Boolean(id)));
+  const existingIndexById = new Map<string, number>();
+  existing.forEach((message, index) => {
+    const id = messageIdentity(message);
+    if (id && !existingIndexById.has(id)) existingIndexById.set(id, index);
+  });
+
+  let firstOverlapIndex = Number.POSITIVE_INFINITY;
+  for (const message of fetched) {
+    const id = messageIdentity(message);
+    if (!id) continue;
+    const index = existingIndexById.get(id);
+    if (index !== undefined && index < firstOverlapIndex) {
+      firstOverlapIndex = index;
+    }
+  }
+
+  // If there is no overlap, this is likely a thread change or a cache reset;
+  // replace with the fetched tail rather than accidentally carrying messages
+  // from another thread forward.
+  if (!Number.isFinite(firstOverlapIndex)) {
+    return { messages: fetched, preservedLoadedScrollback: false };
+  }
+
+  const olderPrefix = existing
+    .slice(0, firstOverlapIndex)
+    .filter((message) => {
+      const id = messageIdentity(message);
+      return (!id || !fetchedIds.has(id)) && (!isLocalOnlyTranscriptMessage(message) || shouldPreserveLocalTranscriptMessage(message));
+    });
+  const localOnlyMessagesAfterOverlap = existing
+    .slice(firstOverlapIndex)
+    .filter((message) => {
+      const id = messageIdentity(message);
+      return shouldPreserveLocalTranscriptMessage(message) && (!id || !fetchedIds.has(id));
+    });
+
+  return {
+    messages: [...olderPrefix, ...fetched, ...localOnlyMessagesAfterOverlap],
+    preservedLoadedScrollback: olderPrefix.some((message) => !isLocalOnlyTranscriptMessage(message)),
+  };
+}
+
+function uniqueThreadSuffixMap(threadIds: unknown): Map<string, string> {
+  if (!Array.isArray(threadIds)) return new Map();
+  const counts = new Map<string, number>();
+  const ids: string[] = [];
+  for (const raw of threadIds) {
+    const threadId = typeof raw === "string" ? raw : "";
+    if (threadId.length < THREAD_LINK_SUFFIX_LENGTH) continue;
+    ids.push(threadId);
+    const suffix = threadId.slice(-THREAD_LINK_SUFFIX_LENGTH).toUpperCase();
+    counts.set(suffix, (counts.get(suffix) || 0) + 1);
+  }
+
+  const suffixMap = new Map<string, string>();
+  for (const threadId of ids) {
+    const suffix = threadId.slice(-THREAD_LINK_SUFFIX_LENGTH).toUpperCase();
+    if (counts.get(suffix) === 1) suffixMap.set(suffix, threadId);
+  }
+  return suffixMap;
+}
+
+function ThreadCommandOutput({ content, threadIds }: { content: string; threadIds: unknown }) {
+  const suffixMap = uniqueThreadSuffixMap(threadIds);
+  const tokenPattern = /\b[A-Za-z0-9]{8}\b/g;
+
+  const renderLine = (line: string, lineIndex: number): ReactNode[] => {
+    const nodes: ReactNode[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    tokenPattern.lastIndex = 0;
+    while ((match = tokenPattern.exec(line)) !== null) {
+      const token = match[0];
+      const fullThreadId = suffixMap.get(token.toUpperCase());
+      if (!fullThreadId) continue;
+      if (match.index > lastIndex) {
+        nodes.push(line.slice(lastIndex, match.index));
+      }
+      nodes.push(
+        <Link
+          key={`${lineIndex}-${match.index}-${token}`}
+          href={`/${fullThreadId}`}
+          className="font-semibold underline-offset-2 hover:underline"
+          style={{ color: "var(--accent)" }}
+          title={`Open thread ${fullThreadId}`}
+        >
+          {token}
+        </Link>,
+      );
+      lastIndex = match.index + token.length;
+    }
+    if (lastIndex < line.length) nodes.push(line.slice(lastIndex));
+    return nodes.length ? nodes : [line];
+  };
+
+  return (
+    <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
+      {content.split("\n").map((line, lineIndex, lines) => (
+        <span key={lineIndex}>
+          {renderLine(line, lineIndex)}
+          {lineIndex < lines.length - 1 ? "\n" : null}
+        </span>
+      ))}
+    </pre>
   );
 }
 
@@ -565,6 +771,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
 
   // Check if this is a system/command message (should render as monospace)
   const isCommandOutput = message.role === "system";
+  const isThreadsCommandOutput = isCommandOutput && message.command_name === "threads";
 
   // For tool messages, check if content is long
   const isLongToolOutput = message.role === "tool" && contentText.length > 500;
@@ -668,9 +875,13 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             </pre>
           ) : isCommandOutput ? (
             /* Command output (system messages) - monospace for tree/list formatting */
-            <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
-              {contentText}
-            </pre>
+            isThreadsCommandOutput ? (
+              <ThreadCommandOutput content={contentText} threadIds={message.command_data?.thread_ids} />
+            ) : (
+              <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
+                {contentText}
+              </pre>
+            )
           ) : isContentPartArray(message.content) ? (
             <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />
           ) : message.role === "tool" ? (
@@ -865,23 +1076,31 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     return tokens;
   };
   if (message.reasoning) {
-    details.push({ kind: "reasoning", header: messageMetadataText(message, "Reasoning"), tokens: takeTokens() });
+    details.push({ kind: "reasoning", header: messageMetadataText(message, "Reasoning"), tokens: takeTokens(), source: "reasoning" });
   }
   if (message.tool_calls?.length) {
     message.tool_calls.forEach((tc: any) => {
       const name = toolCallName(tc);
+      const args = toolCallArgs(tc);
+      const toolCallId = tc?.id || tc?.tool_call_id || "";
       details.push({
         kind: "tool_calls",
         name,
         tokens: takeTokens(),
         header: name ? `ToolCall: ${name}` : "ToolCall",
+        body: formatHiddenDetailBody({
+          ...(toolCallId ? { id: toolCallId } : {}),
+          name,
+          arguments: args,
+        }),
+        source: "tool_call",
       });
     });
   }
   if (message.role === "tool") {
     const contentText = contentToPlainText(message.content, message.content_text || "");
     const name = message.name || "tool";
-    details.push({ kind: "tool_results", name, tokens: takeTokens(), header: name ? `Tool Result: ${name}` : "Tool Result" });
+    details.push({ kind: "tool_results", name, tokens: takeTokens(), header: name ? `Tool Result: ${name}` : "Tool Result", body: contentText, source: "tool_result" });
   }
   stringRecordEntries(message.tool_stream).forEach(([name, text]) => {
     details.push({
@@ -889,6 +1108,8 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
       name,
       tokens: takeTokens(),
       header: name ? `Tool Output: ${name}` : "Tool Output",
+      body: text,
+      source: "tool_stream",
     });
   });
   stringRecordEntries(message.tool_calls_stream).forEach(([streamKey, text]) => {
@@ -897,6 +1118,8 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
       name: streamKey,
       tokens: takeTokens(),
       header: streamKey ? `Tool Call Args: ${streamKey}` : "Tool Call Args",
+      body: text,
+      source: "tool_call_stream",
     });
   });
   return details;
@@ -982,6 +1205,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   const lastToolOutputIndexRef = useRef<Record<string, number>>({});
   const streamingTextFlushRafRef = useRef<number | null>(null);
   const streamingToolFlushRafRef = useRef<number | null>(null);
+  const loadingOlderRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
@@ -1057,7 +1281,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   }, [finishAutoScrollSoon]);
 
   const loadOlderMessages = useCallback(async () => {
-    if (!currentThreadId || isLoadingOlder || !hasOlderMessages) return;
+    if (!currentThreadId || loadingOlderRef.current || isLoadingOlder || !hasOlderMessages) return;
     const el = scrollRef.current;
     const currentMessages = useAppStore.getState().messages;
     const firstId = currentMessages[0]?.id;
@@ -1068,6 +1292,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
 
     const previousScrollHeight = el?.scrollHeight ?? 0;
     const previousScrollTop = el?.scrollTop ?? 0;
+    loadingOlderRef.current = true;
     setIsLoadingOlder(true);
     try {
       const older = await fetchMessages(currentThreadId, {
@@ -1083,7 +1308,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       const existingIds = new Set(latestMessages.map((message) => message.id).filter(Boolean));
       const uniqueOlder = older.filter((message: Message) => !existingIds.has(message.id));
       if (uniqueOlder.length === 0) {
-        setHasOlderMessages(false);
+        setHasOlderMessages(older.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
         return;
       }
 
@@ -1100,6 +1325,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     } catch (error) {
       console.error("Failed to load older messages:", error);
     } finally {
+      loadingOlderRef.current = false;
       setIsLoadingOlder(false);
     }
   }, [currentThreadId, hasOlderMessages, isLoadingOlder, setMessages]);
@@ -1334,8 +1560,15 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       // message can shrink content and make an intentionally scrolled-up view
       // look "at bottom" for one render.
       const wasSticky = stickToBottomRef.current;
-      setMessages(data);
-      setHasOlderMessages(Array.isArray(data) && data.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
+      const fetchedMessages = Array.isArray(data) ? data : [];
+      const currentMessages = useAppStore.getState().messages;
+      const merged = mergeFetchedTranscriptMessages(currentMessages, fetchedMessages);
+      setMessages(merged.messages);
+      setHasOlderMessages((previous) => (
+        merged.preservedLoadedScrollback
+          ? previous
+          : fetchedMessages.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT
+      ));
       // Scroll to bottom after DOM update if we were at bottom before
       if (wasSticky) {
         // Double RAF: first waits for React render, second waits for paint
@@ -1351,6 +1584,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
     stickToBottomRef.current = true;
+    loadingOlderRef.current = false;
     setHasOlderMessages(false);
     setIsLoadingOlder(false);
     requestAnimationFrame(() => {

@@ -218,6 +218,27 @@ class TestThreadOperations:
         data = response.json()
         assert data["id"] == thread_id
 
+    def test_threads_command_returns_full_thread_ids_for_eggw_links(self, client):
+        """EggW /threads output includes full ids so the UI can link suffixes."""
+        parent_resp = client.post("/api/threads", json={"name": "Clickable Parent"})
+        parent_id = parent_resp.json()["id"]
+        child_resp = client.post("/api/threads", json={"name": "Clickable Child", "parent_id": parent_id})
+        child_id = child_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{parent_id}/command",
+            json={"command": "/threads"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["command_name"] == "threads"
+        assert parent_id in payload["data"]["thread_ids"]
+        assert child_id in payload["data"]["thread_ids"]
+        assert parent_id[-8:] in payload["message"]
+        assert child_id[-8:] in payload["message"]
+
     def test_get_thread_state(self, client):
         """Test getting thread state."""
         # Create thread

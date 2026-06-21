@@ -32,6 +32,8 @@ export interface Message {
   tps?: number;
   answer_user_preserve_turn?: boolean;
   recovery_notice?: boolean;
+  command_name?: string;
+  command_data?: Record<string, any>;
 }
 
 export interface ToolCall {

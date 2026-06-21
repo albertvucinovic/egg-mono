@@ -212,6 +212,11 @@ export interface CommandResponse {
   success: boolean;
   message: string;
   data?: Record<string, any>;
+  command_id?: string;
+  command_name?: string;
+  started_at?: string;
+  finished_at?: string;
+  elapsed_sec?: number;
 }
 
 export async function executeCommand(
