@@ -497,7 +497,15 @@ def _tool_output_content_parts_for_transcript(tool_name: str, output: str) -> Op
     still receives plain text via ``content_to_plain_text``.
     """
 
-    if str(tool_name or "") not in {"generate_image", "attach", "attach_output"} or not isinstance(output, str) or not output.strip():
+    if str(tool_name or "") not in {
+        "generate_image",
+        "add_local_file_to_model_context",
+        "add_provider_artifact_to_model_context",
+        # Compatibility for already-persisted in-flight tool outputs from the
+        # brief period when these LLM-facing tools used terminal-style names.
+        "attach",
+        "attach_output",
+    } or not isinstance(output, str) or not output.strip():
         return None
     try:
         payload = json.loads(output)
@@ -1716,7 +1724,19 @@ class ThreadRunner:
                         _passthrough_provider_fields(m, msg_out)
                         base_messages.append(msg_out)
                     elif r == 'tool':
-                        obj = {'role': 'tool', 'content': tool_content_text}
+                        # Preserve structured attachment-producing tool
+                        # outputs until expand_tool_attachment_messages_for_provider()
+                        # can add a synthetic user-role visual/file input.
+                        # Other structured tool outputs (for example generated
+                        # provider artifact cards) should still reach providers
+                        # as plain text, because tool-role messages cannot carry
+                        # native multimodal blocks portably.
+                        tool_provider_content = (
+                            content
+                            if isinstance(content, list) and content_has_attachments(content, validate=False)
+                            else tool_content_text
+                        )
+                        obj = {'role': 'tool', 'content': tool_provider_content}
                         if m.get('msg_id'):
                             obj['msg_id'] = m.get('msg_id')
                         if m.get('event_seq') is not None:
@@ -1759,7 +1779,12 @@ class ThreadRunner:
         if not snap_has_last:
             if not payload.get('no_api'):
                 if role == 'tool':
-                    obj = {'role': 'tool', 'content': content_to_plain_text(user_content)}
+                    tool_provider_content = (
+                        user_content
+                        if isinstance(user_content, list) and content_has_attachments(user_content, validate=False)
+                        else content_to_plain_text(user_content)
+                    )
+                    obj = {'role': 'tool', 'content': tool_provider_content}
                     if payload.get('name'):
                         obj['name'] = payload.get('name')
                     if payload.get('tool_call_id'):

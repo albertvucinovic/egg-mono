@@ -16,9 +16,9 @@ from ..plugins import PluginContext
 from ..tools import ToolContext, ToolExecutionResult, ToolRegistry
 
 
-ATTACH_TOOL_NAME = "attach"
-ATTACH_OUTPUT_TOOL_NAME = "attach_output"
-SAVE_PROVIDER_ARTIFACT_TOOL_NAME = "save_provider_artifact"
+ADD_LOCAL_FILE_TO_MODEL_CONTEXT_TOOL_NAME = "add_local_file_to_model_context"
+ADD_PROVIDER_ARTIFACT_TO_MODEL_CONTEXT_TOOL_NAME = "add_provider_artifact_to_model_context"
+SAVE_PROVIDER_ARTIFACT_TO_FILE_TOOL_NAME = "save_provider_artifact_to_file"
 
 
 def _error(message: str) -> ToolExecutionResult:
@@ -50,10 +50,10 @@ def _thread_context(ctx: ToolContext, tool_name: str) -> tuple[Any, str] | ToolE
     return ctx.db, thread_id
 
 
-def attach_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
+def add_local_file_to_model_context_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
     """Ingest a sandbox-authorized local file as an Egg input attachment."""
 
-    resolved = _thread_context(ctx, ATTACH_TOOL_NAME)
+    resolved = _thread_context(ctx, ADD_LOCAL_FILE_TO_MODEL_CONTEXT_TOOL_NAME)
     if isinstance(resolved, ToolExecutionResult):
         return resolved
     db, thread_id = resolved
@@ -69,10 +69,10 @@ def attach_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
     return _json_result(payload)
 
 
-def attach_output_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
+def add_provider_artifact_to_model_context_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
     """Promote a provider-output artifact to an input attachment."""
 
-    resolved = _thread_context(ctx, ATTACH_OUTPUT_TOOL_NAME)
+    resolved = _thread_context(ctx, ADD_PROVIDER_ARTIFACT_TO_MODEL_CONTEXT_TOOL_NAME)
     if isinstance(resolved, ToolExecutionResult):
         return resolved
     db, thread_id = resolved
@@ -96,10 +96,10 @@ def attach_output_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionR
     return _json_result(payload)
 
 
-def save_provider_artifact_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
+def save_provider_artifact_to_file_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolExecutionResult:
     """Export a provider-output artifact to the thread working directory."""
 
-    resolved = _thread_context(ctx, SAVE_PROVIDER_ARTIFACT_TOOL_NAME)
+    resolved = _thread_context(ctx, SAVE_PROVIDER_ARTIFACT_TO_FILE_TOOL_NAME)
     if isinstance(resolved, ToolExecutionResult):
         return resolved
     db, thread_id = resolved
@@ -126,40 +126,44 @@ def save_provider_artifact_tool(args: Dict[str, Any], ctx: ToolContext) -> ToolE
 
 def register_attachment_tools(registry: ToolRegistry) -> None:
     registry.register(
-        name=ATTACH_TOOL_NAME,
+        name=ADD_LOCAL_FILE_TO_MODEL_CONTEXT_TOOL_NAME,
         description=(
-            "Ingest a local file path as an Egg input attachment for the current thread. "
+            "Add a local file to the current thread's model context. "
             "The path is authorized through the thread's effective sandbox/filesystem read policy, "
-            "then bytes are copied into .egg/egg_inputs; the result contains metadata and an "
-            "attachment content part, never inline bytes or base64."
+            "then bytes are copied into .egg/egg_inputs. If the file is an image, the next image-capable "
+            "model call receives it as visual input; other files/documents are sent through the appropriate "
+            "provider attachment mechanism when supported. The result contains metadata and attachment content parts, "
+            "never inline bytes or base64."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Local file path to attach. Relative paths are resolved against the current thread working directory.",
+                    "description": "Local file path to add to model context. Relative paths are resolved against the current thread working directory.",
                 },
             },
             "required": ["path"],
             "additionalProperties": False,
         },
-        impl=attach_tool,
+        impl=add_local_file_to_model_context_tool,
         accepts_context=True,
     )
     registry.register(
-        name=ATTACH_OUTPUT_TOOL_NAME,
+        name=ADD_PROVIDER_ARTIFACT_TO_MODEL_CONTEXT_TOOL_NAME,
         description=(
-            "Promote an accessible provider-output artifact into the current thread's input attachment storage. "
+            "Add an accessible provider-output artifact to the current thread's model context. "
             "This is the LLM-facing equivalent of /attachOutput: it copies authorized provider-output bytes into "
-            ".egg/egg_inputs and returns a reusable attachment content part."
+            ".egg/egg_inputs and returns reusable attachment content parts. If the artifact is an image, the next "
+            "image-capable model call receives it as visual input; other files/documents are sent through the "
+            "appropriate provider attachment mechanism when supported."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "artifact_id": {
                     "type": "string",
-                    "description": "Provider-output artifact id to promote, for example one returned by generate_image.",
+                    "description": "Provider-output artifact id to add to model context, for example one returned by generate_image.",
                 },
                 "descendant_thread_id": {
                     "type": "string",
@@ -169,22 +173,23 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
             "required": ["artifact_id"],
             "additionalProperties": False,
         },
-        impl=attach_output_tool,
+        impl=add_provider_artifact_to_model_context_tool,
         accepts_context=True,
     )
     registry.register(
-        name=SAVE_PROVIDER_ARTIFACT_TOOL_NAME,
+        name=SAVE_PROVIDER_ARTIFACT_TO_FILE_TOOL_NAME,
         description=(
-            "Export an accessible provider-output artifact to a user-visible file under the current thread working directory. "
+            "Save an accessible provider-output artifact to a user-visible file under the current thread working directory. "
             "This is the LLM-facing equivalent of /saveProviderArtifact and honors provider-output access checks, "
-            "sandbox/filesystem write policy, .egg protection, and no-overwrite safety."
+            "sandbox/filesystem write policy, .egg protection, and no-overwrite safety. This saves a file for the "
+            "user/project; it does not add the artifact to model context."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "artifact_id": {
                     "type": "string",
-                    "description": "Provider-output artifact id to export.",
+                    "description": "Provider-output artifact id to save to a file.",
                 },
                 "path": {
                     "type": "string",
@@ -198,7 +203,7 @@ def register_attachment_tools(registry: ToolRegistry) -> None:
             "required": ["artifact_id"],
             "additionalProperties": False,
         },
-        impl=save_provider_artifact_tool,
+        impl=save_provider_artifact_to_file_tool,
         accepts_context=True,
     )
 
@@ -214,12 +219,12 @@ class AttachmentToolsPlugin:
 
 
 __all__ = [
-    "ATTACH_OUTPUT_TOOL_NAME",
-    "ATTACH_TOOL_NAME",
-    "SAVE_PROVIDER_ARTIFACT_TOOL_NAME",
+    "ADD_PROVIDER_ARTIFACT_TO_MODEL_CONTEXT_TOOL_NAME",
+    "ADD_LOCAL_FILE_TO_MODEL_CONTEXT_TOOL_NAME",
+    "SAVE_PROVIDER_ARTIFACT_TO_FILE_TOOL_NAME",
     "AttachmentToolsPlugin",
-    "attach_output_tool",
-    "attach_tool",
+    "add_provider_artifact_to_model_context_tool",
+    "add_local_file_to_model_context_tool",
     "register_attachment_tools",
-    "save_provider_artifact_tool",
+    "save_provider_artifact_to_file_tool",
 ]

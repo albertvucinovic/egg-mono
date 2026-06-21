@@ -339,29 +339,21 @@ def expand_tool_attachment_messages_for_provider(messages: List[Dict[str, Any]])
     The OpenAI-style tools protocol requires an assistant ``tool_calls`` message
     to be answered by a ``role='tool'`` message.  Most providers do not accept
     multimodal input blocks directly on that tool message, so a tool such as
-    ``attach`` or ``attach_output`` would otherwise give the model only a text
-    placeholder.  Preserve the protocol tool result as text, then append a
-    synthetic user-role message carrying the same Egg attachment content parts;
-    normal provider-bound lowering can turn that user message into image/file
-    input blocks for the current model.
+    ``add_local_file_to_model_context`` or
+    ``add_provider_artifact_to_model_context`` would otherwise give the model
+    only a text placeholder.  Preserve the protocol tool result as text, then
+    append a synthetic user-role message carrying the same Egg attachment
+    content parts; normal provider-bound lowering can turn that user message
+    into image/file input blocks for the current model.
     """
 
-    out: List[Dict[str, Any]] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            out.append(message)
-            continue
+    def split_tool_message(message: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
         content = message.get("content")
-        if str(message.get("role") or "") != "tool" or not isinstance(content, list):
-            out.append(message)
-            continue
-        if not content_has_attachments(content, validate=False):
-            out.append(message)
-            continue
+        if not isinstance(content, list) or not content_has_attachments(content, validate=False):
+            return message, None
 
         tool_message = dict(message)
         tool_message["content"] = content_to_plain_text(content)
-        out.append(tool_message)
 
         user_message: Dict[str, Any] = {"role": "user", "content": content}
         # Keep msg_id/event_seq so current-turn detection treats the synthetic
@@ -370,7 +362,32 @@ def expand_tool_attachment_messages_for_provider(messages: List[Dict[str, Any]])
             user_message["msg_id"] = message.get("msg_id")
         if message.get("event_seq") is not None:
             user_message["event_seq"] = message.get("event_seq")
-        out.append(user_message)
+        return tool_message, user_message
+
+    out: List[Dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if not isinstance(message, dict) or str(message.get("role") or "") != "tool":
+            out.append(message)
+            index += 1
+            continue
+
+        # Preserve each contiguous provider-protocol tool response block before
+        # appending synthetic user-role attachment inputs.  Inserting a user
+        # message between two tool responses for the same assistant tool_call
+        # turn would violate strict OpenAI-style tool-call pairing.
+        synthetic_user_messages: List[Dict[str, Any]] = []
+        while index < len(messages):
+            block_message = messages[index]
+            if not isinstance(block_message, dict) or str(block_message.get("role") or "") != "tool":
+                break
+            tool_message, user_message = split_tool_message(block_message)
+            out.append(tool_message)
+            if user_message is not None:
+                synthetic_user_messages.append(user_message)
+            index += 1
+        out.extend(synthetic_user_messages)
     return out
 
 
