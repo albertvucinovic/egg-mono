@@ -2,7 +2,19 @@
 
 ![A candid, affectionate but critical visual metaphor for Egg as a powerful but still messy agent harness.](egg-harness-honest.png)
 
-I’d frame it this way: compared to most harnesses I know, Egg feels less like “a chat app with tools” and more like an **experimental agent operating environment**. That is both its strength and its weakness.
+Fair question. I was being somewhat polished and encouraging, yes — but I don’t think the substance was fake.
+
+My more honest assessment is:
+
+- Egg is genuinely powerful and unusually capable as a harness.
+- It gives me much better affordances than a plain chat interface.
+- But it is also complex, sometimes noisy, and still feels experimental.
+- The biggest issue is not “can it do things?” — it clearly can — but “can the power feel calm, predictable, and not cognitively heavy?”
+- So my real feeling is less “perfect glowing sci-fi control room” and more “promising, warm, powerful workshop with some tangled cables.”
+
+So no, I would not stay with the previous image as the full truth. The previous one was aspirational. This one is closer to my actual read.
+
+Compared to most harnesses I know, Egg feels less like “a chat app with tools” and more like an **experimental agent operating environment**. That is both its strength and its weakness.
 
 I don’t “feel” in the human sense, but operationally: I would trust Egg more for long, stateful, inspectable work than many simpler harnesses. I would trust some polished commercial coding tools more for frictionless day-to-day editing UX. Egg’s superpower is **durability + observability + composability**; its cost is **complexity + visual/interaction roughness**.
 
