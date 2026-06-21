@@ -924,7 +924,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         </div>
       )}
 
-      <div className="flex gap-2 items-end">
+      <div className="eggw-composer-main-row">
         <input
           ref={fileInputRef}
           type="file"
@@ -933,37 +933,39 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           onChange={handleFileChange}
           data-testid="attachment-file-input"
         />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!currentThreadId || isPending}
-          className="px-3 py-2 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          title="Attach files"
-          data-testid="attach-button"
-        >
-          {uploadMutation.isPending ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Paperclip className="w-4 h-4" />
-          )}
-          Attach
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowImageForm((prev) => !prev)}
-          disabled={!currentThreadId || imageGenerationMutation.isPending}
-          className="px-3 py-2 rounded bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          title="Generate image"
-          aria-pressed={showImageForm}
-          data-testid="image-generation-toggle"
-        >
-          {imageGenerationMutation.isPending ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <ImageIcon className="w-4 h-4" />
-          )}
-          Image
-        </button>
+        <div className="eggw-composer-tools">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={!currentThreadId || isPending}
+            className="eggw-composer-action"
+            title="Attach files"
+            data-testid="attach-button"
+          >
+            {uploadMutation.isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Paperclip className="w-4 h-4" />
+            )}
+            Attach
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowImageForm((prev) => !prev)}
+            disabled={!currentThreadId || imageGenerationMutation.isPending}
+            className={clsx("eggw-composer-action", showImageForm && "eggw-composer-action-active")}
+            title="Generate image"
+            aria-pressed={showImageForm}
+            data-testid="image-generation-toggle"
+          >
+            {imageGenerationMutation.isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <ImageIcon className="w-4 h-4" />
+            )}
+            Image
+          </button>
+        </div>
         <textarea
           ref={textareaRef}
           value={input}
@@ -978,110 +980,116 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               : "Select a thread first"
           }
           disabled={!currentThreadId}
-          className={`eggw-control flex-1 rounded-lg px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[44px] ${showBorders || activeGetUserWait ? 'border' : ''}`}
-          style={{ background: "var(--panel-bg)", borderColor: activeGetUserWait ? "#d946ef" : "var(--panel-border)", color: "var(--foreground)" }}
+          className={clsx(
+            "eggw-composer-input min-w-0 flex-1 resize-none px-3 py-2 focus:outline-none disabled:opacity-50",
+            (showBorders || activeGetUserWait) && "border",
+          )}
+          style={activeGetUserWait ? { borderColor: "#d946ef" } : undefined}
           rows={1}
           data-testid="message-input"
         />
         {/* During streaming: show Run button for commands, Cancel button always */}
-        {isStreaming && inputIsCommand && (
-          <button
-            onClick={handleSubmit}
-            disabled={!input.trim() || !currentThreadId || isPending}
-            className="px-4 py-2 bg-amber-600 rounded hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            title="Run command while streaming"
-          >
-            {isPending ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Terminal className="w-4 h-4" />
-            )}
-            Run
-          </button>
-        )}
-        {showGetUserAnswerButton && (
-          <button
-            onClick={handleSubmit}
-            disabled={!canSend || isPending}
-            className="px-4 py-2 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            style={{ background: "#c026d3", color: "white" }}
-            title="Answer the waiting get-user tool"
-          >
-            {isPending ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-            Answer
-          </button>
-        )}
-        {isStreaming ? (
-          <button
-            onClick={() => cancelMutation.mutate()}
-            disabled={cancelMutation.isPending}
-            className="px-4 py-2 bg-red-600 rounded hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            title="Cancel streaming (Escape)"
-          >
-            {cancelMutation.isPending ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <StopCircle className="w-4 h-4" />
-            )}
-            Cancel
-          </button>
-        ) : (
-          <button
-            onClick={handleSubmit}
-            disabled={!canSend || isPending}
-            className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {isPending ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : inputIsCommand ? (
-              <Terminal className="w-4 h-4" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-            {inputIsCommand ? "Run" : "Send"}
-          </button>
-        )}
+        <div className="eggw-composer-submit">
+          {isStreaming && inputIsCommand && (
+            <button
+              onClick={handleSubmit}
+              disabled={!input.trim() || !currentThreadId || isPending}
+              className="eggw-composer-action eggw-composer-action-warn"
+              title="Run command while streaming"
+            >
+              {isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Terminal className="w-4 h-4" />
+              )}
+              Run
+            </button>
+          )}
+          {showGetUserAnswerButton && (
+            <button
+              onClick={handleSubmit}
+              disabled={!canSend || isPending}
+              className="eggw-composer-action eggw-composer-action-primary"
+              title="Answer the waiting get-user tool"
+            >
+              {isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+              Answer
+            </button>
+          )}
+          {isStreaming ? (
+            <button
+              onClick={() => cancelMutation.mutate()}
+              disabled={cancelMutation.isPending}
+              className="eggw-composer-action eggw-composer-action-danger"
+              title="Cancel streaming (Escape)"
+            >
+              {cancelMutation.isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <StopCircle className="w-4 h-4" />
+              )}
+              Cancel
+            </button>
+          ) : (
+            <button
+              onClick={handleSubmit}
+              disabled={!canSend || isPending}
+              className="eggw-composer-action eggw-composer-action-primary"
+            >
+              {isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : inputIsCommand ? (
+                <Terminal className="w-4 h-4" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+              {inputIsCommand ? "Run" : "Send"}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Status line */}
-      <div className="mt-2 text-xs flex items-center gap-4" style={{ color: "var(--muted)" }}>
-        <span>
-          {currentThreadId ? `Thread: ${currentThreadId.slice(-8)}` : "No thread"}
-        </span>
-        {inputIsCommand && (
-          <span style={{ color: "var(--tool-call-border)" }}>
-            {input.startsWith('$') ? "Shell command" : "Slash command"}
+      <div className="eggw-composer-status mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="eggw-composer-status-pill">
+            {currentThreadId ? `Thread ${currentThreadId.slice(-8)}` : "No thread"}
           </span>
-        )}
-        {isStreaming && (
-          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
-            <Loader2 className="w-3 h-3 animate-spin" />
-            {activeGetUserWait ? "Waiting for get-user answer..." : "Streaming..."}
-          </span>
-        )}
-        {commandMutation.isPending && (
-          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
-            <Loader2 className="w-3 h-3 animate-spin" />
-            Running {displayedCommandLabel}{displayedCommandElapsed ? ` ${displayedCommandElapsed}` : ""}{activeCommandTimeout}...
-          </span>
-        )}
-        {!commandMutation.isPending && activeUserCommand && (
-          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
-            <Loader2 className="w-3 h-3 animate-spin" />
-            Running {activeUserCommand.name.startsWith("$") ? activeUserCommand.name : `/${activeUserCommand.name}`}{activeCommandElapsed ? ` ${activeCommandElapsed}` : ""}{activeCommandTimeout}...
-          </span>
-        )}
-        {imageGenerationMutation.isPending && (
-          <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
-            <Loader2 className="w-3 h-3 animate-spin" />
-            Generating image{imagePendingElapsed ? ` ${imagePendingElapsed}` : ""}...
-          </span>
-        )}
-        <span title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>
+          {inputIsCommand && (
+            <span className="eggw-composer-status-pill" style={{ color: "var(--tool-call-border)" }}>
+              {input.startsWith('$') ? "Shell command" : "Slash command"}
+            </span>
+          )}
+          {isStreaming && (
+            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              {activeGetUserWait ? "Waiting for get-user answer..." : "Streaming..."}
+            </span>
+          )}
+          {commandMutation.isPending && (
+            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Running {displayedCommandLabel}{displayedCommandElapsed ? ` ${displayedCommandElapsed}` : ""}{activeCommandTimeout}...
+            </span>
+          )}
+          {!commandMutation.isPending && activeUserCommand && (
+            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Running {activeUserCommand.name.startsWith("$") ? activeUserCommand.name : `/${activeUserCommand.name}`}{activeCommandElapsed ? ` ${activeCommandElapsed}` : ""}{activeCommandTimeout}...
+            </span>
+          )}
+          {imageGenerationMutation.isPending && (
+            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Generating image{imagePendingElapsed ? ` ${imagePendingElapsed}` : ""}...
+            </span>
+          )}
+        </div>
+        <span className="eggw-composer-status-pill" title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>
           [{enterMode === "send" ? "⏎ send" : "^⏎ send"}]
         </span>
       </div>

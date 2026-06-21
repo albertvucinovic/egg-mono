@@ -269,7 +269,7 @@ function hiddenSummaryText(details: HiddenDetail[]): string {
     .filter((name): name is string => Boolean(name));
   const uniqueToolNames = Array.from(new Set(toolNames));
   const summary = parts.join(", ") || "Hidden details";
-  return uniqueToolNames.length ? `${summary}. Tools: ${uniqueToolNames.join(", ")}.` : `${summary}.`;
+  return uniqueToolNames.length ? `${summary}\nTools: ${uniqueToolNames.join(", ")}` : summary;
 }
 
 function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
@@ -280,12 +280,7 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
       style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" }}
       data-testid="hidden-details"
     >
-      <div className="text-sm font-medium mb-2">{hiddenSummaryText(details)}</div>
-      <div className="space-y-1 text-xs font-mono" style={{ color: "var(--muted)" }}>
-        {details.map((detail, idx) => (
-          <div key={`${detail.kind}-${idx}`}>{detail.header}</div>
-        ))}
-      </div>
+      <div className="whitespace-pre-wrap text-sm font-medium">{hiddenSummaryText(details)}</div>
     </div>
   );
 }
@@ -873,29 +868,26 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   }
   if (message.tool_calls?.length) {
     message.tool_calls.forEach((tc: any) => {
-      const tcId = tc?.id || tc?.tool_call_id || "";
-      const idText = tcId ? ` | tool_call_id: ${tcId}` : "";
       const name = toolCallName(tc);
       details.push({
         kind: "tool_calls",
         name,
         tokens: takeTokens(),
-        header: `${messageMetadataText(message, "ToolCall")}${idText} | ${name} | ${oneLinePreview(toolCallArgs(tc))}`,
+        header: name ? `ToolCall: ${name}` : "ToolCall",
       });
     });
   }
   if (message.role === "tool") {
     const contentText = contentToPlainText(message.content, message.content_text || "");
-    const label = contentText ? `Tool Result (${contentText.length.toLocaleString()} chars)` : "Tool Result";
     const name = message.name || "tool";
-    details.push({ kind: "tool_results", name, tokens: takeTokens(), header: messageMetadataText(message, `${label}: ${name}`) });
+    details.push({ kind: "tool_results", name, tokens: takeTokens(), header: name ? `Tool Result: ${name}` : "Tool Result" });
   }
   stringRecordEntries(message.tool_stream).forEach(([name, text]) => {
     details.push({
       kind: "tool_results",
       name,
       tokens: takeTokens(),
-      header: streamedMetadataHiddenHeader(message, `Tool Output: ${name}`, text),
+      header: name ? `Tool Output: ${name}` : "Tool Output",
     });
   });
   stringRecordEntries(message.tool_calls_stream).forEach(([streamKey, text]) => {
@@ -903,7 +895,7 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
       kind: "tool_calls",
       name: streamKey,
       tokens: takeTokens(),
-      header: streamedMetadataHiddenHeader(message, `Tool Call Args: ${streamKey}`, text),
+      header: streamKey ? `Tool Call Args: ${streamKey}` : "Tool Call Args",
     });
   });
   return details;
