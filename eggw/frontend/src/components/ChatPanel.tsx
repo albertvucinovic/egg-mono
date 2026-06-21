@@ -43,8 +43,47 @@ const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
 function preprocessLatex(content: string): string {
   if (!content) return content;
 
+  const normalizeDisplayMathFences = (value: string): string => {
+    // micromark/remark-math treats text after an opening `$$` fence as fence
+    // metadata, not as math body.  LLMs often emit compact blocks such as
+    // `$$\begin{aligned}` and `\end{aligned}$$`; normalize those to canonical
+    // display-math fences so KaTeX receives the full aligned environment.
+    let normalized = value.replace(/^([ \t]*)\$\$([^\n]*)$/gm, (line, indent, rest) => {
+      if (!String(rest).trim()) return line;
+      const body = String(rest);
+      const withoutClosingFence = body.replace(/\$\$[ \t]*$/, "").trimEnd();
+      if (withoutClosingFence !== body.trimEnd()) {
+        return withoutClosingFence.trim()
+          ? `${indent}$$\n${indent}${withoutClosingFence.trimStart()}\n${indent}$$`
+          : `${indent}$$`;
+      }
+      return `${indent}$$\n${indent}${body.trimStart()}`;
+    });
+
+    normalized = normalized.replace(/^([ \t]*)(\\[^\n]*?)\$\$[ \t]*$/gm, (line, indent, body) => {
+      const mathBody = String(body).trimEnd();
+      return mathBody.trim() ? `${indent}${mathBody}\n${indent}$$` : line;
+    });
+
+    return normalized;
+  };
+
+  const decodeDisplayMathEntities = (value: string): string =>
+    value.replace(/\$\$([\s\S]*?)\$\$/g, (_match, math) => {
+      const decoded = String(math)
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+      return `$$${decoded}$$`;
+    });
+
   // Convert \[...\] to $$...$$ for display math
   let processed = content.replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => `$$${math}$$`);
+
+  processed = normalizeDisplayMathFences(processed);
+  processed = decodeDisplayMathEntities(processed);
 
   // Convert \(...\) to $...$ for inline math
   processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => `$${math}$`);
