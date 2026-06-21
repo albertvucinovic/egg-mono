@@ -236,7 +236,7 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
   if (!details.length) return null;
   return (
     <div
-      className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
+      className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
       style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" }}
       data-testid="hidden-details"
     >
@@ -536,7 +536,7 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max", o
 
   return (
     <div
-      className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
+      className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
       style={isShellCommand ? shellStyle : (roleStyles[displayRole] || shellStyle)}
     >
       {/* Header */}
@@ -1297,7 +1297,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className={`px-3 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)", background: "var(--panel-bg)" }}>
+      <div className={`eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
         <span>
           Chat Messages{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
           {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
@@ -1310,14 +1310,14 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         onWheel={handleWheel}
         onTouchMove={handleTouchMove}
         onPointerUp={handlePointerUp}
-        className="flex-1 overflow-auto p-4"
+        className="eggw-transcript-scroll flex-1 overflow-auto px-4 py-6 md:px-8"
         data-testid="chat-panel"
       >
-        <div data-testid="chat-panel-content">
+        <div className="eggw-transcript-inner" data-testid="chat-panel-content">
           {isLoading ? (
-            <div className="text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
+            <div className="eggw-empty-state text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
           ) : isError ? (
-            <div className="text-center space-y-2">
+            <div className="eggw-empty-state text-center space-y-2">
               <div style={{ color: "var(--error, #ef4444)" }}>Failed to load messages</div>
               <button
                 onClick={() => refetch()}
@@ -1328,7 +1328,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
               </button>
             </div>
           ) : messages.length === 0 ? (
-            <div className="text-center" style={{ color: "var(--muted)" }}>
+            <div className="eggw-empty-state text-center" style={{ color: "var(--muted)" }}>
               No messages yet. Start a conversation!
             </div>
           ) : (
@@ -1338,7 +1338,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
               {/* Streaming content */}
               {isStreaming && (
                 <div
-                  className={`rounded p-3 mb-3 ${showBorders ? 'border' : ''}`}
+                  className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
                   style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
                 >
                   <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>

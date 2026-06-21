@@ -716,7 +716,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   return (
     <div
       className={clsx(
-        "p-4 bg-[var(--panel-bg)] relative transition-shadow",
+        "eggw-composer p-4 bg-[var(--panel-bg)] relative transition-shadow",
         (showBorders || activeGetUserWait) && "border-t",
         isDraggingFiles && "ring-2 ring-blue-500/80",
       )}
@@ -729,7 +729,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     >
       {isDraggingFiles && (
         <div
-          className="pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-blue-400 bg-blue-500/10 text-sm font-medium text-blue-200"
+          className="eggw-floating-overlay pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-blue-400 bg-blue-500/10 text-sm font-medium text-blue-200"
           data-testid="attachment-drop-overlay"
         >
           Drop files to attach
@@ -756,7 +756,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       {showSuggestions && suggestions.length > 0 && (
         <div
           ref={suggestionsRef}
-          className={`absolute bottom-full left-4 right-4 mb-1 rounded-lg shadow-lg max-h-64 overflow-auto z-50 ${showBorders ? 'border' : ''}`}
+          className={`eggw-floating-overlay absolute bottom-full left-4 right-4 mb-1 rounded-lg shadow-lg max-h-64 overflow-auto z-50 ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)" }}
         >
           {suggestions.map((suggestion, index) => (
@@ -859,7 +859,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
             onChange={(e) => setImagePrompt(e.target.value)}
             placeholder="Describe the image to generate..."
             disabled={!currentThreadId || imageGenerationMutation.isPending}
-            className={`w-full rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+            className={`eggw-control w-full rounded-lg px-3 py-2 resize-none focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
             style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
             rows={2}
             data-testid="image-generation-prompt"
@@ -871,7 +871,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               list="image-generation-model-options"
               placeholder={imageDefaultModel ? `Default: ${imageDefaultModel}` : "Image model (optional)"}
               disabled={!currentThreadId || imageGenerationMutation.isPending}
-              className={`rounded px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+              className={`eggw-control rounded-lg px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
               style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               data-testid="image-generation-model"
             />
@@ -886,7 +886,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               value={imageCount}
               onChange={(e) => setImageCount(e.target.value)}
               disabled={!currentThreadId || imageGenerationMutation.isPending}
-              className={`rounded px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+              className={`eggw-control rounded-lg px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
               style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               title="Number of images"
               data-testid="image-generation-count"
@@ -901,7 +901,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               onChange={(e) => setImageSize(e.target.value)}
               placeholder="Size (optional)"
               disabled={!currentThreadId || imageGenerationMutation.isPending}
-              className={`rounded px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
+              className={`eggw-control rounded-lg px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
               style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               data-testid="image-generation-size"
             />
@@ -981,7 +981,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               : "Select a thread first"
           }
           disabled={!currentThreadId}
-          className={`flex-1 rounded px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[40px] ${showBorders || activeGetUserWait ? 'border' : ''}`}
+          className={`eggw-control flex-1 rounded-lg px-3 py-2 resize-none focus:outline-none disabled:opacity-50 min-h-[44px] ${showBorders || activeGetUserWait ? 'border' : ''}`}
           style={{ background: "var(--panel-bg)", borderColor: activeGetUserWait ? "#d946ef" : "var(--panel-border)", color: "var(--foreground)" }}
           rows={1}
           data-testid="message-input"

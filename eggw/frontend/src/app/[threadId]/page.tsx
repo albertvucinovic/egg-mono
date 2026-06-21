@@ -293,7 +293,7 @@ export default function ThreadPage() {
   }, [handleKeyDown]);
 
   return (
-    <main className="h-screen flex flex-col">
+    <main className="eggw-shell h-screen flex flex-col overflow-hidden">
       {/* Help Modal */}
       {showHelp && (
         <div
@@ -369,12 +369,12 @@ export default function ThreadPage() {
       )}
 
       {/* Header - Two rows */}
-      <header className="border-b border-[var(--panel-border)] bg-[var(--panel-bg)]">
+      <header className="eggw-topbar border-b border-[var(--panel-border)]">
         {/* Row 1: Thread info and sidebar toggle */}
-        <div className="h-8 flex items-center px-4 border-b border-[var(--panel-border)]">
-          <h1 className="text-sm font-semibold">eggw</h1>
+        <div className="mx-auto flex min-h-10 w-full max-w-[var(--app-shell-max-width)] items-center gap-3 px-4 py-1 border-b border-[var(--panel-border)]">
+          <h1 className="rounded-full px-2.5 py-1 text-sm font-semibold tracking-tight" style={{ background: "color-mix(in srgb, var(--accent) 14%, transparent)", color: "var(--heading-color)" }}>eggw</h1>
           {threadId && (
-            <span className="ml-3 text-sm">
+            <span className="min-w-0 text-sm">
               <span style={{ color: "var(--muted)" }}>Thread:</span>{" "}
               {currentThreadData?.name ? (
                 <>
@@ -387,12 +387,12 @@ export default function ThreadPage() {
             </span>
           )}
           {!threadId && (
-            <span className="ml-3 text-sm" style={{ color: "var(--muted)" }}>No thread selected</span>
+            <span className="text-sm" style={{ color: "var(--muted)" }}>No thread selected</span>
           )}
 
           {/* Context length */}
           {threadId && tokenStats && (
-            <span className="ml-4 text-xs" style={{ color: "var(--muted)" }}>
+            <span className="hidden sm:inline text-xs" style={{ color: "var(--muted)" }}>
               Context: <span style={{ color: "var(--foreground)" }}>{contextHeaderText}</span>
             </span>
           )}
@@ -425,7 +425,7 @@ export default function ThreadPage() {
         </div>
 
         {/* Row 2: Controls */}
-        <div className="h-7 flex items-center px-4 gap-4 text-xs">
+        <div className="mx-auto flex min-h-9 w-full max-w-[var(--app-shell-max-width)] items-center gap-3 overflow-x-auto px-4 py-1.5 text-xs">
           {/* Model selector */}
           {threadId && modelsData?.models && (
             <div className="flex items-center gap-1.5">
@@ -438,7 +438,7 @@ export default function ThreadPage() {
                   }
                 }}
                 disabled={modelMutation.isPending}
-                className="border rounded px-1.5 py-0.5 text-xs disabled:opacity-50"
+                className="eggw-control border rounded-lg px-2 py-1 text-xs disabled:opacity-50"
                 style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               >
                 {!currentModelKey && (
@@ -532,7 +532,7 @@ export default function ThreadPage() {
               <select
                 value={displayVerbosity}
                 onChange={(e) => setDisplayVerbosity(e.target.value as "max" | "medium" | "min")}
-                className="border rounded px-1.5 py-0.5 text-xs"
+                className="eggw-control border rounded-lg px-2 py-1 text-xs"
                 style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
                 title="Transcript display verbosity"
               >
@@ -556,9 +556,9 @@ export default function ThreadPage() {
       </header>
 
       {/* Main content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="eggw-main-grid flex min-h-0 flex-1 overflow-hidden">
         {/* Center - Chat */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className={clsx("eggw-chat-card min-w-0 flex-1 flex flex-col overflow-hidden", !showBorders && "eggw-chrome-borderless")}>
           {panelVisibility.children && <ChildrenPanel showBorders={showBorders} />}
           {panelVisibility.chat && (
             <ChatPanel
@@ -577,7 +577,7 @@ export default function ThreadPage() {
 
         {/* Right sidebar - System log */}
         {panelVisibility.system && (
-          <div className={`w-80 flex flex-col overflow-hidden ${showBorders ? 'border-l border-[var(--panel-border)]' : ''}`}>
+          <div className={clsx("eggw-side-card fixed bottom-4 right-4 top-24 z-40 flex w-[min(22rem,calc(100vw-2rem))] flex-col overflow-hidden xl:static xl:z-auto xl:w-80", !showBorders && "eggw-chrome-borderless")}>
             <SystemPanel showBorders={showBorders} />
           </div>
         )}

@@ -1003,6 +1003,98 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+html,
+body {
+  min-height: 100%;
+}
+
+:root {
+  --app-shell-max-width: 1680px;
+  --chat-content-max-width: 960px;
+  --layout-gutter: clamp(0.75rem, 1.6vw, 1.5rem);
+  --surface-raised: color-mix(in srgb, var(--panel-bg) 88%, var(--foreground) 12%);
+  --surface-subtle: color-mix(in srgb, var(--panel-bg) 94%, var(--foreground) 6%);
+  --surface-glass: color-mix(in srgb, var(--panel-bg) 88%, transparent);
+  --shadow-soft: 0 18px 60px color-mix(in srgb, #000 32%, transparent);
+  --shadow-card: 0 10px 32px color-mix(in srgb, #000 18%, transparent);
+}
+
+.eggw-shell {
+  background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 16%, transparent) 0, transparent 30rem),
+    radial-gradient(circle at top right, color-mix(in srgb, var(--reasoning-border) 10%, transparent) 0, transparent 26rem),
+    linear-gradient(180deg, color-mix(in srgb, var(--background) 92%, var(--panel-bg) 8%) 0%, var(--background) 55%);
+}
+
+.eggw-topbar {
+  background: color-mix(in srgb, var(--panel-bg) 88%, transparent);
+  backdrop-filter: blur(18px) saturate(1.1);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--panel-border) 75%, transparent);
+}
+
+.eggw-main-grid {
+  width: min(100%, var(--app-shell-max-width));
+  margin-inline: auto;
+  padding: var(--layout-gutter);
+  gap: var(--layout-gutter);
+}
+
+.eggw-chat-card,
+.eggw-side-card {
+  background: color-mix(in srgb, var(--panel-bg) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--panel-border) 82%, transparent);
+  border-radius: 1.25rem;
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.eggw-side-card {
+  background: color-mix(in srgb, var(--panel-bg) 94%, var(--background) 6%);
+}
+
+.eggw-chrome-borderless {
+  border-color: transparent;
+}
+
+.eggw-section-header {
+  background: linear-gradient(180deg, var(--surface-subtle), color-mix(in srgb, var(--panel-bg) 96%, transparent));
+}
+
+.eggw-transcript-scroll {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--panel-bg) 88%, transparent), transparent 7rem),
+    var(--panel-bg);
+}
+
+.eggw-transcript-inner,
+.eggw-composer > :not(.eggw-floating-overlay) {
+  width: 100%;
+  max-width: var(--chat-content-max-width);
+  margin-inline: auto;
+}
+
+.eggw-message-card {
+  border-radius: 1rem;
+  box-shadow: var(--shadow-card);
+}
+
+.eggw-composer {
+  background: color-mix(in srgb, var(--panel-bg) 94%, var(--foreground) 6%);
+}
+
+.eggw-control {
+  border-color: color-mix(in srgb, var(--panel-border) 88%, transparent) !important;
+  background: color-mix(in srgb, var(--code-bg) 82%, var(--foreground) 8%) !important;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.eggw-empty-state {
+  border: 1px dashed color-mix(in srgb, var(--panel-border) 80%, transparent);
+  background: color-mix(in srgb, var(--panel-bg) 86%, var(--foreground) 5%);
+  border-radius: 1rem;
+  padding: 2rem;
+}
+
 ::selection {
   background: var(--selection-bg);
 }
