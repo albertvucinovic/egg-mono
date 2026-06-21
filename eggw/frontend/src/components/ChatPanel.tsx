@@ -31,6 +31,7 @@ import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
 
 const STICKY_BOTTOM_THRESHOLD_PX = 4;
+const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
 
 /**
  * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
@@ -261,6 +262,12 @@ function ContentPartsView({
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const [promotingArtifactIds, setPromotingArtifactIds] = useState<Record<string, boolean>>({});
+  const imagePreviewClassName = clsx("block max-w-full rounded object-contain", showBorders && "border");
+  const imagePreviewStyle = {
+    maxHeight: MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT,
+    borderColor: "var(--panel-border)",
+    background: "var(--panel-bg)",
+  };
 
   const handleUseAsAttachment = useCallback(async (part: Extract<ContentPart, { type: "artifact" }>) => {
     if (!currentThreadId || !part.artifact_id || !onStageAttachment) return;
@@ -331,8 +338,8 @@ function ContentPartsView({
                     loading="lazy"
                     decoding="async"
                     data-testid="attachment-preview"
-                    className={`max-h-48 max-w-full rounded object-contain ${showBorders ? "border" : ""}`}
-                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)" }}
+                    className={imagePreviewClassName}
+                    style={imagePreviewStyle}
                     onError={(event) => {
                       event.currentTarget.style.display = "none";
                     }}
@@ -391,8 +398,8 @@ function ContentPartsView({
                     loading="lazy"
                     decoding="async"
                     data-testid="provider-artifact-preview"
-                    className={`max-h-48 max-w-full rounded object-contain ${showBorders ? "border" : ""}`}
-                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)" }}
+                    className={imagePreviewClassName}
+                    style={imagePreviewStyle}
                     onError={(event) => {
                       event.currentTarget.style.display = "none";
                     }}
