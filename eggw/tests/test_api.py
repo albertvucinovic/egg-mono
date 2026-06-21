@@ -515,6 +515,23 @@ class TestMessageOperations:
         data = response.json()
         assert [message["content"] for message in data] == ["second", "third"]
 
+    def test_get_messages_before_id_paginates_older_history(self, client):
+        """Bounded transcript API can page older messages before the first loaded id."""
+        from eggthreads import append_message
+
+        create_resp = client.post("/api/threads", json={"name": "Message Pagination"})
+        thread_id = create_resp.json()["id"]
+
+        append_message(core_state.db, thread_id, role="user", content="first")
+        second_id = append_message(core_state.db, thread_id, role="assistant", content="second")
+        append_message(core_state.db, thread_id, role="user", content="third")
+
+        response = client.get(f"/api/threads/{thread_id}/messages?limit=1&before_id={second_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [message["content"] for message in data] == ["first"]
+
     def test_upload_attachment_returns_metadata_part_and_stores_bytes(self, client, test_db_path):
         from eggthreads.input_artifacts import resolve_input_bytes
 

@@ -191,7 +191,12 @@ def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> Message
     )
 
 
-def _get_messages_sync(db_path: str, thread_id: str, limit: int | None = None) -> Optional[List[MessageContent]]:
+def _get_messages_sync(
+    db_path: str,
+    thread_id: str,
+    limit: int | None = None,
+    before_id: str | None = None,
+) -> Optional[List[MessageContent]]:
     """Fetch messages for a thread on a worker thread.
 
     The optional ``limit`` is applied before expensive per-message content
@@ -276,6 +281,20 @@ def _get_messages_sync(db_path: str, thread_id: str, limit: int | None = None) -
                     entries.append(("marker", _compaction_marker_message(marker, msg_event_seq)))
             entries.append(("message", msg))
 
+        if before_id:
+            before_index = next(
+                (
+                    idx
+                    for idx, (kind, raw) in enumerate(entries)
+                    if (
+                        (kind == "marker" and getattr(raw, "id", None) == before_id)
+                        or (kind == "message" and isinstance(raw, dict) and raw.get("msg_id") == before_id)
+                    )
+                ),
+                -1,
+            )
+            entries = entries[:before_index] if before_index >= 0 else []
+
         if isinstance(limit, int) and limit > 0 and len(entries) > limit:
             entries = entries[-limit:]
 
@@ -346,6 +365,10 @@ async def get_messages(
         le=5000,
         description="Optional number of latest transcript entries to return.",
     ),
+    before_id: str | None = Query(
+        default=None,
+        description="Optional id of the first loaded entry; returns entries before it.",
+    ),
 ):
     """Get messages for a thread by building fresh snapshot from events.
 
@@ -360,7 +383,7 @@ async def get_messages(
 
     # Run database-heavy work in thread pool to avoid blocking event loop
     loop = asyncio.get_running_loop()
-    messages = await loop.run_in_executor(None, _get_messages_sync, core.db.path, thread_id, limit)
+    messages = await loop.run_in_executor(None, _get_messages_sync, core.db.path, thread_id, limit, before_id)
 
     if messages is None:
         raise HTTPException(status_code=404, detail="Thread not found")

@@ -33,6 +33,7 @@ import clsx from "clsx";
 const STICKY_BOTTOM_THRESHOLD_PX = 4;
 const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
 const INITIAL_TRANSCRIPT_MESSAGE_LIMIT = 300;
+const TRANSCRIPT_SCROLLBACK_THRESHOLD_PX = 240;
 
 /**
  * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
@@ -982,6 +983,8 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   const streamingTextFlushRafRef = useRef<number | null>(null);
   const streamingToolFlushRafRef = useRef<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
 
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const messages = useAppStore((state) => state.messages);
@@ -1053,12 +1056,63 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     finishAutoScrollSoon(generation);
   }, [finishAutoScrollSoon]);
 
+  const loadOlderMessages = useCallback(async () => {
+    if (!currentThreadId || isLoadingOlder || !hasOlderMessages) return;
+    const el = scrollRef.current;
+    const currentMessages = useAppStore.getState().messages;
+    const firstId = currentMessages[0]?.id;
+    if (!firstId) {
+      setHasOlderMessages(false);
+      return;
+    }
+
+    const previousScrollHeight = el?.scrollHeight ?? 0;
+    const previousScrollTop = el?.scrollTop ?? 0;
+    setIsLoadingOlder(true);
+    try {
+      const older = await fetchMessages(currentThreadId, {
+        limit: INITIAL_TRANSCRIPT_MESSAGE_LIMIT,
+        beforeId: firstId,
+      });
+      if (!Array.isArray(older) || older.length === 0) {
+        setHasOlderMessages(false);
+        return;
+      }
+
+      const latestMessages = useAppStore.getState().messages;
+      const existingIds = new Set(latestMessages.map((message) => message.id).filter(Boolean));
+      const uniqueOlder = older.filter((message: Message) => !existingIds.has(message.id));
+      if (uniqueOlder.length === 0) {
+        setHasOlderMessages(false);
+        return;
+      }
+
+      stickToBottomRef.current = false;
+      setMessages([...uniqueOlder, ...latestMessages]);
+      setHasOlderMessages(older.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
+
+      requestAnimationFrame(() => {
+        const currentEl = scrollRef.current;
+        if (!currentEl) return;
+        const delta = currentEl.scrollHeight - previousScrollHeight;
+        currentEl.scrollTop = previousScrollTop + delta;
+      });
+    } catch (error) {
+      console.error("Failed to load older messages:", error);
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  }, [currentThreadId, hasOlderMessages, isLoadingOlder, setMessages]);
+
   // Handle user scroll - scrolling up disables sticky mode; scrolling back to
   // the bottom reenables it.  Programmatic scroll events should not disable it.
   const handleScroll = useCallback(() => {
     if (isAutoScrollingRef.current) return;
     stickToBottomRef.current = isAtBottom();
-  }, [isAtBottom]);
+    if (scrollRef.current && scrollRef.current.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
+      void loadOlderMessages();
+    }
+  }, [isAtBottom, loadOlderMessages]);
 
   const updateStickyAfterUserScroll = useCallback((forceStickyTail = false, exactBottomOnly = false) => {
     isAutoScrollingRef.current = false;
@@ -1281,6 +1335,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       // look "at bottom" for one render.
       const wasSticky = stickToBottomRef.current;
       setMessages(data);
+      setHasOlderMessages(Array.isArray(data) && data.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
       // Scroll to bottom after DOM update if we were at bottom before
       if (wasSticky) {
         // Double RAF: first waits for React render, second waits for paint
@@ -1296,6 +1351,8 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
     stickToBottomRef.current = true;
+    setHasOlderMessages(false);
+    setIsLoadingOlder(false);
     requestAnimationFrame(() => {
       scrollToBottomNow();
     });
@@ -1368,7 +1425,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className={`eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
         <span>
-              Chat Messages · latest {INITIAL_TRANSCRIPT_MESSAGE_LIMIT}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
+              Chat Messages · {messages.length.toLocaleString()} loaded{hasOlderMessages ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
           {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
           {isStreaming && !providerTimeText && genericStreamingTimeText ? ` | ${genericStreamingTimeText}` : ""}
         </span>
@@ -1402,6 +1459,20 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
             </div>
           ) : (
             <>
+              {messages.length > 0 && hasOlderMessages && (
+                <div className="mb-4 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => void loadOlderMessages()}
+                    disabled={isLoadingOlder}
+                    className="rounded-full border px-3 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)", color: "var(--muted)" }}
+                    data-testid="load-older-messages"
+                  >
+                    {isLoadingOlder ? "Loading older messages…" : "Load older messages"}
+                  </button>
+                </div>
+              )}
               <StaticTranscript
                 messages={messages}
                 displayVerbosity={displayVerbosity}
@@ -1434,24 +1505,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                     )}
                   </div>
 
-                  {displayVerbosity === "min" ? (
-                    <div className="space-y-1 text-sm animate-pulse" style={{ color: "var(--accent)" }}>
-                      {streamingKind === "tool" ? (
-                        <>
-                          {Object.keys(streamingToolCalls).length > 0 && <div>Tool call streaming…</div>}
-                          {Object.keys(streamingToolOutputs).length > 0 && <div>Tool output streaming…</div>}
-                          {Object.keys(streamingToolCalls).length === 0 && Object.keys(streamingToolOutputs).length === 0 && <div>Tool output streaming…</div>}
-                          {primaryToolTimeoutText && <div data-testid="streaming-tool-timeout-min">{primaryToolTimeoutText}</div>}
-                        </>
-                      ) : (
-                        <>
-                          <div>Reasoning streaming…</div>
-                          <div>Content streaming…</div>
-                        </>
-                      )}
-                    </div>
-                  ) : (
-                    <>
+                  <>
                       {/* Streaming reasoning - direct DOM updates via ref */}
                       <details
                       open
@@ -1622,8 +1676,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                         })}
                       </div>
                       )}
-                    </>
-                  )}
+                  </>
               </div>
             )}
             </>

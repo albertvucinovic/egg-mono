@@ -574,12 +574,9 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     const hasAttachments = stagedAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || !currentThreadId) return;
 
-    // Commands can run during streaming (navigation, status, etc.). Regular
-    // messages are blocked during streaming except while the get-user tool is
-    // explicitly waiting for the next normal user message.
     if (isCommand(trimmed)) {
       commandMutation.mutate({ command: trimmed, staged: stagedAttachments });
-    } else if (!isStreaming || activeGetUserWait) {
+    } else {
       messageMutation.mutate(buildMessageContentWithAttachments(trimmed, stagedAttachments));
     }
   };
@@ -990,22 +987,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         />
         {/* During streaming: show Run button for commands, Cancel button always */}
         <div className="eggw-composer-submit">
-          {isStreaming && inputIsCommand && (
-            <button
-              onClick={handleSubmit}
-              disabled={!input.trim() || !currentThreadId || isPending}
-              className="eggw-composer-action eggw-composer-action-warn"
-              title="Run command while streaming"
-            >
-              {isPending ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Terminal className="w-4 h-4" />
-              )}
-              Run
-            </button>
-          )}
-          {showGetUserAnswerButton && (
+          {showGetUserAnswerButton ? (
             <button
               onClick={handleSubmit}
               disabled={!canSend || isPending}
@@ -1019,8 +1001,24 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               )}
               Answer
             </button>
+          ) : (
+            <button
+              onClick={handleSubmit}
+              disabled={!canSend || isPending}
+              className={clsx("eggw-composer-action", inputIsCommand ? "eggw-composer-action-warn" : "eggw-composer-action-primary")}
+              title={isStreaming && !inputIsCommand ? "Queue message after the current stream" : undefined}
+            >
+              {isPending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : inputIsCommand ? (
+                <Terminal className="w-4 h-4" />
+              ) : (
+                <Send className="w-4 h-4" />
+              )}
+              {inputIsCommand ? "Run" : "Send"}
+            </button>
           )}
-          {isStreaming ? (
+          {isStreaming && (
             <button
               onClick={() => cancelMutation.mutate()}
               disabled={cancelMutation.isPending}
@@ -1033,21 +1031,6 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
                 <StopCircle className="w-4 h-4" />
               )}
               Cancel
-            </button>
-          ) : (
-            <button
-              onClick={handleSubmit}
-              disabled={!canSend || isPending}
-              className="eggw-composer-action eggw-composer-action-primary"
-            >
-              {isPending ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : inputIsCommand ? (
-                <Terminal className="w-4 h-4" />
-              ) : (
-                <Send className="w-4 h-4" />
-              )}
-              {inputIsCommand ? "Run" : "Send"}
             </button>
           )}
         </div>
@@ -1067,7 +1050,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           {isStreaming && (
             <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
               <Loader2 className="w-3 h-3 animate-spin" />
-              {activeGetUserWait ? "Waiting for get-user answer..." : "Streaming..."}
+              {activeGetUserWait ? "Waiting for get-user answer..." : "Streaming; new messages will queue..."}
             </span>
           )}
           {commandMutation.isPending && (
