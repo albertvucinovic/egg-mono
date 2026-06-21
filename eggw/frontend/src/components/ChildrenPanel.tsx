@@ -19,7 +19,7 @@ interface ChildrenPanelProps {
 
 export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
   const router = useRouter();
-  const { currentThreadId } = useAppStore();
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
 
   const { data: children = [], isLoading } = useQuery({
     queryKey: ["threadChildren", currentThreadId],

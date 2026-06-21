@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Trash2, RefreshCw, ArrowUp, ArrowDown, GitBranch } from "lucide-react";
 import { fetchTokenStats, fetchThread, fetchThreadChildren, fetchThreadState, fetchThreadSettings } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
@@ -16,13 +16,10 @@ interface SystemPanelProps {
 export function SystemPanel({ showBorders = true }: SystemPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
-  const queryClient = useQueryClient();
-  const {
-    currentThreadId,
-    systemLogs,
-    clearSystemLogs,
-    streamingKind,
-  } = useAppStore();
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const systemLogs = useAppStore((state) => state.systemLogs);
+  const clearSystemLogs = useAppStore((state) => state.clearSystemLogs);
+  const streamingKind = useAppStore((state) => state.streamingKind);
 
   // Fetch current thread details
   const { data: currentThreadData } = useQuery({
@@ -42,7 +39,6 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     queryKey: ["threadSettings", currentThreadId],
     queryFn: () => fetchThreadSettings(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: 1000,
   });
 
   // Helper to get state display info
@@ -70,14 +66,15 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     enabled: !!currentThreadId && currentThreadData?.has_children,
   });
 
-  const { isStreaming } = useAppStore();
+  const isStreaming = useAppStore((state) => state.isStreaming);
 
-  // Fetch token stats for current thread - poll only during LLM streaming.
+  // Fetch token stats for current thread.  ThreadPage owns live polling for the
+  // shared stats query so this side panel does not duplicate expensive reads on
+  // very large threads.
   const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ["stats", currentThreadId],
     queryFn: () => fetchTokenStats(currentThreadId!),
     enabled: !!currentThreadId,
-    refetchInterval: isStreaming && streamingKind === "llm" ? 1000 : false,
   });
 
   // Navigate to thread helper

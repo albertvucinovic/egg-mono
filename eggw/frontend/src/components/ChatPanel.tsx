@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode, type WheelEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode, type WheelEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -522,7 +522,15 @@ function CompactionMarker({ message }: { message: Message }) {
   );
 }
 
-function MessageBlock({ message, showBorders = true, displayVerbosity = "max", onStageAttachment }: MessageBlockProps) {
+function appendBufferedTextChunks(element: HTMLElement, chunks: string[], startIndex: number): boolean {
+  if (startIndex >= chunks.length) return false;
+  const text = chunks.slice(startIndex).join("");
+  if (!text) return false;
+  element.appendChild(document.createTextNode(text));
+  return true;
+}
+
+const MessageBlock = memo(function MessageBlock({ message, showBorders = true, displayVerbosity = "max", onStageAttachment }: MessageBlockProps) {
   if (message.kind === "compaction_marker" || message.role === "compaction_marker") {
     return <CompactionMarker message={message} />;
   }
@@ -849,7 +857,7 @@ function MessageBlock({ message, showBorders = true, displayVerbosity = "max", o
       )}
     </div>
   );
-}
+});
 
 function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   const details: HiddenDetail[] = [];
@@ -947,6 +955,20 @@ function renderMessagesForVerbosity(
   return nodes;
 }
 
+const StaticTranscript = memo(function StaticTranscript({
+  messages,
+  displayVerbosity,
+  showBorders,
+  onStageAttachment,
+}: {
+  messages: Message[];
+  displayVerbosity: DisplayVerbosity;
+  showBorders: boolean;
+  onStageAttachment?: (attachment: AttachmentContentPart) => void;
+}) {
+  return <>{renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment)}</>;
+});
+
 interface ChatPanelProps {
   showBorders?: boolean;
   streamingTps?: number | null;
@@ -964,22 +986,22 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   const lastReasoningIndexRef = useRef(0);
   const lastReasoningSummaryIndexRef = useRef(0);
   const lastToolOutputIndexRef = useRef<Record<string, number>>({});
+  const streamingTextFlushRafRef = useRef<number | null>(null);
+  const streamingToolFlushRafRef = useRef<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const {
-    currentThreadId,
-    messages,
-    setMessages,
-    streamingToolCalls,
-    streamingToolOutputs,
-    streamingModelKey,
-    streamingKind,
-    streamingStartedAtMs,
-    streamingProviderRequest,
-    isStreaming,
-    scrollTrigger,
-    displayVerbosity,
-  } = useAppStore();
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const messages = useAppStore((state) => state.messages);
+  const setMessages = useAppStore((state) => state.setMessages);
+  const streamingToolCalls = useAppStore((state) => state.streamingToolCalls);
+  const streamingToolOutputs = useAppStore((state) => state.streamingToolOutputs);
+  const streamingModelKey = useAppStore((state) => state.streamingModelKey);
+  const streamingKind = useAppStore((state) => state.streamingKind);
+  const streamingStartedAtMs = useAppStore((state) => state.streamingStartedAtMs);
+  const streamingProviderRequest = useAppStore((state) => state.streamingProviderRequest);
+  const isStreaming = useAppStore((state) => state.isStreaming);
+  const scrollTrigger = useAppStore((state) => state.scrollTrigger);
+  const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const hasActiveToolTiming = Object.values(streamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
   const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
   const primaryToolTimeoutText = Object.values(streamingToolOutputs)
@@ -1112,10 +1134,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
 
     if (streamingContentRef.current) {
       const chunks = streamingBuffer.contentChunks;
-      for (let i = lastContentIndexRef.current; i < chunks.length; i++) {
-        streamingContentRef.current.appendChild(document.createTextNode(chunks[i]));
-        appended = true;
-      }
+      appended = appendBufferedTextChunks(streamingContentRef.current, chunks, lastContentIndexRef.current) || appended;
       lastContentIndexRef.current = chunks.length;
     }
 
@@ -1125,10 +1144,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         const container = document.getElementById('streaming-reasoning-container');
         if (container) container.style.display = 'block';
       }
-      for (let i = lastReasoningIndexRef.current; i < chunks.length; i++) {
-        streamingReasoningRef.current.appendChild(document.createTextNode(chunks[i]));
-        appended = true;
-      }
+      appended = appendBufferedTextChunks(streamingReasoningRef.current, chunks, lastReasoningIndexRef.current) || appended;
       lastReasoningIndexRef.current = chunks.length;
     }
 
@@ -1138,10 +1154,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         const container = document.getElementById('streaming-reasoning-summary-container');
         if (container) container.style.display = 'block';
       }
-      for (let i = lastReasoningSummaryIndexRef.current; i < chunks.length; i++) {
-        streamingReasoningSummaryRef.current.appendChild(document.createTextNode(chunks[i]));
-        appended = true;
-      }
+      appended = appendBufferedTextChunks(streamingReasoningSummaryRef.current, chunks, lastReasoningSummaryIndexRef.current) || appended;
       lastReasoningSummaryIndexRef.current = chunks.length;
     }
 
@@ -1156,10 +1169,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       const el = streamingToolOutputRefs.current[toolId];
       if (!el) return;
       const lastIndex = lastToolOutputIndexRef.current[toolId] || 0;
-      for (let i = lastIndex; i < chunks.length; i++) {
-        el.appendChild(document.createTextNode(chunks[i]));
-        appended = true;
-      }
+      appended = appendBufferedTextChunks(el, chunks, lastIndex) || appended;
       if (stickToBottomRef.current) {
         el.scrollTop = el.scrollHeight;
       }
@@ -1169,11 +1179,25 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     if (appended) scrollToBottom();
   }, [scrollToBottom]);
 
-  const scheduleStreamingFlush = useCallback((flush: () => void) => {
+  const scheduleStreamingTextFlush = useCallback(() => {
+    if (streamingTextFlushRafRef.current !== null) return;
+    streamingTextFlushRafRef.current = requestAnimationFrame(() => {
+      streamingTextFlushRafRef.current = null;
+      flushStreamingText();
+    });
+  }, [flushStreamingText]);
+
+  const scheduleStreamingToolFlush = useCallback(() => {
+    if (streamingToolFlushRafRef.current !== null) return;
+    streamingToolFlushRafRef.current = requestAnimationFrame(() => {
+      streamingToolFlushRafRef.current = null;
+      flushStreamingToolOutput();
+    });
+  }, [flushStreamingToolOutput]);
+
+  const scheduleInitialStreamingFlush = useCallback((flush: () => void) => {
     const timeoutId = window.setTimeout(() => {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(flush);
-      });
+      requestAnimationFrame(flush);
     }, 0);
     return timeoutId;
   }, []);
@@ -1184,23 +1208,27 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   useEffect(() => {
     const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
 
-    const unsubContent = streamingBuffer.subscribeContent(flushStreamingText);
-    const unsubReasoning = streamingBuffer.subscribeReasoning(flushStreamingText);
+    const unsubContent = streamingBuffer.subscribeContent(scheduleStreamingTextFlush);
+    const unsubReasoning = streamingBuffer.subscribeReasoning(scheduleStreamingTextFlush);
 
     // Render any existing buffer content (catches up when joining mid-stream).
     // When isStreaming changes to true, refs should be available after render.
-    const timeoutId = isStreaming ? scheduleStreamingFlush(flushStreamingText) : null;
+    const timeoutId = isStreaming ? scheduleInitialStreamingFlush(flushStreamingText) : null;
 
     return () => {
       if (timeoutId !== null) clearTimeout(timeoutId);
       unsubContent();
       unsubReasoning();
+      if (streamingTextFlushRafRef.current !== null) {
+        cancelAnimationFrame(streamingTextFlushRafRef.current);
+        streamingTextFlushRafRef.current = null;
+      }
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;
       }
     };
-  }, [isStreaming, flushStreamingText, scheduleStreamingFlush]);
+  }, [isStreaming, flushStreamingText, scheduleInitialStreamingFlush, scheduleStreamingTextFlush]);
 
   // Subscribe to streaming tool-output preview updates. Like text streaming,
   // this writes chunks directly to DOM so large/fast tool output does not
@@ -1208,14 +1236,18 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   useEffect(() => {
     const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
 
-    const unsubToolOutput = streamingBuffer.subscribeToolOutput(flushStreamingToolOutput);
-    const timeoutId = isStreaming ? scheduleStreamingFlush(flushStreamingToolOutput) : null;
+    const unsubToolOutput = streamingBuffer.subscribeToolOutput(scheduleStreamingToolFlush);
+    const timeoutId = isStreaming ? scheduleInitialStreamingFlush(flushStreamingToolOutput) : null;
 
     return () => {
       if (timeoutId !== null) clearTimeout(timeoutId);
       unsubToolOutput();
+      if (streamingToolFlushRafRef.current !== null) {
+        cancelAnimationFrame(streamingToolFlushRafRef.current);
+        streamingToolFlushRafRef.current = null;
+      }
     };
-  }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleStreamingFlush]);
+  }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleInitialStreamingFlush, scheduleStreamingToolFlush]);
 
   // Reset DOM state when streaming stops
   useEffect(() => {
@@ -1377,7 +1409,12 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
             </div>
           ) : (
             <>
-              {renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment)}
+              <StaticTranscript
+                messages={messages}
+                displayVerbosity={displayVerbosity}
+                showBorders={showBorders}
+                onStageAttachment={onStageAttachment}
+              />
 
               {/* Streaming content */}
               {isStreaming && (

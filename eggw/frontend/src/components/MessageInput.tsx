@@ -81,27 +81,25 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const dragDepthRef = useRef(0);
   const router = useRouter();
   const queryClient = useQueryClient();
-  const {
-    currentThreadId,
-    isStreaming,
-    setIsStreaming,
-    setStreamingContent,
-    setStreamingReasoning,
-    setStreamingToolCalls,
-    setStreamingToolOutputs,
-    setStreamingKind,
-    setStreamingStartedAtMs,
-    setStreamingProviderRequest,
-    addSystemLog,
-    addMessage,
-    setTheme,
-    togglePanel,
-    toggleBorders,
-    setEnterMode,
-    setDisplayVerbosity,
-    activeUserCommand,
-    enterMode,
-  } = useAppStore();
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const isStreaming = useAppStore((state) => state.isStreaming);
+  const setIsStreaming = useAppStore((state) => state.setIsStreaming);
+  const setStreamingContent = useAppStore((state) => state.setStreamingContent);
+  const setStreamingReasoning = useAppStore((state) => state.setStreamingReasoning);
+  const setStreamingToolCalls = useAppStore((state) => state.setStreamingToolCalls);
+  const setStreamingToolOutputs = useAppStore((state) => state.setStreamingToolOutputs);
+  const setStreamingKind = useAppStore((state) => state.setStreamingKind);
+  const setStreamingStartedAtMs = useAppStore((state) => state.setStreamingStartedAtMs);
+  const setStreamingProviderRequest = useAppStore((state) => state.setStreamingProviderRequest);
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
+  const addMessage = useAppStore((state) => state.addMessage);
+  const setTheme = useAppStore((state) => state.setTheme);
+  const togglePanel = useAppStore((state) => state.togglePanel);
+  const toggleBorders = useAppStore((state) => state.toggleBorders);
+  const setEnterMode = useAppStore((state) => state.setEnterMode);
+  const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
+  const activeUserCommand = useAppStore((state) => state.activeUserCommand);
+  const enterMode = useAppStore((state) => state.enterMode);
 
   const { data: threadState } = useQuery({
     queryKey: ["threadState", currentThreadId],
@@ -138,7 +136,6 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     },
     onSuccess: () => {
       setStagedAttachments([]);
-      queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
       queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
       addSystemLog("Message sent", "success");
     },

@@ -36,7 +36,8 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   const [editName, setEditName] = useState(thread.name || "");
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
-  const { currentThreadId, addSystemLog } = useAppStore();
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
   const queryClient = useQueryClient();
 
   const { data: children } = useQuery({
@@ -245,7 +246,8 @@ function TreeNode({ thread, level }: TreeNodeProps) {
 export function ThreadTree() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { addSystemLog, setThreads } = useAppStore();
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
+  const setThreads = useAppStore((state) => state.setThreads);
 
   const { data: threads, isLoading } = useQuery({
     queryKey: ["rootThreads"],

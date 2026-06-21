@@ -39,22 +39,37 @@ function eventStartedAtMs(value: unknown): number {
 
 export function useSSE(threadId: string | null) {
   const eventSourceRef = useRef<EventSource | null>(null);
+  const messageRefreshTimeoutRef = useRef<number | null>(null);
   const queryClient = useQueryClient();
-  const {
-    setStreamingToolCalls,
-    setStreamingToolOutputs,
-    upsertStreamingToolOutput,
-    markStreamingToolStarted,
-    clearStreamingToolTimeout,
-    appendToolCallArguments,
-    setIsStreaming,
-    setStreamingModelKey,
-    setStreamingKind,
-    setStreamingStartedAtMs,
-    setStreamingProviderRequest,
-    setActiveUserCommand,
-    addSystemLog,
-  } = useAppStore();
+  const setStreamingToolCalls = useAppStore((state) => state.setStreamingToolCalls);
+  const setStreamingToolOutputs = useAppStore((state) => state.setStreamingToolOutputs);
+  const upsertStreamingToolOutput = useAppStore((state) => state.upsertStreamingToolOutput);
+  const markStreamingToolStarted = useAppStore((state) => state.markStreamingToolStarted);
+  const clearStreamingToolTimeout = useAppStore((state) => state.clearStreamingToolTimeout);
+  const appendToolCallArguments = useAppStore((state) => state.appendToolCallArguments);
+  const setIsStreaming = useAppStore((state) => state.setIsStreaming);
+  const setStreamingModelKey = useAppStore((state) => state.setStreamingModelKey);
+  const setStreamingKind = useAppStore((state) => state.setStreamingKind);
+  const setStreamingStartedAtMs = useAppStore((state) => state.setStreamingStartedAtMs);
+  const setStreamingProviderRequest = useAppStore((state) => state.setStreamingProviderRequest);
+  const setActiveUserCommand = useAppStore((state) => state.setActiveUserCommand);
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
+
+  const clearScheduledMessageRefresh = useCallback(() => {
+    if (messageRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(messageRefreshTimeoutRef.current);
+      messageRefreshTimeoutRef.current = null;
+    }
+  }, []);
+
+  const scheduleMessageRefresh = useCallback((delayMs = 750) => {
+    if (!threadId) return;
+    clearScheduledMessageRefresh();
+    messageRefreshTimeoutRef.current = window.setTimeout(() => {
+      messageRefreshTimeoutRef.current = null;
+      queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+    }, delayMs);
+  }, [clearScheduledMessageRefresh, queryClient, threadId]);
 
   const connect = useCallback(() => {
     if (!threadId) return;
@@ -63,6 +78,7 @@ export function useSSE(threadId: string | null) {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
+    clearScheduledMessageRefresh();
 
     // Clear streaming state
     streamingBuffer.clear();
@@ -102,6 +118,7 @@ export function useSSE(threadId: string | null) {
         }
 
         streamingBuffer.clear();
+        clearScheduledMessageRefresh();
         setStreamingToolCalls({});
         setStreamingToolOutputs({});
         setStreamingModelKey(modelKey);
@@ -194,7 +211,7 @@ export function useSSE(threadId: string | null) {
         setStreamingProviderRequest(null);
         setIsStreaming(false);
         addSystemLog("Streaming complete", "info");
-        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        scheduleMessageRefresh(100);
         queryClient.invalidateQueries({ queryKey: ["stats", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -210,7 +227,7 @@ export function useSSE(threadId: string | null) {
         const payload = data.payload || {};
         const role = payload.role || "unknown";
         addSystemLog(`Message created: ${role}`, "info");
-        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        scheduleMessageRefresh(750);
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
@@ -342,7 +359,7 @@ export function useSSE(threadId: string | null) {
         addSystemLog("Tool finished", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
-        queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+        scheduleMessageRefresh(250);
       } catch (err) {
         console.error("Failed to parse tool_call.finished:", err);
       }
@@ -403,7 +420,7 @@ export function useSSE(threadId: string | null) {
         const purpose = payload.purpose || "";
         if (purpose === "continue") {
           addSystemLog("Continue applied - refreshing", "info");
-          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+          scheduleMessageRefresh(0);
           queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
           queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
         }
@@ -415,6 +432,8 @@ export function useSSE(threadId: string | null) {
     return es;
   }, [
     threadId,
+    clearScheduledMessageRefresh,
+    scheduleMessageRefresh,
     setStreamingToolCalls,
     setStreamingToolOutputs,
     upsertStreamingToolOutput,
@@ -436,16 +455,18 @@ export function useSSE(threadId: string | null) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
-  }, []);
+    clearScheduledMessageRefresh();
+  }, [clearScheduledMessageRefresh]);
 
   useEffect(() => {
     const es = connect();
     return () => {
+      clearScheduledMessageRefresh();
       if (es) {
         es.close();
       }
     };
-  }, [connect]);
+  }, [clearScheduledMessageRefresh, connect]);
 
   return { connect, disconnect };
 }

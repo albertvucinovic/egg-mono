@@ -23,29 +23,27 @@ export default function ThreadPage() {
   const threadId = params.threadId as string;
 
   const queryClient = useQueryClient();
-  const {
-    currentThreadId,
-    setCurrentThreadId,
-    addSystemLog,
-    isStreaming,
-    streamingKind,
-    setIsStreaming,
-    setStreamingContent,
-    setStreamingReasoning,
-    setStreamingToolCalls,
-    setStreamingToolOutputs,
-    setStreamingKind,
-    setStreamingStartedAtMs,
-    setStreamingProviderRequest,
-    panelVisibility,
-    togglePanel,
-    showBorders,
-    toggleBorders,
-    enterMode,
-    setEnterMode,
-    displayVerbosity,
-    setDisplayVerbosity,
-  } = useAppStore();
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const setCurrentThreadId = useAppStore((state) => state.setCurrentThreadId);
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
+  const isStreaming = useAppStore((state) => state.isStreaming);
+  const streamingKind = useAppStore((state) => state.streamingKind);
+  const setIsStreaming = useAppStore((state) => state.setIsStreaming);
+  const setStreamingContent = useAppStore((state) => state.setStreamingContent);
+  const setStreamingReasoning = useAppStore((state) => state.setStreamingReasoning);
+  const setStreamingToolCalls = useAppStore((state) => state.setStreamingToolCalls);
+  const setStreamingToolOutputs = useAppStore((state) => state.setStreamingToolOutputs);
+  const setStreamingKind = useAppStore((state) => state.setStreamingKind);
+  const setStreamingStartedAtMs = useAppStore((state) => state.setStreamingStartedAtMs);
+  const setStreamingProviderRequest = useAppStore((state) => state.setStreamingProviderRequest);
+  const panelVisibility = useAppStore((state) => state.panelVisibility);
+  const togglePanel = useAppStore((state) => state.togglePanel);
+  const showBorders = useAppStore((state) => state.showBorders);
+  const toggleBorders = useAppStore((state) => state.toggleBorders);
+  const enterMode = useAppStore((state) => state.enterMode);
+  const setEnterMode = useAppStore((state) => state.setEnterMode);
+  const displayVerbosity = useAppStore((state) => state.displayVerbosity);
+  const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
   const [showHelp, setShowHelp] = useState(false);
   const [stagedAttachments, setStagedAttachments] = useState<AttachmentContentPart[]>([]);
   const stageAttachment = useCallback((attachment: AttachmentContentPart) => {
@@ -154,7 +152,7 @@ export default function ThreadPage() {
     queryKey: ["stats", threadId],
     queryFn: () => fetchTokenStats(threadId),
     enabled: !!threadId,
-    refetchInterval: isStreaming && streamingKind === "llm" ? 1000 : false,
+    refetchInterval: isStreaming && streamingKind === "llm" ? 2000 : false,
   });
 
   const contextHeaderText = formatTokenCount(tokenStats?.context_tokens ?? null);

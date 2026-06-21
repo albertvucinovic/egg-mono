@@ -11,7 +11,8 @@ interface ApprovalPanelProps {
 
 export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
   const queryClient = useQueryClient();
-  const { currentThreadId, addSystemLog } = useAppStore();
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
 
   // Tool calls are updated via SSE events - no polling needed
   // SSE uses db.path to ensure cross-process events (e.g., TUI approvals) are seen

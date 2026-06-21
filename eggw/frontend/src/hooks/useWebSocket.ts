@@ -7,7 +7,7 @@ import { useAppStore } from "@/lib/store";
 export function useWebSocket(threadId: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const { addSystemLog } = useAppStore();
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
 
   const connect = useCallback(() => {
     if (!threadId) return;
