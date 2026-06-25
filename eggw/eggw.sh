@@ -193,6 +193,15 @@ echo "║  Press Ctrl+C to stop                                        ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
+# Open Web UI in the default browser (skip with EGGW_NO_BROWSER=1)
+if [ "${EGGW_NO_BROWSER:-}" != "1" ]; then
+    case "$(uname -s)" in
+        Darwin)  open "http://localhost:$FRONTEND_PORT" ;;
+        Linux)   command -v xdg-open >/dev/null 2>&1 && xdg-open "http://localhost:$FRONTEND_PORT" &>/dev/null & ;;
+        CYGWIN*|MINGW*|MSYS*) start "http://localhost:$FRONTEND_PORT" &>/dev/null & ;;
+    esac
+fi
+
 # Wait for either process to exit
 set +e
 wait -n $BACKEND_PID $FRONTEND_PID 2>/dev/null
