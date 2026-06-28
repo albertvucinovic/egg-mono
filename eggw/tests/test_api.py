@@ -1724,6 +1724,42 @@ class TestMessageOperations:
         assert notice_messages
         assert notice_messages[0]["recovery_notice"] is True
 
+    def test_web_continue_does_not_interrupt_idle_scheduler_pending_ra1(self, client):
+        """A resident scheduler is not a live stream and must not cancel pending RA1."""
+        from eggthreads import append_message
+        from eggthreads.tool_state import discover_runner_actionable_cached
+
+        create_resp = client.post("/api/threads", json={"name": "Pending RA1 Continue"})
+        thread_id = create_resp.json()["id"]
+        append_message(core_state.db, thread_id, "user", "Hello")
+
+        # Simulate EggW's normal resident scheduler bookkeeping without
+        # creating an open_stream lease for the thread.  Before the fix,
+        # /continue treated this dictionary entry as "streaming" and called
+        # interrupt_thread(), which appended a purpose='llm' boundary and made
+        # the pending user message non-runnable.
+        core_state.active_schedulers[thread_id] = {"scheduler": object(), "task": object()}
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/continue"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert body["data"]["was_interrupted"] is False
+
+        interrupts = core_state.db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='control.interrupt'",
+            (thread_id,),
+        ).fetchall()
+        assert interrupts == []
+
+        ra = discover_runner_actionable_cached(core_state.db, thread_id)
+        assert ra is not None
+        assert ra.kind == "RA1_llm"
+
 
 class TestEventStreaming:
     """Test SSE event shaping for streaming UI clients."""

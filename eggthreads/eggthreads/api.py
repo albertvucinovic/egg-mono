@@ -405,6 +405,22 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
             # advisory tools.config event could not be copied.
             pass
 
+    # Notify event-stream consumers on the parent thread that its child list
+    # changed.  The children table is still the source of truth; this event is
+    # an observation used by live UIs such as EggW to refresh navigation without
+    # polling or requiring a browser reload.
+    try:
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=parent_id,
+            type_="thread.child_created",
+            payload={"parent_id": parent_id, "child_id": tid, "name": name},
+        )
+    except Exception:
+        # Child creation should not fail solely because a UI notification could
+        # not be recorded.
+        pass
+
     return tid
 
 
@@ -2390,14 +2406,66 @@ def diagnose_thread(db: ThreadsDB, thread_id: str) -> ThreadDiagnosis:
             issues.append("Thread ends with error message")
             details['last_error'] = last_content[:200]
 
+    # A pending RA1 turn can be explicitly cancelled by a Ctrl+C-style
+    # ``control.interrupt`` with ``purpose='llm'`` before a runner acquires a
+    # lease.  That is intentional for plain interrupt/cancel, but it leaves an
+    # otherwise normal thread looking deceptively healthy: the last effective
+    # provider-visible message is still a user/tool trigger, yet
+    # discover_runner_actionable() returns None because the RA1 boundary was
+    # advanced past that trigger.  Manual ``/continue`` without an explicit
+    # msg_id must diagnose that stuck state and reset the boundary to before
+    # the trigger, otherwise the user sees "last message is user" but the
+    # scheduler has no RA1 work to run.
+    if not issues:
+        latest_trigger_msg_id = None
+        latest_trigger_seq = None
+        latest_trigger_role = None
+        for msg_id, payload, ev_seq in reversed(messages):
+            if not isinstance(payload, dict):
+                continue
+            role = payload.get('role')
+            no_api = bool(payload.get('no_api'))
+            keep_user_turn = bool(payload.get('keep_user_turn'))
+            tool_calls = payload.get('tool_calls') or []
+            if role == 'user' and not tool_calls and not keep_user_turn and not no_api:
+                latest_trigger_msg_id = msg_id
+                latest_trigger_seq = ev_seq
+                latest_trigger_role = role
+                break
+            if role == 'tool' and not keep_user_turn and not no_api:
+                latest_trigger_msg_id = msg_id
+                latest_trigger_seq = ev_seq
+                latest_trigger_role = role
+                break
+            # Stop at the newest non-local, non-hidden provider message.  If
+            # it is not a trigger, the thread is not in the "last message is a
+            # user/tool trigger but RA1 is stuck" shape.
+            if not no_api:
+                break
+
+        if latest_trigger_msg_id is not None:
+            try:
+                from .tool_state import discover_runner_actionable_cached
+
+                ra = discover_runner_actionable_cached(db, thread_id)
+            except Exception:
+                ra = None
+            if ra is None:
+                issues.append("Last user/tool message is not runnable for RA1")
+                details['stuck_ra1_trigger_msg_id'] = latest_trigger_msg_id
+                details['stuck_ra1_trigger_event_seq'] = latest_trigger_seq
+                details['stuck_ra1_trigger_role'] = latest_trigger_role
+
     # Determine if thread is healthy and find continue point
     is_healthy = len(issues) == 0
     suggested_point = None
 
     if not is_healthy:
+        if details.get('stuck_ra1_trigger_msg_id'):
+            suggested_point = details.get('stuck_ra1_trigger_msg_id')
         # For consecutive assistants, we need to continue from BEFORE the first
         # consecutive assistant to remove all consecutive assistant messages
-        if consecutive_assistants and msg_before_first_consecutive:
+        elif consecutive_assistants and msg_before_first_consecutive:
             suggested_point = msg_before_first_consecutive
         else:
             # Fall back to general continue point detection
@@ -2935,6 +3003,7 @@ _SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES = {
     'thread.compaction_context_length',
     'thread.compaction_summary_in_progress',
     'thread.recovery',
+    'thread.child_created',
     'model.switch',
     'runtime.config',
     'sandbox.config',

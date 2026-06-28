@@ -76,6 +76,24 @@ def test_child_relationship_via_children_table(tmp_path) -> None:
     assert row[1] == child
 
 
+def test_create_child_thread_emits_parent_notification_event(tmp_path) -> None:
+    from eggthreads import create_child_thread
+
+    db, _ = _make_temp_db(tmp_path)
+    parent = "parent-notify"
+    db.create_thread(thread_id=parent, name="Parent", parent_id=None, depth=0)
+
+    child = create_child_thread(db, parent, name="Child")
+
+    row = db.conn.execute(
+        "SELECT type, payload_json FROM events WHERE thread_id=? AND type='thread.child_created'",
+        (parent,),
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row[1])
+    assert payload == {"parent_id": parent, "child_id": child, "name": "Child"}
+
+
 def test_append_event_and_max_event_seq(tmp_path) -> None:
     db, _ = _make_temp_db(tmp_path)
 

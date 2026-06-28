@@ -24,7 +24,7 @@ from eggthreads import (
     is_thread_continuable,
     wait_thread_settled,
 )
-from eggthreads.api import append_continue_recovery_notice, append_recovery_notice, list_active_threads, collect_subtree, get_thread_recovery, set_thread_recovery
+from eggthreads.api import append_continue_recovery_notice, append_recovery_notice, interrupt_thread, list_active_threads, collect_subtree, get_thread_recovery, set_thread_recovery
 from eggthreads.tool_state import discover_runner_actionable, _last_stream_close_seq
 
 
@@ -163,6 +163,35 @@ class TestRA1BoundaryReset:
         ra = discover_runner_actionable(db, tid)
         assert ra is not None, "RA1 should trigger after continue_thread resets boundary"
         assert ra.kind == "RA1_llm"
+
+    def test_continue_thread_repairs_cancelled_pending_ra1(self, tmp_path):
+        """Auto-detect /continue should recover a pending RA1 cancelled before lease acquisition."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        user_msg_id = append_message(db, tid, "user", "Hello")
+
+        assert discover_runner_actionable(db, tid) is not None
+
+        # Simulate Ctrl+C-style cancellation while the user message is only
+        # pending (no open_stream lease yet).  This advances the RA1 boundary
+        # past the user message without creating an assistant/system result.
+        interrupt_thread(db, tid, reason="continue")
+        assert discover_runner_actionable(db, tid) is None
+
+        diagnosis = diagnose_thread(db, tid)
+        assert diagnosis.is_healthy is False
+        assert diagnosis.suggested_continue_point == user_msg_id
+        assert diagnosis.details["stuck_ra1_trigger_msg_id"] == user_msg_id
+
+        result = continue_thread(db, tid)
+        assert result.success is True
+        assert result.continue_from_msg_id == user_msg_id
+
+        ra = discover_runner_actionable(db, tid)
+        assert ra is not None
+        assert ra.kind == "RA1_llm"
+        assert ra.msg_id == user_msg_id
 
 
 class TestSkippedMessages:

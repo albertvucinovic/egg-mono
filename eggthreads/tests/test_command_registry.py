@@ -651,13 +651,15 @@ def test_thread_ui_continue_appends_recovery_notice(tmp_path) -> None:
     append_message(db, thread_id, "system", "LLM/runner error: provider exploded")
 
     logs: list[str] = []
+    started: list[str] = []
     registry = create_default_command_registry()
-    registry.execute(
+    result = registry.execute(
         "continue",
         CommandContext(
             db=db,
             current_thread=thread_id,
             log_system=logs.append,
+            start_scheduler=started.append,
             print_current_thread=lambda **kwargs: None,
         ),
         user_msg_id,
@@ -678,6 +680,8 @@ def test_thread_ui_continue_appends_recovery_notice(tmp_path) -> None:
     assert "manual /continue" in notice["content"]
     assert "Previous error: LLM/runner error: provider exploded" in notice["content"]
     assert any("Continued from message" in message for message in logs)
+    assert started == [thread_id]
+    assert result.start_schedulers == (thread_id,)
 
 
 def test_subagent_commands_are_registered_handlers(tmp_path, monkeypatch) -> None:
