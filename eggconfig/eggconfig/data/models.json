@@ -248,6 +248,19 @@
             "output_tokens": 30
           }
         },
+        "Pro: GPT-5.6 xhigh": {
+          "model_name": "gpt-5.6",
+          "max_tokens": 300000,
+          "api_type": "responses",
+          "parameters": {
+            "reasoning_effort": "xhigh"
+          },
+          "cost": {
+            "input_tokens": 5,
+            "cached_input": 0.5,
+            "output_tokens": 30
+          }
+        },
         "Pro: GPT-5.3-Codex-Spark": {
           "model_name": "gpt-5.3-codex-spark",
           "max_tokens": 300000,
