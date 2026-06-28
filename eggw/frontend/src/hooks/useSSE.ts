@@ -412,6 +412,26 @@ export function useSSE(threadId: string | null) {
       }
     });
 
+    // Child threads can be created by LLM tools, slash commands, runtime
+    // setup, or another Egg frontend.  The parent receives a lightweight
+    // thread.child_created event; refresh active tree/children queries so the
+    // Children panel and thread tree update without a page reload.
+    es.addEventListener("thread.child_created", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        const parentId = typeof payload.parent_id === "string" && payload.parent_id ? payload.parent_id : threadId;
+        const childId = typeof payload.child_id === "string" ? payload.child_id : "";
+        addSystemLog(`Child thread linked${childId ? `: ${childId.slice(-8)}` : ""}`, "info");
+        queryClient.invalidateQueries({ queryKey: ["threadChildren", parentId] });
+        queryClient.invalidateQueries({ queryKey: ["thread", parentId] });
+        queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
+        queryClient.invalidateQueries({ queryKey: ["threads"] });
+      } catch (err) {
+        console.error("Failed to parse thread.child_created:", err);
+      }
+    });
+
     // Handle control.interrupt events (e.g., from delayed /continue)
     es.addEventListener("control.interrupt", (e) => {
       try {

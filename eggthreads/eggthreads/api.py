@@ -405,6 +405,22 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
             # advisory tools.config event could not be copied.
             pass
 
+    # Notify event-stream consumers on the parent thread that its child list
+    # changed.  The children table is still the source of truth; this event is
+    # an observation used by live UIs such as EggW to refresh navigation without
+    # polling or requiring a browser reload.
+    try:
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=parent_id,
+            type_="thread.child_created",
+            payload={"parent_id": parent_id, "child_id": tid, "name": name},
+        )
+    except Exception:
+        # Child creation should not fail solely because a UI notification could
+        # not be recorded.
+        pass
+
     return tid
 
 
@@ -2935,6 +2951,7 @@ _SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES = {
     'thread.compaction_context_length',
     'thread.compaction_summary_in_progress',
     'thread.recovery',
+    'thread.child_created',
     'model.switch',
     'runtime.config',
     'sandbox.config',
