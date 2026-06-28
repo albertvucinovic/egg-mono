@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from eggthreads import (
@@ -26,11 +27,27 @@ from eggthreads.api import append_continue_recovery_notice
 
 from ..models import CommandResponse
 from .. import core
-from ..core import (
-    get_thread_root_id,
-    ensure_scheduler_for,
-)
+from ..core import ensure_scheduler_for
 from ..system_prompt import append_root_system_prompt
+
+
+def _thread_has_active_lease(thread_id: str) -> bool:
+    """Return True only when this exact thread has a live runner lease."""
+
+    try:
+        row = core.db.current_open(thread_id)
+    except Exception:
+        return False
+    if not row:
+        return False
+    try:
+        lease_until = row["lease_until"]
+    except Exception:
+        lease_until = None
+    if not lease_until:
+        return False
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return str(lease_until) > now_iso
 
 
 async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
@@ -325,10 +342,12 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
     msg_id = args.named.get('msg_id') or args.positional_or(0)
     delay_sec = args.get_float('wait')
 
-    # Auto-interrupt if thread is streaming
-    root_id = get_thread_root_id(thread_id) if thread_id else None
+    # Auto-interrupt only if this exact thread is currently streaming.  A
+    # running subtree scheduler is not the same thing as a live thread lease:
+    # schedulers stay resident while idle, and treating that as "streaming"
+    # can cancel a pending RA1 turn by appending a purpose='llm' interrupt.
     was_interrupted = False
-    if root_id and root_id in core.active_schedulers:
+    if _thread_has_active_lease(thread_id):
         # Thread is streaming - interrupt first
         interrupt_thread(core.db, thread_id, reason="continue")
         was_interrupted = True
@@ -349,6 +368,7 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
             result = continue_thread(core.db, thread_id, msg_id=msg_id)
             if result.success:
                 append_continue_recovery_notice(core.db, thread_id, result)
+                ensure_scheduler_for(thread_id)
 
         asyncio.create_task(delayed_continue())
         return CommandResponse(
@@ -365,6 +385,7 @@ async def cmd_continue(thread_id: str, command_arg: str) -> CommandResponse:
 
     if result.success:
         append_continue_recovery_notice(core.db, thread_id, result)
+        ensure_scheduler_for(thread_id)
         msg = result.message
         if was_interrupted:
             msg = f"Interrupted streaming. {msg}"

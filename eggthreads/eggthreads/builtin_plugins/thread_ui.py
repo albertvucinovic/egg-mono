@@ -355,6 +355,7 @@ def continue_thread_command(context: Any, arg: str):
             result = continue_thread(db, current_thread, msg_id=msg_id)
             if result.success:
                 append_continue_recovery_notice(db, current_thread, result)
+                _start_scheduler(context, current_thread)
                 _log(context, f"After {delay_sec}s delay: {result.message}")
                 _print_current_thread(context, heading=f"Continued thread: {current_thread}")
             else:
@@ -367,9 +368,10 @@ def continue_thread_command(context: Any, arg: str):
     result = continue_thread(db, current_thread, msg_id=msg_id)
     if result.success:
         append_continue_recovery_notice(db, current_thread, result)
+        _start_scheduler(context, current_thread)
         _log(context, result.message)
         _print_current_thread(context, heading=f"Continued thread: {current_thread}")
-        return CommandResult(clear_input=True)
+        return CommandResult(clear_input=True, start_schedulers=(current_thread,))
     _log(context, f"/continue error: {result.message}")
     return CommandResult(clear_input=False)
 
