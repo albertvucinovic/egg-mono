@@ -1301,6 +1301,13 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   const genericStreamingTimeText = streamingKind !== "llm"
     ? elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
     : null;
+  // Match terminal Egg's display-verbosity intent for live tool details while
+  // keeping web-only access to the still-streaming body. Medium verbosity
+  // starts collapsed (header/preview only), but leaves <details> uncontrolled
+  // so the user can expand arguments/output without it snapping shut on every
+  // streaming token. Max/min stay open by default because live tokens should
+  // be visible even when historical hidden details are summarized.
+  const streamingToolDetailsOpen = displayVerbosity === "medium" ? undefined : true;
 
   useEffect(() => {
     if (!shouldUpdateTiming) return;
@@ -1861,8 +1868,8 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                           const elapsedText = tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
                           return (
                             <details
-                              key={toolId}
-                              open
+                              key={`${displayVerbosity}-${toolId}`}
+                              open={streamingToolDetailsOpen}
                               className={`rounded ${showBorders ? 'border' : ''}`}
                               style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
                             >
@@ -1872,6 +1879,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                                   {toolId.slice(-8)}
                                 </span>
                                 <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
+                                {displayVerbosity === "medium" && (
+                                  <span className="text-xs" style={{ color: "var(--muted)" }}>
+                                    expand to inspect output
+                                  </span>
+                                )}
                                 {elapsedText && (
                                   <span data-testid="streaming-tool-elapsed-summary" className="text-xs" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
                                     {elapsedText}
@@ -1947,11 +1959,12 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                             // Keep as string
                           }
                           const script = isBash && parsedArgs?.script;
+                          const argsPreview = oneLinePreview(script ? `$ ${script}` : (tc.arguments || ""));
 
                           return (
                             <details
-                              key={tcId}
-                              open
+                              key={`${displayVerbosity}-${tcId}`}
+                              open={streamingToolDetailsOpen}
                               className={`rounded ${showBorders ? 'border' : ''}`}
                               style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
                             >
@@ -1961,6 +1974,16 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                                   {tcId.slice(-8)}
                                 </span>
                                 <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
+                                {displayVerbosity === "medium" && argsPreview && (
+                                  <span className="text-xs font-mono" style={{ color: "var(--foreground)" }}>
+                                    {argsPreview}
+                                  </span>
+                                )}
+                                {displayVerbosity === "medium" && (
+                                  <span className="text-xs" style={{ color: "var(--muted)" }}>
+                                    expand to inspect args
+                                  </span>
+                                )}
                               </summary>
                               <div className="px-2 pb-2">
                                 {isBash && script ? (
