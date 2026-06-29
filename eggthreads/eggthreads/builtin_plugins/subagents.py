@@ -41,14 +41,14 @@ def spawn_parent_id(args: Dict[str, Any]) -> str:
     # Direct/local callers provide parent_thread_id explicitly.
     # Model-initiated calls inherit the current thread via _thread_id, which
     # ToolRegistry.execute injects from runner context.
-    return (args.get("parent_thread_id") or args.get("_thread_id") or "").strip()
+    return (args.get("_thread_id") or args.get("parent_thread_id") or "").strip()
 
 
 def spawn_initial_model_key(args: Dict[str, Any]) -> str | None:
     # The model-facing spawn tools no longer expose model selection.
     # Model-initiated calls therefore inherit from the parent thread.
     # Direct/local callers that explicitly pass parent_thread_id may override.
-    if "parent_thread_id" not in args:
+    if "parent_thread_id" not in args or args.get("_thread_id"):
         return None
     return clean_optional_text(args.get("initial_model_key"))
 

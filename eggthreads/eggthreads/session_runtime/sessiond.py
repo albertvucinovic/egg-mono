@@ -7,8 +7,10 @@ import ast
 import contextlib
 import io
 import json
+import multiprocessing as mp
 import os
 import select
+import signal
 import subprocess
 import sys
 import time
@@ -19,7 +21,114 @@ from typing import Any, Dict, List, Optional
 
 
 PY_REPLS: Dict[str, Dict[str, Any]] = {}
+PY_WORKERS: Dict[str, tuple[mp.Process, Any]] = {}
 BASH_REPLS: Dict[str, subprocess.Popen] = {}
+
+
+def _python_worker_loop(conn) -> None:
+    """Persistent per-REPL Python worker.
+
+    Keeping Python state inside this worker gives us both persistence and a
+    killable timeout boundary: sessiond can terminate the whole worker process
+    if one eval runs too long, then recreate a fresh REPL on the next eval.
+    """
+
+    try:
+        os.setsid()
+    except Exception:
+        pass
+    try:
+        conn.send({"ready": True, "pgid": os.getpgrp()})
+    except Exception:
+        return
+    globs: Dict[str, Any] = {"__name__": "__egg_repl__"}
+    while True:
+        try:
+            req = conn.recv()
+        except EOFError:
+            break
+        except BaseException:
+            break
+        if not isinstance(req, dict):
+            continue
+        if req.get("op") == "stop":
+            break
+        code = str(req.get("code") or "")
+        bridge_dir = Path(str(req.get("bridge_dir") or "/egg-bridge"))
+        token = str(req.get("token") or "")
+        runtime_dir = Path(str(req.get("runtime_dir") or "/egg-runtime"))
+        thread_context_json = req.get("thread_context_json") if isinstance(req.get("thread_context_json"), str) else None
+        try:
+            output = _execute_python_inline(code, globs, bridge_dir, token, runtime_dir, thread_context_json)
+            conn.send({"ok": True, "output": output})
+        except BaseException as e:
+            stderr = io.StringIO()
+            traceback.print_exc(file=stderr)
+            try:
+                conn.send({"ok": False, "output": format_output("", stderr.getvalue() or f"{type(e).__name__}: {e}")})
+            except Exception:
+                break
+
+
+def _get_python_worker(repl_name: str) -> tuple[mp.Process, Any]:
+    existing = PY_WORKERS.get(repl_name)
+    if existing is not None:
+        proc, conn = existing
+        if proc.is_alive():
+            return proc, conn
+        try:
+            conn.close()
+        except Exception:
+            pass
+        PY_WORKERS.pop(repl_name, None)
+    parent_conn, child_conn = mp.Pipe(duplex=True)
+    proc = mp.Process(target=_python_worker_loop, args=(child_conn,), daemon=True)
+    proc.start()
+    try:
+        child_conn.close()
+    except Exception:
+        pass
+    try:
+        if not parent_conn.poll(5.0):
+            raise RuntimeError("Python worker did not become ready")
+        ready = parent_conn.recv()
+        if not (isinstance(ready, dict) and ready.get("ready")):
+            raise RuntimeError("Python worker returned an invalid ready message")
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            parent_conn.close()
+        except Exception:
+            pass
+        raise
+    PY_WORKERS[repl_name] = (proc, parent_conn)
+    return proc, parent_conn
+
+
+def _kill_python_worker(repl_name: str) -> None:
+    existing = PY_WORKERS.pop(repl_name, None)
+    if existing is None:
+        return
+    proc, conn = existing
+    try:
+        conn.close()
+    except Exception:
+        pass
+    if proc.is_alive():
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    try:
+        proc.join(1.0)
+    except Exception:
+        pass
 
 
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -159,8 +268,14 @@ def install_thread_context_helpers(globs: Dict[str, Any], context: Dict[str, Any
     globs["reload_thread_context"] = reload_thread_context
 
 
-def execute_python(code: str, repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path, thread_context_json: str | None = None) -> str:
-    globs = PY_REPLS.setdefault(repl_name or "default", {"__name__": "__egg_repl__"})
+def _execute_python_inline(
+    code: str,
+    globs: Dict[str, Any],
+    bridge_dir: Path,
+    token: str,
+    runtime_dir: Path,
+    thread_context_json: str | None = None,
+) -> str:
     if thread_context_json:
         try:
             context = json.loads(thread_context_json)
@@ -202,6 +317,61 @@ def execute_python(code: str, repl_name: str, bridge_dir: Path, token: str, runt
     return format_output(stdout.getvalue(), stderr.getvalue())
 
 
+def execute_python(
+    code: str,
+    repl_name: str,
+    bridge_dir: Path,
+    token: str,
+    runtime_dir: Path,
+    thread_context_json: str | None = None,
+    timeout_sec: float | None = None,
+) -> str:
+    repl_key = repl_name or "default"
+    try:
+        timeout = float(timeout_sec) if timeout_sec is not None else None
+    except Exception:
+        timeout = None
+    if timeout is not None and timeout <= 0:
+        timeout = None
+
+    try:
+        proc, conn = _get_python_worker(repl_key)
+    except Exception as e:
+        return f"Error: Python worker failed to start: {type(e).__name__}: {e}"
+    try:
+        conn.send({
+            "op": "eval",
+            "code": code or "",
+            "bridge_dir": str(bridge_dir),
+            "token": token,
+            "runtime_dir": str(runtime_dir),
+            "thread_context_json": thread_context_json,
+        })
+    except Exception as e:
+        _kill_python_worker(repl_key)
+        return f"Error: Python worker failed: {type(e).__name__}: {e}"
+
+    start = time.time()
+    while True:
+        if conn.poll(0.05):
+            try:
+                payload = conn.recv()
+            except Exception as e:
+                _kill_python_worker(repl_key)
+                return f"Error: Python worker failed: {type(e).__name__}: {e}"
+            if isinstance(payload, dict) and payload.get("ok"):
+                return str(payload.get("output") or "")
+            if isinstance(payload, dict):
+                return str(payload.get("output") or "Error: Python worker failed.")
+            return "Error: Python worker returned an invalid result."
+        if not proc.is_alive():
+            _kill_python_worker(repl_key)
+            return "Error: Python worker exited before returning a result."
+        if timeout is not None and (time.time() - start) >= timeout:
+            _kill_python_worker(repl_key)
+            return f"--- TIMEOUT ---\nPython REPL timed out after {timeout} seconds"
+
+
 def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) -> subprocess.Popen:
     proc = BASH_REPLS.get(repl_name)
     if proc is not None and proc.poll() is None:
@@ -218,6 +388,7 @@ def _bash_proc(repl_name: str, bridge_dir: Path, token: str, runtime_dir: Path) 
         text=True,
         bufsize=1,
         env=env,
+        start_new_session=True,
     )
     BASH_REPLS[repl_name] = proc
     return proc
@@ -244,7 +415,10 @@ def execute_bash(script: str, repl_name: str, bridge_dir: Path, token: str, runt
     lines: list[str] = []
     while True:
         if timeout_sec is not None and (time.time() - start) >= timeout_sec:
-            proc.kill()
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
             BASH_REPLS.pop(repl_name, None)
             return f"--- TIMEOUT ---\nBash REPL timed out after {timeout_sec} seconds"
         ready, _, _ = select.select([proc.stdout], [], [], 0.05)
@@ -287,6 +461,7 @@ def process_eval_request(req_path: Path, bridge_dir: Path, runtime_dir: Path) ->
                 str(payload.get("token") or ""),
                 runtime_dir,
                 str(payload.get("thread_context_json") or "") or None,
+                payload.get("timeout_sec"),
             )
         elif language == "bash":
             output = execute_bash(

@@ -75,6 +75,7 @@ def test_runner_output_policy_artifacts_long_output_and_read_tool_reads_chunk(tm
 
 def test_runner_artifacts_large_python_stdout(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     tid = ts.create_root_thread(db, name="root")

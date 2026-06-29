@@ -75,6 +75,9 @@ def test_safety_constraints(db):
     outside = str(cwd.parent / ("_not_" + cwd.name + "_safety_test"))
     with pytest.raises(ValueError, match="must be a subdirectory"):
         set_thread_working_directory(db, root_tid, outside)
+    prefix_sibling = str(cwd.parent / (cwd.name + "_evil"))
+    with pytest.raises(ValueError, match="must be a subdirectory"):
+        set_thread_working_directory(db, root_tid, prefix_sibling)
     egg_dir = Path.cwd() / ".egg"
     egg_dir.mkdir(exist_ok=True)
     with pytest.raises(ValueError, match="cannot be inside the .egg system folder"):

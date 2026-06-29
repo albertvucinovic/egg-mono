@@ -21,6 +21,7 @@ from eggthreads.tools import _should_emit_tool_summary
 def _import_eggthreads(monkeypatch, tmp_path: Path):
     """Return the eggthreads module with cwd set to tmp_path."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
     return _eggthreads_mod
 
 

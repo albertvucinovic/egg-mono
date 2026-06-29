@@ -124,6 +124,27 @@ def test_spawn_agent_honors_parent_share_with_children_default(tmp_path, monkeyp
     assert cfg.session_id == sid
 
 
+def test_spawn_agent_does_not_share_parent_session_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.append_message(db, parent, "system", "system")
+    ts.enable_thread_session(db, parent, provider="memory", share_with_children_default=False)
+
+    child = create_default_tools().execute(
+        "spawn_agent",
+        {
+            "parent_thread_id": parent,
+            "context_text": "do child work",
+            "label": "child",
+        },
+    )
+
+    cfg = ts.get_thread_session_config(db, child)
+    assert cfg.enabled is False
+    assert cfg.session_id is None
+
+
 def test_spawn_agent_share_session_does_not_share_repl_by_default(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)

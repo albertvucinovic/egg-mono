@@ -32,7 +32,7 @@ def test_memory_repl_generated_tool_wrapper_supports_from_import(tmp_path, monke
         drive_runtime_tools=True,
     )
 
-    assert "Error: python_repl requires thread context." in out
+    assert "reserved tool context" in out
     assert "ImportError" not in out
 
 

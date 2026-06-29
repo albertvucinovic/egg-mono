@@ -3647,7 +3647,9 @@ def set_thread_working_directory(db: ThreadsDB, thread_id: str, working_dir: str
     cwd = Path.cwd().resolve()
     target = Path(working_dir).resolve()
     
-    if not str(target).startswith(str(cwd)):
+    try:
+        target.relative_to(cwd)
+    except ValueError:
          raise ValueError(f"Working directory {working_dir} must be a subdirectory of {cwd}")
 
     if ".egg" in target.parts:
