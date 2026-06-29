@@ -539,6 +539,148 @@ test.describe('Streaming', () => {
   });
 });
 
+test.describe('Live Tool Streaming', () => {
+  test('keeps tool arguments visible while the tool is running', async ({ page }) => {
+    const threadId = 'running-tool-args-thread';
+    const toolCallId = 'call-running-tool-args';
+
+    await page.addInitScript(({ tcId }) => {
+      class MockEventSource {
+        url: string;
+        readyState = 1;
+        onopen: ((event: Event) => void) | null = null;
+        onerror: ((event: Event) => void) | null = null;
+        private listeners: Record<string, Array<(event: MessageEvent) => void>> = {};
+
+        constructor(url: string) {
+          this.url = url;
+          window.setTimeout(() => {
+            this.onopen?.(new Event('open'));
+            this.dispatch('stream.open', {
+              event_type: 'stream.open',
+              ts: new Date().toISOString(),
+              payload: { stream_kind: 'tool' },
+            });
+            this.dispatch('tool_call.execution_started', {
+              event_type: 'tool_call.execution_started',
+              ts: new Date().toISOString(),
+              payload: {
+                tool_call_id: tcId,
+                name: 'bash',
+                arguments: JSON.stringify({ script: 'echo visible args; sleep 30', timeout: 300 }),
+                timeout: 300,
+              },
+            });
+          }, 25);
+        }
+
+        addEventListener(type: string, listener: (event: MessageEvent) => void) {
+          this.listeners[type] = [...(this.listeners[type] || []), listener];
+        }
+
+        removeEventListener(type: string, listener: (event: MessageEvent) => void) {
+          this.listeners[type] = (this.listeners[type] || []).filter((item) => item !== listener);
+        }
+
+        close() {
+          this.readyState = 2;
+        }
+
+        private dispatch(type: string, data: unknown) {
+          const event = new MessageEvent(type, { data: JSON.stringify(data) });
+          for (const listener of this.listeners[type] || []) listener(event);
+        }
+      }
+
+      (window as unknown as { EventSource: typeof EventSource }).EventSource = MockEventSource as unknown as typeof EventSource;
+    }, { tcId: toolCallId });
+
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
+    });
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: [{ id: 'user-before-running-tool', role: 'user', content: 'run slow tool', content_text: 'run slow tool' }],
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          input_tokens: 0,
+          output_tokens: 0,
+          reasoning_tokens: 0,
+          cached_tokens: 0,
+          context_tokens: 0,
+          full_thread_tokens: 0,
+          total_tokens: 0,
+          cost_usd: 0,
+        },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { enabled: false, effective: false, available: false, user_control_enabled: true },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { state: 'running', active_get_user_wait: false },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: false } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { id: threadId, name: 'Running Tool Args', has_children: false },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/roots`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: [{ id: threadId, name: 'Running Tool Args', has_children: false }],
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/models`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { models: [] } });
+    });
+    await page.route(`${TEST_API_BASE}/api/image-models`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { models: [] } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: [{ id: threadId, name: 'Running Tool Args', has_children: false }],
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+
+    await expect(page.getByTestId('chat-panel')).toContainText('Tool', { timeout: 5000 });
+    await expect(page.getByTestId('chat-panel')).toContainText('bash', { timeout: 5000 });
+    await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30', { timeout: 5000 });
+    await expect(page.getByTestId('chat-panel')).toContainText('streaming output...', { timeout: 5000 });
+  });
+});
+
 test.describe('Settings and Controls', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

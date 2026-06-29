@@ -113,6 +113,7 @@ interface AppState {
   // Streaming tool calls (tool_call_id -> {name, arguments})
   streamingToolCalls: Record<string, { name: string; arguments: string }>;
   setStreamingToolCalls: (tcs: Record<string, { name: string; arguments: string }>) => void;
+  upsertStreamingToolCall: (tcId: string, name: string, args: string) => void;
   appendToolCallArguments: (tcId: string, name: string, argsDelta: string) => void;
 
   // Streaming tool output previews (tool_call_id -> metadata; text lives in streamingBuffer)
@@ -233,6 +234,20 @@ export const useAppStore = create<AppState>((set) => ({
   // Streaming tool calls
   streamingToolCalls: {},
   setStreamingToolCalls: (tcs) => set({ streamingToolCalls: tcs }),
+  upsertStreamingToolCall: (tcId, name, args) =>
+    set((state) => {
+      const existing = state.streamingToolCalls[tcId] || { name: "", arguments: "" };
+      const nextArgs = args && args.length >= existing.arguments.length ? args : existing.arguments;
+      return {
+        streamingToolCalls: {
+          ...state.streamingToolCalls,
+          [tcId]: {
+            name: name || existing.name,
+            arguments: nextArgs,
+          },
+        },
+      };
+    }),
   appendToolCallArguments: (tcId, name, argsDelta) =>
     set((state) => {
       const existing = state.streamingToolCalls[tcId] || { name: "", arguments: "" };

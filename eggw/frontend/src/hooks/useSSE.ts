@@ -29,6 +29,30 @@ function timeoutFromPayload(payload: Record<string, unknown>): number | null {
   return null;
 }
 
+function stringifyToolArguments(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function toolCallArgumentsFromPayload(payload: Record<string, unknown>): string {
+  if (Object.prototype.hasOwnProperty.call(payload, "arguments")) {
+    return stringifyToolArguments(payload.arguments);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "args")) {
+    return stringifyToolArguments(payload.args);
+  }
+  const fn = payload.function;
+  if (fn && typeof fn === "object" && Object.prototype.hasOwnProperty.call(fn, "arguments")) {
+    return stringifyToolArguments((fn as Record<string, unknown>).arguments);
+  }
+  return "";
+}
+
 function eventStartedAtMs(value: unknown): number {
   if (typeof value !== "string" || !value.trim()) return Date.now();
   const raw = value.trim();
@@ -46,6 +70,7 @@ export function useSSE(threadId: string | null) {
   const upsertStreamingToolOutput = useAppStore((state) => state.upsertStreamingToolOutput);
   const markStreamingToolStarted = useAppStore((state) => state.markStreamingToolStarted);
   const clearStreamingToolTimeout = useAppStore((state) => state.clearStreamingToolTimeout);
+  const upsertStreamingToolCall = useAppStore((state) => state.upsertStreamingToolCall);
   const appendToolCallArguments = useAppStore((state) => state.appendToolCallArguments);
   const setIsStreaming = useAppStore((state) => state.setIsStreaming);
   const setStreamingModelKey = useAppStore((state) => state.setStreamingModelKey);
@@ -246,7 +271,13 @@ export function useSSE(threadId: string | null) {
         setStreamingKind("tool");
         setIsStreaming(true);
         if (toolId) {
-          markStreamingToolStarted(String(toolId), String(toolName || "tool"), eventStartedAtMs(data.ts), timeoutSec);
+          const toolIdText = String(toolId);
+          const toolNameText = String(toolName || "tool");
+          const args = toolCallArgumentsFromPayload(payload);
+          markStreamingToolStarted(toolIdText, toolNameText, eventStartedAtMs(data.ts), timeoutSec);
+          if (args) {
+            upsertStreamingToolCall(toolIdText, toolNameText, args);
+          }
         }
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
@@ -459,6 +490,7 @@ export function useSSE(threadId: string | null) {
     upsertStreamingToolOutput,
     markStreamingToolStarted,
     clearStreamingToolTimeout,
+    upsertStreamingToolCall,
     appendToolCallArguments,
     setIsStreaming,
     setStreamingModelKey,

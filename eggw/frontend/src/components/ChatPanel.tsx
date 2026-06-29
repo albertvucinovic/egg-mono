@@ -1860,6 +1860,61 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                       }}
                       />
 
+                      {/* Streaming tool calls */}
+                      {Object.keys(streamingToolCalls).length > 0 && (
+                      <div className="mt-2 space-y-2">
+                        {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
+                          const isBash = tc.name === "bash";
+                          let parsedArgs: any = tc.arguments;
+                          try {
+                            parsedArgs = JSON.parse(tc.arguments);
+                          } catch {
+                            // Keep as string
+                          }
+                          const script = isBash && parsedArgs?.script;
+                          const argsPreview = oneLinePreview(script ? `$ ${script}` : (tc.arguments || ""));
+
+                          return (
+                            <details
+                              key={`${displayVerbosity}-${tcId}`}
+                              open={streamingToolDetailsOpen}
+                              className={`rounded ${showBorders ? 'border' : ''}`}
+                              style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
+                            >
+                              <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
+                                <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
+                                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                                  {tcId.slice(-8)}
+                                </span>
+                                <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
+                                {displayVerbosity === "medium" && argsPreview && (
+                                  <span className="text-xs font-mono" style={{ color: "var(--foreground)" }}>
+                                    {argsPreview}
+                                  </span>
+                                )}
+                                {displayVerbosity === "medium" && (
+                                  <span className="text-xs" style={{ color: "var(--muted)" }}>
+                                    expand to inspect args
+                                  </span>
+                                )}
+                              </summary>
+                              <div className="px-2 pb-2">
+                                {isBash && script ? (
+                                  <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
+                                    $ {script}
+                                  </pre>
+                                ) : (
+                                  <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                                    {tc.arguments || "..."}
+                                  </pre>
+                                )}
+                              </div>
+                            </details>
+                          );
+                        })}
+                      </div>
+                      )}
+
                       {/* Streaming tool output preview */}
                       {Object.keys(streamingToolOutputs).length > 0 && (
                       <div className="mt-2 space-y-2">
@@ -1947,60 +2002,6 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                       </div>
                       )}
 
-                      {/* Streaming tool calls */}
-                      {Object.keys(streamingToolCalls).length > 0 && (
-                      <div className="mt-2 space-y-2">
-                        {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
-                          const isBash = tc.name === "bash";
-                          let parsedArgs: any = tc.arguments;
-                          try {
-                            parsedArgs = JSON.parse(tc.arguments);
-                          } catch {
-                            // Keep as string
-                          }
-                          const script = isBash && parsedArgs?.script;
-                          const argsPreview = oneLinePreview(script ? `$ ${script}` : (tc.arguments || ""));
-
-                          return (
-                            <details
-                              key={`${displayVerbosity}-${tcId}`}
-                              open={streamingToolDetailsOpen}
-                              className={`rounded ${showBorders ? 'border' : ''}`}
-                              style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
-                            >
-                              <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                                <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
-                                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-                                  {tcId.slice(-8)}
-                                </span>
-                                <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
-                                {displayVerbosity === "medium" && argsPreview && (
-                                  <span className="text-xs font-mono" style={{ color: "var(--foreground)" }}>
-                                    {argsPreview}
-                                  </span>
-                                )}
-                                {displayVerbosity === "medium" && (
-                                  <span className="text-xs" style={{ color: "var(--muted)" }}>
-                                    expand to inspect args
-                                  </span>
-                                )}
-                              </summary>
-                              <div className="px-2 pb-2">
-                                {isBash && script ? (
-                                  <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-                                    $ {script}
-                                  </pre>
-                                ) : (
-                                  <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                                    {tc.arguments || "..."}
-                                  </pre>
-                                )}
-                              </div>
-                            </details>
-                          );
-                        })}
-                      </div>
-                      )}
                   </>
               </div>
             )}

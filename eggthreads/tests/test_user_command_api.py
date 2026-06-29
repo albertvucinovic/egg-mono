@@ -298,6 +298,67 @@ def test_runner_publishes_user_tool_result_without_tps_hot_scan(tmp_path, monkey
     assert "tps" not in payload
 
 
+def test_execution_started_repeats_tool_arguments_while_tool_is_running(tmp_path):
+    """Live UIs can show a running tool's args without waiting for final redraw."""
+    import asyncio
+    from eggthreads.tools import ToolRegistry
+
+    async def scenario() -> None:
+        db = _make_db(tmp_path)
+        thread_id = ts.create_root_thread(db, name="root")
+        args = {"script": "echo before; sleep 30", "timeout": 60}
+        tool_call_id = ts.enqueue_user_tool_call(
+            db,
+            thread_id,
+            "slow_tool",
+            args,
+            auto_approve=True,
+            hidden=True,
+        )
+
+        release_tool = asyncio.Event()
+
+        async def slow_tool(_args):
+            await release_tool.wait()
+            return "done"
+
+        tools = ToolRegistry()
+        tools.register(
+            "slow_tool",
+            "Slow tool",
+            {"type": "object", "properties": {}},
+            slow_tool,
+        )
+        runner = ts.ThreadRunner(db, thread_id, llm=object(), tools=tools)
+        task = asyncio.create_task(runner.run_once())
+        try:
+            row = None
+            for _ in range(100):
+                row = db.conn.execute(
+                    """
+                    SELECT payload_json FROM events
+                     WHERE thread_id=? AND type='tool_call.execution_started'
+                     ORDER BY event_seq DESC LIMIT 1
+                    """,
+                    (thread_id,),
+                ).fetchone()
+                if row is not None:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert row is not None
+            assert not task.done()
+            payload = json.loads(row[0])
+            assert payload["tool_call_id"] == tool_call_id
+            assert payload["name"] == "slow_tool"
+            assert json.loads(payload["arguments"]) == args
+        finally:
+            release_tool.set()
+            await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(scenario())
+
+
 def test_runner_auto_output_approval_does_not_rebuild_tool_state(tmp_path, monkeypatch):
     """Auto output approval should not replay tool state on each tool completion."""
     import asyncio

@@ -2837,7 +2837,16 @@ class ThreadRunner:
                     self.cfg.tool_timeout_sec if self.cfg is not None else None,
                     _default_tool_timeout_sec,
                 )
-                started_payload: Dict[str, Any] = {'tool_call_id': tc.tool_call_id}
+                started_payload: Dict[str, Any] = {
+                    'tool_call_id': tc.tool_call_id,
+                    # A live UI may attach after the LLM tool-call argument
+                    # deltas have streamed and after the RA1 stream has
+                    # closed. Repeat the declaration metadata on execution
+                    # start so a running tool remains inspectable without
+                    # waiting for a final transcript redraw.
+                    'name': tc.name,
+                    'arguments': tc.arguments,
+                }
                 if tool_timeout_sec is not None:
                     started_payload['timeout'] = tool_timeout_sec
                 self.db.append_event(
