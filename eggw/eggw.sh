@@ -174,7 +174,10 @@ if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
 fi
 
 # Run from the actual frontend directory to avoid Turbopack workspace issues
-start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev -- -p $FRONTEND_PORT
+NEXT_CACHE_KEY="$(printf '%s' "$CALLER_CWD:$BACKEND_PORT:$FRONTEND_PORT" | cksum | awk '{print $1}')"
+NEXT_DIST_DIR=".next-eggw-$NEXT_CACHE_KEY"
+echo "Using frontend build cache: $SCRIPT_DIR/frontend/$NEXT_DIST_DIR"
+start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" EGGW_NEXT_DIST_DIR="$NEXT_DIST_DIR" npm run dev -- -p $FRONTEND_PORT
 FRONTEND_PID="$STARTED_PID"
 
 # Wait a moment for frontend to start
