@@ -94,6 +94,7 @@ async def cmd_new_thread(name: str) -> CommandResponse:
         all_models_path=all_models_path,
     )
     append_root_system_prompt(core.db, thread_id)
+    ensure_scheduler_for(thread_id)
 
     return CommandResponse(
         success=True,
@@ -125,6 +126,7 @@ async def cmd_switch_thread(selector: str) -> CommandResponse:
     # Try exact match first
     t = core.db.get_thread(selector)
     if t:
+        ensure_scheduler_for(selector)
         return CommandResponse(
             success=True,
             message=f"Switched to thread: {selector[-8:]}",
@@ -143,6 +145,7 @@ async def cmd_switch_thread(selector: str) -> CommandResponse:
 
     if len(matches) == 1:
         tid = matches[0].thread_id
+        ensure_scheduler_for(tid)
         name_part = f" ({matches[0].name})" if matches[0].name else ""
         return CommandResponse(
             success=True,
@@ -319,6 +322,8 @@ async def cmd_duplicate_thread(thread_id: str, command_arg: str) -> CommandRespo
             new_id = duplicate_thread(core.db, source_thread_id, name=name)
     except ValueError as e:
         return CommandResponse(success=False, message=str(e))
+
+    ensure_scheduler_for(new_id)
 
     return CommandResponse(
         success=True,

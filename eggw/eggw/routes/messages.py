@@ -642,9 +642,9 @@ async def open_thread(thread_id: str):
     # Ensure scheduler is running for this thread's root (don't stop other schedulers)
     # This allows multiple tabs to view different thread trees simultaneously
     from ..core import start_scheduler
+    from ..core.scheduler import scheduler_running
     root_id = get_thread_root_id(thread_id)
-    scheduler_running = root_id in core.active_schedulers
-    if not scheduler_running:
+    if not scheduler_running(root_id):
         start_scheduler(root_id)
 
     return {

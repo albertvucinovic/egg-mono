@@ -7,6 +7,7 @@ from eggthreads import (
     get_parent,
     list_threads,
 )
+from eggthreads.runner import scheduler_task_is_live
 
 
 class ThreadCommandsMixin:
@@ -128,6 +129,8 @@ class ThreadCommandsMixin:
         return cur or tid
 
     def is_thread_scheduled(self, tid: str) -> bool:
-        """True if tid's root has an entry in active_schedulers."""
+        """True if tid's root has a live scheduler in this process."""
         rid = self.thread_root_id(tid)
-        return rid in (self.active_schedulers or {})
+        entry = (self.active_schedulers or {}).get(rid)
+        task = entry.get("task") if isinstance(entry, dict) else None
+        return scheduler_task_is_live(task)

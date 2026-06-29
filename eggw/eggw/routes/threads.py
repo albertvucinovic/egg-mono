@@ -22,7 +22,8 @@ from eggthreads import (
 
 from ..models import ThreadInfo, CreateThreadRequest
 from .. import core
-from ..core import get_thread_root_id
+from ..core import ensure_scheduler_for, get_thread_root_id
+from ..core.scheduler import scheduler_running
 from ..system_prompt import append_root_system_prompt
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -152,6 +153,8 @@ async def create_thread(request: CreateThreadRequest):
         )
         append_root_system_prompt(core.db, thread_id)
 
+    ensure_scheduler_for(thread_id)
+
     t = core.db.get_thread(thread_id)
     return ThreadInfo(
         id=t.thread_id,
@@ -277,5 +280,5 @@ async def get_thread_state_endpoint(thread_id: str):
         "streaming_invoke_id": streaming_invoke_id,
         "active_get_user_wait": get_user_waiting_note is not None,
         "get_user_waiting_note": get_user_waiting_note,
-        "scheduler_running": root_id in core.active_schedulers,
+        "scheduler_running": scheduler_running(root_id),
     }

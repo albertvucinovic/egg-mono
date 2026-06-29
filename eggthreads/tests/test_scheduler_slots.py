@@ -174,6 +174,59 @@ def test_interrupted_tool_publication_uses_preview_not_full_output(tmp_path):
     assert "Output incomplete - interrupted" in payload["content"]
 
 
+def test_parallel_schedulers_for_same_root_compete_by_thread_lease(tmp_path):
+    """Multiple scheduler instances may watch the same root safely.
+
+    Process-local scheduler registries should never be treated as durable root
+    ownership.  If two Egg/EggW processes both visited the same root, both can
+    run schedulers; the per-thread ``open_streams`` lease decides who performs
+    each concrete RA1/RA2/RA3 unit of work.
+    """
+
+    db_a = _make_db(tmp_path)
+    root = ts.create_root_thread(db_a, name="root")
+    _make_thread_runnable(db_a, root)
+
+    # Use a second connection to exercise the same SQLite coordination path
+    # separate processes use.
+    db_b = ThreadsDB(db_a.path)
+    db_b.init_schema()
+
+    class SlowLLM:
+        current_model_key = "mock"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
+            await asyncio.sleep(0.05)
+            yield {"type": "content_delta", "text": "done"}
+            yield {"type": "message", "role": "assistant", "content": "done", "stop_reason": "end_turn"}
+
+    async def run_race():
+        cfg = RunnerConfig(lease_ttl_sec=5, heartbeat_sec=0.01)
+        runner_a = ts.ThreadRunner(db_a, root, llm=SlowLLM(), config=cfg, owner="scheduler-a")
+        runner_b = ts.ThreadRunner(db_b, root, llm=SlowLLM(), config=cfg, owner="scheduler-b")
+        return await asyncio.gather(runner_a.run_once(), runner_b.run_once())
+
+    results = asyncio.run(run_race())
+
+    assert sorted(results) == [False, True]
+    assert db_a.current_open(root) is None
+
+    closes = db_a.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE thread_id=? AND type='stream.close'",
+        (root,),
+    ).fetchone()[0]
+    rows = db_a.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create'",
+        (root,),
+    ).fetchall()
+    assistants = sum(1 for row in rows if json.loads(row[0]).get("role") == "assistant")
+    assert closes == 1
+    assert assistants == 1
+
+
 class TestSlotManagement:
     """Tests for scheduler slot availability and watermark behavior."""
 

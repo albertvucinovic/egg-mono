@@ -88,6 +88,58 @@ def runner_actionable_resource_class(ra: Optional[RunnerActionable]) -> str:
     return "llm" if ra is not None and ra.kind == "RA1_llm" else "tool"
 
 
+def scheduler_task_status(task: Any) -> str:
+    """Return a compact process-local scheduler task status string.
+
+    The durable coordination mechanism for work is the per-thread SQLite
+    lease, not a process-local scheduler registry. Egg/EggW registries are
+    only convenience maps from a visited root to this process's resident
+    asyncio task, so callers must be able to distinguish a genuinely live task
+    from stale test objects, missing tasks, cancelled tasks, or crashed tasks.
+    """
+
+    if task is None:
+        return "missing"
+
+    done = getattr(task, "done", None)
+    if not callable(done):
+        return "unknown"
+
+    try:
+        is_done = bool(done())
+    except Exception as e:
+        return f"unknown: {type(e).__name__}: {e}"
+
+    if not is_done:
+        return "running"
+
+    cancelled = getattr(task, "cancelled", None)
+    try:
+        if callable(cancelled) and bool(cancelled()):
+            return "cancelled"
+    except Exception:
+        pass
+
+    exception = getattr(task, "exception", None)
+    if callable(exception):
+        try:
+            exc = exception()
+        except asyncio.CancelledError:
+            return "cancelled"
+        except Exception as e:
+            return f"done: exception unavailable ({type(e).__name__}: {e})"
+        if exc is not None:
+            return f"failed: {type(exc).__name__}: {exc}"
+
+    return "done"
+
+
+def scheduler_task_is_live(task: Any) -> bool:
+    """True only for an active in-process scheduler task."""
+
+    return scheduler_task_status(task) == "running"
+
+
 @dataclass(frozen=True)
 class _SchedulerThreadSettings:
     priority: Any = 0

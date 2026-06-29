@@ -1729,21 +1729,26 @@ class TestMessageOperations:
         from eggthreads import append_message
         from eggthreads.tool_state import discover_runner_actionable_cached
 
-        create_resp = client.post("/api/threads", json={"name": "Pending RA1 Continue"})
-        thread_id = create_resp.json()["id"]
-        append_message(core_state.db, thread_id, "user", "Hello")
+        # Keep this test focused on /continue's interrupt decision.  The
+        # scheduler lifecycle layer now correctly restarts stale resident
+        # scheduler entries, and a real restarted scheduler could consume the
+        # pending RA1 before this assertion inspects it.
+        with patch("eggw.commands.thread.ensure_scheduler_for", lambda tid: None):
+            create_resp = client.post("/api/threads", json={"name": "Pending RA1 Continue"})
+            thread_id = create_resp.json()["id"]
+            append_message(core_state.db, thread_id, "user", "Hello")
 
-        # Simulate EggW's normal resident scheduler bookkeeping without
-        # creating an open_stream lease for the thread.  Before the fix,
-        # /continue treated this dictionary entry as "streaming" and called
-        # interrupt_thread(), which appended a purpose='llm' boundary and made
-        # the pending user message non-runnable.
-        core_state.active_schedulers[thread_id] = {"scheduler": object(), "task": object()}
+            # Simulate EggW's normal resident scheduler bookkeeping without
+            # creating an open_stream lease for the thread.  Before the fix,
+            # /continue treated this dictionary entry as "streaming" and called
+            # interrupt_thread(), which appended a purpose='llm' boundary and made
+            # the pending user message non-runnable.
+            core_state.active_schedulers[thread_id] = {"scheduler": object(), "task": object()}
 
-        response = client.post(
-            f"/api/threads/{thread_id}/command",
-            json={"command": "/continue"},
-        )
+            response = client.post(
+                f"/api/threads/{thread_id}/command",
+                json={"command": "/continue"},
+            )
 
         assert response.status_code == 200
         body = response.json()
@@ -1759,6 +1764,43 @@ class TestMessageOperations:
         ra = discover_runner_actionable_cached(core_state.db, thread_id)
         assert ra is not None
         assert ra.kind == "RA1_llm"
+
+    def test_eggw_restarts_stale_scheduler_entry(self, client, monkeypatch):
+        """A stale process-local scheduler record must not orphan a root."""
+        from eggw.core.scheduler import ensure_scheduler_for
+
+        create_resp = client.post("/api/threads", json={"name": "Pending RA1 Continue"})
+        thread_id = create_resp.json()["id"]
+        core_state.active_schedulers[thread_id] = {"scheduler": object(), "task": object()}
+
+        started: list[str] = []
+
+        class DummyScheduler:
+            def __init__(self, *args, **kwargs):
+                started.append(kwargs["root_thread_id"])
+
+            async def run_forever(self, poll_sec=0.05):
+                await asyncio.sleep(3600)
+
+        class LiveTask:
+            def done(self):
+                return False
+
+            def add_done_callback(self, callback):
+                return None
+
+        def fake_create_task(coro):
+            coro.close()
+            return LiveTask()
+
+        monkeypatch.setattr("eggw.core.scheduler.SubtreeScheduler", DummyScheduler)
+        monkeypatch.setattr("eggw.core.scheduler.asyncio.create_task", fake_create_task)
+
+        ensure_scheduler_for(thread_id)
+
+        assert started == [thread_id]
+        entry = core_state.active_schedulers[thread_id]
+        assert entry["task"].done() is False
 
 
 class TestEventStreaming:
@@ -2693,6 +2735,7 @@ class TestCommands:
         monkeypatch.setattr(asyncio, "create_task", fake_create_task)
         create_resp = client.post("/api/threads", json={"name": "Reload Test"})
         thread_id = create_resp.json()["id"]
+        created.clear()
 
         response = client.post(
             f"/api/threads/{thread_id}/command",
