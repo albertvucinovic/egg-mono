@@ -7,15 +7,4 @@ const nextConfig = {
   compress: false,
 };
 
-if (process.env.EGGW_NEXT_DIST_DIR) {
-  nextConfig.distDir = process.env.EGGW_NEXT_DIST_DIR;
-}
-
-if (process.env.EGGW_NEXT_TSCONFIG_PATH) {
-  nextConfig.typescript = {
-    ...nextConfig.typescript,
-    tsconfigPath: process.env.EGGW_NEXT_TSCONFIG_PATH,
-  };
-}
-
 export default nextConfig;

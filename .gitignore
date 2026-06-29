@@ -12,8 +12,6 @@ build/
 venv/
 node_modules/
 .next/
-.next-eggw-*/
-eggw/frontend/tsconfig.eggw-*.json
 .env
 *.swp
 *.swo

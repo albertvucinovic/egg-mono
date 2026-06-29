@@ -59,7 +59,6 @@ exec 3>&1
 # PIDs for cleanup
 BACKEND_PID=""
 FRONTEND_PID=""
-NEXT_TSCONFIG_FILE=""
 CLEANUP_RUNNING=0
 STARTED_PID=""
 
@@ -106,10 +105,6 @@ cleanup() {
 
     # Extra fallback for anything still attached to this shell.
     jobs -pr | xargs -r kill 2>/dev/null || true
-
-    if [ -n "${NEXT_TSCONFIG_FILE:-}" ]; then
-        rm -f "$SCRIPT_DIR/frontend/$NEXT_TSCONFIG_FILE" 2>/dev/null || true
-    fi
 
     rm -f "${EGGW_RELOAD_STATE_FILE:-}" 2>/dev/null || true
 }
@@ -179,23 +174,7 @@ if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
 fi
 
 # Run from the actual frontend directory to avoid Turbopack workspace issues
-NEXT_CACHE_KEY="$(printf '%s' "$CALLER_CWD:$BACKEND_PORT:$FRONTEND_PORT" | cksum | awk '{print $1}')"
-NEXT_DIST_DIR=".next-eggw-$NEXT_CACHE_KEY"
-NEXT_TSCONFIG_FILE="tsconfig.eggw-$NEXT_CACHE_KEY.json"
-cat > "$NEXT_TSCONFIG_FILE" <<EOF
-{
-  "extends": "./tsconfig.json",
-  "include": [
-    "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    "$NEXT_DIST_DIR/types/**/*.ts"
-  ],
-  "exclude": ["node_modules"]
-}
-EOF
-echo "Using frontend build cache: $SCRIPT_DIR/frontend/$NEXT_DIST_DIR"
-start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" EGGW_NEXT_DIST_DIR="$NEXT_DIST_DIR" EGGW_NEXT_TSCONFIG_PATH="$NEXT_TSCONFIG_FILE" npm run dev -- -p $FRONTEND_PORT
+start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev -- -p $FRONTEND_PORT
 FRONTEND_PID="$STARTED_PID"
 
 # Wait a moment for frontend to start
