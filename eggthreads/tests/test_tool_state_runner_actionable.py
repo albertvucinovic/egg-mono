@@ -933,8 +933,8 @@ def test_thread_state_waiting_and_running(tmp_path):
     We do *not* attempt to simulate a full runner turn here.  Instead
     we assert that:
 
-    * with an unapproved tool_call present, the thread waits for tool
-      approval,
+    * with an unapproved assistant tool_call present, the thread waits for
+      tool approval,
     * after execution/finish (TC4) it waits for output approval, and
     * once output approval and a final tool message exist, the thread
       is considered "running" again because an RA1 LLM turn is now
@@ -950,15 +950,16 @@ def test_thread_state_waiting_and_running(tmp_path):
     # Initially idle, waiting for user
     assert ts.thread_state(db, tid) == "waiting_user"
 
-    # Add a user message with a tool_call but no approval -> TC1
+    # Add an assistant message with a tool_call but no approval -> TC1.
+    # User-originated tool calls are intentionally auto-approved.
     payload = {
-        "role": "user",
-        "content": "cmd",
+        "role": "assistant",
+        "content": None,
         "tool_calls": [
             {"id": "tc1", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
         ],
     }
-    db.append_event("msg-user", tid, "msg.create", payload, msg_id="m-user")
+    db.append_event("msg-asst", tid, "msg.create", payload, msg_id="m-asst")
     assert ts.thread_state(db, tid) == "waiting_tool_approval"
 
     # Approve and finish the tool without output_approval -> TC4
@@ -1774,9 +1775,10 @@ def test_reducer_cache_incrementally_applies_user_tool_call_declaration_tail(tmp
     tc = after.tool_call_states["tc_user_decl"]
     assert tc.parent_role == "user"
     assert tc.parent_msg_id == "m-user-tool"
-    assert tc.state == "TC1"
-    assert after.next_runner_actionable is None
-    assert after.coarse_thread_state_without_lease == "waiting_tool_approval"
+    assert tc.state == "TC2.1"
+    assert after.next_runner_actionable is not None
+    assert after.next_runner_actionable.kind == "RA3_tools_user"
+    assert after.coarse_thread_state_without_lease == "running"
     assert [int(ev["event_seq"]) for ev in after.messages_after_boundary] == [db.max_event_seq(tid)]
     assert before.tool_call_states == {}
 
@@ -1971,20 +1973,20 @@ def test_reducer_cache_incrementally_applies_global_approval_and_revoke_tails(tm
         tid,
         "msg.create",
         {
-            "role": "user",
+            "role": "assistant",
             "tool_calls": [
                 {"id": "tc_after_revoke", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
             ],
         },
-        msg_id="m-user-tool-after-revoke",
+        msg_id="m-asst-tool-after-revoke",
     )
     after_second_decl = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
 
     assert after_second_decl.tool_call_states["tc_after_revoke"].state == "TC1"
 
 
-def test_reducer_cache_declaration_tail_falls_back_after_all_in_turn_approval(tmp_path, monkeypatch):
-    from eggthreads.tool_state import _reduce_loaded_thread_events, _reduce_thread_events
+def test_reducer_cache_incrementally_applies_declaration_after_open_all_in_turn_approval(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
 
     db = _make_db(tmp_path)
     tid = "thread-incremental-declaration-after-all-in-turn"
@@ -1995,33 +1997,58 @@ def test_reducer_cache_declaration_tail_falls_back_after_all_in_turn_approval(tm
     before = _reduce_thread_events(db, tid)
     assert before.tool_call_states == {}
 
-    calls = 0
-    original = _reduce_loaded_thread_events
-
-    def counting_full_rebuild(thread_id, max_event_seq, events):
-        nonlocal calls
-        calls += 1
-        return original(thread_id, max_event_seq, events)
-
-    monkeypatch.setattr("eggthreads.tool_state._reduce_loaded_thread_events", counting_full_rebuild)
-
     db.append_event(
-        "msg-user-tool-turn",
+        "msg-asst-tool-turn",
         tid,
         "msg.create",
         {
-            "role": "user",
+            "role": "assistant",
             "tool_calls": [
                 {"id": "tc_turn", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
             ],
         },
-        msg_id="m-user-tool-turn",
+        msg_id="m-asst-tool-turn",
     )
-    after = _reduce_thread_events(db, tid)
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
 
-    assert calls == 1
-    assert after.tool_call_states["tc_turn"].state == "TC1"
-    _assert_incremental_matches_full_rebuild(db, tid)
+    assert after.tool_call_states["tc_turn"].state == "TC2.1"
+    assert after.next_runner_actionable is not None
+    assert after.next_runner_actionable.kind == "RA2_tools_assistant"
+
+
+def test_reducer_cache_incrementally_expires_all_in_turn_on_next_user_command(tmp_path, monkeypatch):
+    from eggthreads.tool_state import _reduce_thread_events
+
+    db = _make_db(tmp_path)
+    tid = "thread-incremental-all-in-turn-next-user"
+    db.create_thread(thread_id=tid, name="t", parent_id=None, depth=0)
+    db.append_event("msg-user", tid, "msg.create", {"role": "user", "content": "turn"}, msg_id="m-user")
+    db.append_event("approve-turn", tid, "tool_call.approval", {"decision": "all-in-turn"})
+
+    before = _reduce_thread_events(db, tid)
+    assert before._open_all_in_turn_user_seq is not None
+    assert before.tool_call_states == {}
+
+    db.append_event(
+        "msg-user-tool-next-turn",
+        tid,
+        "msg.create",
+        {
+            "role": "user",
+            "content": "$$ pwd",
+            "tool_calls": [
+                {"id": "tc_user_next", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        msg_id="m-user-tool-next-turn",
+    )
+    after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
+
+    assert after._open_all_in_turn_user_seq is None
+    assert after._open_all_in_turn_approval_seq is None
+    assert after.tool_call_states["tc_user_next"].state == "TC2.1"
+    assert after.next_runner_actionable is not None
+    assert after.next_runner_actionable.kind == "RA3_tools_user"
 
 
 def test_reducer_cache_incrementally_applies_combined_assistant_tool_round_trip(tmp_path, monkeypatch):
@@ -2183,9 +2210,9 @@ def test_reducer_cache_synthetic_long_thread_normal_tails_do_not_rebuild(tmp_pat
         ],
     }, msg_id="m-tail-user-tool-parent")
     after_user_tool = reduce_tail("next-user-tool-trigger")
-    assert after_user_tool.tool_call_states["tc_tail_user"].state == "TC1"
+    assert after_user_tool.tool_call_states["tc_tail_user"].state == "TC2.1"
     assert after_user_tool.next_runner_actionable is not None
-    assert after_user_tool.next_runner_actionable.kind == "RA1_llm"
+    assert after_user_tool.next_runner_actionable.kind == "RA3_tools_user"
     assert after_user_tool.coarse_thread_state_without_lease == "running"
 
     elapsed = time.perf_counter() - start
@@ -2380,7 +2407,7 @@ def test_build_tool_call_states_returns_cache_safe_copies(tmp_path):
         tid,
         "msg.create",
         {
-            "role": "user",
+            "role": "assistant",
             "content": "cmd",
             "tool_calls": [
                 {"id": "tc_copy", "type": "function", "function": {"name": "bash", "arguments": "{}"}},

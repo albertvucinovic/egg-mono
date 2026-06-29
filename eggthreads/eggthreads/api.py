@@ -4573,6 +4573,8 @@ def enqueue_user_tool_call(
     }
     if hidden:
         payload_extra['no_api'] = True
+    if not auto_approve:
+        payload_extra['requires_tool_approval'] = True
     if extra:
         payload_extra.update(dict(extra))
 
