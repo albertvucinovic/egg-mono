@@ -12,6 +12,7 @@ build/
 venv/
 node_modules/
 .next/
+eggw/frontend/.eggw-runs/
 .env
 *.swp
 *.swo

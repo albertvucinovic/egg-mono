@@ -62,6 +62,71 @@ FRONTEND_PID=""
 CLEANUP_RUNNING=0
 STARTED_PID=""
 
+link_frontend_runtime_path() {
+    local source_path="$1"
+    local link_path="$2"
+
+    if [ -L "$link_path" ]; then
+        if [ "$(readlink "$link_path")" = "$source_path" ]; then
+            return 0
+        fi
+        rm -f "$link_path"
+    elif [ -e "$link_path" ]; then
+        rm -rf "$link_path"
+    fi
+
+    ln -s "$source_path" "$link_path"
+}
+
+copy_frontend_runtime_path() {
+    local source_path="$1"
+    local target_path="$2"
+
+    rm -rf "$target_path"
+    cp -a "$source_path" "$target_path"
+}
+
+prepare_frontend_runtime_dir() {
+    local source_dir="$1"
+    local run_dir="$2"
+    mkdir -p "$run_dir"
+
+    local path
+    for path in \
+        package.json \
+        package-lock.json \
+        next.config.mjs \
+        tsconfig.json \
+        postcss.config.mjs \
+        tailwind.config.ts \
+        next-env.d.ts
+    do
+        if [ -e "$source_dir/$path" ]; then
+            copy_frontend_runtime_path "$source_dir/$path" "$run_dir/$path"
+        fi
+    done
+
+    # Next dev does not reliably discover App Router routes from a symlinked
+    # `src` directory, so copy the source tree into the runtime workspace. The
+    # copy is refreshed on each EggW launch while mutable Next output stays
+    # isolated in the workspace's own `.next` directory.
+    copy_frontend_runtime_path "$source_dir/src" "$run_dir/src"
+
+    link_frontend_runtime_path "$source_dir/node_modules" "$run_dir/node_modules"
+
+    # Preserve any local frontend env files without copying secrets.
+    for path in .env .env.local .env.development .env.development.local; do
+        if [ -e "$source_dir/$path" ]; then
+            link_frontend_runtime_path "$source_dir/$path" "$run_dir/$path"
+        fi
+    done
+
+    # Optional static assets.
+    if [ -e "$source_dir/public" ]; then
+        link_frontend_runtime_path "$source_dir/public" "$run_dir/public"
+    fi
+}
+
 # Start a long-running command in its own session so we can reliably
 # terminate the full process group on Ctrl+C. Output is prefixed
 # without turning the main command PID into a shell pipeline PID.
@@ -173,8 +238,24 @@ if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
     touch node_modules  # Update timestamp
 fi
 
-# Run from the actual frontend directory to avoid Turbopack workspace issues
-start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev -- -p $FRONTEND_PORT
+# Next dev writes mutable chunk manifests and generated JS into its project
+# `.next` directory. EggW deliberately allows multiple local UI processes for
+# the same checkout; if they all share `eggw/frontend/.next`, a later process
+# or a local `next build` can rewrite chunks while an older browser session is
+# hydrating, which surfaces as ChunkLoadError for paths like
+# `/_next/static/chunks/app/layout.js`.
+#
+# Run the frontend from a tiny per-process runtime workspace instead. Static
+# app source/config are refreshed from the checkout on launch, node_modules is
+# linked, and Next's mutable `.next` output is isolated under
+# `.eggw-runs/<key>/.next`. This avoids generated per-run project config in the
+# real frontend tree.
+FRONTEND_SOURCE_DIR="$SCRIPT_DIR/frontend"
+FRONTEND_RUN_KEY="$(printf '%s' "$CALLER_CWD:$BACKEND_PORT:$FRONTEND_PORT" | cksum | awk '{print $1}')"
+FRONTEND_RUN_DIR="$FRONTEND_SOURCE_DIR/.eggw-runs/$FRONTEND_RUN_KEY"
+prepare_frontend_runtime_dir "$FRONTEND_SOURCE_DIR" "$FRONTEND_RUN_DIR"
+echo "Using frontend runtime dir: $FRONTEND_RUN_DIR"
+start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev --prefix "$FRONTEND_RUN_DIR" -- -p $FRONTEND_PORT
 FRONTEND_PID="$STARTED_PID"
 
 # Wait a moment for frontend to start
