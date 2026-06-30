@@ -93,27 +93,6 @@ js_chunk_complete() {
     tail -c 128 "$path" | grep -qF ']);'
 }
 
-latest_root_thread_id() {
-    local backend_url="$1"
-
-    python3 - "$backend_url" <<'PY'
-import json
-import sys
-import urllib.request
-
-backend_url = sys.argv[1].rstrip("/")
-try:
-    with urllib.request.urlopen(f"{backend_url}/api/threads/roots", timeout=10) as resp:
-        roots = json.load(resp)
-    if isinstance(roots, list) and roots:
-        tid = roots[-1].get("id")
-        if isinstance(tid, str):
-            print(tid)
-except Exception:
-    pass
-PY
-}
-
 wait_for_frontend_warmup() {
     local frontend_url="$1"
     local backend_url="$2"
@@ -138,30 +117,20 @@ wait_for_frontend_warmup() {
         fi
 
         if \
+            curl_fetch_complete "$backend_url/health" "$tmpdir/backend-health.json" 10 && \
             curl_fetch_complete "$frontend_url/" "$tmpdir/root.html" 20 && \
             grep -q '/_next/static/chunks/app/layout.js' "$tmpdir/root.html" && \
             curl_fetch_complete "$frontend_url/_next/static/chunks/app/layout.js" "$tmpdir/layout.js" 30 && \
             js_chunk_complete "$tmpdir/layout.js" 100000 && \
             curl_fetch_complete "$frontend_url/_next/static/chunks/app/page.js" "$tmpdir/home-page.js" 30 && \
-            js_chunk_complete "$tmpdir/home-page.js" 10000
+            js_chunk_complete "$tmpdir/home-page.js" 10000 && \
+            curl_fetch_complete "$frontend_url/__eggw_warmup_thread__" "$tmpdir/thread.html" 30 && \
+            curl_fetch_complete "$frontend_url/_next/static/chunks/app/%5BthreadId%5D/page.js" "$tmpdir/thread-page.js" 90 && \
+            js_chunk_complete "$tmpdir/thread-page.js" 100000
         then
-            local root_thread_id
-            root_thread_id="$(latest_root_thread_id "$backend_url")"
-            if [ -n "$root_thread_id" ]; then
-                if \
-                    curl_fetch_complete "$frontend_url/$root_thread_id" "$tmpdir/thread.html" 30 && \
-                    curl_fetch_complete "$frontend_url/_next/static/chunks/app/%5BthreadId%5D/page.js" "$tmpdir/thread-page.js" 90 && \
-                    js_chunk_complete "$tmpdir/thread-page.js" 100000
-                then
-                    rm -rf "$tmpdir"
-                    echo "Frontend warmup complete."
-                    return 0
-                fi
-            else
-                rm -rf "$tmpdir"
-                echo "Frontend warmup complete."
-                return 0
-            fi
+            rm -rf "$tmpdir"
+            echo "Frontend warmup complete."
+            return 0
         fi
 
         sleep 0.5
