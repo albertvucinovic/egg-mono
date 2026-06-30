@@ -338,9 +338,9 @@ def test_provider_stream_duration_is_displayed_in_system_header(tmp_path, monkey
     )
 
     header = app._current_stream_header_part()
-    assert "streaming 30s (limit 600s)" in header
+    assert "streaming 30s (inactivity limit 600s)" in header
     app.update_panels()
-    assert "streaming 30s (limit 600s)" in app.system_output.title
+    assert "streaming 30s (inactivity limit 600s)" in app.system_output.title
 
 
 def test_active_stream_timing_hydrates_after_thread_switch_snapshot_boundary(tmp_path, monkeypatch):

@@ -1025,7 +1025,7 @@ class PanelsMixin:
         except Exception:
             limit = 0.0
         if limit > 0:
-            return f"streaming {elapsed:.0f}s (limit {limit:.0f}s)"
+            return f"streaming {elapsed:.0f}s (inactivity limit {limit:.0f}s)"
         return f"streaming {elapsed:.0f}s"
 
     def _current_user_command_duration(self) -> str:

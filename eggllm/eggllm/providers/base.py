@@ -1,6 +1,55 @@
 from typing import Dict, Any, Generator, Optional
 
 
+def positive_timeout_seconds(timeout: Any) -> Optional[float]:
+    """Return a positive timeout in seconds, otherwise ``None``.
+
+    Egg's public provider-timeout contract treats ``0`` and negative values as
+    "no timeout".  HTTP libraries do not all use that convention (for example,
+    ``requests`` rejects ``timeout=0``), so provider adapters normalize the value
+    before handing it to their transport.
+    """
+
+    try:
+        value = float(timeout)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def requests_timeout_arg(timeout: Any) -> Optional[float]:
+    """Return the timeout value to pass to ``requests``.
+
+    A single ``requests`` timeout is a connect/read timeout, not a total
+    streaming wall-clock timeout.  That is the desired provider-stream behavior:
+    long active streams may continue, while connection/reader inactivity is
+    still bounded.
+    """
+
+    return positive_timeout_seconds(timeout)
+
+
+def aiohttp_stream_timeout(aiohttp_module: Any, timeout: Any) -> Any:
+    """Build an aiohttp timeout for provider streaming.
+
+    Do **not** set ``total`` here.  ``total`` is a wall-clock cap for the whole
+    response and aborts healthy long provider streams after the configured
+    number of seconds.  Instead, keep the configured value as connection/read
+    inactivity limits.  ``sock_read`` is reset by aiohttp whenever response data
+    arrives, so streaming activity invalidates the old deadline naturally.
+    """
+
+    timeout_sec = positive_timeout_seconds(timeout)
+    if timeout_sec is None:
+        return aiohttp_module.ClientTimeout(total=None)
+    return aiohttp_module.ClientTimeout(
+        total=None,
+        connect=timeout_sec,
+        sock_connect=timeout_sec,
+        sock_read=timeout_sec,
+    )
+
+
 def _usage_int(value: Any) -> Optional[int]:
     if value is None:
         return None

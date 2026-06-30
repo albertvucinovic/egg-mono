@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from .base import ProviderAdapter, attach_provider_usage
+from .base import ProviderAdapter, attach_provider_usage, requests_timeout_arg
 
 
 class AnthropicMessagesAdapter(ProviderAdapter):
@@ -69,7 +69,13 @@ class AnthropicMessagesAdapter(ProviderAdapter):
         session: Optional[requests.Session] = None,
     ):
         sess = session or requests
-        resp = sess.post(url, headers=headers, json=self._build_payload(payload), timeout=timeout, stream=True)
+        resp = sess.post(
+            url,
+            headers=headers,
+            json=self._build_payload(payload),
+            timeout=requests_timeout_arg(timeout),
+            stream=True,
+        )
         resp.raise_for_status()
 
         assistant_text_parts: list[str] = []

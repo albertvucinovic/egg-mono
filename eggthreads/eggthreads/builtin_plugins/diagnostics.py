@@ -311,7 +311,7 @@ def set_thread_priority_command(context: Any, arg: str):
         block += f"  Thread: [cyan]{target_thread[-8:]}[/cyan]\n"
         block += f"  Priority: [cyan]{settings.priority}[/cyan]\n"
         block += f"  Sticky threshold: [cyan]{threshold_str}[/cyan]\n"
-        block += f"  API timeout: [cyan]{api_timeout_str}[/cyan]\n\n"
+        block += f"  API inactivity timeout: [cyan]{api_timeout_str}[/cyan]\n\n"
         block += "  [dim]Usage: /setThreadPriority priority=<int> threshold=<seconds> apiTimeout=<seconds>[/dim]\n"
         block += "  [dim]Use empty value (e.g., threshold=) or 'unset' to reset to default[/dim]"
         _print_block(context, "Thread Priority", block, border_style="cyan")
@@ -327,10 +327,10 @@ def set_thread_priority_command(context: Any, arg: str):
     elif new_threshold is not None:
         messages.append(f"Sticky threshold set to {new_threshold}s")
     if isinstance(new_api_timeout, type(UNSET)):
-        messages.append("API timeout reset to default (600s)")
+        messages.append("API inactivity timeout reset to default (600s)")
     elif new_api_timeout is not None:
         timeout_str = f"{new_api_timeout}s" if new_api_timeout > 0 else "no timeout"
-        messages.append(f"API timeout set to {timeout_str}")
+        messages.append(f"API inactivity timeout set to {timeout_str}")
     _log(context, f"Thread {target_thread[-8:]}: {', '.join(messages)}")
     return CommandResult(clear_input=True)
 
