@@ -6,31 +6,18 @@ import os
 import shlex
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from eggthreads.command_catalog import CommandResult, CommandSpec
-from eggthreads.content_parts import content_to_plain_text
+from eggthreads.edit_answer import (
+    prepare_edit_answer_draft,
+    quote_markdown_blockquote,
+    select_assistant_message,
+)
 from eggthreads import sanitize_terminal_text  # type: ignore
-
-from .utils import snapshot_messages
 
 
 _EDIT_ANSWER_COMMAND = "editAnswer"
-
-
-def quote_markdown_blockquote(text: str) -> str:
-    """Return ``text`` as a markdown blockquote, preserving blank lines.
-
-    This is intentionally a mechanical source transform: the editable buffer is
-    raw assistant markdown, not rendered markdown.  Every physical source line
-    is prefixed, and blank lines become ``>`` so the quote does not visually
-    break when rendered.
-    """
-
-    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    if normalized == "":
-        return ""
-    return "\n".join(f"> {line}" if line else ">" for line in normalized.split("\n"))
 
 
 def editor_argv_for_path(path: Path) -> list[str]:
@@ -44,72 +31,6 @@ def editor_argv_for_path(path: Path) -> list[str]:
     if not argv:
         argv = ["vi"]
     return [*argv, str(path)]
-
-
-def _message_raw_text(message: Mapping[str, Any]) -> str:
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content
-    return content_to_plain_text(content)
-
-
-def _assistant_candidates(messages: Sequence[Mapping[str, Any]]) -> list[tuple[Mapping[str, Any], str]]:
-    candidates: list[tuple[Mapping[str, Any], str]] = []
-    for message in messages:
-        if message.get("role") != "assistant":
-            continue
-        text = _message_raw_text(message)
-        if text.strip():
-            candidates.append((message, text))
-    return candidates
-
-
-def select_assistant_message(
-    messages: Sequence[Mapping[str, Any]],
-    selector: str = "",
-    *,
-    preferred_msg_id: str = "",
-    prefer_notes: bool = False,
-) -> tuple[Mapping[str, Any], str]:
-    """Select an assistant message by msg_id/suffix, or the latest by default.
-
-    When Egg is in get-answer mode, callers pass the active waiting Assistant
-    Note as ``preferred_msg_id``/``prefer_notes`` so ``/editAnswer`` edits the
-    note the user is answering rather than an older final assistant response.
-    """
-
-    candidates = _assistant_candidates(messages)
-    if not candidates:
-        raise ValueError("No assistant answer with textual content was found in this thread.")
-
-    wanted = (selector or "").strip()
-    if not wanted:
-        preferred = str(preferred_msg_id or "").strip()
-        if preferred:
-            for message, text in candidates:
-                msg_id = str(message.get("msg_id") or message.get("id") or "")
-                if msg_id == preferred:
-                    return message, text
-        if prefer_notes:
-            notes = [
-                (message, text)
-                for message, text in candidates
-                if bool(message.get("answer_user_preserve_turn"))
-            ]
-            if notes:
-                return notes[-1]
-        return candidates[-1]
-
-    matches: list[tuple[Mapping[str, Any], str]] = []
-    for message, text in candidates:
-        msg_id = str(message.get("msg_id") or message.get("id") or "")
-        if msg_id == wanted or (msg_id and msg_id.endswith(wanted)):
-            matches.append((message, text))
-    if not matches:
-        raise ValueError(f"No assistant answer matched selector {wanted!r}.")
-    if len(matches) > 1:
-        raise ValueError(f"Selector {wanted!r} matched multiple assistant answers; use a longer msg_id.")
-    return matches[0]
 
 
 def _set_input_panel_text(app: Any, text: str) -> None:
@@ -165,38 +86,11 @@ async def edit_answer_command_async(ctx: Any, arg: str) -> CommandResult:
         return CommandResult(clear_input=False, message="/editAnswer refused: input panel is not empty.")
 
     try:
-        create_snapshot = getattr(ctx, "create_snapshot", None)
-        if create_snapshot is not None:
-            create_snapshot(db, thread_id)
-    except Exception:
-        pass
-
-    waiting_note: Mapping[str, Any] | None = None
-    if not selector:
-        try:
-            from eggthreads import get_active_get_user_message_waiting_note  # type: ignore
-
-            raw_waiting_note = get_active_get_user_message_waiting_note(db, thread_id)
-            if isinstance(raw_waiting_note, Mapping):
-                waiting_note = raw_waiting_note
-        except Exception:
-            waiting_note = None
-
-    try:
-        message, raw_text = select_assistant_message(
-            snapshot_messages(db, thread_id),
-            selector,
-            preferred_msg_id=str((waiting_note or {}).get("msg_id") or ""),
-            prefer_notes=waiting_note is not None,
-        )
+        draft = prepare_edit_answer_draft(db, thread_id, selector, prefer_waiting_note=True)
     except ValueError as e:
         return CommandResult(clear_input=False, message=f"/editAnswer failed: {e}")
 
-    quoted = quote_markdown_blockquote(raw_text)
-    if not quoted.strip():
-        return CommandResult(clear_input=False, message="/editAnswer failed: selected assistant answer is empty.")
-
-    temp_path = _write_temp_markdown(quoted)
+    temp_path = _write_temp_markdown(draft.draft)
     try:
         argv = editor_argv_for_path(temp_path)
     except ValueError as e:
@@ -238,9 +132,8 @@ async def edit_answer_command_async(ctx: Any, arg: str) -> CommandResult:
         return CommandResult(clear_input=True, message="/editAnswer cancelled: edited draft was empty.")
 
     _set_input_panel_text(app, edited.rstrip("\n"))
-    msg_id = str(message.get("msg_id") or message.get("id") or "")
-    suffix = f" {msg_id[-8:]}" if msg_id else ""
-    label = "assistant note" if message.get("answer_user_preserve_turn") else "assistant answer"
+    suffix = f" {draft.source_suffix}" if draft.source_suffix else ""
+    label = draft.source_label or ("assistant note" if draft.source_kind == "assistant_note" else "assistant answer")
     return CommandResult(
         clear_input=False,
         message=f"Loaded quoted {label}{suffix} into the input panel.",
