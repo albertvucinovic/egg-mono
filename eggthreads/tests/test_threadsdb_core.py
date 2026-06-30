@@ -16,7 +16,10 @@ The focus is on schema-level behaviour:
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from eggthreads import ThreadsDB
 
@@ -76,6 +79,15 @@ def test_child_relationship_via_children_table(tmp_path) -> None:
     assert row[1] == child
 
 
+def test_create_thread_with_missing_parent_rolls_back_child_row(tmp_path) -> None:
+    db, _ = _make_temp_db(tmp_path)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.create_thread(thread_id="orphan-child", name="Child", parent_id="missing-parent", depth=1)
+
+    assert db.get_thread("orphan-child") is None
+
+
 def test_create_child_thread_emits_parent_notification_event(tmp_path) -> None:
     from eggthreads import create_child_thread
 
@@ -92,6 +104,17 @@ def test_create_child_thread_emits_parent_notification_event(tmp_path) -> None:
     assert row is not None
     payload = json.loads(row[1])
     assert payload == {"parent_id": parent, "child_id": child, "name": "Child"}
+
+
+def test_create_child_thread_requires_existing_parent(tmp_path) -> None:
+    from eggthreads import create_child_thread
+
+    db, _ = _make_temp_db(tmp_path)
+
+    with pytest.raises(ValueError, match="Parent thread not found"):
+        create_child_thread(db, "missing-parent", name="Child")
+
+    assert db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 0
 
 
 def test_append_event_and_max_event_seq(tmp_path) -> None:

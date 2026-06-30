@@ -369,7 +369,10 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
         The new child thread's unique ID (ULID format).
     """
     parent = db.get_thread(parent_id)
-    depth = (parent.depth + 1) if parent else 1
+    if not parent:
+        raise ValueError(f"Parent thread not found: {parent_id}")
+
+    depth = parent.depth + 1
     tid = _ulid_like()
     db.create_thread(thread_id=tid, name=name, parent_id=parent_id, initial_model_key=initial_model_key, depth=depth)
 

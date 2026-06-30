@@ -29,6 +29,37 @@ from ..system_prompt import append_root_system_prompt
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
 
+def _is_internal_runtime_thread_name(name: Optional[str]) -> bool:
+    return bool(name and name.startswith("@runtime:"))
+
+
+def _is_visible_root_thread(thread, parent_set: set[str]) -> bool:
+    """Return whether a thread should appear as an EggW top-level chat root."""
+
+    if thread.thread_id in parent_set:
+        return False
+    if (thread.depth or 0) != 0:
+        return False
+    return not _is_internal_runtime_thread_name(thread.name)
+
+
+def _thread_created_at(thread) -> str:
+    return thread.created_at or ""
+
+
+def _latest_event_seq(thread_id: str) -> int:
+    if not core.db:
+        return -1
+    try:
+        row = core.db.conn.execute(
+            "SELECT event_seq FROM events WHERE thread_id=? ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else -1
+    except Exception:
+        return -1
+
+
 @router.get("", response_model=List[ThreadInfo])
 async def get_threads():
     """List all threads (optimized with bulk queries)."""
@@ -57,6 +88,7 @@ async def get_threads():
             name=t.name,
             parent_id=parent_map.get(t.thread_id),
             model_key=current_thread_model(core.db, t.thread_id),
+            created_at=t.created_at,
             has_children=t.thread_id in children_set,
         ))
     return threads
@@ -84,15 +116,15 @@ async def get_root_threads():
         pass
 
     threads = []
-    for t in all_threads:
-        # Skip if thread has a parent (not a root)
-        if t.thread_id in parent_set:
-            continue
+    visible_roots = [t for t in all_threads if _is_visible_root_thread(t, parent_set)]
+    visible_roots.sort(key=lambda t: (_latest_event_seq(t.thread_id), _thread_created_at(t), t.thread_id))
+    for t in visible_roots:
         threads.append(ThreadInfo(
             id=t.thread_id,
             name=t.name,
             parent_id=None,
             model_key=current_thread_model(core.db, t.thread_id),
+            created_at=t.created_at,
             has_children=t.thread_id in children_set,
         ))
     return threads
@@ -114,6 +146,7 @@ async def get_thread(thread_id: str):
         name=t.name,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
+        created_at=t.created_at,
         has_children=len(children) > 0,
     )
 
@@ -133,6 +166,9 @@ async def create_thread(request: CreateThreadRequest):
     all_models_path = str(core.ALL_MODELS_PATH)
 
     if request.parent_id:
+        if not core.db.get_thread(request.parent_id):
+            raise HTTPException(status_code=404, detail="Parent thread not found")
+
         # Create child thread
         thread_id = create_child_thread(
             core.db,
@@ -161,6 +197,7 @@ async def create_thread(request: CreateThreadRequest):
         name=t.name,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
+        created_at=t.created_at,
         has_children=False,
     )
 
@@ -189,6 +226,7 @@ async def update_thread(thread_id: str, name: Optional[str] = None):
         name=t.name,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
+        created_at=t.created_at,
         has_children=len(children) > 0,
     )
 
@@ -220,6 +258,7 @@ async def duplicate_thread_endpoint(thread_id: str, name: Optional[str] = None):
         name=t.name,
         parent_id=get_parent(core.db, t.thread_id),
         model_key=current_thread_model(core.db, t.thread_id),
+        created_at=t.created_at,
         has_children=False,
     )
 
@@ -239,6 +278,7 @@ async def get_thread_children(thread_id: str):
             name=name,
             parent_id=thread_id,
             model_key=current_thread_model(core.db, child_id),
+            created_at=created_at,
             has_children=len(grandchildren) > 0,
         ))
     return children

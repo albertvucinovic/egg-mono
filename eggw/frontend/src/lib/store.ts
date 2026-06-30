@@ -6,6 +6,7 @@ export interface Thread {
   name?: string;
   parent_id?: string;
   model_key?: string;
+  created_at?: string;
   has_children: boolean;
 }
 

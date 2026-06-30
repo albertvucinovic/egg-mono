@@ -161,6 +161,51 @@ class TestThreadOperations:
         thread = next(t for t in response.json() if t["id"] == thread_id)
         assert thread["model_key"] == "Switched Model"
 
+    def test_root_threads_hide_internal_runtime_threads_and_sort_by_activity(self, client):
+        """EggW root navigation should open real chat roots, not runtime internals."""
+        from eggthreads import append_message
+
+        first_resp = client.post("/api/threads", json={"name": "Older Chat Root"})
+        assert first_resp.status_code == 200
+        first_id = first_resp.json()["id"]
+
+        second_resp = client.post("/api/threads", json={"name": "Newer Chat Root"})
+        assert second_resp.status_code == 200
+        second_id = second_resp.json()["id"]
+
+        # Simulate pre-existing/internal runtime rows that have no children row.
+        # These have appeared in real databases and must not be treated as
+        # top-level conversations by EggW's landing-page redirect.
+        core_state.db.create_thread(
+            thread_id="01ZZZZZZZZZZZZZZZZZZZZZZZZ",
+            name="@runtime:python",
+            parent_id=None,
+            initial_model_key=None,
+            depth=1,
+        )
+        core_state.db.create_thread(
+            thread_id="01ZZZZZZZZZZZZZZZZZZZZZZZY",
+            name="@runtime:bash:analysis",
+            parent_id=None,
+            initial_model_key=None,
+            depth=0,
+        )
+
+        # Activity, not thread-id/insertion order, determines the landing-page
+        # "latest root" because Home redirects to the final root in this list.
+        append_message(core_state.db, first_id, "user", "make older root recently active")
+
+        response = client.get("/api/threads/roots")
+        assert response.status_code == 200
+        roots = response.json()
+        root_ids = [thread["id"] for thread in roots]
+
+        assert "01ZZZZZZZZZZZZZZZZZZZZZZZZ" not in root_ids
+        assert "01ZZZZZZZZZZZZZZZZZZZZZZZY" not in root_ids
+        assert second_id in root_ids
+        assert root_ids[-1] == first_id
+        assert next(thread for thread in roots if thread["id"] == first_id)["created_at"] is not None
+
     def test_api_created_root_thread_has_one_system_prompt(self, client, monkeypatch):
         """EggW API-created root threads include the loaded system prompt once."""
         monkeypatch.setattr("eggw.system_prompt.load_system_prompt", lambda: "EGGW TEST SYSTEM PROMPT")
@@ -205,6 +250,14 @@ class TestThreadOperations:
 
         assert [m["content"] for m in self._system_messages(client, parent_id)] == ["EGGW ROOT ONLY PROMPT"]
         assert self._system_messages(client, child_id) == []
+
+    def test_api_rejects_child_thread_with_missing_parent(self, client):
+        """Failed child creation must not leave orphan non-root rows."""
+        response = client.post("/api/threads", json={"name": "Orphan", "parent_id": "missing-parent"})
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Parent thread not found"
+        assert core_state.db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 0
 
     def test_get_thread(self, client):
         """Test getting thread details."""
