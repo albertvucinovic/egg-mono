@@ -176,6 +176,14 @@ def test_prepare_edit_answer_draft_rejects_ambiguous_suffix(tmp_path: Path) -> N
         prepare_edit_answer_draft(db, tid, "SAME")
 
 
+def test_prepare_edit_answer_draft_reports_selected_empty_answer(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+    empty_id = ts.append_message(db, tid, "assistant", "")
+
+    with pytest.raises(ValueError, match="selected assistant answer is empty"):
+        prepare_edit_answer_draft(db, tid, empty_id)
+
+
 def test_prepare_edit_answer_draft_converts_multipart_content_consistently(tmp_path: Path) -> None:
     db, tid = _make_db(tmp_path)
     msg_id = ts.append_message(

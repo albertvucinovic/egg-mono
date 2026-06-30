@@ -456,6 +456,9 @@ EggW-only commands:
     /rename <name> — Rename the current thread.
     /theme [name] — List or switch browser themes.
 
+Edit answer:
+    /editAnswer [assistant_msg_id|suffix] — Quote an assistant answer into an editable browser draft.
+
 Attachments:
     /attach <path> — Stage a server-side local file path for the next message.
     /attachments — List staged attachments and attachments already used in this conversation.

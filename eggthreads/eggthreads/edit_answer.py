@@ -83,6 +83,25 @@ def message_id(message: Mapping[str, Any]) -> str:
     return str(message.get("msg_id") or message.get("id") or "")
 
 
+def _selector_matches_message(message: Mapping[str, Any], selector: str) -> bool:
+    msg_id = message_id(message)
+    return msg_id == selector or (msg_id and msg_id.endswith(selector))
+
+
+def _assistant_selector_matches(
+    messages: Sequence[Mapping[str, Any]],
+    selector: str,
+) -> list[tuple[Mapping[str, Any], str]]:
+    matches: list[tuple[Mapping[str, Any], str]] = []
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        if not _selector_matches_message(message, selector):
+            continue
+        matches.append((message, message_raw_text(message)))
+    return matches
+
+
 def select_assistant_message(
     messages: Sequence[Mapping[str, Any]],
     selector: str = "",
@@ -97,33 +116,32 @@ def select_assistant_message(
     an active get-user-message tool is waiting.
     """
 
+    wanted = (selector or "").strip()
+    if wanted:
+        matches = _assistant_selector_matches(messages, wanted)
+        if not matches:
+            raise ValueError(f"No assistant answer matched selector {wanted!r}.")
+        if len(matches) > 1:
+            raise ValueError(f"Selector {wanted!r} matched multiple assistant answers; use a longer msg_id.")
+        message, text = matches[0]
+        if not text.strip():
+            raise ValueError("selected assistant answer is empty.")
+        return message, text
+
     candidates = assistant_message_candidates(messages)
     if not candidates:
         raise ValueError("No assistant answer with textual content was found in this thread.")
 
-    wanted = (selector or "").strip()
-    if not wanted:
-        preferred = str(preferred_msg_id or "").strip()
-        if preferred:
-            for message, text in candidates:
-                if message_id(message) == preferred:
-                    return message, text
-        if prefer_notes:
-            notes = [(message, text) for message, text in candidates if is_assistant_note(message)]
-            if notes:
-                return notes[-1]
-        return candidates[-1]
-
-    matches: list[tuple[Mapping[str, Any], str]] = []
-    for message, text in candidates:
-        msg_id = message_id(message)
-        if msg_id == wanted or (msg_id and msg_id.endswith(wanted)):
-            matches.append((message, text))
-    if not matches:
-        raise ValueError(f"No assistant answer matched selector {wanted!r}.")
-    if len(matches) > 1:
-        raise ValueError(f"Selector {wanted!r} matched multiple assistant answers; use a longer msg_id.")
-    return matches[0]
+    preferred = str(preferred_msg_id or "").strip()
+    if preferred:
+        for message, text in candidates:
+            if message_id(message) == preferred:
+                return message, text
+    if prefer_notes:
+        notes = [(message, text) for message, text in candidates if is_assistant_note(message)]
+        if notes:
+            return notes[-1]
+    return candidates[-1]
 
 
 def _snapshot_messages_from_db(db: Any, thread_id: str) -> list[Mapping[str, Any]]:
