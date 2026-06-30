@@ -2456,6 +2456,7 @@ def find_runtime_thread(
         if db.get_thread(runtime_thread_id) is None:
             # Stale event referencing a deleted runtime thread; keep looking.
             continue
+        _ensure_runtime_thread_child_link(db, parent_thread_id, runtime_thread_id)
         session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
         return RuntimeThreadConfig(
             parent_thread_id=parent_thread_id,
@@ -2466,6 +2467,65 @@ def find_runtime_thread(
             source_event_seq=int(event_seq) if event_seq is not None else None,
         )
     return None
+
+
+def _ensure_runtime_thread_child_link(db: ThreadsDB, parent_thread_id: str, runtime_thread_id: str) -> bool:
+    """Ensure a configured runtime thread is a child of its caller thread.
+
+    Current runtime threads are created with ``create_child_thread``.  This
+    helper repairs older/incomplete rows where a ``runtime.config`` event links
+    parent and runtime but the ``children`` edge is missing.  If the runtime is
+    already attached to a different parent, leave it alone rather than creating
+    a multi-parent tree.
+    """
+
+    try:
+        parent = db.get_thread(parent_thread_id)
+        runtime = db.get_thread(runtime_thread_id)
+        if parent is None or runtime is None:
+            return False
+
+        rows = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=?",
+            (runtime_thread_id,),
+        ).fetchall()
+        existing_parents = {str(row[0]) for row in rows if row and row[0]}
+        desired_depth = int(parent.depth or 0) + 1
+        if parent_thread_id in existing_parents:
+            if int(runtime.depth or 0) != desired_depth:
+                db.conn.execute(
+                    "UPDATE threads SET depth=? WHERE thread_id=?",
+                    (desired_depth, runtime_thread_id),
+                )
+            return False
+        if existing_parents:
+            return False
+
+        db.conn.execute(
+            "INSERT INTO children(parent_id, child_id, waiting_until) VALUES (?,?,NULL)",
+            (parent_thread_id, runtime_thread_id),
+        )
+        db.conn.execute(
+            "UPDATE threads SET depth=? WHERE thread_id=?",
+            (desired_depth, runtime_thread_id),
+        )
+        try:
+            db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=parent_thread_id,
+                type_="thread.child_created",
+                payload={
+                    "parent_id": parent_thread_id,
+                    "child_id": runtime_thread_id,
+                    "name": runtime.name,
+                    "reason": "runtime_child_link_repair",
+                },
+            )
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
 
 
 def get_or_create_runtime_thread(
@@ -2486,6 +2546,7 @@ def get_or_create_runtime_thread(
 
     existing = find_runtime_thread(db, parent_thread_id, language=language, name=name)
     if existing is not None:
+        _ensure_runtime_thread_child_link(db, parent_thread_id, existing.runtime_thread_id)
         return existing.runtime_thread_id
 
     # Import lazily to avoid api <-> session import cycles at module import time.

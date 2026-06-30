@@ -292,6 +292,85 @@ class TestThreadOperations:
         assert parent_id[-8:] in payload["message"]
         assert child_id[-8:] in payload["message"]
 
+    def test_threads_command_uses_fast_status_mode_by_default(self, client, monkeypatch):
+        """Default /threads must not reduce every long thread's event log."""
+        import eggw.commands.thread as thread_commands
+
+        parent_resp = client.post("/api/threads", json={"name": "Fast Threads Parent"})
+        parent_id = parent_resp.json()["id"]
+        client.post("/api/threads", json={"name": "Fast Threads Child", "parent_id": parent_id})
+
+        calls = []
+
+        def fake_get_thread_statuses_bulk(db, tids, *, skip_runnability=False):
+            calls.append((tuple(tids), skip_runnability))
+            return {tid: "idle" for tid in tids}
+
+        monkeypatch.setattr(thread_commands, "get_thread_statuses_bulk", fake_get_thread_statuses_bulk)
+
+        response = client.post(
+            f"/api/threads/{parent_id}/command",
+            json={"command": "/threads"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["data"]["status_mode"] == "fast"
+        assert calls and calls[0][1] is True
+        assert "status=full" in payload["message"]
+
+    def test_threads_command_full_status_mode_is_explicit(self, client, monkeypatch):
+        """Users can still request the expensive runnable-state scan."""
+        import eggw.commands.thread as thread_commands
+
+        parent_resp = client.post("/api/threads", json={"name": "Full Threads Parent"})
+        parent_id = parent_resp.json()["id"]
+        calls = []
+
+        def fake_get_thread_statuses_bulk(db, tids, *, skip_runnability=False):
+            calls.append((tuple(tids), skip_runnability))
+            return {tid: "idle" for tid in tids}
+
+        monkeypatch.setattr(thread_commands, "get_thread_statuses_bulk", fake_get_thread_statuses_bulk)
+
+        response = client.post(
+            f"/api/threads/{parent_id}/command",
+            json={"command": "/threads status=full"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["data"]["status_mode"] == "full"
+        assert calls and calls[0][1] is False
+
+    def test_threads_command_hides_orphan_runtime_roots(self, client):
+        """Legacy orphan @runtime:* rows should not appear as top-level chats."""
+        parent_resp = client.post("/api/threads", json={"name": "Visible Parent"})
+        parent_id = parent_resp.json()["id"]
+        orphan_id = "01ZZZZZZZZZZZZZZZZZZZZZZRT"
+        core_state.db.create_thread(
+            thread_id=orphan_id,
+            name="@runtime:python",
+            parent_id=None,
+            initial_model_key=None,
+            depth=1,
+        )
+
+        response = client.post(
+            f"/api/threads/{parent_id}/command",
+            json={"command": "/threads"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert orphan_id in payload["data"]["thread_ids"]
+        assert orphan_id in payload["data"]["hidden_runtime_root_ids"]
+        assert orphan_id[-8:] not in payload["message"]
+        assert "hidden orphan @runtime roots: 1" in payload["message"]
+
     def test_get_thread_state(self, client):
         """Test getting thread state."""
         # Create thread

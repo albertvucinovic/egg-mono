@@ -7,6 +7,7 @@ These are the major design invariants for `egg-mono`. Keep this file short: it s
 - Performance for very long threads is a priority; use incremental computation, cached reducer/snapshot state, and bounded rendering/loading wherever possible.
 - Every thread is the root of a descendant-thread tree from the perspective of the current view.
   - Switching to a subthread makes that subthread the root of the tree currently being inspected.
+- Runtime implementation threads such as `@runtime:*` must be real children of the thread that started the runtime/REPL tool call.
 - Descendants must not be able to inspect parent or sibling data; ancestors may inspect descendants under explicit descendant-selection/access rules.
 - Descendants inherit at least the security guarantees of their direct ancestor.
 - Everything meaningful should be inspectable and transparent to the user.

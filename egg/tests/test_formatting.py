@@ -95,6 +95,22 @@ class TestFormatTree:
         # Root thread should have name "Root" (from default creation)
         assert "Root" in tree
 
+    def test_hides_orphan_runtime_roots(self, egg_app):
+        """Legacy orphan @runtime:* rows should not become top-level chats."""
+        orphan_id = "01ZZZZZZZZZZZZZZZZZZZZZZRT"
+        egg_app.db.create_thread(
+            thread_id=orphan_id,
+            name="@runtime:python",
+            parent_id=None,
+            initial_model_key=None,
+            depth=1,
+        )
+
+        tree = egg_app.format_tree()
+
+        assert egg_app.current_thread[-8:] in tree
+        assert orphan_id[-8:] not in tree
+
 
 class TestFormatMessagesText:
     """Tests for format_messages_text()."""

@@ -71,3 +71,43 @@ def test_find_runtime_thread_ignores_stale_deleted_runtime(tmp_path):
     replacement = ts.get_or_create_runtime_thread(db, parent, language="python", name="default")
     assert replacement != runtime
     assert replacement in ts.list_children_ids(db, parent)
+
+
+def test_find_runtime_thread_repairs_missing_child_link(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    runtime = ts.create_root_thread(db, name="@runtime:python")
+
+    ts.append_runtime_config(db, parent, runtime, language="python", name="default", reason="legacy")
+    assert runtime not in ts.list_children_ids(db, parent)
+
+    cfg = ts.find_runtime_thread(db, parent, language="python", name="default")
+
+    assert cfg is not None
+    assert cfg.runtime_thread_id == runtime
+    assert runtime in ts.list_children_ids(db, parent)
+    assert db.get_thread(runtime).depth == db.get_thread(parent).depth + 1
+
+
+def test_python_repl_tool_uses_runner_context_for_runtime_parent(tmp_path, monkeypatch):
+    from eggthreads.tools import create_default_tools
+
+    monkeypatch.setenv("EGG_RLM_SESSION_PROVIDER", "memory")
+    monkeypatch.setenv("EGG_ALLOW_MEMORY_SESSION_WITH_SANDBOX", "1")
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+
+    tools = create_default_tools()
+    out = tools.execute(
+        "python_repl",
+        {"code": "1 + 1", "_thread_id": "wrong-thread-id"},
+        db=db,
+        thread_id=parent,
+        preserve_tool_result=True,
+    )
+
+    assert "2" in out
+    runtime = ts.find_runtime_thread(db, parent, language="python")
+    assert runtime is not None
+    assert runtime.runtime_thread_id in ts.list_children_ids(db, parent)
+    assert ts.find_runtime_thread(db, "wrong-thread-id", language="python") is None

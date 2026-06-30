@@ -193,11 +193,21 @@ class FormattingMixin:
                 render_tree(cid, prefix + indent_next, last, out)
             return out
 
-        # Find roots
+        def _is_internal_runtime_thread_name(name: Optional[str]) -> bool:
+            return bool(name and name.startswith('@runtime:'))
+
+        # Find roots. Runtime threads should be real children of the thread
+        # that started the REPL tool call. Legacy DBs can contain orphan
+        # @runtime:* rows; hide those implementation details from top-level
+        # tree listings rather than promoting them to conversations.
         if root_tid:
             roots = [root_tid]
         else:
-            roots = [t.thread_id for t in all_threads if t.thread_id not in parent_set]
+            roots = [
+                t.thread_id
+                for t in all_threads
+                if t.thread_id not in parent_set and not _is_internal_runtime_thread_name(t.name)
+            ]
 
         lines: List[str] = []
         if not roots:

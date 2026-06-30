@@ -231,7 +231,7 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
         elif command_name == "thread":
             return await cmd_switch_thread(command_arg)
         elif command_name == "threads":
-            return await cmd_list_threads()
+            return await cmd_list_threads(command_arg)
         elif command_name == "listChildren":
             return await cmd_list_children(thread_id)
         elif command_name == "deleteThread":

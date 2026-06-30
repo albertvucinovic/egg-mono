@@ -50,6 +50,32 @@ def _thread_has_active_lease(thread_id: str) -> bool:
     return str(lease_until) > now_iso
 
 
+def _is_internal_runtime_thread_name(name: str | None) -> bool:
+    return bool(name and name.startswith("@runtime:"))
+
+
+def _threads_status_mode(arg: str) -> tuple[bool, str]:
+    """Return (include_runnability, mode_label) for /threads.
+
+    Full runnability discovery reduces each thread's event log.  That is useful
+    when explicitly requested, but it is far too expensive as the default for a
+    large database with many long threads.
+    """
+
+    args = parse_args(arg or "")
+    raw = (
+        args.get("status")
+        or args.get("state")
+        or args.get("runnability")
+        or args.get("runnable")
+        or args.positional_or(0)
+        or ""
+    )
+    mode = str(raw).strip().lower()
+    include_runnability = mode in {"full", "all", "runnable", "runnability", "true", "1", "yes", "on"}
+    return include_runnability, "full" if include_runnability else "fast"
+
+
 async def cmd_spawn(thread_id: str, context: str) -> CommandResponse:
     """Handle /spawnChildThread command."""
     models_path = str(core.MODELS_PATH)
@@ -165,7 +191,7 @@ async def cmd_switch_thread(selector: str) -> CommandResponse:
         return CommandResponse(success=False, message=f"No thread found matching: {selector}")
 
 
-async def cmd_list_threads() -> CommandResponse:
+async def cmd_list_threads(arg: str = "") -> CommandResponse:
     """Handle /threads command - shows thread tree structure (optimized)."""
     # Fetch all data in bulk to avoid N+1 queries
     all_threads = list_threads(core.db)
@@ -189,12 +215,28 @@ async def cmd_list_threads() -> CommandResponse:
     except Exception:
         pass
 
-    # Find roots (threads with no parent)
-    roots = [t.thread_id for t in all_threads if t.thread_id not in parent_map]
+    # Find visible roots (threads with no parent). Runtime threads should be
+    # real children of the thread that started the REPL tool call.  Legacy DBs
+    # can contain orphan @runtime:* rows; do not promote those implementation
+    # details to top-level conversations.
+    orphan_runtime_roots = [
+        t.thread_id
+        for t in all_threads
+        if t.thread_id not in parent_map and _is_internal_runtime_thread_name(t.name)
+    ]
+    roots = [
+        t.thread_id
+        for t in all_threads
+        if t.thread_id not in parent_map and not _is_internal_runtime_thread_name(t.name)
+    ]
 
-    # Pre-compute real-time status for all threads in one batch (efficient)
+    # Pre-compute real-time status for all threads.  By default this only does
+    # the cheap active-lease/streaming query.  Full runnability discovery folds
+    # every thread's event log and can take many seconds on large DBs; keep it
+    # behind an explicit option.
+    include_runnability, status_mode = _threads_status_mode(arg)
     all_tids = [t.thread_id for t in all_threads]
-    status_map = get_thread_statuses_bulk(core.db, all_tids)
+    status_map = get_thread_statuses_bulk(core.db, all_tids, skip_runnability=not include_runnability)
 
     def format_thread(tid: str, indent: int = 0, max_depth: int = 50) -> list[str]:
         """Format a thread and its children recursively."""
@@ -229,10 +271,26 @@ async def cmd_list_threads() -> CommandResponse:
         lines.extend(format_thread(root_id))
 
     total = len(all_threads)
+    visible_total = len(lines)
+    notes: list[str] = []
+    if not include_runnability:
+        notes.append("fast status mode: streaming only; use `/threads status=full` to scan runnable state")
+    if orphan_runtime_roots:
+        notes.append(f"hidden orphan @runtime roots: {len(orphan_runtime_roots)}")
+    note_part = ""
+    if notes:
+        note_part = "\n" + "\n".join(f"Note: {note}" for note in notes)
     return CommandResponse(
         success=True,
-        message=f"Threads ({total} total, {len(roots)} roots):\n" + "\n".join(lines),
-        data={"threads": roots, "thread_ids": all_tids, "total": total},
+        message=f"Threads ({total} total, {len(roots)} roots, {visible_total} shown):{note_part}\n" + "\n".join(lines),
+        data={
+            "threads": roots,
+            "thread_ids": all_tids,
+            "total": total,
+            "visible_total": visible_total,
+            "status_mode": status_mode,
+            "hidden_runtime_root_ids": orphan_runtime_roots,
+        },
     )
 
 
