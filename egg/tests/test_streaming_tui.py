@@ -338,9 +338,100 @@ def test_provider_stream_duration_is_displayed_in_system_header(tmp_path, monkey
     )
 
     header = app._current_stream_header_part()
-    assert "streaming 30s (inactivity limit 600s)" in header
+    assert "streaming 30s; inactivity timeout in 570s (limit 600s)" in header
     app.update_panels()
-    assert "streaming 30s (inactivity limit 600s)" in app.system_output.title
+    assert "streaming 30s; inactivity timeout in 570s (limit 600s)" in app.system_output.title
+
+    asyncio.run(
+        app.ingest_event_for_live(
+            {
+                "type": "stream.delta",
+                "invoke_id": invoke_id,
+                "ts": "1970-01-01T00:17:15Z",
+                "payload_json": json.dumps({"text": "hello"}),
+            },
+            tid,
+        )
+    )
+
+    header = app._current_stream_header_part()
+    assert "streaming 30s; inactivity timeout in 595s (limit 600s)" in header
+
+
+def test_provider_inactivity_timeout_hydrates_from_latest_delta(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+
+    monkeypatch.setattr("egg.panels.time.time", lambda: 1070.0)
+
+    assert app.db.try_open_stream(
+        thread_id=tid,
+        invoke_id=invoke_id,
+        lease_until_iso="9999-12-31T23:59:59Z",
+        owner="pytest",
+        purpose="llm",
+    )
+    app.db.conn.execute(
+        "UPDATE open_streams SET opened_at=? WHERE thread_id=?",
+        ("1970-01-01T00:16:40Z", tid),
+    )
+    open_seq = app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="stream.open",
+        payload={"stream_kind": "llm"},
+        msg_id=_uid(),
+        invoke_id=invoke_id,
+    )
+    provider_seq = app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="provider_request.started",
+        payload={"timeout": 100, "timeout_kind": "inactivity"},
+        invoke_id=invoke_id,
+    )
+    delta_seq = app.db.append_event(
+        event_id=_uid(),
+        thread_id=tid,
+        type_="stream.delta",
+        payload={"text": "recent"},
+        invoke_id=invoke_id,
+        chunk_seq=1,
+    )
+    app.db.conn.execute(
+        "UPDATE events SET ts=? WHERE event_seq=?",
+        ("1970-01-01T00:16:40Z", open_seq),
+    )
+    app.db.conn.execute(
+        "UPDATE events SET ts=? WHERE event_seq=?",
+        ("1970-01-01T00:16:50Z", provider_seq),
+    )
+    app.db.conn.execute(
+        "UPDATE events SET ts=? WHERE event_seq=?",
+        ("1970-01-01T00:17:30Z", delta_seq),
+    )
+
+    from eggthreads import create_snapshot
+
+    create_snapshot(app.db, tid)
+    app._live_state = app._make_live_state()
+
+    import egg.streaming as streaming_mod
+
+    class _NoOpWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            if False:  # pragma: no cover - keep it an async generator
+                yield []
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _NoOpWatcher)
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert "streaming 60s; inactivity timeout in 80s (limit 100s)" in app._current_stream_header_part()
 
 
 def test_active_stream_timing_hydrates_after_thread_switch_snapshot_boundary(tmp_path, monkeypatch):

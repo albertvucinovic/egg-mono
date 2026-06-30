@@ -1025,7 +1025,13 @@ class PanelsMixin:
         except Exception:
             limit = 0.0
         if limit > 0:
-            return f"streaming {elapsed:.0f}s (inactivity limit {limit:.0f}s)"
+            try:
+                last_activity = float(ls.get('provider_last_activity_at') or started)
+            except Exception:
+                last_activity = started
+            inactive_for = max(0.0, time.time() - last_activity)
+            remaining = max(0.0, limit - inactive_for)
+            return f"streaming {elapsed:.0f}s; inactivity timeout in {remaining:.0f}s (limit {limit:.0f}s)"
         return f"streaming {elapsed:.0f}s"
 
     def _current_user_command_duration(self) -> str:
