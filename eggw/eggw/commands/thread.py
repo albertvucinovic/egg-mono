@@ -50,10 +50,6 @@ def _thread_has_active_lease(thread_id: str) -> bool:
     return str(lease_until) > now_iso
 
 
-def _is_internal_runtime_thread_name(name: str | None) -> bool:
-    return bool(name and name.startswith("@runtime:"))
-
-
 def _threads_status_mode(arg: str) -> tuple[bool, str]:
     """Return (include_runnability, mode_label) for /threads.
 
@@ -215,20 +211,11 @@ async def cmd_list_threads(arg: str = "") -> CommandResponse:
     except Exception:
         pass
 
-    # Find visible roots (threads with no parent). Runtime threads should be
-    # real children of the thread that started the REPL tool call.  Legacy DBs
-    # can contain orphan @runtime:* rows; do not promote those implementation
-    # details to top-level conversations.
-    orphan_runtime_roots = [
-        t.thread_id
-        for t in all_threads
-        if t.thread_id not in parent_map and _is_internal_runtime_thread_name(t.name)
-    ]
-    roots = [
-        t.thread_id
-        for t in all_threads
-        if t.thread_id not in parent_map and not _is_internal_runtime_thread_name(t.name)
-    ]
+    # Find roots (threads with no parent). Runtime threads should be real
+    # children of the thread that started the REPL tool call, but legacy
+    # unparented rows still need to remain visible/inspectable rather than
+    # being hidden.
+    roots = [t.thread_id for t in all_threads if t.thread_id not in parent_map]
 
     # Pre-compute real-time status for all threads.  By default this only does
     # the cheap active-lease/streaming query.  Full runnability discovery folds
@@ -275,8 +262,6 @@ async def cmd_list_threads(arg: str = "") -> CommandResponse:
     notes: list[str] = []
     if not include_runnability:
         notes.append("fast status mode: streaming only; use `/threads status=full` to scan runnable state")
-    if orphan_runtime_roots:
-        notes.append(f"hidden orphan @runtime roots: {len(orphan_runtime_roots)}")
     note_part = ""
     if notes:
         note_part = "\n" + "\n".join(f"Note: {note}" for note in notes)
@@ -289,7 +274,6 @@ async def cmd_list_threads(arg: str = "") -> CommandResponse:
             "total": total,
             "visible_total": visible_total,
             "status_mode": status_mode,
-            "hidden_runtime_root_ids": orphan_runtime_roots,
         },
     )
 

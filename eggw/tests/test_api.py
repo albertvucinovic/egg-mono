@@ -161,8 +161,8 @@ class TestThreadOperations:
         thread = next(t for t in response.json() if t["id"] == thread_id)
         assert thread["model_key"] == "Switched Model"
 
-    def test_root_threads_hide_internal_runtime_threads_and_sort_by_activity(self, client):
-        """EggW root navigation should open real chat roots, not runtime internals."""
+    def test_root_threads_keep_legacy_orphan_runtime_rows_visible_and_sort_by_activity(self, client):
+        """Legacy orphan runtime rows remain inspectable in the root list."""
         from eggthreads import append_message
 
         first_resp = client.post("/api/threads", json={"name": "Older Chat Root"})
@@ -174,8 +174,9 @@ class TestThreadOperations:
         second_id = second_resp.json()["id"]
 
         # Simulate pre-existing/internal runtime rows that have no children row.
-        # These have appeared in real databases and must not be treated as
-        # top-level conversations by EggW's landing-page redirect.
+        # These have appeared in real databases.  They should remain visible so
+        # users can inspect/repair them; EggW startup no longer depends on
+        # hiding them because `/` opens a fresh thread.
         core_state.db.create_thread(
             thread_id="01ZZZZZZZZZZZZZZZZZZZZZZZZ",
             name="@runtime:python",
@@ -200,8 +201,8 @@ class TestThreadOperations:
         roots = response.json()
         root_ids = [thread["id"] for thread in roots]
 
-        assert "01ZZZZZZZZZZZZZZZZZZZZZZZZ" not in root_ids
-        assert "01ZZZZZZZZZZZZZZZZZZZZZZZY" not in root_ids
+        assert "01ZZZZZZZZZZZZZZZZZZZZZZZZ" in root_ids
+        assert "01ZZZZZZZZZZZZZZZZZZZZZZZY" in root_ids
         assert second_id in root_ids
         assert root_ids[-1] == first_id
         assert next(thread for thread in roots if thread["id"] == first_id)["created_at"] is not None
@@ -345,8 +346,8 @@ class TestThreadOperations:
         assert payload["data"]["status_mode"] == "full"
         assert calls and calls[0][1] is False
 
-    def test_threads_command_hides_orphan_runtime_roots(self, client):
-        """Legacy orphan @runtime:* rows should not appear as top-level chats."""
+    def test_threads_command_keeps_orphan_runtime_roots_visible(self, client):
+        """Legacy orphan @runtime:* rows remain visible/inspectable."""
         parent_resp = client.post("/api/threads", json={"name": "Visible Parent"})
         parent_id = parent_resp.json()["id"]
         orphan_id = "01ZZZZZZZZZZZZZZZZZZZZZZRT"
@@ -367,9 +368,8 @@ class TestThreadOperations:
         payload = response.json()
         assert payload["success"] is True
         assert orphan_id in payload["data"]["thread_ids"]
-        assert orphan_id in payload["data"]["hidden_runtime_root_ids"]
-        assert orphan_id[-8:] not in payload["message"]
-        assert "hidden orphan @runtime roots: 1" in payload["message"]
+        assert orphan_id in payload["data"]["threads"]
+        assert orphan_id[-8:] in payload["message"]
 
     def test_get_thread_state(self, client):
         """Test getting thread state."""

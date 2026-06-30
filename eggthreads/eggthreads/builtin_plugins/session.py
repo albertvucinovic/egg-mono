@@ -25,7 +25,17 @@ def _context_thread_id(args: Dict[str, Any], ctx: Any = None) -> str:
 
 
 def _context_db(ctx: Any = None):
-    return _thread_db(getattr(ctx, "db", None) if ctx is not None else None)
+    db = getattr(ctx, "db", None) if ctx is not None else None
+    db_path = getattr(db, "path", None)
+    if db_path is not None:
+        from ..db import ThreadsDB
+
+        # REPL tools are synchronous implementations, so execute_async() runs
+        # them in a worker thread.  The runner's ctx.db connection belongs to
+        # the scheduler/event-loop thread; open a fresh connection to the same
+        # SQLite file instead of crossing thread boundaries.
+        return ThreadsDB(db_path)
+    return _thread_db(db)
 
 
 def _context_timeout_sec(args: Dict[str, Any], ctx: Any = None) -> float | None:

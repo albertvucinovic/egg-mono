@@ -29,18 +29,10 @@ from ..system_prompt import append_root_system_prompt
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
 
-def _is_internal_runtime_thread_name(name: Optional[str]) -> bool:
-    return bool(name and name.startswith("@runtime:"))
-
-
 def _is_visible_root_thread(thread, parent_set: set[str]) -> bool:
     """Return whether a thread should appear as an EggW top-level chat root."""
 
-    if thread.thread_id in parent_set:
-        return False
-    if (thread.depth or 0) != 0:
-        return False
-    return not _is_internal_runtime_thread_name(thread.name)
+    return thread.thread_id not in parent_set
 
 
 def _thread_created_at(thread) -> str:
