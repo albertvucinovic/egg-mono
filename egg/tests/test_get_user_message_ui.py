@@ -115,6 +115,33 @@ def test_input_panel_marks_active_get_user_answer_mode_and_restores_after_reply(
     assert egg_app.input_panel.style.border_style == normal_border
 
 
+def test_slash_command_during_active_get_user_wait_does_not_answer_tool(egg_app):
+    _start_get_user_wait(egg_app)
+    egg_app.input_panel.editor.editor.set_text("/help")
+
+    result = egg_app.handle_key("\x04")
+
+    assert result is True
+    assert ts.get_active_get_user_message_waiting_note(egg_app.db, egg_app.current_thread) is not None
+    messages = _messages(egg_app)
+    assert not any(msg.get("role") == "user" and msg.get("content") == "/help" for msg in messages)
+    assert any("Help" in msg or "help" in msg.lower() for msg in egg_app._system_log)
+
+
+def test_shell_command_during_active_get_user_wait_does_not_answer_tool(egg_app):
+    _start_get_user_wait(egg_app)
+    egg_app.input_panel.editor.editor.set_text("$ echo hi")
+
+    result = egg_app.handle_key("\x04")
+
+    assert result is True
+    assert ts.get_active_get_user_message_waiting_note(egg_app.db, egg_app.current_thread) is not None
+    messages = _messages(egg_app)
+    command_msg = next(msg for msg in messages if msg.get("role") == "user" and msg.get("content") == "$ echo hi")
+    assert command_msg.get("keep_user_turn") is True
+    assert command_msg.get("tool_calls")
+
+
 def test_ctrl_c_cancels_active_get_user_wait_with_keep_user_turn(egg_app):
     _start_get_user_wait(egg_app)
     egg_app.update_panels()

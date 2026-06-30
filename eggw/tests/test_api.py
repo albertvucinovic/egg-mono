@@ -480,6 +480,18 @@ class TestThreadOperations:
         assert settings["active_get_user_wait"] is True
         assert settings["get_user_waiting_note"]["content"] == note
 
+        command_response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/threads"},
+        )
+
+        assert command_response.status_code == 200
+        assert command_response.json()["success"] is True
+        state_after_command = client.get(f"/api/threads/{thread_id}/state").json()
+        assert state_after_command["active_get_user_wait"] is True
+        messages_after_command = client.get(f"/api/threads/{thread_id}/messages").json()
+        assert not any(msg["role"] == "user" and msg["content"] == "/threads" for msg in messages_after_command)
+
         answer_response = client.post(
             f"/api/threads/{thread_id}/messages",
             json={"content": "Continue with the next slice."},
