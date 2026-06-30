@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -52,15 +53,23 @@ class ThreadsDB:
     # Threads -----------------------------------------------------------
     def create_thread(self, thread_id: str, name: Optional[str] = None, parent_id: Optional[str] = None,
                       waiting_until: Optional[str] = None, initial_model_key: Optional[str] = None, depth: int = 0) -> str:
-        self.conn.execute(
-            "INSERT INTO threads(thread_id, name, initial_model_key, depth) VALUES (?,?,?,?)",
-            (thread_id, name, initial_model_key, depth)
-        )
-        if parent_id:
+        savepoint = f"create_thread_{uuid.uuid4().hex}"
+        self.conn.execute(f"SAVEPOINT {savepoint}")
+        try:
             self.conn.execute(
-                "INSERT INTO children(parent_id, child_id, waiting_until) VALUES (?,?,?)",
-                (parent_id, thread_id, waiting_until)
+                "INSERT INTO threads(thread_id, name, initial_model_key, depth) VALUES (?,?,?,?)",
+                (thread_id, name, initial_model_key, depth)
             )
+            if parent_id:
+                self.conn.execute(
+                    "INSERT INTO children(parent_id, child_id, waiting_until) VALUES (?,?,?)",
+                    (parent_id, thread_id, waiting_until)
+                )
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
         return thread_id
 
     def get_thread(self, thread_id: str) -> Optional[ThreadRow]:

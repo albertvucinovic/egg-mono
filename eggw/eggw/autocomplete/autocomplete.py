@@ -23,6 +23,7 @@ from eggthreads.image_generation import complete_image_generate_args
 from eggthreads.skills import list_skills
 
 from .. import core
+from ..core.scheduler import scheduler_running
 
 
 def get_tool_names() -> List[str]:
@@ -147,8 +148,11 @@ async def get_autocomplete(
                 # Get current thread ID for [CUR] indicator
                 cur_thread_id = thread_id
 
-                # Check which threads are streaming (have active schedulers)
-                streaming_threads = set(core.active_schedulers.keys())
+                # Check which roots have live schedulers in this process.
+                streaming_threads = {
+                    root_id for root_id in core.active_schedulers.keys()
+                    if scheduler_running(root_id)
+                }
 
                 # Filter ALL threads first, then limit results
                 matched_count = 0

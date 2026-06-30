@@ -120,6 +120,8 @@ class _ThreadEventReduction:
     _last_assistant_seq: int = -1
     _user_seqs: List[int] = field(default_factory=list)
     _current_global_start: Optional[int] = None
+    _open_all_in_turn_user_seq: Optional[int] = None
+    _open_all_in_turn_approval_seq: Optional[int] = None
 
 
 def _payload(ev: Dict[str, Any]) -> Dict[str, Any]:
@@ -252,45 +254,39 @@ def _tool_call_states_from_declaration(
             name=str(name),
             arguments=args,
         )
-        if out[tcid].name in AUTO_APPROVED_TOOL_NAMES:
+        if (
+            (role == "user" and not bool(payload.get("requires_tool_approval")))
+            or out[tcid].name in AUTO_APPROVED_TOOL_NAMES
+        ):
             out[tcid] = replace(out[tcid], approval_decision="granted")
     return out
 
 
-def _records_declare_tool_calls(records: List[Tuple[Dict[str, Any], Dict[str, Any], int]]) -> bool:
-    for ev, payload, _ev_seq in records:
-        if ev.get("type") != "msg.create":
-            continue
-        raw_tool_calls = payload.get("tool_calls")
-        if isinstance(raw_tool_calls, list) and raw_tool_calls:
-            return True
-    return False
+def _latest_user_seq_at_or_before(user_seqs: List[int], ev_seq: int) -> int:
+    """Return the user-turn start sequence for an approval event.
+
+    ``all-in-turn`` historically applies to the turn containing the approval:
+    the latest user message at or before the approval event, through the event
+    before the next user message.  If malformed/imported history contains an
+    approval before any user message, full replay treats the pre-user prefix as
+    a turn starting at ``-1``; preserve that behavior for incremental state.
+    """
+
+    prev_user_seq = -1
+    for user_seq in user_seqs:
+        if user_seq <= ev_seq:
+            prev_user_seq = user_seq
+        else:
+            break
+    return prev_user_seq
 
 
-def _has_hard_prior_broad_tool_approval(db: ThreadsDB, thread_id: str, max_seq: int) -> bool:
-    cur = db.conn.execute(
-        """
-        SELECT payload_json FROM events
-         WHERE thread_id=?
-           AND type='tool_call.approval'
-           AND event_seq<=?
-        """,
-        (thread_id, max_seq),
-    )
-    for row in cur.fetchall():
-        try:
-            payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if payload.get("decision") == "all-in-turn":
-            return True
-    return False
-
-
-def _has_open_global_approval(reduction: _ThreadEventReduction) -> bool:
-    return reduction._current_global_start is not None
+def _all_in_turn_open_for_event(
+    open_user_seq: Optional[int],
+    approval_seq: Optional[int],
+    ev_seq: int,
+) -> bool:
+    return open_user_seq is not None and approval_seq is not None and ev_seq >= approval_seq
 
 
 def _tool_call_ids_in_turn(
@@ -392,14 +388,14 @@ def _try_reduce_thread_events_incrementally(
     records = [(ev, _payload(ev), _event_seq_value(ev)) for ev in events]
     if not _has_incremental_safe_tail(records):
         return None
-    if _records_declare_tool_calls(records) and _has_hard_prior_broad_tool_approval(db, thread_id, previous.max_event_seq):
-        return None
 
     skipped_msg_ids = set(previous.skipped_msg_ids)
     consumed_user_msg_ids = set(previous.consumed_user_msg_ids)
     llm_invokes = set(previous._llm_invokes)
     user_seqs = list(previous._user_seqs)
     current_global_start = previous._current_global_start
+    open_all_in_turn_user_seq = previous._open_all_in_turn_user_seq
+    open_all_in_turn_approval_seq = previous._open_all_in_turn_approval_seq
     last_llm_boundary_seq = previous.last_llm_boundary_seq
     last_llm_stream_boundary_seq = previous._last_llm_stream_boundary_seq
     last_assistant_seq = previous._last_assistant_seq
@@ -481,6 +477,17 @@ def _try_reduce_thread_events_incrementally(
                 closed_invokes.add(inv)
             continue
         if ev_type == "msg.create":
+            if (
+                payload.get("role") == "user"
+                and open_all_in_turn_user_seq is not None
+                and ev_seq > open_all_in_turn_user_seq
+            ):
+                # ``all-in-turn`` approval is scoped to one user turn.  A new
+                # user message starts a new turn, so old approvals must not
+                # leak onto user-command tool calls such as ``$`` / ``$$``.
+                open_all_in_turn_user_seq = None
+                open_all_in_turn_approval_seq = None
+
             raw_tool_calls = payload.get("tool_calls")
             if isinstance(raw_tool_calls, list) and raw_tool_calls:
                 msg_id = ev.get("msg_id")
@@ -493,7 +500,11 @@ def _try_reduce_thread_events_incrementally(
                     return None
                 if _has_prior_tool_approval_for_ids(db, thread_id, ev_seq, declared):
                     return None
-                if _has_open_global_approval(previous):
+                if current_global_start is not None or _all_in_turn_open_for_event(
+                    open_all_in_turn_user_seq,
+                    open_all_in_turn_approval_seq,
+                    ev_seq,
+                ):
                     declared = {
                         tcid: replace(tc, approval_decision="granted")
                         for tcid, tc in declared.items()
@@ -552,6 +563,8 @@ def _try_reduce_thread_events_incrementally(
                 current_global_start = None
                 continue
             if decision == "all-in-turn":
+                open_all_in_turn_user_seq = _latest_user_seq_at_or_before(user_seqs, ev_seq)
+                open_all_in_turn_approval_seq = ev_seq
                 for candidate_tcid, candidate_tc in _tool_call_ids_in_turn(tool_call_states, user_seqs, ev_seq):
                     if candidate_tc.approval_decision is None:
                         tool_call_states[candidate_tcid] = replace(candidate_tc, approval_decision="granted")
@@ -648,6 +661,8 @@ def _try_reduce_thread_events_incrementally(
         _last_assistant_seq=last_assistant_seq,
         _user_seqs=user_seqs,
         _current_global_start=current_global_start,
+        _open_all_in_turn_user_seq=open_all_in_turn_user_seq,
+        _open_all_in_turn_approval_seq=open_all_in_turn_approval_seq,
     )
 
 
@@ -843,6 +858,18 @@ def _reduce_loaded_thread_events(
     if global_auto_approval and current_global_start is not None:
         global_intervals.append((current_global_start, None))
 
+    open_all_in_turn_user_seq: Optional[int] = None
+    open_all_in_turn_approval_seq: Optional[int] = None
+    for ev, payload, ev_seq in records:
+        ev_type = ev.get("type")
+        if ev_type == "msg.create" and payload.get("role") == "user":
+            if open_all_in_turn_user_seq is not None and ev_seq > open_all_in_turn_user_seq:
+                open_all_in_turn_user_seq = None
+                open_all_in_turn_approval_seq = None
+        elif ev_type == "tool_call.approval" and payload.get("decision") == "all-in-turn":
+            open_all_in_turn_user_seq = _latest_user_seq_at_or_before(user_seqs, ev_seq)
+            open_all_in_turn_approval_seq = ev_seq
+
     closed_invokes: set[str] = set()
     interrupted_invokes: set[str] = set()
     for ev, _payload_obj, _ev_seq in records:
@@ -951,6 +978,8 @@ def _reduce_loaded_thread_events(
         _last_assistant_seq=last_assistant_seq,
         _user_seqs=user_seqs,
         _current_global_start=current_global_start if global_auto_approval else None,
+        _open_all_in_turn_user_seq=open_all_in_turn_user_seq,
+        _open_all_in_turn_approval_seq=open_all_in_turn_approval_seq,
     )
 
 

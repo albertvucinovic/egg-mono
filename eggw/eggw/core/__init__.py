@@ -21,6 +21,7 @@ from .scheduler import (
     start_scheduler,
     stop_scheduler,
     ensure_scheduler_for,
+    scheduler_running,
 )
 
 
@@ -75,4 +76,5 @@ __all__ = [
     "start_scheduler",
     "stop_scheduler",
     "ensure_scheduler_for",
+    "scheduler_running",
 ]

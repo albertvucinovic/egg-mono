@@ -81,6 +81,27 @@ if TYPE_CHECKING:  # pragma: no cover
     from .db import ThreadsDB
 
 
+class SandboxSetupError(RuntimeError):
+    """Raised when sandboxing is enabled but cannot be applied safely."""
+
+
+def sandbox_unavailable_message(provider: str, reason: str | None = None) -> str:
+    """Return the standard user-facing fail-closed sandbox error."""
+
+    provider_name = str(provider or "unknown").strip() or "unknown"
+    detail = f" {reason.strip()}" if isinstance(reason, str) and reason.strip() else ""
+    return (
+        f"Sandboxing is turned on, but sandbox provider '{provider_name}' is not available or could not be used."
+        f"{detail}\n"
+        "The tool call was not run. If you are sure you want to run without the sandbox, "
+        "turn sandboxing off for this thread and retry."
+    )
+
+
+def _raise_sandbox_setup(provider: str, reason: str | None = None) -> None:
+    raise SandboxSetupError(sandbox_unavailable_message(provider, reason))
+
+
 
 # ---------------------------------------------------------------------------
 # Common abstractions for mandatory protections and default configurations
@@ -189,6 +210,249 @@ def _docker_read_roots(settings: Dict[str, Any], working_dir: Path) -> List[Path
             continue
         out.append(root)
     return out
+
+
+def _path_is_within_roots(path: Path, roots: List[Path]) -> bool:
+    try:
+        p = path.resolve()
+    except Exception:
+        p = path
+    for root in roots:
+        try:
+            r = root.resolve()
+        except Exception:
+            r = root
+        if p == r or _is_relative_to_path(p, r):
+            return True
+    return False
+
+
+def _keep_broad_roots(paths: List[Path]) -> List[Path]:
+    """Return de-duplicated paths, keeping broader ancestors first."""
+
+    out: List[Path] = []
+    for p in sorted({item.resolve() for item in paths}, key=lambda item: len(item.parts)):
+        if any(p == existing or _is_relative_to_path(p, existing) for existing in out):
+            continue
+        out.append(p)
+    return out
+
+
+def _filesystem_has_explicit_allow_write(settings: Dict[str, Any]) -> bool:
+    fs = settings.get("filesystem") if isinstance(settings, dict) else None
+    return isinstance(fs, dict) and "allowWrite" in fs
+
+
+def _sandbox_allow_write_roots(settings: Dict[str, Any], working_dir: Path) -> List[Path]:
+    if not _filesystem_has_explicit_allow_write(settings):
+        return [working_dir.resolve()]
+    roots: List[Path] = []
+    for raw in _sandbox_filesystem_values(settings, "allowWrite"):
+        p = _resolve_sandbox_policy_path(raw, working_dir)
+        if p is not None and (p == working_dir.resolve() or _is_relative_to_path(p, working_dir)):
+            roots.append(p)
+    return _keep_broad_roots(roots)
+
+
+def _sandbox_denied_roots(settings: Dict[str, Any], working_dir: Path) -> List[Path]:
+    denied: List[Path] = []
+    for key in ("denyRead", "denyWrite"):
+        for raw in _sandbox_filesystem_values(settings, key):
+            p = _resolve_sandbox_policy_path(raw, working_dir)
+            if p is None:
+                continue
+            if p == working_dir.resolve() or _is_relative_to_path(p, working_dir):
+                # File masks are represented by masking the containing
+                # directory, because Docker/Bwrap directory bind masks are the
+                # portable primitive available here. This intentionally
+                # over-approximates protection for file paths.
+                try:
+                    if p.exists() and p.is_file():
+                        p = p.parent
+                except Exception:
+                    pass
+                denied.append(p)
+    return _keep_broad_roots(denied)
+
+
+def _container_path_for_host_path(host_path: Path, working_dir: Path, workspace: str) -> Optional[str]:
+    try:
+        rel = host_path.resolve().relative_to(working_dir.resolve())
+    except Exception:
+        return None
+    return str(Path(str(workspace).rstrip("/") or "/") / rel)
+
+
+def _docker_mount_args_from_filesystem_policy(
+    *,
+    working_dir: Path,
+    workspace: str,
+    settings: Dict[str, Any],
+    skip_denied_paths: Optional[List[Path]] = None,
+) -> List[str]:
+    """Translate Egg filesystem policy into Docker ``-v`` flags.
+
+    The workspace is mounted read-only first. Writable allow roots are then
+    overlaid read-write. Deny roots are finally overlaid with empty read-only
+    masks. If no explicit allowWrite exists, the workspace root is writable.
+    """
+
+    wd = working_dir.resolve()
+    workspace = str(workspace or "/workspace")
+    allow_roots = _sandbox_allow_write_roots(settings, wd)
+    args: List[str] = ["-v", f"{wd}:{workspace}:ro"]
+    if any(p == wd for p in allow_roots):
+        args = ["-v", f"{wd}:{workspace}"]
+    else:
+        for p in allow_roots:
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            container_path = _container_path_for_host_path(p, wd, workspace)
+            if container_path:
+                args.extend(["-v", f"{p}:{container_path}"])
+
+    skip_roots = [p.resolve() for p in (skip_denied_paths or [])]
+    denied = []
+    for p in _sandbox_denied_roots(settings, wd):
+        if any(p == skip or _is_relative_to_path(p, skip) for skip in skip_roots):
+            continue
+        denied.append(p)
+    for p in _keep_broad_roots(denied):
+        container_path = _container_path_for_host_path(p, wd, workspace)
+        if not container_path:
+            continue
+        mask = _sandbox_mask_dir("docker", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
+        args.extend(["-v", f"{mask}:{container_path}:ro"])
+    return args
+
+
+def _container_path_equal_or_under(path_text: str, root_text: str) -> bool:
+    try:
+        p = Path("/" + str(path_text or "").lstrip("/")).resolve()
+        r = Path("/" + str(root_text or "").lstrip("/")).resolve()
+        return p == r or _is_relative_to_path(p, r)
+    except Exception:
+        return False
+
+
+def _docker_host_mount_source_is_protected(src: str, working_dir: Path) -> bool:
+    path = _resolve_sandbox_policy_path(str(src or ""), working_dir)
+    if path is None:
+        return False
+    for protected in _mandatory_protected_paths_for_working_dir(working_dir):
+        if path == protected or _is_relative_to_path(path, protected):
+            return True
+    return False
+
+
+def _validate_docker_mount_does_not_expose_egg(
+    *,
+    src: Any,
+    dst: Any,
+    working_dir: Path,
+    workspace: str,
+) -> None:
+    """Fail closed if a Docker mount would expose Egg-private storage."""
+
+    src_text = str(src or "").strip()
+    dst_text = str(dst or "").strip()
+    if src_text and _docker_host_mount_source_is_protected(src_text, working_dir):
+        _raise_sandbox_setup("docker", "Docker mount source is under Egg-private .egg storage.")
+    egg_dst = f"{str(workspace or '/workspace').rstrip('/')}/.egg"
+    if dst_text and _container_path_equal_or_under(dst_text, egg_dst):
+        _raise_sandbox_setup("docker", "Docker mount target is under Egg-private .egg storage.")
+
+
+def _parse_docker_volume_spec(value: str) -> tuple[str, str]:
+    # Docker volume specs are host:container[:mode]. This simple parser covers
+    # the POSIX paths Egg supports in sandbox configs.
+    parts = str(value or "").split(":")
+    if len(parts) < 2:
+        return "", ""
+    return parts[0], parts[1]
+
+
+def _parse_docker_mount_spec(value: str) -> tuple[str, str]:
+    src = ""
+    dst = ""
+    for item in str(value or "").split(","):
+        key, sep, val = item.partition("=")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        val = val.strip()
+        if key in {"source", "src"}:
+            src = val
+        elif key in {"target", "dst", "destination"}:
+            dst = val
+    return src, dst
+
+
+def _validate_docker_extra_args_do_not_expose_egg(extra_args: Any, *, working_dir: Path, workspace: str) -> None:
+    if not isinstance(extra_args, list):
+        return
+    args = [arg for arg in extra_args if isinstance(arg, str)]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        value = ""
+        kind = ""
+        if arg in {"-v", "--volume"} and i + 1 < len(args):
+            kind = "volume"
+            value = args[i + 1]
+            i += 2
+        elif arg.startswith("-v="):
+            kind = "volume"
+            value = arg.split("=", 1)[1]
+            i += 1
+        elif arg.startswith("--volume="):
+            kind = "volume"
+            value = arg.split("=", 1)[1]
+            i += 1
+        elif arg == "--mount" and i + 1 < len(args):
+            kind = "mount"
+            value = args[i + 1]
+            i += 2
+        elif arg.startswith("--mount="):
+            kind = "mount"
+            value = arg.split("=", 1)[1]
+            i += 1
+        else:
+            i += 1
+            continue
+        src, dst = _parse_docker_mount_spec(value) if kind == "mount" else _parse_docker_volume_spec(value)
+        _validate_docker_mount_does_not_expose_egg(src=src, dst=dst, working_dir=working_dir, workspace=workspace)
+
+
+def _bwrap_args_from_filesystem_policy(
+    *,
+    working_dir: Path,
+    settings: Dict[str, Any],
+) -> List[str]:
+    """Translate Egg filesystem policy into a conservative bwrap argv prefix."""
+
+    wd = working_dir.resolve()
+    allow_roots = _sandbox_allow_write_roots(settings, wd)
+    args: List[str] = ["bwrap", "--ro-bind", "/", "/"]
+    if any(p == wd for p in allow_roots):
+        args.extend(["--bind", str(wd), str(wd)])
+    else:
+        args.extend(["--ro-bind", str(wd), str(wd)])
+        for p in allow_roots:
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            args.extend(["--bind", str(p), str(p)])
+
+    for p in _sandbox_denied_roots(settings, wd):
+        if not (p == wd or _is_relative_to_path(p, wd)):
+            continue
+        mask = _sandbox_mask_dir("bwrap", hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:16])
+        args.extend(["--ro-bind", str(mask), str(p)])
+    return args
 
 
 def sandbox_read_policy_decision(
@@ -614,10 +878,7 @@ class DockerProvider:
 
     def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None, container_name: Optional[str] = None) -> List[str]:
         if not self.is_available():
-            # Normalize settings with provider-specific defaults
-            settings = normalize_provider_settings("docker", settings)
-
-            return argv
+            _raise_sandbox_setup("docker", "Docker is not available or the Docker daemon is unreachable.")
         # Default settings
         image = settings.get("image", _default_docker_image())
         network = settings.get("network", "none")
@@ -628,6 +889,9 @@ class DockerProvider:
         workspace = settings.get("workspace", "/workspace")
         extra_mounts = settings.get("extra_mounts", [])
         extra_args = settings.get("extra_args", [])
+        from pathlib import Path
+        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
+        _validate_docker_extra_args_do_not_expose_egg(extra_args, working_dir=wd, workspace=str(workspace or "/workspace"))
         # Build docker run command
         # --init ensures signals are properly forwarded to the container's main process
         cmd = ["docker", "run", "--rm", "--init", "--cpus", "4", "--user", f"{os.getuid()}"]
@@ -638,11 +902,20 @@ class DockerProvider:
         if network:
             cmd.extend(["--network", network])
         # Mount working directory as workspace
-        from pathlib import Path
-        wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
-        cmd.extend(["-v", f"{wd}:{workspace}"])
+        cmd.extend(_docker_mount_args_from_filesystem_policy(
+            working_dir=wd,
+            workspace=str(workspace or "/workspace"),
+            settings=settings,
+            skip_denied_paths=[wd / ".egg"],
+        ))
         for mount in extra_mounts:
             if isinstance(mount, dict) and mount.get("src") and mount.get("dst"):
+                _validate_docker_mount_does_not_expose_egg(
+                    src=mount.get("src"),
+                    dst=mount.get("dst"),
+                    working_dir=wd,
+                    workspace=str(workspace or "/workspace"),
+                )
                 cmd.extend(["-v", f"{mount['src']}:{mount['dst']}"])
         # Extra arguments (user-provided)
         for arg in extra_args:
@@ -708,21 +981,13 @@ class BwrapProvider:
 
     def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
         if not self.is_available():
-            # Normalize settings with provider-specific defaults
-            settings = normalize_provider_settings("bwrap", settings)
-        
-            return argv
-        # Basic bwrap sandbox: read-only root, bind working directory, unshare network
-        # This is a minimal example; real implementation should respect settings.
+            _raise_sandbox_setup("bwrap", "bubblewrap (bwrap) is not available.")
         from pathlib import Path
         wd = Path(working_dir).resolve() if working_dir else Path.cwd().resolve()
-        # Build bwrap command
-        cmd = ["bwrap", "--ro-bind", "/", "/",
-               "--bind", str(wd), str(wd),
-               "--dev", "/dev",
-               "--proc", "/proc",
-               "--unshare-net",
-               "--chdir", str(wd)]
+        cmd = _bwrap_args_from_filesystem_policy(working_dir=wd, settings=settings)
+        # Basic process/network hardening.  Filesystem policy is translated
+        # above; bwrap still uses a read-only host root for compatibility.
+        cmd.extend(["--dev", "/dev", "--proc", "/proc", "--unshare-net", "--unshare-pid", "--die-with-parent", "--chdir", str(wd)])
         # Hide mandatory Egg-private paths with empty read-only masks instead
         # of read-only binding the real .egg tree into the sandbox.
         for prot_path in _mandatory_protected_paths_for_working_dir(wd):
@@ -751,9 +1016,8 @@ class SrtProvider:
         return shutil.which(srt_bin) is not None
 
     def wrap_argv(self, argv: List[str], settings: Dict[str, Any], working_dir: Optional[Path] = None) -> List[str]:
-        # If not available, return original argv (caller will fall back).
         if not self.is_available():
-            return argv
+            _raise_sandbox_setup("srt", "sandbox-runtime (srt) is not available.")
         
         # Apply mandatory protections and normalize settings
         cfg = apply_mandatory_protections("srt", settings, working_dir)
@@ -1158,8 +1422,10 @@ def wrap_argv_for_sandbox_with_settings(
 
     The provider can be specified via the ``provider`` argument or via a
     "provider" key inside ``settings`` (default "docker").  If sandboxing is
-    disabled or the requested provider is unavailable, the original argv
-    is returned unchanged.
+    disabled, the original argv is returned unchanged. If sandboxing is enabled
+    but the requested provider is unavailable or unknown, this function raises
+    :class:`SandboxSetupError` so callers fail closed instead of running a
+    model-controlled command on the host.
 
     Args:
         argv: Command arguments to wrap
@@ -1186,10 +1452,9 @@ def wrap_argv_for_sandbox_with_settings(
     settings = apply_mandatory_protections(provider_name, settings, working_dir)
 
     if provider_obj is None:
-        # Unknown provider -> no sandbox
-        return argv
+        _raise_sandbox_setup(provider_name, "Unknown sandbox provider.")
     if not provider_obj.is_available():
-        return argv
+        _raise_sandbox_setup(provider_name, "Provider binary/service is unavailable.")
 
     # Delegate to provider (pass container_name for Docker)
     if provider_name == "docker" and container_name:
@@ -1461,10 +1726,7 @@ def get_thread_sandbox_status(db: "ThreadsDB", thread_id: str) -> Dict[str, obje
     effective = bool(cfg.enabled) and provider_available
     warning: Optional[str] = None
     if bool(cfg.enabled) and not provider_available:
-        warning = (
-            f"Sandboxing is enabled but provider '{cfg.provider}' is not available. "
-            "Tool commands will run *without* a sandbox."
-        )
+        warning = sandbox_unavailable_message(cfg.provider, "Provider binary/service is unavailable.")
 
     # Best-effort: source_path is only meaningful for default.json or
     # file:* sources.
@@ -1591,10 +1853,7 @@ def get_sandbox_status() -> Dict[str, object]:
 
     warning: Optional[str] = None
     if sandbox_enabled() and not sandbox_available():
-        warning = (
-            "Sandboxing is enabled by default but the 'docker' provider is not available. "
-            "Tool commands will run *without* a sandbox. Install Docker or choose another provider."
-        )
+        warning = sandbox_unavailable_message("docker", "Install Docker or choose another provider.")
 
     cfg = get_srt_sandbox_configuration()
     # Provider availability

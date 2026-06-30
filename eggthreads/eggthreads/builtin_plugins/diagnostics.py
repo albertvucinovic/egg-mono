@@ -32,6 +32,7 @@ def _target(context: Any, command_name: str) -> tuple[Any, str] | None:
 
 def schedulers_command(context: Any, arg: str):
     from ..command_catalog import CommandResult
+    from ..runner import scheduler_task_status
 
     app = getattr(context, "app", None)
     active = getattr(app, "active_schedulers", {}) if app is not None else {}
@@ -40,8 +41,9 @@ def schedulers_command(context: Any, arg: str):
         return CommandResult(clear_input=True)
     out: List[str] = []
     formatter = context.format_threads or getattr(app, "format_tree", None)
-    for rid in active.keys():
-        out.append(f"- root {rid[-8:]}")
+    for rid, entry in active.items():
+        task = entry.get("task") if isinstance(entry, dict) else None
+        out.append(f"- root {rid[-8:]} ({scheduler_task_status(task)})")
         if formatter is not None:
             out.append(formatter(rid))
     block = "\n".join(out)

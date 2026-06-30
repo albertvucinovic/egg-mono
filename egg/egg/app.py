@@ -50,6 +50,7 @@ from eggthreads import (  # type: ignore
 )
 from eggthreads.event_watcher import EventWatcher  # type: ignore
 from eggthreads.command_catalog import CommandContext, create_default_command_registry, create_default_input_prefix_registry  # type: ignore
+from eggthreads.runner import scheduler_task_is_live, scheduler_task_status  # type: ignore
 
 # eggdisplay UI components
 from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer  # type: ignore
@@ -424,10 +425,16 @@ class EggDisplayApp(
         # sandbox.config event is present in its ancestry.
 
     def start_scheduler(self, root_tid: str) -> None:
-        # Scheduler lifecycle is managed elsewhere; here we only avoid
-        # starting duplicate schedulers for the same root.
-        if root_tid in self.active_schedulers:
+        # Every Egg process should run its own scheduler for each visited root;
+        # coordination across processes happens via SQLite per-thread leases.
+        # Only suppress a duplicate if this *process* already has a live task.
+        existing = self.active_schedulers.get(root_tid)
+        if existing is not None and scheduler_task_is_live(existing.get("task")):
             return
+        if existing is not None:
+            status = scheduler_task_status(existing.get("task"))
+            self.active_schedulers.pop(root_tid, None)
+            self.log_system(f"Restarting scheduler for root {root_tid[-8:]} (previous task: {status})")
         # The SubtreeScheduler scans the entire subtree looking for runnable
         # threads. A very aggressive poll interval (e.g. 50ms) can keep a CPU
         # core busy even when nothing is happening. Use a slightly more
@@ -450,11 +457,26 @@ class EggDisplayApp(
         )
         task = asyncio.create_task(sched.run_forever(poll_sec=poll_sec))
         self.active_schedulers[root_tid] = {"scheduler": sched, "task": task}
+        add_done_callback = getattr(task, "add_done_callback", None)
+        if callable(add_done_callback):
+            add_done_callback(lambda done_task, rid=root_tid: self._scheduler_task_done(rid, done_task))
         self.log_system(f"Started scheduler for root {root_tid[-8:]}")
+
+    def _scheduler_task_done(self, root_tid: str, task: asyncio.Task) -> None:
+        """Forget dead scheduler tasks so visiting the root restarts them."""
+
+        entry = self.active_schedulers.get(root_tid)
+        if entry is not None and entry.get("task") is task:
+            self.active_schedulers.pop(root_tid, None)
+        status = scheduler_task_status(task)
+        if status != "cancelled":
+            self.log_system(f"Scheduler for root {root_tid[-8:]} stopped ({status})")
 
     def ensure_scheduler_for(self, tid: str) -> None:
         rid = self.thread_root_id(tid)
-        if rid not in self.active_schedulers:
+        entry = self.active_schedulers.get(rid)
+        task = entry.get("task") if isinstance(entry, dict) else None
+        if not scheduler_task_is_live(task):
             self.start_scheduler(rid)
 
     def current_model_for_thread(self, tid: str) -> Optional[str]:

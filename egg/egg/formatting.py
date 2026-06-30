@@ -132,10 +132,16 @@ class FormattingMixin:
         all_tids = [t.thread_id for t in all_threads]
         status_map = get_thread_statuses_bulk(self.db, all_tids, skip_runnability=True)
 
-        # Get scheduled threads from self
+        # Get roots with live schedulers from self.
         scheduled_set: Set[str] = set()
         try:
-            scheduled_set = set(getattr(self, 'schedulers', {}).keys())
+            from eggthreads.runner import scheduler_task_is_live
+
+            active = getattr(self, 'active_schedulers', {}) or {}
+            scheduled_set = {
+                rid for rid, entry in active.items()
+                if isinstance(entry, dict) and scheduler_task_is_live(entry.get('task'))
+            }
         except Exception:
             pass
 
@@ -187,7 +193,9 @@ class FormattingMixin:
                 render_tree(cid, prefix + indent_next, last, out)
             return out
 
-        # Find roots
+        # Find roots. Runtime threads should be real children of the thread
+        # that started the REPL tool call, but legacy unparented rows still
+        # need to remain visible/inspectable rather than being hidden.
         if root_tid:
             roots = [root_tid]
         else:

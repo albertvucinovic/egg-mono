@@ -50,6 +50,19 @@ def test_execute_python_repl_reports_disabled_auto_session(tmp_path, monkeypatch
     assert "auto-create is disabled" in out
 
 
+def test_memory_repl_is_blocked_when_sandboxing_is_enabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("EGG_ALLOW_MEMORY_SESSION_WITH_SANDBOX", raising=False)
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.enable_thread_session(db, parent, provider="memory")
+
+    out = ts.execute_python_repl(db, parent, "1 + 1")
+
+    assert "memory REPL sessions execute in the Egg host process" in out
+    assert "sandboxing is turned on" in out
+
+
 def test_python_repl_tool_registered():
     tools = ts.create_default_tools()
     specs = {spec["function"]["name"]: spec for spec in tools.tools_spec()}

@@ -49,6 +49,17 @@ class ReplToolTimeout(ReplBridgeError):
 
 _EVAL_CONTEXTS: Dict[str, EvalContext] = {}
 
+_REPL_RESERVED_TOOL_ARGUMENTS = {
+    "_thread_id",
+    "parent_thread_id",
+    "manager_thread_id",
+    "_initial_model_key",
+    "initial_model_key",
+    "_cancel_check",
+    "_tool_timeout_sec",
+    "_egg_tool_timeout_sec",
+}
+
 
 def create_eval_context(
     db: ThreadsDB,
@@ -102,6 +113,21 @@ def _authorize(db: ThreadsDB, runtime_thread_id: str, name: str) -> None:
         raise ReplBridgeError(f"Tool '{name}' is not allowed for runtime thread {runtime_thread_id}")
 
 
+def _reject_reserved_arguments(args: Dict[str, Any]) -> None:
+    """Reject tool context fields supplied by untrusted REPL code.
+
+    REPL programmatic tool calls are intentionally routed through the runtime
+    thread.  Allowing REPL code to provide fields like ``_thread_id`` or
+    ``parent_thread_id`` would let it make tools act on a different thread and
+    bypass the runtime thread's sandbox/tool capability boundary.
+    """
+
+    forbidden = sorted(key for key in args if key in _REPL_RESERVED_TOOL_ARGUMENTS)
+    if forbidden:
+        joined = ", ".join(forbidden)
+        raise ReplBridgeError(f"REPL tool call may not set reserved tool context argument(s): {joined}")
+
+
 def _drive_runtime_once(db: ThreadsDB, runtime_thread_id: str) -> bool:
     """Run one runner step for tests/special modes.
 
@@ -132,6 +158,7 @@ def call_tool(token: str, name: str, arguments: Optional[Dict[str, Any]] = None,
         raise ReplBridgeError("Tool name is required")
     args = dict(arguments or {})
     tool_timeout_sec = args.pop("_egg_tool_timeout_sec", None)
+    _reject_reserved_arguments(args)
     _authorize(db, ctx.runtime_thread_id, tool_name)
 
     effective_timeout = ctx.timeout_sec if timeout_sec is None else timeout_sec

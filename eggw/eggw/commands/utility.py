@@ -356,9 +356,12 @@ def cmd_schedulers() -> CommandResponse:
     if not core.active_schedulers:
         return CommandResponse(success=True, message="No active schedulers")
 
+    from eggthreads.runner import scheduler_task_status
+
     lines = []
-    for root_id in core.active_schedulers:
-        lines.append(f"  {root_id[-8:]}")
+    for root_id, entry in core.active_schedulers.items():
+        task = entry.get("task") if isinstance(entry, dict) else None
+        lines.append(f"  {root_id[-8:]} ({scheduler_task_status(task)})")
 
     return CommandResponse(
         success=True,

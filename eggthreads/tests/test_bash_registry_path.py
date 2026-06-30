@@ -16,6 +16,7 @@ def _make_db(tmp_path: Path) -> ts.ThreadsDB:
 
 def test_runner_executes_bash_through_tool_registry(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
     tcid = ts.enqueue_user_tool_call(
@@ -54,6 +55,7 @@ def test_runner_executes_bash_through_tool_registry(tmp_path, monkeypatch):
 
 def test_runner_persists_bash_timeout_reason_from_tool_result(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
     tcid = ts.enqueue_user_tool_call(
@@ -78,6 +80,7 @@ def test_runner_persists_bash_timeout_reason_from_tool_result(tmp_path, monkeypa
 
 def test_bash_tool_streams_live_output_through_tool_context(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
     db = _make_db(tmp_path)
     tid = ts.create_root_thread(db, name="root")
     ts.enqueue_user_tool_call(

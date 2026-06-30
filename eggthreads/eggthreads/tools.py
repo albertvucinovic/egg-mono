@@ -273,7 +273,10 @@ class ToolRegistry:
         # to know "who called me" (e.g. spawn_agent). We use a reserved
         # key name to avoid colliding with user-provided arguments.
         thread_id = context.get("thread_id")
-        if not accepts_context and thread_id and "parent_thread_id" not in args and "_thread_id" not in args:
+        if not accepts_context and thread_id:
+            # Context identity is authoritative for model/runner-originated
+            # tool calls.  Do not let caller-supplied parent_thread_id or
+            # _thread_id redirect a tool to another thread.
             args["_thread_id"] = thread_id
 
         # Similarly, propagate the calling thread's model key so other

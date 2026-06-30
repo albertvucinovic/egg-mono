@@ -18,6 +18,7 @@ from eggthreads import (
 
 from .. import core
 from ..core import get_thread_root_id
+from ..core.scheduler import scheduler_running
 
 router = APIRouter(tags=["events"])
 
@@ -89,7 +90,7 @@ async def stream_events(thread_id: str):
                     last_seq = batch[-1]["event_seq"]
 
                     # Check which scheduler is running (if any)
-                    eggw_scheduler = thread_id and get_thread_root_id(thread_id) in core.active_schedulers
+                    eggw_scheduler = bool(thread_id and scheduler_running(get_thread_root_id(thread_id)))
 
                     print(f"[SSE] Large batch: {len(batch)} events (seq {first_seq}-{last_seq}), "
                           f"{elapsed_ms:.0f}ms since last, eggw_sched={eggw_scheduler}, "

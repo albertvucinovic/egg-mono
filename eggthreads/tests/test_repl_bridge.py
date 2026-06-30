@@ -110,6 +110,35 @@ def test_repl_bridge_denies_non_allowlisted_tool(tmp_path):
         ts.dispose_eval_context(ctx.token)
 
 
+def test_repl_bridge_rejects_reserved_context_arguments(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    other = ts.create_root_thread(db, name="other")
+    runtime = ts.get_or_create_runtime_thread(db, parent, language="python")
+    ts.set_thread_tool_allowlist(db, runtime, ["bash", "spawn_agent"])
+
+    ctx = ts.create_eval_context(
+        db,
+        caller_thread_id=parent,
+        runtime_thread_id=runtime,
+        session_id="sess_test",
+        drive_runtime_tools=True,
+    )
+    try:
+        for name, args in (
+            ("bash", {"script": "echo nope", "_thread_id": other}),
+            ("spawn_agent", {"context_text": "nope", "parent_thread_id": other}),
+        ):
+            try:
+                ts.repl_bridge_call_tool(ctx.token, name, args)
+            except ts.ReplBridgeError as e:
+                assert "reserved tool context" in str(e)
+            else:
+                raise AssertionError("Expected ReplBridgeError")
+    finally:
+        ts.dispose_eval_context(ctx.token)
+
+
 def test_python_repl_spawn_agent_creates_child_under_runtime_and_attenuates_tools(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB()

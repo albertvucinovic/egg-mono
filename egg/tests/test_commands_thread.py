@@ -368,12 +368,24 @@ class TestIsThreadScheduled:
 
     def test_returns_true_for_scheduled_root(self, egg_app):
         """Should return True for thread with active scheduler."""
+        class LiveTask:
+            def done(self):
+                return False
+
         # Add scheduler entry
-        egg_app.active_schedulers[egg_app.current_thread] = {"scheduler": None, "task": None}
+        egg_app.active_schedulers[egg_app.current_thread] = {"scheduler": None, "task": LiveTask()}
 
         result = egg_app.is_thread_scheduled(egg_app.current_thread)
 
         assert result is True
+
+    def test_returns_false_for_stale_scheduler_entry(self, egg_app):
+        """A dead/missing task should not count as a live scheduler."""
+        egg_app.active_schedulers[egg_app.current_thread] = {"scheduler": None, "task": None}
+
+        result = egg_app.is_thread_scheduled(egg_app.current_thread)
+
+        assert result is False
 
     def test_returns_false_for_unscheduled(self, egg_app):
         """Should return False for thread without scheduler."""

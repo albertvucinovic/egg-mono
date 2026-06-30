@@ -78,8 +78,7 @@ def _sandboxed_argv(
     if thread_id:
         try:
             from ..api import _ensure_thread_working_directory
-            from ..db import ThreadsDB
-            from ..sandbox import get_thread_sandbox_config, wrap_argv_for_sandbox_with_settings
+            from ..sandbox import SandboxSetupError, get_thread_sandbox_config, sandbox_unavailable_message, wrap_argv_for_sandbox_with_settings
 
             db_for_thread = _thread_db(db)
             sb = get_thread_sandbox_config(db_for_thread, thread_id)
@@ -93,8 +92,12 @@ def _sandboxed_argv(
                 container_name=container_name,
             )
             return argv, cwd, sb.provider, container_name if sb.enabled and sb.provider == "docker" else None
+        except SandboxSetupError:
+            raise
         except Exception:
-            return base_argv, cwd, None, None
+            from ..sandbox import SandboxSetupError, sandbox_unavailable_message
+
+            raise SandboxSetupError(sandbox_unavailable_message("unknown", "Sandbox setup failed before execution."))
 
     from ..sandbox import wrap_argv_for_sandbox
 
@@ -106,6 +109,8 @@ def _run_interruptible_subprocess(
     argv: list[str],
     *,
     cwd: str | None,
+    sandbox_provider: str | None = None,
+    sandbox_container_name: str | None = None,
     timeout_message: str,
     interrupt_message: str,
     empty_message: str,
@@ -113,17 +118,51 @@ def _run_interruptible_subprocess(
     timeout = resolve_tool_timeout_arg(args)
     cancel_check = args.get("_cancel_check")
 
+    def _kill_process_and_container(proc: subprocess.Popen, *, force: bool = False) -> None:
+        if sandbox_container_name and sandbox_provider == "docker":
+            try:
+                from ..sandbox import stop_docker_container
+
+                stop_docker_container(sandbox_container_name, timeout=2)
+            except Exception:
+                pass
+        try:
+            import os as _os
+            import signal as _signal
+
+            pgid = _os.getpgid(proc.pid)
+            _os.killpg(pgid, _signal.SIGKILL if force else _signal.SIGTERM)
+        except Exception:
+            try:
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except Exception:
+                pass
+
     start_time = time.time()
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, start_new_session=True)
+    def _wait_after_stop() -> None:
+        try:
+            proc.wait(timeout=_BASH_TIMEOUT_TERM_GRACE_SEC)
+            return
+        except subprocess.TimeoutExpired:
+            _kill_process_and_container(proc, force=True)
+        try:
+            proc.wait(timeout=_BASH_TIMEOUT_FORCE_GRACE_SEC)
+        except Exception:
+            pass
+
     try:
         while True:
             if cancel_check and cancel_check():
-                proc.kill()
-                proc.wait()
+                _kill_process_and_container(proc)
+                _wait_after_stop()
                 return interrupt_message
             if timeout and (time.time() - start_time) >= timeout:
-                proc.kill()
-                proc.wait()
+                _kill_process_and_container(proc)
+                _wait_after_stop()
                 return timeout_message.format(timeout=timeout)
             wait_timeout = 0.1
             if timeout:
@@ -134,8 +173,11 @@ def _run_interruptible_subprocess(
             except subprocess.TimeoutExpired:
                 pass
     except Exception as e:
-        proc.kill()
-        proc.wait()
+        _kill_process_and_container(proc, force=True)
+        try:
+            proc.wait(timeout=_BASH_TIMEOUT_FORCE_GRACE_SEC)
+        except Exception:
+            pass
         return f"--- ERROR ---\n{e}"
 
     return _format_subprocess_output(stdout_bytes, stderr_bytes, empty_message=empty_message)
@@ -143,11 +185,30 @@ def _run_interruptible_subprocess(
 
 def execute_bash_tool(args: Dict[str, Any]) -> str:
     script = args.get("script", "")
-    argv, cwd, _, _ = _sandboxed_argv(args, ["/bin/bash", "-lc", script], thread_arg="_thread_id")
+    try:
+        import os as _os
+
+        argv, cwd, sandbox_provider, sandbox_container_name = _sandboxed_argv(
+            args,
+            ["/bin/bash", "-lc", script],
+            thread_arg="_thread_id",
+            container_name=f"egg_tool_{_os.urandom(8).hex()}",
+        )
+    except Exception as e:
+        try:
+            from ..sandbox import SandboxSetupError
+
+            if isinstance(e, SandboxSetupError):
+                return f"--- SANDBOX ERROR ---\n{e}"
+        except Exception:
+            pass
+        return f"--- ERROR ---\n{e}"
     return _run_interruptible_subprocess(
         args,
         argv,
         cwd=cwd,
+        sandbox_provider=sandbox_provider,
+        sandbox_container_name=sandbox_container_name,
         timeout_message="--- TIMEOUT ---\nCommand timed out after {timeout} seconds",
         interrupt_message="--- INTERRUPTED ---\nCommand was interrupted by user",
         empty_message="--- The command executed successfully and produced no output ---",
@@ -156,11 +217,72 @@ def execute_bash_tool(args: Dict[str, Any]) -> str:
 
 def execute_python_tool(args: Dict[str, Any]) -> str:
     script = args.get("script", "")
-    argv, cwd, _, _ = _sandboxed_argv(args, ["python3", "-c", script], thread_arg="_thread_id")
+    try:
+        import os as _os
+
+        argv, cwd, sandbox_provider, sandbox_container_name = _sandboxed_argv(
+            args,
+            ["python3", "-c", script],
+            thread_arg="_thread_id",
+            container_name=f"egg_tool_{_os.urandom(8).hex()}",
+        )
+    except Exception as e:
+        try:
+            from ..sandbox import SandboxSetupError
+
+            if isinstance(e, SandboxSetupError):
+                return f"--- SANDBOX ERROR ---\n{e}"
+        except Exception:
+            pass
+        return f"--- ERROR ---\n{e}"
     return _run_interruptible_subprocess(
         args,
         argv,
         cwd=cwd,
+        sandbox_provider=sandbox_provider,
+        sandbox_container_name=sandbox_container_name,
+        timeout_message="--- TIMEOUT ---\nScript timed out after {timeout} seconds",
+        interrupt_message="--- INTERRUPTED ---\nScript was interrupted by user",
+        empty_message="--- The script executed successfully and produced no output ---",
+    )
+
+
+def execute_python_tool_context(args: Dict[str, Any], ctx: ToolContext) -> str:
+    """Execute Python with full ToolContext so sandbox lookup uses the runner DB."""
+
+    script = args.get("script", "")
+    call_args = dict(args)
+    if ctx.thread_id and "_thread_id" not in call_args:
+        call_args["_thread_id"] = ctx.thread_id
+    if ctx.timeout_sec is not None and "_tool_timeout_sec" not in call_args:
+        call_args["_tool_timeout_sec"] = ctx.timeout_sec
+    if ctx.cancel_check is not None and "_cancel_check" not in call_args:
+        call_args["_cancel_check"] = ctx.cancel_check
+    try:
+        import os as _os
+
+        argv, cwd, sandbox_provider, sandbox_container_name = _sandboxed_argv(
+            call_args,
+            ["python3", "-c", script],
+            thread_arg="_thread_id",
+            db=ctx.db,
+            container_name=f"egg_tool_{_os.urandom(8).hex()}",
+        )
+    except Exception as e:
+        try:
+            from ..sandbox import SandboxSetupError
+
+            if isinstance(e, SandboxSetupError):
+                return f"--- SANDBOX ERROR ---\n{e}"
+        except Exception:
+            pass
+        return f"--- ERROR ---\n{e}"
+    return _run_interruptible_subprocess(
+        call_args,
+        argv,
+        cwd=cwd,
+        sandbox_provider=sandbox_provider,
+        sandbox_container_name=sandbox_container_name,
         timeout_message="--- TIMEOUT ---\nScript timed out after {timeout} seconds",
         interrupt_message="--- INTERRUPTED ---\nScript was interrupted by user",
         empty_message="--- The script executed successfully and produced no output ---",
@@ -175,14 +297,24 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
 
     script = args.get("script", "")
     invoke_id = ctx.invoke_id or ""
-    container_name = f"egg_{invoke_id}" if invoke_id else None
-    argv, cwd, sandbox_provider, sandbox_container_name = _sandboxed_argv(
-        {**args, "_thread_id": ctx.thread_id or ""},
-        ["/bin/bash", "-lc", script],
-        thread_arg="_thread_id",
-        db=ctx.db,
-        container_name=container_name,
-    )
+    container_name = f"egg_{invoke_id}" if invoke_id else f"egg_tool_{_os.urandom(8).hex()}"
+    try:
+        argv, cwd, sandbox_provider, sandbox_container_name = _sandboxed_argv(
+            {**args, "_thread_id": ctx.thread_id or ""},
+            ["/bin/bash", "-lc", script],
+            thread_arg="_thread_id",
+            db=ctx.db,
+            container_name=container_name,
+        )
+    except Exception as e:
+        try:
+            from ..sandbox import SandboxSetupError
+
+            if isinstance(e, SandboxSetupError):
+                return ToolExecutionResult(f"--- SANDBOX ERROR ---\n{e}", reason="sandbox_error", streamed=ctx.stream is not None)
+        except Exception:
+            pass
+        return ToolExecutionResult(f"--- ERROR ---\n{e}", reason="error", streamed=ctx.stream is not None)
 
     proc = await _asyncio.create_subprocess_exec(
         *argv,
@@ -408,7 +540,8 @@ def register_execution_tools(registry: ToolRegistry) -> None:
                 "script": {"type": "string", "description": "The Python script to execute."},
             },
         },
-        impl=execute_python_tool,
+        impl=execute_python_tool_context,
+        accepts_context=True,
         capabilities=ToolCapabilities(supports_cancellation=True),
     )
 
@@ -427,5 +560,6 @@ __all__ = [
     "execute_bash_tool",
     "execute_bash_tool_streaming",
     "execute_python_tool",
+    "execute_python_tool_context",
     "register_execution_tools",
 ]

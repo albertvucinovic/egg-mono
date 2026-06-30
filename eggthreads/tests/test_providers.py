@@ -135,11 +135,11 @@ def test_srt_provider_wrap_argv(eggthreads):
                     assert wrapped[1] == "--settings"
                     assert wrapped[2] == "/tmp/test2.json"
     
-    # Test when not available - should return original argv
+    # Test when not available - fail closed
     with patch.object(provider, "is_available", return_value=False):
         argv = ["echo", "hello"]
-        wrapped = provider.wrap_argv(argv, {})
-        assert wrapped == argv
+        with pytest.raises(sandbox.SandboxSetupError, match="Sandboxing is turned on"):
+            provider.wrap_argv(argv, {})
 
 
 def test_docker_provider_wrap_argv(eggthreads):
@@ -203,11 +203,11 @@ def test_docker_provider_wrap_argv(eggthreads):
         assert "alpine:latest" in wrapped
         assert wrapped[-3:] == ["python", "-c", "print(\'test\')"]
     
-    # Test when not available
+    # Test when not available - fail closed
     with patch.object(provider, "is_available", return_value=False):
         argv = ["echo", "test"]
-        wrapped = provider.wrap_argv(argv, {})
-        assert wrapped == argv
+        with pytest.raises(sandbox.SandboxSetupError, match="Sandboxing is turned on"):
+            provider.wrap_argv(argv, {})
 
 
 def test_bwrap_provider_wrap_argv(eggthreads):
@@ -231,11 +231,11 @@ def test_bwrap_provider_wrap_argv(eggthreads):
         assert "/tmp/test" in wrapped
         assert wrapped[-2:] == ["ls", "-la"]
     
-    # Test when not available
+    # Test when not available - fail closed
     with patch.object(provider, "is_available", return_value=False):
         argv = ["echo", "test"]
-        wrapped = provider.wrap_argv(argv, {})
-        assert wrapped == argv
+        with pytest.raises(sandbox.SandboxSetupError, match="Sandboxing is turned on"):
+            provider.wrap_argv(argv, {})
 
 
 def test_wrap_argv_for_sandbox_with_settings_provider_selection(eggthreads):
@@ -278,13 +278,13 @@ def test_wrap_argv_for_sandbox_with_settings_provider_selection(eggthreads):
             mock_wrap.assert_called_once()
             assert wrapped[0] == "bwrap"
     
-    # Test unknown provider -> no sandbox
+    # Test unknown provider -> fail closed
     argv = ["echo", "test"]
     settings = {"provider": "unknown"}
-    wrapped = sandbox.wrap_argv_for_sandbox_with_settings(
-        argv, enabled=True, settings=settings
-    )
-    assert wrapped == argv  # No sandbox applied
+    with pytest.raises(sandbox.SandboxSetupError, match="Unknown sandbox provider"):
+        sandbox.wrap_argv_for_sandbox_with_settings(
+            argv, enabled=True, settings=settings
+        )
     
     # Test disabled sandbox
     with patch.object(sandbox._PROVIDERS["srt"], "is_available", return_value=True):
@@ -474,6 +474,33 @@ def test_docker_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
         assert not any(".egg_outputs" in wrapped[idx + 1] for idx in vol_indices)
 
 
+def test_docker_provider_rejects_extra_mounts_targeting_egg(eggthreads, tmp_path, monkeypatch):
+    sandbox = eggthreads.sandbox
+    provider = sandbox._PROVIDERS["docker"]
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".egg").mkdir()
+
+    with patch.object(provider, "is_available", return_value=True):
+        with pytest.raises(sandbox.SandboxSetupError, match="Egg-private"):
+            provider.wrap_argv(
+                ["true"],
+                {"extra_mounts": [{"src": str(tmp_path / ".egg"), "dst": "/data"}]},
+                working_dir=tmp_path,
+            )
+        with pytest.raises(sandbox.SandboxSetupError, match="Egg-private"):
+            provider.wrap_argv(
+                ["true"],
+                {"extra_mounts": [{"src": str(tmp_path), "dst": "/workspace/.egg/real"}]},
+                working_dir=tmp_path,
+            )
+        with pytest.raises(sandbox.SandboxSetupError, match="Egg-private"):
+            provider.wrap_argv(
+                ["true"],
+                {"extra_args": ["-v", f"{tmp_path / '.egg'}:/host-egg"]},
+                working_dir=tmp_path,
+            )
+
+
 def test_bwrap_provider_masks_egg_dir(eggthreads, tmp_path, monkeypatch):
     """Test that Bwrap provider masks .egg with an empty read-only dir."""
     sandbox = eggthreads.sandbox
@@ -568,21 +595,21 @@ def test_integration_thread_with_docker_provider(eggthreads, tmp_path):
             mock_wrap.assert_called_once()
             assert wrapped[0] == "docker"
     
-    # Test that when docker is unavailable, it falls back to no sandbox
+    # Test that when docker is unavailable, sandboxing fails closed instead of
+    # running model-controlled argv on the host.
     with patch.object(sandbox._PROVIDERS["docker"], "is_available", return_value=False):
         # Re-get config (provider still docker)
         config = sandbox.get_thread_sandbox_config(db, thread_id)
         assert config.provider == "docker"
         
-        # Wrap should return original argv because provider unavailable
         argv = ["echo", "test"]
-        wrapped = sandbox.wrap_argv_for_sandbox_with_settings(
-            argv,
-            enabled=config.enabled,
-            settings=config.settings,
-            provider=config.provider,
-        )
-        assert wrapped == argv  # No sandbox applied
+        with pytest.raises(sandbox.SandboxSetupError, match="Sandboxing is turned on"):
+            sandbox.wrap_argv_for_sandbox_with_settings(
+                argv,
+                enabled=config.enabled,
+                settings=config.settings,
+                provider=config.provider,
+            )
 
 
 def test_default_config_includes_provider(eggthreads):

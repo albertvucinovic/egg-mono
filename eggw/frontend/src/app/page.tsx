@@ -1,33 +1,29 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchRootThreads, createThread } from "@/lib/api";
+import { createThread } from "@/lib/api";
 
 export default function Home() {
   const router = useRouter();
+  const didInitialize = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const initAndRedirect = async () => {
+    if (didInitialize.current) return;
+    didInitialize.current = true;
+
+    const createAndRedirect = async () => {
       try {
-        const roots = await fetchRootThreads();
-        if (roots && roots.length > 0) {
-          // Redirect to most recent thread
-          const latest = roots[roots.length - 1];
-          router.replace(`/${latest.id}`);
-        } else {
-          // No threads exist - create one and redirect
-          const thread = await createThread({});
-          router.replace(`/${thread.id}`);
-        }
+        const thread = await createThread({});
+        router.replace(`/${thread.id}`);
       } catch (err) {
-        console.error("Failed to initialize:", err);
-        setError("Failed to connect to server. Is the backend running?");
+        console.error("Failed to create startup thread:", err);
+        setError("Failed to create a new thread. Is the backend running?");
       }
     };
 
-    initAndRedirect();
+    createAndRedirect();
   }, [router]);
 
   if (error) {

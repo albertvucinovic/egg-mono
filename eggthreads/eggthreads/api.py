@@ -369,7 +369,10 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
         The new child thread's unique ID (ULID format).
     """
     parent = db.get_thread(parent_id)
-    depth = (parent.depth + 1) if parent else 1
+    if not parent:
+        raise ValueError(f"Parent thread not found: {parent_id}")
+
+    depth = parent.depth + 1
     tid = _ulid_like()
     db.create_thread(thread_id=tid, name=name, parent_id=parent_id, initial_model_key=initial_model_key, depth=depth)
 
@@ -3647,7 +3650,9 @@ def set_thread_working_directory(db: ThreadsDB, thread_id: str, working_dir: str
     cwd = Path.cwd().resolve()
     target = Path(working_dir).resolve()
     
-    if not str(target).startswith(str(cwd)):
+    try:
+        target.relative_to(cwd)
+    except ValueError:
          raise ValueError(f"Working directory {working_dir} must be a subdirectory of {cwd}")
 
     if ".egg" in target.parts:
@@ -4573,6 +4578,8 @@ def enqueue_user_tool_call(
     }
     if hidden:
         payload_extra['no_api'] = True
+    if not auto_approve:
+        payload_extra['requires_tool_approval'] = True
     if extra:
         payload_extra.update(dict(extra))
 

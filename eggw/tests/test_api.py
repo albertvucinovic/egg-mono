@@ -161,6 +161,52 @@ class TestThreadOperations:
         thread = next(t for t in response.json() if t["id"] == thread_id)
         assert thread["model_key"] == "Switched Model"
 
+    def test_root_threads_keep_legacy_orphan_runtime_rows_visible_and_sort_by_activity(self, client):
+        """Legacy orphan runtime rows remain inspectable in the root list."""
+        from eggthreads import append_message
+
+        first_resp = client.post("/api/threads", json={"name": "Older Chat Root"})
+        assert first_resp.status_code == 200
+        first_id = first_resp.json()["id"]
+
+        second_resp = client.post("/api/threads", json={"name": "Newer Chat Root"})
+        assert second_resp.status_code == 200
+        second_id = second_resp.json()["id"]
+
+        # Simulate pre-existing/internal runtime rows that have no children row.
+        # These have appeared in real databases.  They should remain visible so
+        # users can inspect/repair them; EggW startup no longer depends on
+        # hiding them because `/` opens a fresh thread.
+        core_state.db.create_thread(
+            thread_id="01ZZZZZZZZZZZZZZZZZZZZZZZZ",
+            name="@runtime:python",
+            parent_id=None,
+            initial_model_key=None,
+            depth=1,
+        )
+        core_state.db.create_thread(
+            thread_id="01ZZZZZZZZZZZZZZZZZZZZZZZY",
+            name="@runtime:bash:analysis",
+            parent_id=None,
+            initial_model_key=None,
+            depth=0,
+        )
+
+        # Activity, not thread-id/insertion order, determines the landing-page
+        # "latest root" because Home redirects to the final root in this list.
+        append_message(core_state.db, first_id, "user", "make older root recently active")
+
+        response = client.get("/api/threads/roots")
+        assert response.status_code == 200
+        roots = response.json()
+        root_ids = [thread["id"] for thread in roots]
+
+        assert "01ZZZZZZZZZZZZZZZZZZZZZZZZ" in root_ids
+        assert "01ZZZZZZZZZZZZZZZZZZZZZZZY" in root_ids
+        assert second_id in root_ids
+        assert root_ids[-1] == first_id
+        assert next(thread for thread in roots if thread["id"] == first_id)["created_at"] is not None
+
     def test_api_created_root_thread_has_one_system_prompt(self, client, monkeypatch):
         """EggW API-created root threads include the loaded system prompt once."""
         monkeypatch.setattr("eggw.system_prompt.load_system_prompt", lambda: "EGGW TEST SYSTEM PROMPT")
@@ -206,6 +252,14 @@ class TestThreadOperations:
         assert [m["content"] for m in self._system_messages(client, parent_id)] == ["EGGW ROOT ONLY PROMPT"]
         assert self._system_messages(client, child_id) == []
 
+    def test_api_rejects_child_thread_with_missing_parent(self, client):
+        """Failed child creation must not leave orphan non-root rows."""
+        response = client.post("/api/threads", json={"name": "Orphan", "parent_id": "missing-parent"})
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Parent thread not found"
+        assert core_state.db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 0
+
     def test_get_thread(self, client):
         """Test getting thread details."""
         # Create thread first
@@ -238,6 +292,84 @@ class TestThreadOperations:
         assert child_id in payload["data"]["thread_ids"]
         assert parent_id[-8:] in payload["message"]
         assert child_id[-8:] in payload["message"]
+
+    def test_threads_command_uses_fast_status_mode_by_default(self, client, monkeypatch):
+        """Default /threads must not reduce every long thread's event log."""
+        import eggw.commands.thread as thread_commands
+
+        parent_resp = client.post("/api/threads", json={"name": "Fast Threads Parent"})
+        parent_id = parent_resp.json()["id"]
+        client.post("/api/threads", json={"name": "Fast Threads Child", "parent_id": parent_id})
+
+        calls = []
+
+        def fake_get_thread_statuses_bulk(db, tids, *, skip_runnability=False):
+            calls.append((tuple(tids), skip_runnability))
+            return {tid: "idle" for tid in tids}
+
+        monkeypatch.setattr(thread_commands, "get_thread_statuses_bulk", fake_get_thread_statuses_bulk)
+
+        response = client.post(
+            f"/api/threads/{parent_id}/command",
+            json={"command": "/threads"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["data"]["status_mode"] == "fast"
+        assert calls and calls[0][1] is True
+        assert "status=full" in payload["message"]
+
+    def test_threads_command_full_status_mode_is_explicit(self, client, monkeypatch):
+        """Users can still request the expensive runnable-state scan."""
+        import eggw.commands.thread as thread_commands
+
+        parent_resp = client.post("/api/threads", json={"name": "Full Threads Parent"})
+        parent_id = parent_resp.json()["id"]
+        calls = []
+
+        def fake_get_thread_statuses_bulk(db, tids, *, skip_runnability=False):
+            calls.append((tuple(tids), skip_runnability))
+            return {tid: "idle" for tid in tids}
+
+        monkeypatch.setattr(thread_commands, "get_thread_statuses_bulk", fake_get_thread_statuses_bulk)
+
+        response = client.post(
+            f"/api/threads/{parent_id}/command",
+            json={"command": "/threads status=full"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert payload["data"]["status_mode"] == "full"
+        assert calls and calls[0][1] is False
+
+    def test_threads_command_keeps_orphan_runtime_roots_visible(self, client):
+        """Legacy orphan @runtime:* rows remain visible/inspectable."""
+        parent_resp = client.post("/api/threads", json={"name": "Visible Parent"})
+        parent_id = parent_resp.json()["id"]
+        orphan_id = "01ZZZZZZZZZZZZZZZZZZZZZZRT"
+        core_state.db.create_thread(
+            thread_id=orphan_id,
+            name="@runtime:python",
+            parent_id=None,
+            initial_model_key=None,
+            depth=1,
+        )
+
+        response = client.post(
+            f"/api/threads/{parent_id}/command",
+            json={"command": "/threads"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["success"] is True
+        assert orphan_id in payload["data"]["thread_ids"]
+        assert orphan_id in payload["data"]["threads"]
+        assert orphan_id[-8:] in payload["message"]
 
     def test_get_thread_state(self, client):
         """Test getting thread state."""
@@ -1729,21 +1861,26 @@ class TestMessageOperations:
         from eggthreads import append_message
         from eggthreads.tool_state import discover_runner_actionable_cached
 
-        create_resp = client.post("/api/threads", json={"name": "Pending RA1 Continue"})
-        thread_id = create_resp.json()["id"]
-        append_message(core_state.db, thread_id, "user", "Hello")
+        # Keep this test focused on /continue's interrupt decision.  The
+        # scheduler lifecycle layer now correctly restarts stale resident
+        # scheduler entries, and a real restarted scheduler could consume the
+        # pending RA1 before this assertion inspects it.
+        with patch("eggw.commands.thread.ensure_scheduler_for", lambda tid: None):
+            create_resp = client.post("/api/threads", json={"name": "Pending RA1 Continue"})
+            thread_id = create_resp.json()["id"]
+            append_message(core_state.db, thread_id, "user", "Hello")
 
-        # Simulate EggW's normal resident scheduler bookkeeping without
-        # creating an open_stream lease for the thread.  Before the fix,
-        # /continue treated this dictionary entry as "streaming" and called
-        # interrupt_thread(), which appended a purpose='llm' boundary and made
-        # the pending user message non-runnable.
-        core_state.active_schedulers[thread_id] = {"scheduler": object(), "task": object()}
+            # Simulate EggW's normal resident scheduler bookkeeping without
+            # creating an open_stream lease for the thread.  Before the fix,
+            # /continue treated this dictionary entry as "streaming" and called
+            # interrupt_thread(), which appended a purpose='llm' boundary and made
+            # the pending user message non-runnable.
+            core_state.active_schedulers[thread_id] = {"scheduler": object(), "task": object()}
 
-        response = client.post(
-            f"/api/threads/{thread_id}/command",
-            json={"command": "/continue"},
-        )
+            response = client.post(
+                f"/api/threads/{thread_id}/command",
+                json={"command": "/continue"},
+            )
 
         assert response.status_code == 200
         body = response.json()
@@ -1759,6 +1896,43 @@ class TestMessageOperations:
         ra = discover_runner_actionable_cached(core_state.db, thread_id)
         assert ra is not None
         assert ra.kind == "RA1_llm"
+
+    def test_eggw_restarts_stale_scheduler_entry(self, client, monkeypatch):
+        """A stale process-local scheduler record must not orphan a root."""
+        from eggw.core.scheduler import ensure_scheduler_for
+
+        create_resp = client.post("/api/threads", json={"name": "Pending RA1 Continue"})
+        thread_id = create_resp.json()["id"]
+        core_state.active_schedulers[thread_id] = {"scheduler": object(), "task": object()}
+
+        started: list[str] = []
+
+        class DummyScheduler:
+            def __init__(self, *args, **kwargs):
+                started.append(kwargs["root_thread_id"])
+
+            async def run_forever(self, poll_sec=0.05):
+                await asyncio.sleep(3600)
+
+        class LiveTask:
+            def done(self):
+                return False
+
+            def add_done_callback(self, callback):
+                return None
+
+        def fake_create_task(coro):
+            coro.close()
+            return LiveTask()
+
+        monkeypatch.setattr("eggw.core.scheduler.SubtreeScheduler", DummyScheduler)
+        monkeypatch.setattr("eggw.core.scheduler.asyncio.create_task", fake_create_task)
+
+        ensure_scheduler_for(thread_id)
+
+        assert started == [thread_id]
+        entry = core_state.active_schedulers[thread_id]
+        assert entry["task"].done() is False
 
 
 class TestEventStreaming:
@@ -2693,6 +2867,7 @@ class TestCommands:
         monkeypatch.setattr(asyncio, "create_task", fake_create_task)
         create_resp = client.post("/api/threads", json={"name": "Reload Test"})
         thread_id = create_resp.json()["id"]
+        created.clear()
 
         response = client.post(
             f"/api/threads/{thread_id}/command",

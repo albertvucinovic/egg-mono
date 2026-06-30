@@ -15,19 +15,49 @@ def _thread_db(db: Any = None):
     return db if db is not None else ThreadsDB()
 
 
-def execute_python_repl_tool(args: Dict[str, Any]) -> str:
+def _context_thread_id(args: Dict[str, Any], ctx: Any = None) -> str:
+    """Return the authoritative thread id for a REPL tool call."""
+
+    thread_id = getattr(ctx, "thread_id", None) if ctx is not None else None
+    if not thread_id:
+        thread_id = args.get("_thread_id")
+    return str(thread_id or "").strip()
+
+
+def _context_db(ctx: Any = None):
+    db = getattr(ctx, "db", None) if ctx is not None else None
+    db_path = getattr(db, "path", None)
+    if db_path is not None:
+        from ..db import ThreadsDB
+
+        # REPL tools are synchronous implementations, so execute_async() runs
+        # them in a worker thread.  The runner's ctx.db connection belongs to
+        # the scheduler/event-loop thread; open a fresh connection to the same
+        # SQLite file instead of crossing thread boundaries.
+        return ThreadsDB(db_path)
+    return _thread_db(db)
+
+
+def _context_timeout_sec(args: Dict[str, Any], ctx: Any = None) -> float | None:
+    timeout_sec = resolve_tool_timeout_arg(args)
+    if timeout_sec is None and ctx is not None:
+        timeout_sec = getattr(ctx, "timeout_sec", None)
+    return timeout_sec
+
+
+def execute_python_repl_tool(args: Dict[str, Any], ctx: Any = None) -> str:
     from ..session import execute_python_repl
 
-    thread_id = (args.get("_thread_id") or "").strip()
+    thread_id = _context_thread_id(args, ctx)
     if not thread_id:
         return "Error: python_repl requires thread context."
     code = args.get("code", "")
     repl_name = (args.get("repl_name") or "default").strip() or "default"
     runtime_name = (args.get("runtime_name") or "default").strip() or "default"
-    timeout_sec = resolve_tool_timeout_arg(args)
+    timeout_sec = _context_timeout_sec(args, ctx)
     try:
         return execute_python_repl(
-            _thread_db(),
+            _context_db(ctx),
             thread_id,
             str(code),
             repl_name=repl_name,
@@ -38,19 +68,19 @@ def execute_python_repl_tool(args: Dict[str, Any]) -> str:
         return f"Error: python_repl failed: {e}"
 
 
-def execute_bash_repl_tool(args: Dict[str, Any]) -> str:
+def execute_bash_repl_tool(args: Dict[str, Any], ctx: Any = None) -> str:
     from ..session import execute_bash_repl
 
-    thread_id = (args.get("_thread_id") or "").strip()
+    thread_id = _context_thread_id(args, ctx)
     if not thread_id:
         return "Error: bash_repl requires thread context."
     script = args.get("script", "")
     repl_name = (args.get("repl_name") or "default").strip() or "default"
     runtime_name = (args.get("runtime_name") or "default").strip() or "default"
-    timeout_sec = resolve_tool_timeout_arg(args)
+    timeout_sec = _context_timeout_sec(args, ctx)
     try:
         return execute_bash_repl(
-            _thread_db(),
+            _context_db(ctx),
             thread_id,
             str(script),
             repl_name=repl_name,
@@ -376,6 +406,7 @@ def register_session_tools(registry: ToolRegistry) -> None:
             "required": ["code"],
         },
         impl=execute_python_repl_tool,
+        accepts_context=True,
     )
 
     registry.register(
@@ -391,6 +422,7 @@ def register_session_tools(registry: ToolRegistry) -> None:
             "required": ["script"],
         },
         impl=execute_bash_repl_tool,
+        accepts_context=True,
     )
 
 

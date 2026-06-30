@@ -185,6 +185,17 @@ def _latest_session_lifecycle_action(db: ThreadsDB, thread_id: str, session_id: 
     return None
 
 
+def _is_runtime_thread(db: ThreadsDB, thread_id: str) -> bool:
+    try:
+        row = db.conn.execute(
+            "SELECT 1 FROM events WHERE thread_id=? AND type='runtime.thread' ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 def _session_id_for_thread(thread_id: str) -> str:
     """Return a stable default session id for a thread/runtime."""
 
@@ -422,9 +433,17 @@ def _docker_repl_mandatory_mask_args(*, mount_dir: Path, workspace: str, session
 
 
 def _docker_existing_mount_policy(container_name: str) -> Optional[str]:
+    return _docker_existing_label(container_name, "egg.mount_policy")
+
+
+def _docker_existing_sandbox_policy_hash(container_name: str) -> Optional[str]:
+    return _docker_existing_label(container_name, "egg.sandbox_policy_hash")
+
+
+def _docker_existing_label(container_name: str, label: str) -> Optional[str]:
     try:
         proc = subprocess.run(
-            ["docker", "inspect", "-f", "{{ index .Config.Labels \"egg.mount_policy\" }}", container_name],
+            ["docker", "inspect", "-f", "{{ index .Config.Labels " + json.dumps(str(label)) + " }}", container_name],
             capture_output=True,
             text=True,
             timeout=5,
@@ -435,6 +454,31 @@ def _docker_existing_mount_policy(container_name: str) -> Optional[str]:
         return None
     value = (proc.stdout or "").strip()
     return value or None
+
+
+def _docker_session_policy_hash(db: ThreadsDB, runtime_thread_id: str, cfg: SessionConfig) -> str:
+    """Return a stable hash of the security-relevant Docker session policy."""
+
+    body: Dict[str, Any] = {
+        "mount_policy": _DOCKER_MOUNT_POLICY,
+        "image": cfg.image,
+        "workspace": cfg.workspace,
+        "network": cfg.network,
+        "mount_dir": str(docker_session_mount_dir(db, runtime_thread_id, cfg).resolve()),
+    }
+    try:
+        from .sandbox import get_thread_sandbox_config
+
+        sb = get_thread_sandbox_config(db, runtime_thread_id)
+        body["sandbox"] = {
+            "enabled": bool(sb.enabled),
+            "provider": sb.provider,
+            "settings": dict(sb.settings or {}),
+        }
+    except Exception as e:
+        body["sandbox_error"] = f"{type(e).__name__}: {e}"
+    canon = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(canon).hexdigest()[:24]
 
 
 def _docker_container_created_at(container_name: str) -> Optional[float]:
@@ -627,18 +671,25 @@ def _start_docker_container(
     bridge_dir: Path,
     runtime_dir: Path,
 ) -> None:
+    expected_policy_hash = _docker_session_policy_hash(db, runtime_thread_id, cfg)
+
+    def _remove_existing_container() -> None:
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False, timeout=20)
+
     existing_running = _docker_inspect_running(container_name)
     if existing_running is True:
-        return
+        policy = _docker_existing_mount_policy(container_name)
+        policy_hash = _docker_existing_sandbox_policy_hash(container_name)
+        if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
+            return
+        _remove_existing_container()
     if existing_running is False:
         policy = _docker_existing_mount_policy(container_name)
-        if policy and policy != _DOCKER_MOUNT_POLICY:
-            raise RuntimeError(
-                f"Existing Docker session container {container_name!r} uses old mount policy {policy!r}; "
-                "run /sessionReset or remove the container to recreate it safely."
-            )
-        subprocess.run(["docker", "start", container_name], capture_output=True, check=True, timeout=20)
-        return
+        policy_hash = _docker_existing_sandbox_policy_hash(container_name)
+        if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
+            subprocess.run(["docker", "start", container_name], capture_output=True, check=True, timeout=20)
+            return
+        _remove_existing_container()
 
     workspace = cfg.workspace or "/workspace"
     network = cfg.network or "none"
@@ -686,6 +737,7 @@ def _start_docker_container(
         "--label", f"egg.runtime_thread_id={runtime_thread_id}",
         "--label", f"egg.db_hash={docker_session_db_hash(db)}",
         "--label", f"egg.mount_policy={_DOCKER_MOUNT_POLICY}",
+        "--label", f"egg.sandbox_policy_hash={expected_policy_hash}",
         "--label", f"egg.sandbox_mounts={'on' if sandbox_effective else 'off'}",
         "-v", f"{bridge_dir}:/egg-bridge",
         "-v", f"{runtime_dir}:/egg-runtime:ro",
@@ -707,6 +759,13 @@ def get_thread_session_config(db: ThreadsDB, thread_id: str) -> SessionConfig:
         return SessionConfig()
 
     source_tid, payload = found
+    if source_tid != thread_id and not _is_runtime_thread(db, thread_id):
+        # Persistent execution sessions are not inherited by ordinary children
+        # unless the owner explicitly opted into sharing with future children.
+        # Runtime threads are implementation children of their caller and must
+        # still inherit the caller's session policy.
+        if not bool(payload.get("share_with_children_default", False)):
+            return SessionConfig()
     enabled = bool(payload.get("enabled", False))
     provider = _clean_runtime_part(payload.get("provider"), "docker")
     image = _clean_runtime_part(payload.get("image"), "egg-rlm-session")
@@ -1047,6 +1106,7 @@ def _execute_python_docker(
         "code": code,
         "repl_name": repl_name,
         "token": eval_token,
+        "timeout_sec": timeout_sec,
     }
     try:
         from .repl_bridge import resolve_eval_context
@@ -1080,10 +1140,21 @@ def _execute_python_docker(
                 except Exception:
                     pass
             if payload.get("ok"):
-                return str(payload.get("output") or "")
+                output = str(payload.get("output") or "")
+                if output.startswith("--- TIMEOUT ---"):
+                    try:
+                        stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
+                    except Exception:
+                        pass
+                    output += "\n\n[Egg stopped the Docker REPL session after timeout cleanup.]"
+                return output
             return f"Error: Docker Python REPL failed: {payload.get('error') or 'unknown error'}"
         if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
-            return "Error: Docker Python REPL timed out."
+            try:
+                stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
+            except Exception:
+                pass
+            return "Error: Docker Python REPL timed out. The session container was stopped/reset for cleanup."
         time.sleep(_DOCKER_EVAL_POLL_SEC)
 
 
@@ -1121,10 +1192,21 @@ def _execute_bash_docker(
                 except Exception:
                     pass
             if payload.get("ok"):
-                return str(payload.get("output") or "")
+                output = str(payload.get("output") or "")
+                if output.startswith("--- TIMEOUT ---"):
+                    try:
+                        stop_thread_session(db, runtime_thread_id, reason="bash_repl_timeout")
+                    except Exception:
+                        pass
+                    output += "\n\n[Egg stopped the Docker REPL session after timeout cleanup.]"
+                return output
             return f"Error: Docker Bash REPL failed: {payload.get('error') or 'unknown error'}"
         if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
-            return "Error: Docker Bash REPL timed out."
+            try:
+                stop_thread_session(db, runtime_thread_id, reason="bash_repl_timeout")
+            except Exception:
+                pass
+            return "Error: Docker Bash REPL timed out. The session container was stopped/reset for cleanup."
         time.sleep(_DOCKER_EVAL_POLL_SEC)
 
 
@@ -1134,6 +1216,34 @@ def _execute_bash_docker(
 
 _MEMORY_PYTHON_REPLS: Dict[tuple[str, str], Dict[str, Any]] = {}
 _MEMORY_BASH_ENVS: Dict[tuple[str, str], Dict[str, str]] = {}
+
+
+def _memory_provider_allowed_under_sandbox(db: ThreadsDB, runtime_thread_id: str) -> tuple[bool, str]:
+    """Return whether the unsafe host-memory provider may run now."""
+
+    try:
+        if str(getattr(db, "path", "")) == ":memory:":
+            return True, "in-memory test database"
+    except Exception:
+        pass
+    try:
+        raw = os.environ.get("EGG_ALLOW_MEMORY_SESSION_WITH_SANDBOX")
+        if raw is not None and str(raw).strip().lower() in ("1", "true", "yes", "on"):
+            return True, "explicit unsafe override"
+    except Exception:
+        pass
+    try:
+        from .sandbox import get_thread_sandbox_config
+
+        sb = get_thread_sandbox_config(db, runtime_thread_id)
+        if bool(sb.enabled):
+            return False, (
+                "Error: memory REPL sessions execute in the Egg host process, but sandboxing is turned on. "
+                "Use provider='docker' or turn sandboxing off if you are sure host execution is intended."
+            )
+    except Exception as e:
+        return False, f"Error: could not verify sandbox policy before using memory REPL provider: {e}"
+    return True, "sandboxing disabled"
 
 
 def _coerce_positive_timeout(value: Any) -> Optional[float]:
@@ -1852,6 +1962,9 @@ class MemorySessionProvider:
         return True
 
     def status(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
+        allowed, reason = _memory_provider_allowed_under_sandbox(db, thread_id)
+        if not allowed:
+            return SessionStatus(True, cfg.provider, cfg.session_id, "blocked", reason, share_repl=cfg.share_repl)
         action = _latest_session_lifecycle_action(db, thread_id, cfg.session_id)
         if action == "stopped":
             return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", "In-memory test session provider is stopped", share_repl=cfg.share_repl)
@@ -1872,6 +1985,9 @@ class MemorySessionProvider:
         eval_token: Optional[str],
         timeout_sec: Optional[float],
     ) -> str:
+        allowed, reason = _memory_provider_allowed_under_sandbox(db, runtime_thread_id)
+        if not allowed:
+            return reason
         if language == "python":
             return _execute_python_memory(cfg.session_id or "", repl_channel, code, eval_token=eval_token)
         if language == "bash":
@@ -1916,7 +2032,7 @@ class DockerSessionProvider:
         action = _latest_session_lifecycle_action(db, thread_id, cfg.session_id)
         if action == "stopped":
             return SessionStatus(True, cfg.provider, cfg.session_id, "stopped", "Docker session is stopped", name, cfg.share_repl)
-        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "Docker session provider skeleton is available", name, cfg.share_repl)
+        return SessionStatus(True, cfg.provider, cfg.session_id, "available", "Docker session provider is available", name, cfg.share_repl)
 
     def start(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig) -> SessionStatus:
         return get_or_start_docker_session(db, thread_id)
@@ -2340,6 +2456,7 @@ def find_runtime_thread(
         if db.get_thread(runtime_thread_id) is None:
             # Stale event referencing a deleted runtime thread; keep looking.
             continue
+        _ensure_runtime_thread_child_link(db, parent_thread_id, runtime_thread_id)
         session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
         return RuntimeThreadConfig(
             parent_thread_id=parent_thread_id,
@@ -2350,6 +2467,65 @@ def find_runtime_thread(
             source_event_seq=int(event_seq) if event_seq is not None else None,
         )
     return None
+
+
+def _ensure_runtime_thread_child_link(db: ThreadsDB, parent_thread_id: str, runtime_thread_id: str) -> bool:
+    """Ensure a configured runtime thread is a child of its caller thread.
+
+    Current runtime threads are created with ``create_child_thread``.  This
+    helper repairs older/incomplete rows where a ``runtime.config`` event links
+    parent and runtime but the ``children`` edge is missing.  If the runtime is
+    already attached to a different parent, leave it alone rather than creating
+    a multi-parent tree.
+    """
+
+    try:
+        parent = db.get_thread(parent_thread_id)
+        runtime = db.get_thread(runtime_thread_id)
+        if parent is None or runtime is None:
+            return False
+
+        rows = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=?",
+            (runtime_thread_id,),
+        ).fetchall()
+        existing_parents = {str(row[0]) for row in rows if row and row[0]}
+        desired_depth = int(parent.depth or 0) + 1
+        if parent_thread_id in existing_parents:
+            if int(runtime.depth or 0) != desired_depth:
+                db.conn.execute(
+                    "UPDATE threads SET depth=? WHERE thread_id=?",
+                    (desired_depth, runtime_thread_id),
+                )
+            return False
+        if existing_parents:
+            return False
+
+        db.conn.execute(
+            "INSERT INTO children(parent_id, child_id, waiting_until) VALUES (?,?,NULL)",
+            (parent_thread_id, runtime_thread_id),
+        )
+        db.conn.execute(
+            "UPDATE threads SET depth=? WHERE thread_id=?",
+            (desired_depth, runtime_thread_id),
+        )
+        try:
+            db.append_event(
+                event_id=os.urandom(10).hex(),
+                thread_id=parent_thread_id,
+                type_="thread.child_created",
+                payload={
+                    "parent_id": parent_thread_id,
+                    "child_id": runtime_thread_id,
+                    "name": runtime.name,
+                    "reason": "runtime_child_link_repair",
+                },
+            )
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
 
 
 def get_or_create_runtime_thread(
@@ -2370,6 +2546,7 @@ def get_or_create_runtime_thread(
 
     existing = find_runtime_thread(db, parent_thread_id, language=language, name=name)
     if existing is not None:
+        _ensure_runtime_thread_child_link(db, parent_thread_id, existing.runtime_thread_id)
         return existing.runtime_thread_id
 
     # Import lazily to avoid api <-> session import cycles at module import time.

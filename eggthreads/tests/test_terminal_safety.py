@@ -26,6 +26,7 @@ def test_filter_tool_output_always_applies_terminal_safety() -> None:
 
 def test_default_bash_tool_output_is_terminal_safe(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
     tools = eggthreads.create_default_tools()
 
     result = tools.execute("bash", {"script": "printf 'a\\033[2Jb\\r\\bc'"})
