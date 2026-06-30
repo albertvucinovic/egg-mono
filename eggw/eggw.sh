@@ -127,6 +127,116 @@ prepare_frontend_runtime_dir() {
     fi
 }
 
+curl_fetch_complete() {
+    local url="$1"
+    local output_path="$2"
+    local timeout_sec="${3:-20}"
+
+    curl \
+        --fail \
+        --silent \
+        --show-error \
+        --http1.1 \
+        --max-time "$timeout_sec" \
+        -H "Accept-Encoding: identity" \
+        -H "Connection: close" \
+        -o "$output_path" \
+        "$url" >/dev/null
+}
+
+js_chunk_complete() {
+    local path="$1"
+    local min_bytes="${2:-1024}"
+    local size
+
+    [ -s "$path" ] || return 1
+    size=$(wc -c < "$path")
+    [ "$size" -ge "$min_bytes" ] || return 1
+
+    # Next dev chunks should end with the webpack chunk closure.  This catches
+    # short/partial transfers even when the HTTP status was 200.
+    tail -c 128 "$path" | grep -qF ']);'
+}
+
+latest_root_thread_id() {
+    local backend_url="$1"
+
+    python3 - "$backend_url" <<'PY'
+import json
+import sys
+import urllib.request
+
+backend_url = sys.argv[1].rstrip("/")
+try:
+    with urllib.request.urlopen(f"{backend_url}/api/threads/roots", timeout=10) as resp:
+        roots = json.load(resp)
+    if isinstance(roots, list) and roots:
+        tid = roots[-1].get("id")
+        if isinstance(tid, str):
+            print(tid)
+except Exception:
+    pass
+PY
+}
+
+wait_for_frontend_warmup() {
+    local frontend_url="$1"
+    local backend_url="$2"
+    local timeout_sec="${EGGW_FRONTEND_WARMUP_TIMEOUT:-90}"
+    local deadline=$((SECONDS + timeout_sec))
+    local tmpdir
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "Warning: curl is unavailable; using fixed frontend startup delay."
+        sleep 3
+        return 0
+    fi
+
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/eggw-frontend-warmup.XXXXXX")"
+    echo "Warming frontend before opening browser..."
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+            rm -rf "$tmpdir"
+            echo "Error: Frontend stopped during startup"
+            return 1
+        fi
+
+        if \
+            curl_fetch_complete "$frontend_url/" "$tmpdir/root.html" 20 && \
+            grep -q '/_next/static/chunks/app/layout.js' "$tmpdir/root.html" && \
+            curl_fetch_complete "$frontend_url/_next/static/chunks/app/layout.js" "$tmpdir/layout.js" 30 && \
+            js_chunk_complete "$tmpdir/layout.js" 100000 && \
+            curl_fetch_complete "$frontend_url/_next/static/chunks/app/page.js" "$tmpdir/home-page.js" 30 && \
+            js_chunk_complete "$tmpdir/home-page.js" 10000
+        then
+            local root_thread_id
+            root_thread_id="$(latest_root_thread_id "$backend_url")"
+            if [ -n "$root_thread_id" ]; then
+                if \
+                    curl_fetch_complete "$frontend_url/$root_thread_id" "$tmpdir/thread.html" 30 && \
+                    curl_fetch_complete "$frontend_url/_next/static/chunks/app/%5BthreadId%5D/page.js" "$tmpdir/thread-page.js" 90 && \
+                    js_chunk_complete "$tmpdir/thread-page.js" 100000
+                then
+                    rm -rf "$tmpdir"
+                    echo "Frontend warmup complete."
+                    return 0
+                fi
+            else
+                rm -rf "$tmpdir"
+                echo "Frontend warmup complete."
+                return 0
+            fi
+        fi
+
+        sleep 0.5
+    done
+
+    rm -rf "$tmpdir"
+    echo "Warning: Frontend warmup did not complete within ${timeout_sec}s; opening UI anyway."
+    return 0
+}
+
 # Start a long-running command in its own session so we can reliably
 # terminate the full process group on Ctrl+C. Output is prefixed
 # without turning the main command PID into a shell pipeline PID.
@@ -258,8 +368,12 @@ echo "Using frontend runtime dir: $FRONTEND_RUN_DIR"
 start_prefixed frontend env NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" npm run dev --prefix "$FRONTEND_RUN_DIR" -- -p $FRONTEND_PORT
 FRONTEND_PID="$STARTED_PID"
 
-# Wait a moment for frontend to start
-sleep 3
+if [ "${EGGW_SKIP_FRONTEND_WARMUP:-}" != "1" ]; then
+    wait_for_frontend_warmup "http://localhost:$FRONTEND_PORT" "http://localhost:$BACKEND_PORT"
+else
+    # Backwards-compatible escape hatch for debugging the raw Next dev server.
+    sleep 3
+fi
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
