@@ -813,14 +813,20 @@ class PanelsMixin:
         title_parts.extend([sandbox_part, auto_part])
         if no_api_part:
             title_parts.append(no_api_part)
-        if stream_part:
-            title_parts.append(stream_part)
         title = "  ".join(title_parts)
         self.system_output.title = title
 
-        # System panel is intentionally only the header line: status
-        # (sandbox, auto-approval) lives in the title border, body is empty.
-        self.system_output.set_content("")
+        # Keep the normal System panel to one title row. Streaming status can
+        # be longer and changes frequently, so render it in a dedicated second
+        # row instead of extending the title border.
+        self.system_output.set_content(stream_part or "")
+        if not stream_part:
+            try:
+                if float(getattr(self.system_output, 'current_height', 2)) != 2:
+                    self.system_output.current_height = 2
+                    self.system_output.mark_dirty()
+            except Exception:
+                pass
 
         # Children panel: refresh on watcher/explicit invalidation, and keep a
         # slow fallback check for cross-process or descendant changes. This
@@ -927,11 +933,13 @@ class PanelsMixin:
             pass
 
     def _current_stream_header_part(self, *, include_tps: bool = True) -> str:
-        """Return a compact live-streaming suffix for the System title.
+        """Return a compact live-streaming status for the System panel.
 
-        Empty when nothing is streaming. For LLM streams, appends live
-        TPS when available. For tool streams, appends the active tool
-        name (best-effort) so users see what's running.
+        Empty when nothing is streaming. The caller renders this in the System
+        panel's second row, not in the title, so long timeout/TPS text does not
+        crowd out model/sandbox/approval status. For LLM streams, appends live
+        TPS when available. For tool streams, appends the active tool name
+        (best-effort) so users see what's running.
         """
         ls = getattr(self, '_live_state', {}) or {}
         invoke = ls.get('active_invoke')

@@ -215,10 +215,17 @@ class EggDisplayApp(
         # Panels
         # Single-column layout (system, children, chat, input)
         self._build_chat_output_for_mode()
-        # System panel: keep compact by default (~5 content lines).
-        # OutputPanel height includes borders; with wrap-mode padding this
-        # corresponds to ~5 content lines.
-        self.system_output = OutputPanel(title="System", initial_height=2, max_height=2, columns_hint=1)
+        # System panel: normally just the title bar. While a stream is active,
+        # the streaming notification lives in a single second row so long
+        # timeout/TPS text does not crowd the title/status line.
+        system_style = OutputPanel.PanelStyle(line_wrap_mode="crop")
+        self.system_output = OutputPanel(
+            title="System",
+            initial_height=2,
+            max_height=3,
+            columns_hint=1,
+            style=system_style,
+        )
         # For the System panel we want the sandboxing status to appear
         # only in the panel title (border), not as a separate header
         # line inside the content area.

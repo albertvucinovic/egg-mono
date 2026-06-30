@@ -205,7 +205,7 @@ def test_tool_timeout_countdown_is_calculated_without_summary_events(tmp_path, m
     assert "timeout in 270s (limit 300s)" in app._current_stream_header_part()
     assert "timeout in 270s (limit 300s)" in app.compose_chat_panel_text()
     app.update_panels()
-    assert "timeout in 270s (limit 300s)" in app.system_output.title
+    assert "timeout in 270s (limit 300s)" in app.system_output.content
 
     asyncio.run(
         app.ingest_event_for_live(
@@ -217,7 +217,7 @@ def test_tool_timeout_countdown_is_calculated_without_summary_events(tmp_path, m
         )
     )
     app.update_panels()
-    assert "timeout in 270s (limit 300s)" in app.system_output.title
+    assert "timeout in 270s (limit 300s)" in app.system_output.content
 
 
 def test_tool_timeout_countdown_stays_in_header_with_tool_status(tmp_path, monkeypatch):
@@ -340,7 +340,7 @@ def test_provider_stream_duration_is_displayed_in_system_header(tmp_path, monkey
     header = app._current_stream_header_part()
     assert "streaming 30s; inactivity timeout in 570s (limit 600s)" in header
     app.update_panels()
-    assert "streaming 30s; inactivity timeout in 570s (limit 600s)" in app.system_output.title
+    assert "streaming 30s; inactivity timeout in 570s (limit 600s)" in app.system_output.content
 
     asyncio.run(
         app.ingest_event_for_live(
@@ -495,7 +495,7 @@ def test_active_stream_timing_hydrates_after_thread_switch_snapshot_boundary(tmp
     assert app._live_state["timeout_sec"] == 300
     assert "timeout in 270s (limit 300s)" in app._current_stream_header_part()
     app.update_panels()
-    assert "timeout in 270s (limit 300s)" in app.system_output.title
+    assert "timeout in 270s (limit 300s)" in app.system_output.content
 
 
 def test_watch_thread_yields_while_replaying_large_active_reasoning_stream(tmp_path, monkeypatch):
