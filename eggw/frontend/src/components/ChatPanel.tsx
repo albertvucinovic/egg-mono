@@ -430,12 +430,16 @@ function messageIdentity(message: Message | undefined): string | null {
 
 function isLocalOnlyTranscriptMessage(message: Message): boolean {
   const id = messageIdentity(message) || "";
-  return id.startsWith("cmd-") || id.startsWith("temp-");
+  return id.startsWith("temp-") || (id.startsWith("cmd-") && message.kind !== "user_command" && message.event_seq === undefined);
 }
 
 function shouldPreserveLocalTranscriptMessage(message: Message): boolean {
-  const id = messageIdentity(message) || "";
-  return id.startsWith("cmd-") && Boolean(message.command_name);
+  // Command output used to be injected as frontend-only ``cmd-*`` cards and
+  // then preserved across refetches. That made them drift to the tail when
+  // real transcript messages arrived later. Command results now come from the
+  // backend's ordered ``user_command.finished`` events, so local transcript
+  // messages should disappear as soon as the canonical transcript is fetched.
+  return false;
 }
 
 function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[]): { messages: Message[]; preservedLoadedScrollback: boolean } {

@@ -697,6 +697,45 @@ class TestMessageOperations:
         data = response.json()
         assert [message["content"] for message in data] == ["first"]
 
+    def test_get_messages_orders_user_command_output_by_event_seq(self, client):
+        """User-command output cards should have a canonical transcript position."""
+        from eggthreads import append_message
+
+        create_resp = client.post("/api/threads", json={"name": "Command Output Order"})
+        thread_id = create_resp.json()["id"]
+
+        first_id = append_message(core_state.db, thread_id, role="user", content="before command")
+        first_command = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/attachments"},
+        )
+        assert first_command.status_code == 200
+        after_id = append_message(core_state.db, thread_id, role="assistant", content="after first command")
+        second_command = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/attachments"},
+        )
+        assert second_command.status_code == 200
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        data = response.json()
+        first_index = next(index for index, message in enumerate(data) if message["id"] == first_id)
+        after_index = next(index for index, message in enumerate(data) if message["id"] == after_id)
+        command_indices = [
+            index
+            for index, message in enumerate(data)
+            if message.get("kind") == "user_command" and message.get("command_name") == "attachments"
+        ]
+        assert first_index < command_indices[0] < after_index < command_indices[1]
+
+        command_cards = [data[index] for index in command_indices]
+        assert all(card["role"] == "system" for card in command_cards)
+        assert all(card["id"].startswith("user-command-") for card in command_cards)
+        assert all(isinstance(card.get("event_seq"), int) for card in command_cards)
+        assert all("No attachments currently staged." in card["content"] for card in command_cards)
+
     def test_upload_attachment_returns_metadata_part_and_stores_bytes(self, client, test_db_path):
         from eggthreads.input_artifacts import resolve_input_bytes
 
@@ -1009,7 +1048,17 @@ class TestMessageOperations:
         assert started["command_name"] == "attachments"
         assert finished["command_id"] == payload["command_id"]
         assert finished["success"] is True
+        assert finished["message"] == payload["message"]
+        assert finished["data"] == payload["data"]
+        assert finished["suppress_transcript"] is False
         assert finished["elapsed_sec"] >= 0
+
+        messages = client.get(f"/api/threads/{thread_id}/messages").json()
+        command_card = next(message for message in messages if message.get("kind") == "user_command")
+        assert command_card["role"] == "system"
+        assert command_card["command_name"] == "attachments"
+        assert command_card["command_data"] == payload["data"]
+        assert command_card["content"] == payload["message"]
 
     def test_image_generate_slash_command_emits_start_status(self, client, monkeypatch, test_db_path):
         import eggw.image_generation_service as image_generation_service
