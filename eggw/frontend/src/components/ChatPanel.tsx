@@ -438,6 +438,48 @@ function shouldPreserveLocalTranscriptMessage(message: Message): boolean {
   return id.startsWith("cmd-") && Boolean(message.command_name);
 }
 
+function messageTimestampMs(message: Message): number | null {
+  const timestamp = typeof message.timestamp === "string" ? message.timestamp : "";
+  if (!timestamp) return null;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function mergeLocalOnlyMessagesByTimestamp(base: Message[], localOnly: Message[]): Message[] {
+  if (!localOnly.length) return base;
+
+  const merged = [...base];
+  const localWithOriginalIndex = localOnly.map((message, index) => ({ message, index }));
+  localWithOriginalIndex.sort((left, right) => {
+    const leftMs = messageTimestampMs(left.message);
+    const rightMs = messageTimestampMs(right.message);
+    if (leftMs !== null && rightMs !== null && leftMs !== rightMs) return leftMs - rightMs;
+    if (leftMs !== null && rightMs === null) return -1;
+    if (leftMs === null && rightMs !== null) return 1;
+    return left.index - right.index;
+  });
+
+  for (const { message } of localWithOriginalIndex) {
+    const localMs = messageTimestampMs(message);
+    if (localMs === null) {
+      merged.push(message);
+      continue;
+    }
+
+    const insertAt = merged.findIndex((candidate) => {
+      const candidateMs = messageTimestampMs(candidate);
+      return candidateMs !== null && candidateMs > localMs;
+    });
+    if (insertAt === -1) {
+      merged.push(message);
+    } else {
+      merged.splice(insertAt, 0, message);
+    }
+  }
+
+  return merged;
+}
+
 function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[]): { messages: Message[]; preservedLoadedScrollback: boolean } {
   if (!existing.length || !fetched.length) {
     return { messages: fetched, preservedLoadedScrollback: false };
@@ -480,8 +522,10 @@ function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[])
       return shouldPreserveLocalTranscriptMessage(message) && (!id || !fetchedIds.has(id));
     });
 
+  const mergedMessages = mergeLocalOnlyMessagesByTimestamp([...olderPrefix, ...fetched], localOnlyMessagesAfterOverlap);
+
   return {
-    messages: [...olderPrefix, ...fetched, ...localOnlyMessagesAfterOverlap],
+    messages: mergedMessages,
     preservedLoadedScrollback: olderPrefix.some((message) => !isLocalOnlyTranscriptMessage(message)),
   };
 }

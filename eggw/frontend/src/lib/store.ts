@@ -37,6 +37,24 @@ export interface Message {
   command_data?: Record<string, any>;
 }
 
+function messageTimestampMs(message: Pick<Message, "timestamp">): number | null {
+  if (typeof message.timestamp !== "string" || !message.timestamp) return null;
+  const parsed = Date.parse(message.timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function insertMessageByTimestamp(messages: Message[], message: Message): Message[] {
+  const messageMs = messageTimestampMs(message);
+  if (messageMs === null) return [...messages, message];
+
+  const insertAt = messages.findIndex((candidate) => {
+    const candidateMs = messageTimestampMs(candidate);
+    return candidateMs !== null && candidateMs > messageMs;
+  });
+  if (insertAt === -1) return [...messages, message];
+  return [...messages.slice(0, insertAt), message, ...messages.slice(insertAt)];
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -241,7 +259,7 @@ export const useAppStore = create<AppState>((set) => ({
   setMessages: (messages) => set({ messages }),
   addMessage: (message) =>
     set((state) => ({
-      messages: [...state.messages, message],
+      messages: insertMessageByTimestamp(state.messages, message),
       scrollTrigger: state.scrollTrigger + 1,  // Trigger scroll when UI-only message added
     })),
 

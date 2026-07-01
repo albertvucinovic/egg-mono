@@ -255,17 +255,21 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       textareaRef.current?.focus();
       // For shell commands, show them in the chat
       if (command.startsWith('$')) {
+        const nowIso = new Date().toISOString();
         addMessage({
           id: `temp-${Date.now()}`,
           role: "user",
           content: command,
+          timestamp: nowIso,
         });
       }
       if (command.startsWith('/imageGenerate')) {
+        const nowIso = new Date().toISOString();
         addMessage({
           id: `cmd-start-${Date.now()}`,
           role: "system",
           content: "Starting /imageGenerate — generating image artifact and appending it to the transcript...",
+          timestamp: nowIso,
         });
       }
     },
@@ -290,12 +294,14 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         // as a compact event log, but command output should be visible in the
         // transcript area consistently (like /help).
         if (response.message && !response.data?.suppress_transcript) {
+          const timestamp = response.finished_at || new Date().toISOString();
           addMessage({
-            id: `cmd-${Date.now()}`,
+            id: `cmd-${response.command_id || Date.now()}`,
             role: "system",
             content: response.message,
             command_name: response.command_name || commandNameFromText(variables.command),
             command_data: response.data,
+            timestamp,
           });
         }
         addSystemLog(response.message || "Command completed", "success");
@@ -395,10 +401,14 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         }
       } else {
         // Show errors in chat for better visibility
+        const timestamp = response.finished_at || new Date().toISOString();
         addMessage({
-          id: `cmd-err-${Date.now()}`,
+          id: `cmd-err-${response.command_id || Date.now()}`,
           role: "system",
           content: `Error: ${response.message}`,
+          command_name: response.command_name || commandNameFromText(variables.command),
+          command_data: response.data,
+          timestamp,
         });
         addSystemLog(response.message, "error");
       }
