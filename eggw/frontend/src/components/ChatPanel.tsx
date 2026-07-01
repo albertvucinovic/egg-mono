@@ -481,8 +481,16 @@ function mergeLocalOnlyMessagesByTimestamp(base: Message[], localOnly: Message[]
 }
 
 function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[]): { messages: Message[]; preservedLoadedScrollback: boolean } {
-  if (!existing.length || !fetched.length) {
+  if (!existing.length) {
     return { messages: fetched, preservedLoadedScrollback: false };
+  }
+
+  const existingLocalOnlyMessages = existing.filter((message) => shouldPreserveLocalTranscriptMessage(message));
+  if (!fetched.length) {
+    return {
+      messages: mergeLocalOnlyMessagesByTimestamp([], existingLocalOnlyMessages),
+      preservedLoadedScrollback: false,
+    };
   }
 
   const fetchedIds = new Set(fetched.map(messageIdentity).filter((id): id is string => Boolean(id)));
@@ -506,7 +514,10 @@ function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[])
   // replace with the fetched tail rather than accidentally carrying messages
   // from another thread forward.
   if (!Number.isFinite(firstOverlapIndex)) {
-    return { messages: fetched, preservedLoadedScrollback: false };
+    return {
+      messages: mergeLocalOnlyMessagesByTimestamp(fetched, existingLocalOnlyMessages),
+      preservedLoadedScrollback: false,
+    };
   }
 
   const olderPrefix = existing

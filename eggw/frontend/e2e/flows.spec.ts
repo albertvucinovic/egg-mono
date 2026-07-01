@@ -607,6 +607,35 @@ test.describe('Image Generation UI', () => {
 
 
 test.describe('Command Transcript Ordering', () => {
+  test('keeps local command output visible when backend transcript is empty', async ({ page }) => {
+    const threadId = 'command-empty-thread-1';
+    await mockThreadShell(page, threadId, { messages: [] });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Help output stays visible',
+          command_id: 'command-empty-1',
+          command_name: 'help',
+          started_at: '2026-01-01T00:00:00.000Z',
+          finished_at: '2026-01-01T00:00:00.000Z',
+          elapsed_sec: 0.01,
+          data: { action: 'help' },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible({ timeout: 5000 });
+    await input.fill('/help');
+    await input.press('Enter');
+
+    await expect(page.getByTestId('chat-panel-content')).toContainText('Help output stays visible', { timeout: 5000 });
+  });
+
   test('inserts local command output by response timestamp', async ({ page }) => {
     const threadId = 'command-order-thread-1';
     const beforeTimestamp = '2026-01-01T00:00:00.000Z';
