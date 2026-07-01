@@ -13,7 +13,6 @@ export interface Thread {
 export interface Message {
   id: string;
   role: string;
-  event_seq?: number;
   content?: EggMessageContent;
   content_text?: string;
   kind?: string;

@@ -333,7 +333,6 @@ export function useSSE(threadId: string | null) {
         const commandName = String(payload.command_name || "command");
         setActiveUserCommand(null);
         addSystemLog(`Command finished: ${commandName.startsWith("$") ? commandName : `/${commandName}`}${elapsed}`, payload.success === false ? "error" : "success");
-        scheduleMessageRefresh(100);
       } catch (err) {
         console.error("Failed to parse user_command.finished:", err);
       }

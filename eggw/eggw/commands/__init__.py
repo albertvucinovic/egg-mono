@@ -101,12 +101,6 @@ def _execute_shared_command(thread_id: str, command_name: str, command_arg: str)
         command_arg,
     )
     data = {"start_schedulers": list(result.start_schedulers)} if result.start_schedulers else None
-    if command_name == "btw":
-        data = dict(data or {})
-        # /btw's durable transcript effect is the queued user message itself.
-        # Duplicating the small "Queued..." status as a command card would put
-        # a system message after that user request and obscure the turn order.
-        data.update({"suppress_transcript": True, "reload": True})
     return CommandResponse(
         success=bool(result.clear_input),
         message=result.message or f"/{command_name} completed.",

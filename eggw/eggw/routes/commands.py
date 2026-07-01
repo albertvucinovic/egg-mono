@@ -58,7 +58,7 @@ async def execute_command(thread_id: str, request: CommandRequest):
 
     try:
         response = await dispatch_command(thread_id, request.command, staged_attachments=request.staged_attachments)
-    except Exception as exc:
+    except Exception:
         finished_at = datetime.now(timezone.utc)
         try:
             core.db.append_event(
@@ -69,9 +69,6 @@ async def execute_command(thread_id: str, request: CommandRequest):
                     "command_id": command_id,
                     "command_name": command_name,
                     "success": False,
-                    "message": f"Command failed: {exc}",
-                    "data": None,
-                    "suppress_transcript": False,
                     "started_at": _iso(started_at),
                     "finished_at": _iso(finished_at),
                     "elapsed_sec": max(0.0, (finished_at - started_at).total_seconds()),
@@ -83,8 +80,6 @@ async def execute_command(thread_id: str, request: CommandRequest):
 
     finished_at = datetime.now(timezone.utc)
     elapsed_sec = max(0.0, (finished_at - started_at).total_seconds())
-    response_data = response.data if isinstance(response.data, dict) else None
-    suppress_transcript = bool(response_data and response_data.get("suppress_transcript"))
     try:
         core.db.append_event(
             event_id=os.urandom(10).hex(),
@@ -94,9 +89,6 @@ async def execute_command(thread_id: str, request: CommandRequest):
                 "command_id": command_id,
                 "command_name": command_name,
                 "success": bool(response.success),
-                "message": response.message,
-                "data": response.data,
-                "suppress_transcript": suppress_transcript,
                 "started_at": _iso(started_at),
                 "finished_at": _iso(finished_at),
                 "elapsed_sec": elapsed_sec,

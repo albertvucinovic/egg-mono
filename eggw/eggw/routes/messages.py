@@ -179,7 +179,6 @@ def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> Message
         id=marker_id,
         role="compaction_marker",
         kind="compaction_marker",
-        event_seq=marker.get("marker_event_seq"),
         content=(
             f"Compaction boundary: API context now starts at msg_{start_short}{details}. "
             "Earlier messages remain visible in the UI/raw history."
@@ -189,66 +188,6 @@ def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> Message
         marker_event_seq=marker.get("marker_event_seq"),
         selector=marker.get("selector"),
         created_by=marker.get("created_by"),
-    )
-
-
-def _parse_iso_timestamp(value: object) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        try:
-            return datetime.fromisoformat(str(value).replace("Z", ""))
-        except Exception:
-            return None
-
-
-def _optional_int(value: object) -> int | None:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except Exception:
-        return None
-
-
-def _command_transcript_message(row) -> MessageContent | None:
-    """Return a stable transcript card for a completed user command.
-
-    Slash-command output is not a durable ``msg.create`` event because it is a
-    UI command result, not provider context.  It still needs a canonical place
-    in EggW's visible transcript; use the ``user_command.finished`` event_seq
-    so refetches cannot move the output to the end of the chat.
-    """
-
-    try:
-        payload_json = row["payload_json"]
-        payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict) or payload.get("suppress_transcript"):
-        return None
-
-    message = str(payload.get("message") or "").strip()
-    if not message:
-        return None
-
-    success = bool(payload.get("success"))
-    if not success and not message.lower().startswith("error:"):
-        message = f"Error: {message}"
-
-    event_seq = _optional_int(row["event_seq"])
-
-    command_data = payload.get("data") if isinstance(payload.get("data"), dict) else None
-    return MessageContent(
-        id=f"user-command-{event_seq or payload.get('command_id') or 'unknown'}",
-        role="system",
-        kind="user_command",
-        event_seq=event_seq,
-        content=message,
-        content_text=message,
-        timestamp=_parse_iso_timestamp(payload.get("finished_at") or row["ts"]),
-        command_name=str(payload.get("command_name") or "command"),
-        command_data=command_data,
     )
 
 
@@ -328,41 +267,28 @@ def _get_messages_sync(
             if isinstance(start_seq, int):
                 markers_by_start_seq.setdefault(start_seq, []).append(marker)
 
-        # Mix compaction markers and completed user-command outputs into the
-        # transcript stream before applying the tail limit. Entries are
-        # intentionally raw until after slicing so we do not compute
-        # content_text for thousands of hidden historical messages.
-        entries: list[tuple[int, int, str, object]] = []
+        # Mix compaction markers into the transcript stream before applying the
+        # tail limit.  Entries are intentionally raw until after slicing so we do
+        # not compute content_text for thousands of hidden historical messages.
+        entries: list[tuple[str, object]] = []
         for msg in snapshot_messages:
-            msg_event_seq = _optional_int(msg.get("event_seq"))
+            try:
+                msg_event_seq = int(msg.get("event_seq"))
+            except Exception:
+                msg_event_seq = None
             if msg_event_seq is not None:
                 for marker in markers_by_start_seq.get(msg_event_seq, []):
-                    entries.append((msg_event_seq, 0, "marker", _compaction_marker_message(marker, msg_event_seq)))
-            entries.append((msg_event_seq if msg_event_seq is not None else 0, 1, "message", msg))
-
-        try:
-            command_rows = fresh_db.conn.execute(
-                "SELECT event_seq, ts, payload_json FROM events WHERE thread_id=? AND type='user_command.finished' ORDER BY event_seq ASC",
-                (thread_id,),
-            ).fetchall()
-        except Exception:
-            command_rows = []
-        for row in command_rows:
-            command_message = _command_transcript_message(row)
-            if command_message is not None and command_message.event_seq is not None:
-                entries.append((int(command_message.event_seq), 1, "command", command_message))
-
-        entries.sort(key=lambda item: (item[0], item[1]))
+                    entries.append(("marker", _compaction_marker_message(marker, msg_event_seq)))
+            entries.append(("message", msg))
 
         if before_id:
             before_index = next(
                 (
                     idx
-                    for idx, (_seq, _secondary, kind, raw) in enumerate(entries)
+                    for idx, (kind, raw) in enumerate(entries)
                     if (
                         (kind == "marker" and getattr(raw, "id", None) == before_id)
                         or (kind == "message" and isinstance(raw, dict) and raw.get("msg_id") == before_id)
-                        or (kind == "command" and getattr(raw, "id", None) == before_id)
                     )
                 ),
                 -1,
@@ -373,8 +299,8 @@ def _get_messages_sync(
             entries = entries[-limit:]
 
         messages: List[MessageContent] = []
-        for _seq, _secondary, kind, raw in entries:
-            if kind in {"marker", "command"}:
+        for kind, raw in entries:
+            if kind == "marker":
                 messages.append(raw)  # type: ignore[arg-type]
                 continue
 
@@ -393,12 +319,20 @@ def _get_messages_sync(
                     total_tokens = int(total_tokens)
 
             # Parse timestamp
-            timestamp = _parse_iso_timestamp(msg.get("ts"))
+            ts_raw = msg.get("ts")
+            timestamp = None
+            if ts_raw:
+                try:
+                    timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except Exception:
+                    try:
+                        timestamp = datetime.fromisoformat(str(ts_raw).replace("Z", ""))
+                    except Exception:
+                        pass
 
             messages.append(MessageContent(
                 id=str(msg_id or ""),
                 role=msg.get("role", ""),
-                event_seq=_optional_int(msg.get("event_seq")),
                 content=msg.get("content"),
                 content_text=content_to_plain_text(msg.get("content")),
                 reasoning=msg.get("reasoning"),

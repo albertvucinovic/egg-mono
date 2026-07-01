@@ -20,7 +20,6 @@ class MessageContent(BaseModel):
     """A single message or transcript marker in a thread."""
     id: str
     role: str  # "user" | "assistant" | "system" | "tool" | "compaction_marker"
-    event_seq: Optional[int] = None
     content: Optional[Union[str, List[Dict[str, Any]]]] = None
     content_text: Optional[str] = None
     kind: str = "message"
@@ -41,8 +40,6 @@ class MessageContent(BaseModel):
     model_key: Optional[str] = None
     answer_user_preserve_turn: bool = False
     recovery_notice: bool = False
-    command_name: Optional[str] = None
-    command_data: Optional[Dict[str, Any]] = None
 
 
 class ToolCallInfo(BaseModel):

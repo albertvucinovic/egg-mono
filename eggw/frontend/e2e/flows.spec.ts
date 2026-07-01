@@ -605,59 +605,6 @@ test.describe('Image Generation UI', () => {
 });
 
 
-
-test.describe('Command Transcript Ordering', () => {
-  test('places user command output by backend event order after refetch', async ({ page }) => {
-    const threadId = 'command-order-thread-1';
-    const messages: any[] = [
-      { id: 'message-before-command', role: 'user', event_seq: 10, content: 'Before command', content_text: 'Before command' },
-      { id: 'message-after-command', role: 'assistant', event_seq: 30, content: 'After command', content_text: 'After command' },
-    ];
-
-    await mockThreadShell(page, threadId, { messages });
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
-      if (!messages.some((message) => message.id === 'user-command-20')) {
-        messages.splice(1, 0, {
-          id: 'user-command-20',
-          role: 'system',
-          kind: 'user_command',
-          event_seq: 20,
-          content: 'Command output in canonical position',
-          content_text: 'Command output in canonical position',
-          command_name: 'attachments',
-          command_data: { action: 'list_attachments' },
-        });
-      }
-      await route.fulfill({
-        status: 200,
-        headers: mockApiHeaders,
-        json: {
-          success: true,
-          message: 'Command output in canonical position',
-          command_id: 'command-order-1',
-          command_name: 'attachments',
-          started_at: new Date().toISOString(),
-          finished_at: new Date().toISOString(),
-          elapsed_sec: 0.01,
-          data: { action: 'list_attachments' },
-        },
-      });
-    });
-
-    await page.goto(`/${threadId}`);
-    const input = page.getByTestId('message-input');
-    await expect(input).toBeVisible({ timeout: 5000 });
-    await input.fill('/attachments');
-    await input.press('Enter');
-
-    const chatContent = page.getByTestId('chat-panel-content');
-    await expect(chatContent).toContainText('Command output in canonical position', { timeout: 5000 });
-    const orderedText = await chatContent.innerText();
-    expect(orderedText.indexOf('Before command')).toBeLessThan(orderedText.indexOf('Command output in canonical position'));
-    expect(orderedText.indexOf('Command output in canonical position')).toBeLessThan(orderedText.indexOf('After command'));
-  });
-});
-
 test.describe('Edit Answer Modal', () => {
   test('typing /editAnswer opens modal and loading draft populates composer without transcript pollution', async ({ page }) => {
     const threadId = 'edit-answer-thread-1';
@@ -761,21 +708,10 @@ test.describe('Edit Answer Modal', () => {
 
   test('failed /editAnswer displays an error without opening the modal', async ({ page }) => {
     const threadId = 'edit-answer-thread-3';
-    const messages: any[] = [{ id: 'assistant-3', role: 'assistant', event_seq: 10, content: 'Answer three', content_text: 'Answer three' }];
-    await mockThreadShell(page, threadId, { messages });
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'assistant-3', role: 'assistant', content: 'Answer three', content_text: 'Answer three' }],
+    });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
-      if (!messages.some((message) => message.id === 'user-command-20')) {
-        messages.push({
-          id: 'user-command-20',
-          role: 'system',
-          kind: 'user_command',
-          event_seq: 20,
-          content: "Error: /editAnswer failed: No assistant answer matched selector 'missing'.",
-          content_text: "Error: /editAnswer failed: No assistant answer matched selector 'missing'.",
-          command_name: 'editAnswer',
-          command_data: null,
-        });
-      }
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
