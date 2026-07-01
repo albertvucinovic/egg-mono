@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 import clsx from "clsx";
+import { PlainDraftEditor, type DraftEditorProps } from "@/components/PlainDraftEditor";
 
 function focusComposerSoon() {
   window.setTimeout(() => {
@@ -17,32 +19,30 @@ function sourceTitle(sourceLabel: string, sourceSuffix: string) {
   return `${label}${sourceSuffix ? ` ${sourceSuffix}` : ""}`;
 }
 
-interface DraftEditorProps {
-  value: string;
-  onChange: (value: string) => void;
-  textareaRef: React.RefObject<HTMLTextAreaElement>;
-}
-
-function DraftEditor({ value, onChange, textareaRef }: DraftEditorProps) {
-  // Monaco can replace this small widget later without changing modal state or
-  // composer-loading policy.  Plain textarea keeps this slice dependency-free.
+function DraftEditorLoading() {
   return (
-    <textarea
-      ref={textareaRef}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      className="min-h-[45vh] w-full resize-y rounded border p-3 font-mono text-sm outline-none"
+    <div
+      className="flex min-h-[45vh] w-full items-center justify-center rounded border p-3 text-sm"
       style={{
         background: "var(--code-bg)",
         borderColor: "var(--panel-border)",
-        color: "var(--foreground)",
+        color: "var(--muted)",
       }}
-      spellCheck={false}
       data-testid="edit-answer-draft"
       aria-label="Quoted assistant markdown draft"
-    />
+    >
+      Loading Monaco editor…
+    </div>
   );
 }
+
+const DraftEditor = dynamic<DraftEditorProps>(
+  () => import("@/components/MonacoDraftEditor").then((mod) => mod.MonacoDraftEditor).catch(() => PlainDraftEditor),
+  {
+    ssr: false,
+    loading: DraftEditorLoading,
+  },
+);
 
 export function EditAnswerModal() {
   const currentThreadId = useAppStore((state) => state.currentThreadId);
@@ -55,7 +55,6 @@ export function EditAnswerModal() {
   const closeEditAnswerModal = useAppStore((state) => state.closeEditAnswerModal);
   const setEditAnswerDraft = useAppStore((state) => state.setEditAnswerDraft);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [initialDraft, setInitialDraft] = useState("");
 
   const isVisible = modal.isOpen && Boolean(modal.threadId) && modal.threadId === currentThreadId;
@@ -68,38 +67,11 @@ export function EditAnswerModal() {
   useEffect(() => {
     if (!isVisible) return;
     setInitialDraft(modal.draft);
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
     // Capture the initial draft only when a modal instance opens.  Subsequent
     // edits must not reset this baseline because Escape/Cancel uses it for the
     // dirty-draft confirmation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isVisible, modal.threadId, modal.sourceMsgId]);
-
-  const closeWithDirtyCheck = () => {
-    if (modal.draft !== initialDraft) {
-      const discard = window.confirm("Discard changes to the edit-answer draft?");
-      if (!discard) return;
-    }
-    closeEditAnswerModal();
-    focusComposerSoon();
-  };
-
-  useEffect(() => {
-    if (!isVisible) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeWithDirtyCheck();
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && canLoadDirectly && draftHasText) {
-        event.preventDefault();
-        loadReplace();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVisible, modal.draft, initialDraft, canLoadDirectly, draftHasText]);
 
   const finishLoad = (verb: "Loaded" | "Appended") => {
     addSystemLog(`${verb} quoted ${source} into composer`, "success");
@@ -118,6 +90,34 @@ export function EditAnswerModal() {
     appendComposerDraft(modal.threadId, modal.draft);
     finishLoad("Appended");
   };
+
+  const closeWithDirtyCheck = () => {
+    if (modal.draft !== initialDraft) {
+      const discard = window.confirm("Discard changes to the edit-answer draft?");
+      if (!discard) return;
+    }
+    closeEditAnswerModal();
+    focusComposerSoon();
+  };
+
+  useEffect(() => {
+    if (!isVisible) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeWithDirtyCheck();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && canLoadDirectly && draftHasText) {
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest('[data-testid="edit-answer-draft"]')) return;
+        event.preventDefault();
+        loadReplace();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVisible, modal.draft, initialDraft, canLoadDirectly, draftHasText]);
 
   if (!isVisible) return null;
 
@@ -156,9 +156,15 @@ export function EditAnswerModal() {
 
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <p className="mb-3 text-sm" style={{ color: "var(--muted)" }}>
-            Editing raw quoted assistant markdown. This will load into the composer; it will not send automatically.
+            Editing raw quoted assistant markdown in Monaco. This will load into the composer; it will not send automatically.
           </p>
-          <DraftEditor value={modal.draft} onChange={setEditAnswerDraft} textareaRef={textareaRef} />
+          <DraftEditor
+            value={modal.draft}
+            onChange={setEditAnswerDraft}
+            sourceMsgId={modal.sourceMsgId}
+            canSubmitShortcut={canLoadDirectly && draftHasText}
+            onSubmitShortcut={loadReplace}
+          />
           {hasExistingComposerDraft && (
             <div
               className="mt-3 rounded border p-3 text-sm"

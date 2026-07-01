@@ -84,6 +84,22 @@ function mockGeneratedImageMessage(threadId: string, prompt: string) {
 }
 
 
+
+async function expectMonacoDraft(page: Page, visibleText: string) {
+  const draft = page.getByTestId('edit-answer-draft');
+  await expect(draft).toHaveAttribute('data-editor', 'monaco', { timeout: 15000 });
+  await expect(draft.locator('.view-lines')).toContainText(visibleText, { timeout: 10000 });
+}
+
+async function replaceMonacoDraft(page: Page, value: string) {
+  const draft = page.getByTestId('edit-answer-draft');
+  await expect(draft).toHaveAttribute('data-editor', 'monaco', { timeout: 15000 });
+  await draft.locator('.monaco-editor').click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.type(value);
+  await expect(draft.locator('.view-lines')).toContainText(value.replace(/^>\s*/, ''), { timeout: 10000 });
+}
+
 async function mockThreadShell(page: Page, threadId: string, options: { messages?: unknown[] } = {}) {
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
     await route.fulfill({
@@ -632,12 +648,13 @@ test.describe('Edit Answer Modal', () => {
 
     await expect.poll(() => commandRequest).toMatchObject({ command: '/editAnswer' });
     await expect(page.getByTestId('edit-answer-modal')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByTestId('edit-answer-draft')).toHaveValue('> Original answer');
+    await expectMonacoDraft(page, 'Original answer');
     await expect(page.getByTestId('chat-panel-content')).not.toContainText('Prepared quoted assistant answer');
 
+    await replaceMonacoDraft(page, '> Edited in Monaco');
     await page.getByTestId('edit-answer-load').click();
     await expect(page.getByTestId('edit-answer-modal')).not.toBeVisible({ timeout: 5000 });
-    await expect(input).toHaveValue('> Original answer');
+    await expect(input).toHaveValue('> Edited in Monaco');
   });
 
   test('does not silently overwrite unrelated composer text', async ({ page }) => {
@@ -681,6 +698,7 @@ test.describe('Edit Answer Modal', () => {
     await input.fill('Keep this draft');
 
     await expect(page.getByTestId('edit-answer-modal')).toBeVisible({ timeout: 5000 });
+    await expectMonacoDraft(page, 'Answer two');
     await expect(page.getByTestId('edit-answer-overwrite-warning')).toBeVisible();
     await expect(page.getByTestId('edit-answer-load')).not.toBeVisible();
     await page.getByTestId('edit-answer-append').click();
@@ -777,7 +795,7 @@ test.describe('Quote/Edit Button', () => {
 
     await expect.poll(() => draftRequest).toEqual({ source_msg_id: 'assistant-answer-2' });
     await expect(page.getByTestId('edit-answer-modal')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByTestId('edit-answer-draft')).toHaveValue('> Selected answer');
+    await expectMonacoDraft(page, 'Selected answer');
     await expect(page.getByTestId('chat-panel-content')).not.toContainText('Prepared quoted assistant answer');
   });
 });
