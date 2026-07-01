@@ -8,6 +8,7 @@ import { ChildrenPanel } from "@/components/ChildrenPanel";
 import { MessageInput } from "@/components/MessageInput";
 import { SystemPanel } from "@/components/SystemPanel";
 import { ApprovalPanel } from "@/components/ApprovalPanel";
+import { EditAnswerModal } from "@/components/EditAnswerModal";
 import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
 import { createThread, openThread, interruptThread, fetchThread, executeCommand, fetchSandboxStatus, SandboxStatus, fetchModels, fetchThreadSettings, setThreadModel, setAutoApproval, fetchTokenStats } from "@/lib/api";
@@ -44,6 +45,7 @@ export default function ThreadPage() {
   const setEnterMode = useAppStore((state) => state.setEnterMode);
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
+  const setComposerDraft = useAppStore((state) => state.setComposerDraft);
   const [showHelp, setShowHelp] = useState(false);
   const [stagedAttachments, setStagedAttachments] = useState<AttachmentContentPart[]>([]);
   const stageAttachment = useCallback((attachment: AttachmentContentPart) => {
@@ -197,7 +199,10 @@ export default function ThreadPage() {
 
     // Don't trigger other shortcuts when typing in input fields
     const target = e.target as HTMLElement;
-    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") {
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.closest('[role="dialog"]')) {
+      return;
+    }
+    if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
       return;
     }
 
@@ -231,8 +236,7 @@ export default function ThreadPage() {
       const input = document.querySelector("textarea") as HTMLTextAreaElement;
       if (input) {
         input.focus();
-        input.value = "/";
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+        setComposerDraft(threadId, "/");
       }
     }
 
@@ -254,8 +258,7 @@ export default function ThreadPage() {
       e.preventDefault();
       const input = document.querySelector("textarea") as HTMLTextAreaElement;
       if (input) {
-        input.value = "";
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+        setComposerDraft(threadId, "");
         input.focus();
         addSystemLog("Input cleared (Ctrl+E)", "info");
       }
@@ -272,9 +275,10 @@ export default function ThreadPage() {
             const end = input.selectionEnd || 0;
             const before = input.value.substring(0, start);
             const after = input.value.substring(end);
-            input.value = before + text + after;
-            input.selectionStart = input.selectionEnd = start + text.length;
-            input.dispatchEvent(new Event("input", { bubbles: true }));
+            setComposerDraft(threadId, before + text + after);
+            window.setTimeout(() => {
+              input.selectionStart = input.selectionEnd = start + text.length;
+            }, 0);
             input.focus();
             addSystemLog("Pasted from clipboard (Ctrl+P)", "info");
           }
@@ -283,7 +287,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingToolOutputs, setStreamingKind, setStreamingStartedAtMs, setStreamingProviderRequest, router]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingToolOutputs, setStreamingKind, setStreamingStartedAtMs, setStreamingProviderRequest, router]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
@@ -351,7 +355,7 @@ export default function ThreadPage() {
               <p>/sessionStatus, /sessionOn, /sessionOff, /sessionStop, /sessionReset</p>
               <p>/sessionCleanup, /pythonRepl, /bashRepl</p>
               <p>/setContextLimit, /setThreadPriority, /authStatus, /login, /logout</p>
-              <p>/togglePanel, /toggleBorders, /enterMode, /theme, /cost, /reload, /quit</p>
+              <p>/editAnswer, /togglePanel, /toggleBorders, /enterMode, /theme, /cost, /reload, /quit</p>
               <p>/startSearxng, /stopSearxng</p>
               <p>$ cmd - Shell, $$ cmd - Hidden shell</p>
             </div>
@@ -580,6 +584,7 @@ export default function ThreadPage() {
           </div>
         )}
       </div>
+      <EditAnswerModal />
     </main>
   );
 }

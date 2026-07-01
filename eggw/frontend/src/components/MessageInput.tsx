@@ -68,7 +68,6 @@ function filesFromDataTransfer(dataTransfer: DataTransfer | null): File[] {
 }
 
 export function MessageInput({ showBorders = true, stagedAttachments, setStagedAttachments }: MessageInputProps) {
-  const [input, setInput] = useState("");
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -90,6 +89,12 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const router = useRouter();
   const queryClient = useQueryClient();
   const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const input = useAppStore((state) => (currentThreadId ? state.composerDraftByThread[currentThreadId] || "" : ""));
+  const setComposerDraft = useAppStore((state) => state.setComposerDraft);
+  const openEditAnswerModal = useAppStore((state) => state.openEditAnswerModal);
+  const setInput = useCallback((value: string) => {
+    if (currentThreadId) setComposerDraft(currentThreadId, value);
+  }, [currentThreadId, setComposerDraft]);
   const isStreaming = useAppStore((state) => state.isStreaming);
   const setIsStreaming = useAppStore((state) => state.setIsStreaming);
   const setStreamingContent = useAppStore((state) => state.setStreamingContent);
@@ -267,10 +272,24 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     onSuccess: (response, variables) => {
       setCommandPendingStartedAtMs(null);
       if (response.success) {
+        const isEditAnswerModalAction = response.data?.action === "open_edit_answer_modal";
+        if (isEditAnswerModalAction && currentThreadId) {
+          openEditAnswerModal({
+            threadId: currentThreadId,
+            draft: typeof response.data?.draft === "string" ? response.data.draft : "",
+            sourceMsgId: typeof response.data?.source_msg_id === "string" ? response.data.source_msg_id : "",
+            sourceKind: response.data?.source_kind === "assistant_note" ? "assistant_note" : "assistant_answer",
+            sourceSuffix: typeof response.data?.source_suffix === "string" ? response.data.source_suffix : "",
+            sourceLabel: typeof response.data?.source_label === "string" ? response.data.source_label : "",
+            origin: "command",
+            replaceCommandText: variables.command,
+          });
+        }
+
         // Show every command response in Chat Messages. The System Log stays
         // as a compact event log, but command output should be visible in the
         // transcript area consistently (like /help).
-        if (response.message) {
+        if (response.message && !response.data?.suppress_transcript) {
           addMessage({
             id: `cmd-${Date.now()}`,
             role: "system",
@@ -280,6 +299,10 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           });
         }
         addSystemLog(response.message || "Command completed", "success");
+
+        if (isEditAnswerModalAction) {
+          return;
+        }
 
         if (response.data?.action === "reload") {
           setTimeout(() => {
@@ -537,7 +560,9 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       // Skip if already focused on an input/textarea
       if (document.activeElement?.tagName === "INPUT" ||
           document.activeElement?.tagName === "TEXTAREA" ||
-          document.activeElement?.tagName === "SELECT") {
+          document.activeElement?.tagName === "SELECT" ||
+          document.activeElement?.closest('[role="dialog"]') ||
+          document.querySelector('[role="dialog"][aria-modal="true"]')) {
         return;
       }
       // Skip modifier keys, function keys, etc.
