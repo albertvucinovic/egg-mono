@@ -219,6 +219,32 @@ export interface CommandResponse {
   elapsed_sec?: number;
 }
 
+export interface EditAnswerDraftResponse {
+  action: "open_edit_answer_modal";
+  draft: string;
+  source_msg_id: string;
+  source_kind: "assistant_answer" | "assistant_note";
+  source_suffix?: string;
+  source_label?: string;
+  suppress_transcript?: boolean;
+  message?: string;
+}
+
+export async function createEditAnswerDraft(
+  threadId: string,
+  request: { selector?: string; source_msg_id?: string } = {},
+): Promise<EditAnswerDraftResponse> {
+  const res = await fetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/edit-answer-draft`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    throw new Error(await readErrorDetail(res, "Failed to prepare edit-answer draft"));
+  }
+  return res.json();
+}
+
 export async function executeCommand(
   threadId: string,
   command: string,

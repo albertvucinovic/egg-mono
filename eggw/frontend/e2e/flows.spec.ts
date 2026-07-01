@@ -723,6 +723,65 @@ test.describe('Edit Answer Modal', () => {
   });
 });
 
+
+test.describe('Quote/Edit Button', () => {
+  test('shows Quote/Edit only on assistant answers and Assistant Notes', async ({ page }) => {
+    const threadId = 'quote-button-thread-1';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'user-message-1', role: 'user', content: 'Question', content_text: 'Question' },
+        { id: 'assistant-answer-1', role: 'assistant', content: 'Answer', content_text: 'Answer' },
+        { id: 'assistant-note-1', role: 'assistant', content: 'Waiting note', content_text: 'Waiting note', answer_user_preserve_turn: true },
+        { id: 'tool-message-1', role: 'tool', content: 'Tool output', content_text: 'Tool output' },
+        { id: 'system-message-1', role: 'system', content: 'System output', content_text: 'System output' },
+      ],
+    });
+
+    await page.goto(`/${threadId}`);
+
+    const quoteButtons = page.getByTestId('quote-edit-button');
+    await expect(quoteButtons).toHaveCount(2);
+    await expect(page.getByRole('button', { name: /Quote\/Edit Assistant assistant-answer-1/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Quote\/Edit Assistant Note assistant-note-1/ })).toBeVisible();
+    await expect(page.getByText('User').locator('..').getByTestId('quote-edit-button')).toHaveCount(0);
+  });
+
+  test('clicking Quote/Edit calls exact source_msg_id endpoint and opens the existing modal', async ({ page }) => {
+    const threadId = 'quote-button-thread-2';
+    let draftRequest: Record<string, unknown> | undefined;
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'assistant-answer-2', role: 'assistant', content: 'Selected answer', content_text: 'Selected answer' },
+      ],
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/edit-answer-draft`, async (route, request) => {
+      draftRequest = request.postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          action: 'open_edit_answer_modal',
+          draft: '> Selected answer',
+          source_msg_id: 'assistant-answer-2',
+          source_kind: 'assistant_answer',
+          source_suffix: 'answer-2',
+          source_label: 'assistant answer',
+          suppress_transcript: true,
+          message: 'Prepared quoted assistant answer answer-2.',
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await page.getByTestId('quote-edit-button').click();
+
+    await expect.poll(() => draftRequest).toEqual({ source_msg_id: 'assistant-answer-2' });
+    await expect(page.getByTestId('edit-answer-modal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('edit-answer-draft')).toHaveValue('> Selected answer');
+    await expect(page.getByTestId('chat-panel-content')).not.toContainText('Prepared quoted assistant answer');
+  });
+});
+
 test.describe('Streaming', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
