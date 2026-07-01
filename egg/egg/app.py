@@ -84,6 +84,7 @@ from .attachments import (
     staged_attachments_for_thread,
 )
 from .image_generation import register_image_generation_command
+from .edit_answer import register_edit_answer_command
 from .commands import (
     ModelCommandsMixin,
     ThreadCommandsMixin,
@@ -181,6 +182,7 @@ class EggDisplayApp(
         self._staged_attachments_by_thread: Dict[str, List[Dict[str, Any]]] = {}
         register_attachment_commands(self.command_registry, self)
         register_image_generation_command(self.command_registry, self)
+        register_edit_answer_command(self.command_registry, self)
         self.input_prefix_registry = create_default_input_prefix_registry()
         reload_thread = (os.environ.get('EGG_RELOAD_THREAD_ID') or '').strip()
         reloaded_existing_thread = False
@@ -213,10 +215,17 @@ class EggDisplayApp(
         # Panels
         # Single-column layout (system, children, chat, input)
         self._build_chat_output_for_mode()
-        # System panel: keep compact by default (~5 content lines).
-        # OutputPanel height includes borders; with wrap-mode padding this
-        # corresponds to ~5 content lines.
-        self.system_output = OutputPanel(title="System", initial_height=2, max_height=2, columns_hint=1)
+        # System panel: normally just the title bar. While a stream is active,
+        # the streaming notification lives in a single second row so long
+        # timeout/TPS text does not crowd the title/status line.
+        system_style = OutputPanel.PanelStyle(line_wrap_mode="crop")
+        self.system_output = OutputPanel(
+            title="System",
+            initial_height=2,
+            max_height=3,
+            columns_hint=1,
+            style=system_style,
+        )
         # For the System panel we want the sandboxing status to appear
         # only in the panel title (border), not as a separate header
         # line inside the content area.
@@ -327,6 +336,9 @@ class EggDisplayApp(
         }
         self._watch_task: Optional[asyncio.Task] = None
         self._user_command_tasks: set[asyncio.Task] = set()
+        self._input_thread: Optional[Any] = None
+        self._external_terminal_active: bool = False
+        self._external_terminal_release_event: Optional[asyncio.Event] = None
         self.running = False
         # ensure system log exists (double safety)
         if not hasattr(self, '_system_log'):
@@ -342,6 +354,105 @@ class EggDisplayApp(
         self._pending_prompt: Dict[str, Any] = {}
         # Last time we refreshed the children tree panel (sec since epoch)
         self._last_children_refresh: float = time.time()
+
+    async def run_external_terminal_command(self, argv: List[str]) -> int:
+        """Run an interactive subprocess while temporarily releasing Egg's TUI.
+
+        The asyncio event loop remains alive while the foreground program is
+        running, so in-process schedulers and child/runtime threads keep being
+        polled.  Only terminal ownership and keyboard input are paused.
+        """
+
+        if not argv:
+            raise ValueError("argv must not be empty")
+
+        editor = getattr(getattr(self, "input_panel", None), "editor", None)
+        previous_editor_running = bool(getattr(editor, "running", False)) if editor is not None else False
+        if editor is not None:
+            try:
+                editor.running = False
+            except Exception:
+                pass
+        self._external_terminal_active = True
+        release_event = asyncio.Event()
+        self._external_terminal_release_event = release_event
+        input_thread = getattr(self, "_input_thread", None)
+        if input_thread is not None:
+            try:
+                if input_thread.is_alive():
+                    await asyncio.to_thread(input_thread.join, 0.5)
+            except Exception:
+                pass
+
+        renderer = getattr(self, "_renderer", None)
+        if renderer is not None:
+            try:
+                await asyncio.wait_for(release_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # Fallback for tests or unusual call sites that invoke this
+                # helper while no main render loop can exit the context for us.
+                try:
+                    renderer.__exit__(None, None, None)
+                except Exception:
+                    pass
+                self._renderer = None
+                try:
+                    release_event.set()
+                except Exception:
+                    pass
+        else:
+            try:
+                release_event.set()
+            except Exception:
+                pass
+        try:
+            restore_tty()
+        except Exception:
+            pass
+
+        try:
+            proc = await asyncio.create_subprocess_exec(*argv)
+            return int(await proc.wait())
+        finally:
+            try:
+                restore_tty()
+            except Exception:
+                pass
+            if previous_editor_running and editor is not None:
+                try:
+                    # Drop keys typed while the external editor owned the TTY.
+                    q = getattr(editor, "input_queue", None)
+                    if q is not None:
+                        while True:
+                            try:
+                                q.get_nowait()
+                            except Exception:
+                                break
+                except Exception:
+                    pass
+                try:
+                    editor.running = True
+                    import threading
+
+                    input_thread = threading.Thread(target=editor._input_worker, daemon=True)
+                    self._input_thread = input_thread
+                    input_thread.start()
+                except Exception:
+                    pass
+            self._pending_mode_change = True
+            for panel in (
+                getattr(self, "chat_output", None),
+                getattr(self, "system_output", None),
+                getattr(self, "children_output", None),
+                getattr(self, "approval_panel", None),
+                getattr(self, "input_panel", None),
+            ):
+                try:
+                    panel.mark_dirty()
+                except Exception:
+                    pass
+            self._external_terminal_active = False
+            self._external_terminal_release_event = None
 
     def apply_theme(self, theme_name: str) -> str:
         """Apply a terminal theme and mark live panels for repaint."""
@@ -763,6 +874,7 @@ class EggDisplayApp(
         except Exception:
             pass
         input_thread = threading.Thread(target=self.input_panel.editor._input_worker, daemon=True)
+        self._input_thread = input_thread
         input_thread.start()
 
         try:
@@ -800,7 +912,7 @@ class EggDisplayApp(
                     except Exception:
                         pass
                     self._pending_mode_change = False
-                    while self.running and not self._pending_mode_change:
+                    while self.running and not self._pending_mode_change and not self._external_terminal_active:
                         # Drain input queue
                         had_input = False
                         try:
@@ -876,6 +988,21 @@ class EggDisplayApp(
                 # Otherwise the user asked to quit; break the outer loop.
                 if not self.running:
                     break
+                if self._external_terminal_active:
+                    self._renderer = None
+                    release_event = getattr(self, "_external_terminal_release_event", None)
+                    if release_event is not None:
+                        try:
+                            release_event.set()
+                        except Exception:
+                            pass
+                    while self.running and self._external_terminal_active:
+                        try:
+                            await asyncio.sleep(0.1)
+                        except asyncio.CancelledError:
+                            break
+                    if self.running:
+                        continue
                 if not self._pending_mode_change:
                     break
         except (KeyboardInterrupt, asyncio.CancelledError):

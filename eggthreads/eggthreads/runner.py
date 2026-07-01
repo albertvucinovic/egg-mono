@@ -837,7 +837,9 @@ class RunnerConfig:
     sticky_idle_threshold_sec: float = 5.0  # idle time before losing reserved slot
     # Priority mode: "none" | "alphabetical" (tie-breaker for equal priorities)
     priority_mode: str = "none"
-    # API timeout: None = 600s default, 0 = no timeout, >0 = timeout in seconds
+    # API/provider inactivity timeout: None = 600s default, 0 = no timeout,
+    # >0 = timeout in seconds.  For streaming providers this is a pre-first-
+    # response / inter-event inactivity timeout, not a total generation cap.
     # Per-thread settings (via thread.scheduling events) override this
     api_timeout_sec: Optional[float] = None
     # Tool execution timeout: None = 600s default, 0 = no timeout, >0 = timeout in seconds
@@ -1957,7 +1959,9 @@ class ThreadRunner:
             tools_spec_to_use = tools_spec
             tool_choice = 'auto'
 
-        # Determine API timeout: per-thread setting > config setting > default (600s)
+        # Determine API/provider inactivity timeout: per-thread setting >
+        # config setting > default (600s).  eggllm adapters enforce this as
+        # connection/read inactivity rather than total streaming wall-clock.
         # 0 or negative means no timeout
         from .api import get_thread_scheduling
         sched_settings = get_thread_scheduling(self.db, self.thread_id)
@@ -1978,6 +1982,7 @@ class ThreadRunner:
             invoke_id=invoke_id,
             payload={
                 'timeout': api_timeout_int,
+                'timeout_kind': 'inactivity',
                 'model_key': current_model,
             },
         )

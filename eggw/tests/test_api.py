@@ -480,6 +480,18 @@ class TestThreadOperations:
         assert settings["active_get_user_wait"] is True
         assert settings["get_user_waiting_note"]["content"] == note
 
+        command_response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/threads"},
+        )
+
+        assert command_response.status_code == 200
+        assert command_response.json()["success"] is True
+        state_after_command = client.get(f"/api/threads/{thread_id}/state").json()
+        assert state_after_command["active_get_user_wait"] is True
+        messages_after_command = client.get(f"/api/threads/{thread_id}/messages").json()
+        assert not any(msg["role"] == "user" and msg["content"] == "/threads" for msg in messages_after_command)
+
         answer_response = client.post(
             f"/api/threads/{thread_id}/messages",
             json={"content": "Continue with the next slice."},
@@ -2573,6 +2585,7 @@ class TestCommands:
         assert "EggW-only commands:" in data["message"]
         assert "/theme [name]" in data["message"]
         assert "/rename <name>" in data["message"]
+        assert "/editAnswer [assistant_msg_id|suffix]" in data["message"]
         assert "/spawn <context>" not in data["message"]
         assert "/redraw — No-op in EggW" in data["message"]
         assert "/displayMode — Terminal-only" in data["message"]
@@ -2978,7 +2991,7 @@ class TestAutocomplete:
         """Command autocomplete should not drift from shared or explicit EggW-only commands."""
         from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, create_default_command_registry
 
-        eggw_only = {
+        extra_eggw_commands = {
             "rename",
             "theme",
             "attach",
@@ -2988,15 +3001,16 @@ class TestAutocomplete:
             "saveProviderOutput",
             "clearAttachments",
             "imageGenerate",
+            "editAnswer",
         }
-        assert {f"/{name}" for name in eggw_only} <= set(EGGW_COMMAND_COMPLETIONS)
+        assert {f"/{name}" for name in extra_eggw_commands} <= set(EGGW_COMMAND_COMPLETIONS)
         assert "/spawn" not in EGGW_COMMAND_COMPLETIONS
 
         advertised_names = {cmd.removeprefix("/") for cmd in EGGW_COMMAND_COMPLETIONS}
-        allowed_names = set(create_default_command_registry().names(include_aliases=True)) | eggw_only
+        allowed_names = set(create_default_command_registry().names(include_aliases=True)) | extra_eggw_commands
         assert advertised_names - allowed_names == set()
 
-        for name in eggw_only:
+        for name in extra_eggw_commands:
             line = f"/{name[:3]}"
             response = client.get("/api/autocomplete", params={"line": line, "cursor": len(line)})
             assert response.status_code == 200
@@ -3012,6 +3026,7 @@ class TestAutocomplete:
     def test_eggw_advertises_all_meaningful_terminal_egg_commands(self, client):
         """Keep EggW's textual command surface in sync with terminal Egg."""
         from egg.attachments import register_attachment_commands
+        from egg.edit_answer import register_edit_answer_command
         from egg.image_generation import register_image_generation_command
         from egg.theme import register_theme_command
         from eggthreads.command_catalog import EGGW_COMMAND_COMPLETIONS, create_default_command_registry
@@ -3031,6 +3046,7 @@ class TestAutocomplete:
         register_theme_command(registry, dummy)
         register_attachment_commands(registry, dummy)
         register_image_generation_command(registry, dummy)
+        register_edit_answer_command(registry, dummy)
 
         terminal_egg_commands = set(registry.names(include_aliases=True))
         eggw_commands = {command.removeprefix("/") for command in EGGW_COMMAND_COMPLETIONS}

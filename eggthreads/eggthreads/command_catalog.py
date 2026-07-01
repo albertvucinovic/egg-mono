@@ -467,6 +467,7 @@ EGGW_COMMAND_COMPLETIONS: List[str] = [
     '/saveProviderOutput',
     '/clearAttachments',
     '/imageGenerate',
+    '/editAnswer',
     # Web-only options.
     '/rename',
     '/theme',

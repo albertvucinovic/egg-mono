@@ -11,7 +11,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
-import { attachmentUrl, fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
+import { attachmentUrl, createEditAnswerDraft, fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
 import {
   artifactFilename,
@@ -793,6 +793,33 @@ function appendBufferedTextChunks(element: HTMLElement, chunks: string[], startI
 }
 
 const MessageBlock = memo(function MessageBlock({ message, showBorders = true, displayVerbosity = "max", onStageAttachment }: MessageBlockProps) {
+  const currentThreadId = useAppStore((state) => state.currentThreadId);
+  const openEditAnswerModal = useAppStore((state) => state.openEditAnswerModal);
+  const addSystemLog = useAppStore((state) => state.addSystemLog);
+  const [isPreparingEditAnswer, setIsPreparingEditAnswer] = useState(false);
+
+  const handleQuoteEdit = useCallback(async () => {
+    if (!currentThreadId || !message.id) return;
+    setIsPreparingEditAnswer(true);
+    try {
+      const draft = await createEditAnswerDraft(currentThreadId, { source_msg_id: message.id });
+      openEditAnswerModal({
+        threadId: currentThreadId,
+        draft: draft.draft,
+        sourceMsgId: draft.source_msg_id,
+        sourceKind: draft.source_kind,
+        sourceSuffix: draft.source_suffix || "",
+        sourceLabel: draft.source_label || "",
+        origin: "quote_button",
+      });
+      addSystemLog(draft.message || "Prepared quoted assistant answer", "success");
+    } catch (error) {
+      addSystemLog(error instanceof Error ? error.message : "Failed to prepare edit-answer draft", "error");
+    } finally {
+      setIsPreparingEditAnswer(false);
+    }
+  }, [addSystemLog, currentThreadId, message.id, openEditAnswerModal]);
+
   if (message.kind === "compaction_marker" || message.role === "compaction_marker") {
     return <CompactionMarker message={message} />;
   }
@@ -848,6 +875,13 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const showContent = Boolean(contentText) && !hideToolBody;
   const showToolCalls = toolCalls.length > 0 && displayVerbosity !== "min";
   const showStreamedMetadata = displayVerbosity !== "min" && (toolStreamEntries.length > 0 || toolCallStreamEntries.length > 0);
+  const canQuoteEdit = Boolean(
+    currentThreadId &&
+    message.id &&
+    !message.id.startsWith("temp-") &&
+    contentText.trim() &&
+    (displayRole === "assistant" || displayRole === "assistant_note")
+  );
 
   return (
     <div
@@ -898,6 +932,20 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
           <span className="font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
             ← {message.tool_call_id.slice(-8)}
           </span>
+        )}
+        {canQuoteEdit && (
+          <button
+            type="button"
+            onClick={handleQuoteEdit}
+            disabled={isPreparingEditAnswer}
+            className="rounded border px-1.5 py-0.5 text-[11px] font-medium disabled:cursor-wait disabled:opacity-60"
+            style={{ borderColor: "var(--panel-border)", color: "var(--accent)", background: "var(--panel-bg)" }}
+            aria-label={`Quote/Edit ${roleLabel} ${message.id}`}
+            title={`Quote/Edit ${roleLabel}${message.id ? ` ${message.id.slice(-8)}` : ""}`}
+            data-testid="quote-edit-button"
+          >
+            {isPreparingEditAnswer ? "Preparing…" : "Quote/Edit"}
+          </button>
         )}
       </div>
 

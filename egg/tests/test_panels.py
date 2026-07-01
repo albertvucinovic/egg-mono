@@ -27,7 +27,7 @@ class TestUpdatePanels:
         assert len(set_content_calls) >= 1
 
     def test_system_output_body_is_empty(self, egg_app):
-        """System panel body is empty — status lives in the title line."""
+        """System panel body is empty when there is no active stream."""
         egg_app.update_panels()
 
         assert egg_app.system_output.content == ""
@@ -66,8 +66,17 @@ class TestUpdatePanels:
         assert title.index("8.0 tps") < title.index("$0.0123 cost")
         assert title.index("$0.0123 cost") < title.index("Sandboxing")
         assert title.index("Sandboxing") < title.index("Autoapproval")
-        assert title.index("Autoapproval") < title.index("Streaming")
+        assert "Streaming" not in title
+        assert "Streaming" in egg_app.system_output.content
+        assert int(egg_app.system_output.current_height) == 3
         assert "Chat Messages" not in [getattr(item, "title", "") for item in group._renderables]
+
+        egg_app._live_state = {"active_invoke": None, "stream_kind": None}
+        egg_app.update_panels()
+        egg_app.render_group()
+        assert "Streaming" not in egg_app.system_output.title
+        assert egg_app.system_output.content == ""
+        assert int(egg_app.system_output.current_height) == 2
 
     def test_inline_keeps_chat_metrics_in_chat_title(self, egg_app, monkeypatch):
         """Inline mode keeps ctx/TPS on the Chat Messages panel."""

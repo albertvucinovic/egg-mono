@@ -83,6 +83,102 @@ function mockGeneratedImageMessage(threadId: string, prompt: string) {
   };
 }
 
+
+
+async function expectMonacoDraft(page: Page, visibleText: string) {
+  const draft = page.getByTestId('edit-answer-draft');
+  await expect(draft).toHaveAttribute('data-editor', 'monaco', { timeout: 15000 });
+  await expect(draft.locator('.view-lines')).toContainText(visibleText, { timeout: 10000 });
+}
+
+async function replaceMonacoDraft(page: Page, value: string) {
+  const draft = page.getByTestId('edit-answer-draft');
+  await expect(draft).toHaveAttribute('data-editor', 'monaco', { timeout: 15000 });
+  await draft.locator('.monaco-editor').click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.type(value);
+  await expect(draft.locator('.view-lines')).toContainText(value.replace(/^>\s*/, ''), { timeout: 10000 });
+}
+
+async function mockThreadShell(page: Page, threadId: string, options: { messages?: unknown[] } = {}) {
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+      body: '',
+    });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
+  });
+  await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: options.messages || [] });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: {
+        input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: 0,
+        cached_tokens: 0,
+        context_tokens: 0,
+        full_thread_tokens: 0,
+        total_tokens: 0,
+        cost_usd: 0,
+      },
+    });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, async (route) => {
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { enabled: false, effective: false, available: false, user_control_enabled: true },
+    });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'waiting_user', active_get_user_wait: false },
+    });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: false } });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, async (route) => {
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { id: threadId, name: 'Edit Answer UI Test', has_children: false },
+    });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/roots`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [{ id: threadId, name: 'Edit Answer UI Test', has_children: false }],
+    });
+  });
+  await page.route(`${TEST_API_BASE}/api/models`, async (route) => {
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { models: [], default_model: null } });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [{ id: threadId, name: 'Edit Answer UI Test', has_children: false }],
+    });
+  });
+}
+
 function mockImageAttachmentMessage(threadId: string) {
   const attachmentPart = {
     type: 'attachment',
@@ -505,6 +601,202 @@ test.describe('Image Generation UI', () => {
     await expect(attachmentPreview).toBeVisible({ timeout: 5000 });
     await expect(attachmentPreview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/attachments/input123`);
     await expect(attachmentPreview).toHaveAttribute('loading', 'lazy');
+  });
+});
+
+
+test.describe('Edit Answer Modal', () => {
+  test('typing /editAnswer opens modal and loading draft populates composer without transcript pollution', async ({ page }) => {
+    const threadId = 'edit-answer-thread-1';
+    let commandRequest: Record<string, unknown> | undefined;
+    const messages = [{ id: 'assistant-1', role: 'assistant', content: 'Original answer', content_text: 'Original answer' }];
+
+    await mockThreadShell(page, threadId, { messages });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route, request) => {
+      commandRequest = request.postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Prepared quoted assistant answer stant-1.',
+          command_id: 'cmd-edit-answer-1',
+          command_name: 'editAnswer',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          elapsed_sec: 0.01,
+          data: {
+            action: 'open_edit_answer_modal',
+            draft: '> Original answer',
+            source_msg_id: 'assistant-1',
+            source_kind: 'assistant_answer',
+            source_suffix: 'stant-1',
+            source_label: 'assistant answer',
+            suppress_transcript: true,
+            message: 'Prepared quoted assistant answer stant-1.',
+          },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible({ timeout: 5000 });
+
+    await input.fill('/editAnswer');
+    await input.press('Enter');
+
+    await expect.poll(() => commandRequest).toMatchObject({ command: '/editAnswer' });
+    await expect(page.getByTestId('edit-answer-modal')).toBeVisible({ timeout: 5000 });
+    await expectMonacoDraft(page, 'Original answer');
+    await expect(page.getByTestId('chat-panel-content')).not.toContainText('Prepared quoted assistant answer');
+
+    await replaceMonacoDraft(page, '> Edited in Monaco');
+    await page.getByTestId('edit-answer-load').click();
+    await expect(page.getByTestId('edit-answer-modal')).not.toBeVisible({ timeout: 5000 });
+    await expect(input).toHaveValue('> Edited in Monaco');
+  });
+
+  test('does not silently overwrite unrelated composer text', async ({ page }) => {
+    const threadId = 'edit-answer-thread-2';
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'assistant-2', role: 'assistant', content: 'Answer two', content_text: 'Answer two' }],
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Prepared quoted assistant answer stant-2.',
+          command_id: 'cmd-edit-answer-2',
+          command_name: 'editAnswer',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          elapsed_sec: 0.01,
+          data: {
+            action: 'open_edit_answer_modal',
+            draft: '> Answer two',
+            source_msg_id: 'assistant-2',
+            source_kind: 'assistant_answer',
+            source_suffix: 'stant-2',
+            source_label: 'assistant answer',
+            suppress_transcript: true,
+          },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible({ timeout: 5000 });
+
+    await input.fill('/editAnswer');
+    await input.press('Enter');
+    await expect(input).toHaveValue('');
+    await input.fill('Keep this draft');
+
+    await expect(page.getByTestId('edit-answer-modal')).toBeVisible({ timeout: 5000 });
+    await expectMonacoDraft(page, 'Answer two');
+    await expect(page.getByTestId('edit-answer-overwrite-warning')).toBeVisible();
+    await expect(page.getByTestId('edit-answer-load')).not.toBeVisible();
+    await page.getByTestId('edit-answer-append').click();
+
+    await expect(input).toHaveValue('Keep this draft\n\n> Answer two');
+  });
+
+  test('failed /editAnswer displays an error without opening the modal', async ({ page }) => {
+    const threadId = 'edit-answer-thread-3';
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'assistant-3', role: 'assistant', content: 'Answer three', content_text: 'Answer three' }],
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: false,
+          message: "/editAnswer failed: No assistant answer matched selector 'missing'.",
+          command_id: 'cmd-edit-answer-3',
+          command_name: 'editAnswer',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          elapsed_sec: 0.01,
+          data: null,
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible({ timeout: 5000 });
+
+    await input.fill('/editAnswer missing');
+    await input.press('Enter');
+
+    await expect(page.getByTestId('edit-answer-modal')).not.toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: No assistant answer matched selector 'missing'.");
+    await expect(input).toHaveValue('');
+  });
+});
+
+
+test.describe('Quote/Edit Button', () => {
+  test('shows Quote/Edit only on assistant answers and Assistant Notes', async ({ page }) => {
+    const threadId = 'quote-button-thread-1';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'user-message-1', role: 'user', content: 'Question', content_text: 'Question' },
+        { id: 'assistant-answer-1', role: 'assistant', content: 'Answer', content_text: 'Answer' },
+        { id: 'assistant-note-1', role: 'assistant', content: 'Waiting note', content_text: 'Waiting note', answer_user_preserve_turn: true },
+        { id: 'tool-message-1', role: 'tool', content: 'Tool output', content_text: 'Tool output' },
+        { id: 'system-message-1', role: 'system', content: 'System output', content_text: 'System output' },
+      ],
+    });
+
+    await page.goto(`/${threadId}`);
+
+    const quoteButtons = page.getByTestId('quote-edit-button');
+    await expect(quoteButtons).toHaveCount(2);
+    await expect(page.getByRole('button', { name: /Quote\/Edit Assistant assistant-answer-1/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Quote\/Edit Assistant Note assistant-note-1/ })).toBeVisible();
+    await expect(page.getByText('User').locator('..').getByTestId('quote-edit-button')).toHaveCount(0);
+  });
+
+  test('clicking Quote/Edit calls exact source_msg_id endpoint and opens the existing modal', async ({ page }) => {
+    const threadId = 'quote-button-thread-2';
+    let draftRequest: Record<string, unknown> | undefined;
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'assistant-answer-2', role: 'assistant', content: 'Selected answer', content_text: 'Selected answer' },
+      ],
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/edit-answer-draft`, async (route, request) => {
+      draftRequest = request.postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          action: 'open_edit_answer_modal',
+          draft: '> Selected answer',
+          source_msg_id: 'assistant-answer-2',
+          source_kind: 'assistant_answer',
+          source_suffix: 'answer-2',
+          source_label: 'assistant answer',
+          suppress_transcript: true,
+          message: 'Prepared quoted assistant answer answer-2.',
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await page.getByTestId('quote-edit-button').click();
+
+    await expect.poll(() => draftRequest).toEqual({ source_msg_id: 'assistant-answer-2' });
+    await expect(page.getByTestId('edit-answer-modal')).toBeVisible({ timeout: 5000 });
+    await expectMonacoDraft(page, 'Selected answer');
+    await expect(page.getByTestId('chat-panel-content')).not.toContainText('Prepared quoted assistant answer');
   });
 });
 

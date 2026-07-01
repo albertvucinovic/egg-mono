@@ -1117,7 +1117,19 @@ class RealTimeEditor(LiveEditorBase):
         try:
             while self.running:
                 try:
-                    key = self._read_key_from_fd(fd) if fd is not None else self.read_key()
+                    if fd is not None:
+                        # Do not block forever in os.read().  Embedders such
+                        # as Egg need to be able to pause terminal input while
+                        # handing the foreground TTY to an external editor;
+                        # polling lets ``self.running = False`` take effect
+                        # before the editor starts, instead of stealing the
+                        # editor's first keypress.
+                        ready, _w, _x = select.select([fd], [], [], 0.1)
+                        if not ready:
+                            continue
+                        key = self._read_key_from_fd(fd)
+                    else:
+                        key = self.read_key()
                     self.input_queue.put(key)
                 except KeyboardInterrupt:
                     # Normalize KeyboardInterrupt to a Ctrl+C key and
@@ -1192,7 +1204,15 @@ class AsyncRealTimeEditor(LiveEditorBase):
             while self.running:
                 try:
                     if fd is not None:
-                        key = await asyncio.to_thread(self._read_key_from_fd, fd)
+                        def _read_if_ready():
+                            ready, _w, _x = select.select([fd], [], [], 0.1)
+                            if not ready:
+                                return None
+                            return self._read_key_from_fd(fd)
+
+                        key = await asyncio.to_thread(_read_if_ready)
+                        if key is None:
+                            continue
                     else:
                         key = await asyncio.to_thread(self.read_key)
                     await self.input_queue.put(key)

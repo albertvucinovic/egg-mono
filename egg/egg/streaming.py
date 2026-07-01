@@ -67,6 +67,7 @@ def _new_live_state(
         "timeout_sec": None,
         "timeout_started_at": None,
         "provider_started_at": None,
+        "provider_last_activity_at": None,
         "provider_timeout_sec": None,
         "content": "",
         "reason": "",
@@ -408,6 +409,15 @@ class StreamingMixin:
                 pass
             self._stream_begin_on_renderer(stream_kind)
         elif t == 'stream.delta':
+            if self._live_state.get('stream_kind') == 'llm':
+                activity_at = self._event_started_at_epoch(e["ts"] if "ts" in e.keys() else None)
+                if activity_at is None:
+                    try:
+                        activity_at = float(time.time())
+                    except Exception:
+                        activity_at = None
+                if activity_at is not None:
+                    self._live_state['provider_last_activity_at'] = activity_at
             try:
                 payload = json.loads(e['payload_json']) if isinstance(e['payload_json'], str) else (e['payload_json'] or {})
             except Exception:
@@ -497,6 +507,7 @@ class StreamingMixin:
                 except Exception:
                     started_at = None
             self._live_state['provider_started_at'] = started_at
+            self._live_state['provider_last_activity_at'] = started_at
             if isinstance(payload, dict):
                 timeout = _positive_timeout(payload.get('timeout') or payload.get('timeout_sec'))
                 if timeout is not None:
@@ -518,6 +529,7 @@ class StreamingMixin:
             self._live_state['started_at'] = None
             self._live_state['timeout_started_at'] = None
             self._live_state['provider_started_at'] = None
+            self._live_state['provider_last_activity_at'] = None
             self._live_state['provider_timeout_sec'] = None
             try:
                 create_snapshot(self.db, self.current_thread)
@@ -588,10 +600,43 @@ class StreamingMixin:
                     self._live_state['timeout_sec'] = timeout
                     self._live_state['timeout_started_at'] = started_at or self._live_state.get('started_at')
             elif ev_type == 'provider_request.started':
-                self._live_state['provider_started_at'] = started_at or self._live_state.get('started_at')
+                provider_started = started_at or self._live_state.get('started_at')
+                self._live_state['provider_started_at'] = provider_started
+                self._live_state['provider_last_activity_at'] = provider_started
                 timeout = _positive_timeout(payload.get('timeout') or payload.get('timeout_sec'))
                 if timeout is not None:
                     self._live_state['provider_timeout_sec'] = timeout
+
+        # Hydrate the inactivity deadline from the latest persisted stream
+        # delta without replaying every delta in very long active streams.
+        # Provider raw keep-alives are not persisted, but all user-visible
+        # assistant/reasoning/tool-call deltas are, and those are the events
+        # users expect the System header to react to.
+        try:
+            row = self.db.conn.execute(
+                "SELECT ts FROM events "
+                "WHERE thread_id=? AND invoke_id=? AND type='stream.delta' "
+                "ORDER BY event_seq DESC LIMIT 1",
+                (thread_id, invoke_id),
+            ).fetchone()
+        except Exception:
+            row = None
+        if row is not None:
+            try:
+                ts_value = row["ts"]
+            except Exception:
+                try:
+                    ts_value = row[0]
+                except Exception:
+                    ts_value = None
+            latest_delta_at = self._event_started_at_epoch(ts_value)
+            if latest_delta_at is not None:
+                provider_started = self._live_state.get('provider_started_at')
+                try:
+                    if provider_started is None or latest_delta_at >= float(provider_started):
+                        self._live_state['provider_last_activity_at'] = latest_delta_at
+                except Exception:
+                    self._live_state['provider_last_activity_at'] = latest_delta_at
 
     def _stream_begin_on_renderer(self, stream_kind: Optional[str]) -> None:
         renderer = getattr(self, '_renderer', None)

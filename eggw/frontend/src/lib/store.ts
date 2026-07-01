@@ -85,6 +85,34 @@ export interface SystemLog {
   type: "info" | "error" | "success";
 }
 
+export type EditAnswerSourceKind = "assistant_answer" | "assistant_note";
+export type EditAnswerOrigin = "command" | "quote_button";
+
+export interface EditAnswerModalState {
+  isOpen: boolean;
+  threadId: string | null;
+  draft: string;
+  sourceMsgId: string;
+  sourceKind: EditAnswerSourceKind;
+  sourceSuffix: string;
+  sourceLabel: string;
+  origin: EditAnswerOrigin;
+  replaceCommandText?: string;
+}
+
+export type OpenEditAnswerModalPayload = Omit<EditAnswerModalState, "isOpen">;
+
+const CLOSED_EDIT_ANSWER_MODAL: EditAnswerModalState = {
+  isOpen: false,
+  threadId: null,
+  draft: "",
+  sourceMsgId: "",
+  sourceKind: "assistant_answer",
+  sourceSuffix: "",
+  sourceLabel: "",
+  origin: "command",
+};
+
 interface AppState {
   // Current thread
   currentThreadId: string | null;
@@ -98,6 +126,17 @@ interface AppState {
   messages: Message[];
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
+
+  // Thread-scoped composer drafts
+  composerDraftByThread: Record<string, string>;
+  setComposerDraft: (threadId: string, text: string) => void;
+  appendComposerDraft: (threadId: string, text: string) => void;
+
+  // Edit-answer modal
+  editAnswerModal: EditAnswerModalState;
+  openEditAnswerModal: (payload: OpenEditAnswerModalPayload) => void;
+  closeEditAnswerModal: () => void;
+  setEditAnswerDraft: (text: string) => void;
 
   // Streaming content - stored as array of chunks for O(1) append
   streamingContent: string;
@@ -204,6 +243,44 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({
       messages: [...state.messages, message],
       scrollTrigger: state.scrollTrigger + 1,  // Trigger scroll when UI-only message added
+    })),
+
+  // Thread-scoped composer drafts
+  composerDraftByThread: {},
+  setComposerDraft: (threadId, text) =>
+    set((state) => ({
+      composerDraftByThread: {
+        ...state.composerDraftByThread,
+        [threadId]: text,
+      },
+    })),
+  appendComposerDraft: (threadId, text) =>
+    set((state) => {
+      const existing = state.composerDraftByThread[threadId] || "";
+      const separator = existing.trim() ? "\n\n" : "";
+      return {
+        composerDraftByThread: {
+          ...state.composerDraftByThread,
+          [threadId]: `${existing.trimEnd()}${separator}${text}`,
+        },
+      };
+    }),
+
+  // Edit-answer modal
+  editAnswerModal: CLOSED_EDIT_ANSWER_MODAL,
+  openEditAnswerModal: (payload) =>
+    set({
+      editAnswerModal: {
+        isOpen: true,
+        ...payload,
+      },
+    }),
+  closeEditAnswerModal: () => set({ editAnswerModal: CLOSED_EDIT_ANSWER_MODAL }),
+  setEditAnswerDraft: (text) =>
+    set((state) => ({
+      editAnswerModal: state.editAnswerModal.isOpen
+        ? { ...state.editAnswerModal, draft: text }
+        : state.editAnswerModal,
     })),
 
   // Streaming content - use chunks array for O(1) append

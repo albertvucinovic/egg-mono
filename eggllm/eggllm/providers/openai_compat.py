@@ -4,7 +4,12 @@ from typing import Dict, Any, Optional
 import os
 import requests
 
-from .base import ProviderAdapter, attach_provider_usage
+from .base import (
+    ProviderAdapter,
+    aiohttp_stream_timeout,
+    attach_provider_usage,
+    requests_timeout_arg,
+)
 
 
 class OpenAICompatAdapter(ProviderAdapter):
@@ -20,7 +25,7 @@ class OpenAICompatAdapter(ProviderAdapter):
                timeout: int = 600,
                session: Optional[requests.Session] = None):
         sess = session or requests
-        resp = sess.post(url, headers=headers, json=payload, timeout=timeout, stream=True)
+        resp = sess.post(url, headers=headers, json=payload, timeout=requests_timeout_arg(timeout), stream=True)
         resp.raise_for_status()
 
         assistant_text_parts: list[str] = []
@@ -209,7 +214,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         def tool_calls_values():
             return [tool_calls_buf[i] for i in sorted(tool_calls_buf.keys())]
 
-        client_timeout = aiohttp.ClientTimeout(total=timeout) if timeout else aiohttp.ClientTimeout(total=None)
+        client_timeout = aiohttp_stream_timeout(aiohttp, timeout)
         async with aiohttp.ClientSession(timeout=client_timeout) as sess:
             async with sess.post(url, headers=headers, json=payload) as resp:
                 if resp.status >= 400:

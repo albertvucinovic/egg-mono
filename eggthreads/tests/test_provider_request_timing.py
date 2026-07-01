@@ -41,6 +41,7 @@ def test_runner_emits_provider_request_started_with_timeout(tmp_path):
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload_json"])
     assert payload["timeout"] == 42
+    assert payload["timeout_kind"] == "inactivity"
     assert payload["model_key"] == "mock-model"
     assert rows[0]["invoke_id"]
 

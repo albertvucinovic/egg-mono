@@ -456,6 +456,9 @@ EggW-only commands:
     /rename <name> — Rename the current thread.
     /theme [name] — List or switch browser themes.
 
+Edit answer:
+    /editAnswer [assistant_msg_id|suffix] — Quote an assistant answer into an editable browser draft.
+
 Attachments:
     /attach <path> — Stage a server-side local file path for the next message.
     /attachments — List staged attachments and attachments already used in this conversation.
@@ -744,7 +747,7 @@ async def cmd_setThreadPriority(thread_id: str, arg: str = "") -> CommandRespons
                     f"  Thread: {target_thread[-8:]}\n"
                     f"  Priority: {settings.priority}\n"
                     f"  Sticky threshold: {threshold_str}\n"
-                    f"  API timeout: {api_timeout_str}\n\n"
+                    f"  API inactivity timeout: {api_timeout_str}\n\n"
                     f"  Usage: /setThreadPriority priority=<int> threshold=<seconds> apiTimeout=<seconds>\n"
                     f"  Use empty value or 'unset' to reset to default",
             data={
@@ -779,11 +782,11 @@ async def cmd_setThreadPriority(thread_id: str, arg: str = "") -> CommandRespons
         messages.append(f"Sticky threshold set to {new_threshold}s")
         data["threshold"] = new_threshold
     if isinstance(new_api_timeout, type(UNSET)):
-        messages.append("API timeout reset to default")
+        messages.append("API inactivity timeout reset to default")
         data["apiTimeout"] = None
     elif new_api_timeout is not None:
         timeout_str = f"{new_api_timeout}s" if new_api_timeout > 0 else "no timeout"
-        messages.append(f"API timeout set to {timeout_str}")
+        messages.append(f"API inactivity timeout set to {timeout_str}")
         data["apiTimeout"] = new_api_timeout
 
     return CommandResponse(

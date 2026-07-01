@@ -100,6 +100,7 @@ from .routes import (
     stats_router,
     events_router,
     commands_router,
+    edit_answer_router,
     health_router,
     auth_router,
 )
@@ -113,6 +114,7 @@ app.include_router(settings_router)
 app.include_router(stats_router)
 app.include_router(events_router)
 app.include_router(commands_router)
+app.include_router(edit_answer_router)
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(autocomplete_router)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
@@ -118,6 +118,26 @@ class CommandLifecycleResponse(BaseModel):
     started_at: datetime
     finished_at: datetime
     elapsed_sec: float
+
+
+class EditAnswerDraftRequest(BaseModel):
+    """Request to prepare a quoted assistant-answer draft."""
+
+    selector: Optional[str] = None
+    source_msg_id: Optional[str] = None
+
+
+class EditAnswerDraftResponse(BaseModel):
+    """Prepared edit-answer draft metadata for the browser editor modal."""
+
+    action: Literal["open_edit_answer_modal"] = "open_edit_answer_modal"
+    draft: str
+    source_msg_id: str
+    source_kind: Literal["assistant_answer", "assistant_note"]
+    source_suffix: str = ""
+    source_label: str = ""
+    suppress_transcript: bool = True
+    message: Optional[str] = None
 
 
 class CreateThreadRequest(BaseModel):
