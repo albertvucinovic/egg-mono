@@ -29,6 +29,7 @@ from .factory import create_default_output_optimizer, default_native_filters
 from .filters.find import FindPathGroupFilter, is_find_like_request, parse_find_fd_paths
 from .filters.git_status import GitStatusCompactFilter, is_git_status_request, parse_git_status_entries, parse_git_status_line
 from .filters.grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
+from .filters.python_traceback import PythonTracebackFocusFilter, parse_python_traceback
 from .generic import (
     AnsiControlCleanupFilter,
     BoundedHeadTailFilter,
@@ -60,6 +61,7 @@ __all__ = [
     "OutputOptimizerRegistry",
     "PathLineContent",
     "ProgressNoiseFilter",
+    "PythonTracebackFocusFilter",
     "RepeatedLineDedupeFilter",
     "bounded_head_tail",
     "calculate_size_metadata",
@@ -85,6 +87,7 @@ __all__ = [
     "parse_path_list_lines",
     "parse_path_line_content",
     "parse_path_line_content_lines",
+    "parse_python_traceback",
     "request_command_name",
     "simple_bash_command_invocation",
     "simple_bash_command_name",

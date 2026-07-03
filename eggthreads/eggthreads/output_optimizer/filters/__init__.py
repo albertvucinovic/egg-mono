@@ -5,11 +5,13 @@ from __future__ import annotations
 from .find import FindPathGroupFilter, is_find_like_request, parse_find_fd_paths
 from .git_status import GitStatusCompactFilter, is_git_status_request, parse_git_status_entries, parse_git_status_line
 from .grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
+from .python_traceback import PythonTracebackFocusFilter, parse_python_traceback
 
 __all__ = [
     "FindPathGroupFilter",
     "GitStatusCompactFilter",
     "GrepRgGroupByFileFilter",
+    "PythonTracebackFocusFilter",
     "is_find_like_request",
     "is_git_status_request",
     "is_grep_like_request",
@@ -17,4 +19,5 @@ __all__ = [
     "parse_git_status_entries",
     "parse_git_status_line",
     "parse_grep_rg_matches",
+    "parse_python_traceback",
 ]
