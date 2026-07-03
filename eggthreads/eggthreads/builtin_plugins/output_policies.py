@@ -92,9 +92,10 @@ class NativeOptimizerOutputPolicy:
                 metadata=metadata,
             )
             min_size_chars = self._min_size_chars(request)
+            min_confidence = self._min_confidence(request)
             optimizer = create_default_output_optimizer(
                 min_size_chars=min_size_chars,
-                min_confidence=0.5,
+                min_confidence=min_confidence,
             )
             optimization = optimizer.optimize(opt_request)
         except Exception as exc:
@@ -271,6 +272,37 @@ class NativeOptimizerOutputPolicy:
             return max(0, int(value)) if value is not None else 0
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _min_confidence(request: OutputPolicyRequest) -> float:
+        """Resolve optimizer min-confidence from the thread config.
+
+        Default/no-event behavior intentionally remains the Phase-2/3 value of
+        ``0.5``.  Event-sourced mode config supplied by the runner may override
+        it using either an explicit threshold or a named mode.
+        """
+
+        cfg = request.thread_config or {}
+        for key in (
+            "output_optimizer_mode_min_confidence",
+            "optimizer_min_confidence",
+            "native_output_optimizer_min_confidence",
+        ):
+            value = cfg.get(key)
+            try:
+                if value is not None:
+                    return max(0.0, float(value))
+            except (TypeError, ValueError):
+                pass
+        mode = cfg.get("output_optimizer_mode") or cfg.get("native_output_optimizer_mode")
+        if mode is not None:
+            try:
+                from ..output_optimizer.config import output_optimizer_min_confidence_for_mode
+
+                return output_optimizer_min_confidence_for_mode(mode)
+            except ValueError:
+                pass
+        return 0.5
 
 
 def register_output_policies(registry: Any) -> None:

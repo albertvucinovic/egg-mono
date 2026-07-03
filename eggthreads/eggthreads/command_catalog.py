@@ -372,9 +372,10 @@ def create_default_command_registry() -> CommandRegistry:
     register_plugins(CommandPluginContext(command_registry=registry), [ModelPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [AuthPlugin()])
 
-    from .builtin_plugins import DiagnosticsPlugin, ToolsAdminPlugin
+    from .builtin_plugins import DiagnosticsPlugin, OutputOptimizerAdminPlugin, ToolsAdminPlugin
 
     register_plugins(CommandPluginContext(command_registry=registry), [ToolsAdminPlugin()])
+    register_plugins(CommandPluginContext(command_registry=registry), [OutputOptimizerAdminPlugin()])
     register_plugins(CommandPluginContext(command_registry=registry), [DiagnosticsPlugin()])
 
     from .builtin_plugins import AnswerUserPlugin, CompactionPlugin, DisplayInputPlugin, SandboxAdminPlugin, SessionPlugin, SkillsPlugin, SubagentsPlugin, ThreadUiPlugin, WebPlugin
@@ -456,6 +457,15 @@ SESSION_ON_COMPLETIONS: List[str] = [
 
 SESSION_TARGET_COMPLETIONS: List[str] = ['python', 'bash', 'all']
 
+OUTPUT_OPTIMIZER_COMMAND_COMPLETIONS: List[str] = [
+    '/outputOptimizerStatus',
+    '/outputOptimizerOn',
+    '/outputOptimizerOff',
+    '/outputOptimizerMode',
+]
+
+OUTPUT_OPTIMIZER_MODE_COMPLETIONS: List[str] = ['conservative', 'balanced', 'aggressive']
+
 EGG_COMMAND_COMPLETIONS: List[str] = command_completion_names()
 
 EGGW_COMMAND_COMPLETIONS: List[str] = [
@@ -491,6 +501,8 @@ __all__ = [
     'SESSION_COMMAND_COMPLETIONS',
     'SESSION_ON_COMPLETIONS',
     'SESSION_TARGET_COMPLETIONS',
+    'OUTPUT_OPTIMIZER_COMMAND_COMPLETIONS',
+    'OUTPUT_OPTIMIZER_MODE_COMPLETIONS',
     'EGG_COMMAND_COMPLETIONS',
     'EGGW_COMMAND_COMPLETIONS',
 ]

@@ -472,6 +472,12 @@ def _emit_auto_output_approval(
     original_count = original_char_count if original_char_count is not None else stored_char_count
     try:
         from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
+        from .output_optimizer.config import get_thread_output_optimizer_policy_config
+
+        try:
+            thread_output_optimizer_config = get_thread_output_optimizer_policy_config(db, thread_id)
+        except Exception:
+            thread_output_optimizer_config = {}
 
         publication = decide_output_publication(
             create_output_policy_registry(),
@@ -486,6 +492,7 @@ def _emit_auto_output_approval(
                 origin=str(origin or "runner"),
                 user_tool_call=bool(user_tool_call),
                 tool_metadata=dict(tool_metadata or {}),
+                thread_config=thread_output_optimizer_config,
                 limits={
                     "long_output_line_threshold": LONG_OUTPUT_LINE_THRESHOLD,
                     "long_output_char_threshold": LONG_OUTPUT_CHAR_THRESHOLD,

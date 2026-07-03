@@ -186,15 +186,15 @@ Goal: capture high ROI coding-agent outputs.
 
 Goal: make optimizer controllable and inspectable.
 
-- [ ] Add event-sourced per-thread/inherited optimizer config.
-- [ ] Add terminal shared commands:
-  - [ ] `/outputOptimizerStatus`
-  - [ ] `/outputOptimizerOn`
-  - [ ] `/outputOptimizerOff`
-  - [ ] `/outputOptimizerMode conservative|balanced|aggressive`
-- [ ] Add EggW command adapters and settings display if appropriate.
-- [ ] Tests for inheritance, toggling, and terminal/EggW parity.
-- [ ] Update TODO and commit.
+- [x] Add event-sourced per-thread/inherited optimizer config.
+- [x] Add terminal shared commands:
+  - [x] `/outputOptimizerStatus`
+  - [x] `/outputOptimizerOn`
+  - [x] `/outputOptimizerOff`
+  - [x] `/outputOptimizerMode conservative|balanced|aggressive`
+- [x] Add EggW command adapters and settings display if appropriate.
+- [x] Tests for inheritance, toggling, and terminal/EggW parity.
+- [x] Update TODO and commit.
 
 ### Phase 5 — UI observability
 
@@ -237,3 +237,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 - 2026-07-03: Phase 3 git diff slice implemented a conservative unified `git diff` preview filter that preserves file names, hunk headers, and changed lines while omitting capped context/files/hunks with explicit notes. Enabled native optimizer order is grep/rg, find/fd, git status, git diff, Python traceback, then generic fallback. Pytest/cargo filters remain pending.
 - 2026-07-03: Phase 3 pytest slice implemented a conservative pytest failure summary filter that preserves failed/error nodeids, assertion/error excerpts, and final summary while capping summaries/sections with explicit notes. Enabled native optimizer order is grep/rg, find/fd, git status, git diff, pytest, Python traceback, then generic fallback. Cargo remains pending.
 - 2026-07-03: Phase 3 cargo slice implemented a conservative Cargo/Rust test failure summary filter that preserves failing test names, panic/source excerpts, final test result, and cargo error rerun lines while capping names/sections with explicit notes. All planned Phase 3 semantic filters are now implemented in small slices.
+- 2026-07-03: Phase 4 first slice implemented event-sourced inherited `output_optimizer.config` resolution with env/config fallback compatibility, explicit per-thread enable/disable, modes `conservative`/`balanced`/`aggressive` wired to optimizer min-confidence, runner policy-config population, shared slash commands for status/on/off/mode, and EggW shared-command adapters for the new commands. No separate EggW settings UI/badges were added in this slice.

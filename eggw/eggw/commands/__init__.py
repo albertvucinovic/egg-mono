@@ -80,7 +80,14 @@ from ..models import CommandResponse
 from .. import core
 from ..core import ensure_scheduler_for
 
-_SHARED_COMMAND_ADAPTER_COMMANDS = {"btw", "waitForThreads"}
+_SHARED_COMMAND_ADAPTER_COMMANDS = {
+    "btw",
+    "waitForThreads",
+    "outputOptimizerStatus",
+    "outputOptimizerOn",
+    "outputOptimizerOff",
+    "outputOptimizerMode",
+}
 
 
 def _execute_shared_command(thread_id: str, command_name: str, command_arg: str) -> CommandResponse:
@@ -313,6 +320,14 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
         elif command_name == "toolsSecrets":
             return await cmd_tools_secrets(thread_id, command_arg)
         elif command_name == "waitForThreads":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerStatus":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerOn":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerOff":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerMode":
             return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "togglePanel":
             return cmd_toggle_panel(command_arg)

@@ -2419,6 +2419,48 @@ class TestCommands:
         shared_names = set(create_default_command_registry().names(include_aliases=True))
         assert shared_names - dispatched_names == set()
 
+    def test_output_optimizer_commands_use_shared_registry(self, client):
+        """EggW delegates output optimizer commands to shared handlers."""
+        create_resp = client.post("/api/threads", json={"name": "Optimizer Commands"})
+        thread_id = create_resp.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/outputOptimizerOn"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "ENABLED" in data["message"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/outputOptimizerMode aggressive"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "aggressive" in data["message"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/outputOptimizerStatus"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "Enabled: ENABLED" in data["message"]
+        assert "Mode: aggressive" in data["message"]
+
+        response = client.post(
+            f"/api/threads/{thread_id}/command",
+            json={"command": "/outputOptimizerMode reckless"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "Usage: /outputOptimizerMode" in data["message"]
+
     def test_cost_command_matches_shared_diagnostics_format(self, client, monkeypatch):
         """EggW /cost uses the shared rich diagnostics formatter."""
         create_resp = client.post("/api/threads", json={"name": "Cost Command"})
