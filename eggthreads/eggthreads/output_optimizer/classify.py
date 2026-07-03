@@ -43,14 +43,21 @@ def simple_bash_command_words(script: Any) -> tuple[str, ...]:
     return words
 
 
-def simple_bash_command_name(script: Any) -> str | None:
-    """Return the command name for a single simple shell command, if known."""
+def simple_bash_command_invocation(script: Any) -> tuple[str, ...]:
+    """Return command words after simple env/``command`` wrappers."""
 
     words = list(simple_bash_command_words(script))
     while words and _ENV_ASSIGNMENT_RE.match(words[0]):
         words.pop(0)
     if words and words[0] == "command":
         words.pop(0)
+    return tuple(words)
+
+
+def simple_bash_command_name(script: Any) -> str | None:
+    """Return the command name for a single simple shell command, if known."""
+
+    words = list(simple_bash_command_invocation(script))
     if not words:
         return None
     name = normalize_command_name(words[0])
@@ -158,6 +165,7 @@ __all__ = [
     "parse_path_line_content",
     "parse_path_line_content_lines",
     "request_command_name",
+    "simple_bash_command_invocation",
     "simple_bash_command_name",
     "simple_bash_command_words",
 ]

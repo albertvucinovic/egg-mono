@@ -21,11 +21,13 @@ from .classify import (
     parse_path_line_content,
     parse_path_line_content_lines,
     request_command_name,
+    simple_bash_command_invocation,
     simple_bash_command_name,
     simple_bash_command_words,
 )
 from .factory import create_default_output_optimizer, default_native_filters
 from .filters.find import FindPathGroupFilter, is_find_like_request, parse_find_fd_paths
+from .filters.git_status import GitStatusCompactFilter, is_git_status_request, parse_git_status_entries, parse_git_status_line
 from .filters.grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
 from .generic import (
     AnsiControlCleanupFilter,
@@ -49,6 +51,7 @@ __all__ = [
     "BoundedHeadTailFilter",
     "FindPathGroupFilter",
     "GenericOutputFilter",
+    "GitStatusCompactFilter",
     "GrepRgGroupByFileFilter",
     "OptimizeDecision",
     "OptimizeRequest",
@@ -67,6 +70,7 @@ __all__ = [
     "default_native_filters",
     "default_generic_filters",
     "is_find_like_request",
+    "is_git_status_request",
     "is_grep_like_request",
     "is_obvious_progress_noise_line",
     "is_plausible_path_list_line",
@@ -75,11 +79,14 @@ __all__ = [
     "normalize_command_name",
     "output_optimizer_enabled",
     "parse_find_fd_paths",
+    "parse_git_status_entries",
+    "parse_git_status_line",
     "parse_grep_rg_matches",
     "parse_path_list_lines",
     "parse_path_line_content",
     "parse_path_line_content_lines",
     "request_command_name",
+    "simple_bash_command_invocation",
     "simple_bash_command_name",
     "simple_bash_command_words",
     "suppress_progress_noise",

@@ -172,14 +172,14 @@ Goal: capture high ROI coding-agent outputs.
   - [ ] `cargo test` failure summary;
   - [x] `rg`/`grep` grouping by file;
   - [x] `find` path grouping;
-  - [ ] `git status` compact status;
+  - [x] `git status` compact status;
   - [ ] `git diff` compact diff preview;
   - [ ] generic Python traceback focus.
 - [ ] Each filter must be conservative:
-  - [x] high-confidence `matches` logic for grep/rg and find/fd;
-  - [x] fallback unchanged on parse ambiguity for grep/rg and find/fd;
-  - [x] tests for non-matching similar output for grep/rg and find/fd.
-- [x] Tests with representative raw grep/rg and find/fd outputs for completed slices.
+  - [x] high-confidence `matches` logic for grep/rg, find/fd, and git status;
+  - [x] fallback unchanged on parse ambiguity for grep/rg, find/fd, and git status;
+  - [x] tests for non-matching similar output for grep/rg, find/fd, and git status.
+- [x] Tests with representative raw grep/rg, find/fd, and git status outputs for completed slices.
 - [ ] Update TODO and commit in small slices, not one giant commit.
 
 ### Phase 4 — User/thread configuration and commands
@@ -232,3 +232,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 - 2026-07-03: Phase 2 disabled-by-default integration implemented. `NativeOptimizerOutputPolicy` is registered after default output policy and gated by `EGG_OUTPUT_OPTIMIZER`/config truthy values; runner now supplies tool name/args, RA origin, user-tool flag, finished reason, and size/cap metadata. Enabled generic optimization rewrites publication previews/messages only, preserves `tool_call.finished.output`, and keeps long-output raw artifact recovery metadata.
 - 2026-07-03: Phase 3 first slice implemented conservative classifier helpers plus a grep/rg semantic filter. The enabled native optimizer now tries grep/rg grouping before generic fallback; disabled behavior is unchanged. Remaining semantic filters are still pending.
 - 2026-07-03: Phase 3 find/fd slice implemented conservative path-list grouping by directory. The enabled native optimizer now tries grep/rg, then find/fd, then generic fallback; disabled behavior remains unchanged. Pytest/cargo/git/traceback filters remain pending.
+- 2026-07-03: Phase 3 git status slice implemented conservative `git status --short`/porcelain-v1 grouping by exact status code, including renamed/copied paths and caps. Enabled native optimizer order is grep/rg, find/fd, git status, then generic fallback. Pytest/cargo/git diff/traceback filters remain pending.
