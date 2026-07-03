@@ -26,6 +26,7 @@ from .classify import (
     simple_bash_command_words,
 )
 from .factory import create_default_output_optimizer, default_native_filters
+from .filters.cargo import CargoTestFailureSummaryFilter, is_cargo_test_request, parse_cargo_test_failure_output
 from .filters.find import FindPathGroupFilter, is_find_like_request, parse_find_fd_paths
 from .filters.git_diff import GitDiffCompactFilter, is_git_diff_request, parse_git_diff
 from .filters.git_status import GitStatusCompactFilter, is_git_status_request, parse_git_status_entries, parse_git_status_line
@@ -52,6 +53,7 @@ __all__ = [
     "OUTPUT_OPTIMIZER_ENV",
     "AnsiControlCleanupFilter",
     "BoundedHeadTailFilter",
+    "CargoTestFailureSummaryFilter",
     "FindPathGroupFilter",
     "GenericOutputFilter",
     "GitDiffCompactFilter",
@@ -75,6 +77,7 @@ __all__ = [
     "dedupe_repeated_lines",
     "default_native_filters",
     "default_generic_filters",
+    "is_cargo_test_request",
     "is_find_like_request",
     "is_git_diff_request",
     "is_git_status_request",
@@ -86,6 +89,7 @@ __all__ = [
     "make_decision",
     "normalize_command_name",
     "output_optimizer_enabled",
+    "parse_cargo_test_failure_output",
     "parse_find_fd_paths",
     "parse_git_diff",
     "parse_git_status_entries",

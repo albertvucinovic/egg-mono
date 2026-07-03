@@ -3,6 +3,7 @@ from __future__ import annotations
 """Factory helpers for composing native output optimizer filters."""
 
 from .core import OutputFilter, OutputOptimizer
+from .filters.cargo import CargoTestFailureSummaryFilter
 from .filters.find import FindPathGroupFilter
 from .filters.git_diff import GitDiffCompactFilter
 from .filters.git_status import GitStatusCompactFilter
@@ -21,6 +22,7 @@ def default_native_filters(*, bounded_max_chars: int | None = None) -> list[Outp
         GitStatusCompactFilter(),
         GitDiffCompactFilter(),
         PytestFailureSummaryFilter(),
+        CargoTestFailureSummaryFilter(),
         PythonTracebackFocusFilter(),
         GenericOutputFilter(max_chars=bounded_max_chars),
     ]
