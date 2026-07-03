@@ -473,6 +473,25 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
         }
 
     monkeypatch.setattr(diagnostics, "thread_token_stats", fake_thread_token_stats)
+    monkeypatch.setattr(
+        diagnostics,
+        "collect_output_optimizer_savings",
+        lambda db, thread_id: {
+            "optimized_tool_outputs": 2,
+            "raw_chars": 1000,
+            "published_chars": 250,
+            "saved_chars": 750,
+            "savings_pct": 75.0,
+            "raw_tokens": 250,
+            "published_tokens": 70,
+            "saved_tokens": 180,
+            "token_savings_pct": 72.0,
+            "by_filter": {
+                "rtk_pipe": {"count": 1, "saved_chars": 500, "saved_tokens": 120},
+                "generic": {"count": 1, "saved_chars": 250, "saved_tokens": 60},
+            },
+        },
+    )
 
     registry.execute("schedulers", ctx)
     registry.execute("cost", ctx)
@@ -505,6 +524,12 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
     assert "cache_creation: $0.0300" in cost_text
     assert "calls=1 (actual=1, estimated=0)" in cost_text
     assert "cache_creation_in=2" in cost_text
+    assert "Output optimizer publication savings:" in cost_text
+    assert "optimized_tool_outputs: 2" in cost_text
+    assert "chars: raw=1000 published=250 saved=750 (75.0%)" in cost_text
+    assert "approx_tokens: raw=250 (250) published=70 (70) saved=180 (180, 72.0%)" in cost_text
+    assert "rtk_pipe: count=1 saved_chars=500 saved_tokens=120" in cost_text
+    assert "actual billing depends" in cost_text
 
 
 def test_toggle_auto_approval_command_is_registered_handler(tmp_path) -> None:

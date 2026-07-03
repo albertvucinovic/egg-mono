@@ -54,6 +54,7 @@ from .classify import (
 )
 from .factory import create_default_output_optimizer, default_native_filters
 from .observability import (
+    collect_output_optimizer_savings,
     format_output_optimizer_summary,
     optimizer_public_metadata_from_output_approval,
 )
@@ -117,6 +118,7 @@ __all__ = [
     "bounded_head_tail",
     "calculate_size_metadata",
     "clean_ansi_controls",
+    "collect_output_optimizer_savings",
     "create_default_output_optimizer",
     "create_generic_output_optimizer",
     "dedupe_repeated_lines",

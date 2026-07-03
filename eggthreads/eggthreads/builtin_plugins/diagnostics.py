@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from ..plugins import PluginContext
+from ..output_optimizer.observability import collect_output_optimizer_savings
 from ..token_count import thread_token_stats
 
 
@@ -140,6 +141,54 @@ def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
         lines.append("")
         _append_usage_section(lines, "Current provider context usage (after last compaction):", since_api)
 
+    optimizer_savings = stats.get("output_optimizer_savings")
+    if isinstance(optimizer_savings, dict) and optimizer_savings:
+        optimized_count = int(optimizer_savings.get("optimized_tool_outputs") or 0)
+        if optimized_count > 0:
+            raw_chars = int(optimizer_savings.get("raw_chars") or 0)
+            published_chars = int(optimizer_savings.get("published_chars") or 0)
+            saved_chars = int(optimizer_savings.get("saved_chars") or 0)
+            raw_tokens = int(optimizer_savings.get("raw_tokens") or 0)
+            published_tokens = int(optimizer_savings.get("published_tokens") or 0)
+            saved_tokens = int(optimizer_savings.get("saved_tokens") or 0)
+            savings_pct = float(optimizer_savings.get("savings_pct") or 0.0)
+            token_savings_pct = float(optimizer_savings.get("token_savings_pct") or 0.0)
+            lines.append("")
+            lines.append("Output optimizer publication savings:")
+            lines.append(f"  optimized_tool_outputs: {optimized_count}")
+            lines.append(
+                "  chars: raw={raw} published={published} saved={saved} ({pct:.1f}%)".format(
+                    raw=raw_chars,
+                    published=published_chars,
+                    saved=saved_chars,
+                    pct=savings_pct,
+                )
+            )
+            if raw_tokens or published_tokens or saved_tokens:
+                lines.append(
+                    "  approx_tokens: raw={raw} ({raw_fmt}) published={published} ({published_fmt}) "
+                    "saved={saved} ({saved_fmt}, {pct:.1f}%)".format(
+                        raw=raw_tokens,
+                        raw_fmt=_fmt_tok(raw_tokens),
+                        published=published_tokens,
+                        published_fmt=_fmt_tok(published_tokens),
+                        saved=saved_tokens,
+                        saved_fmt=_fmt_tok(saved_tokens),
+                        pct=token_savings_pct,
+                    )
+                )
+            by_filter = optimizer_savings.get("by_filter") if isinstance(optimizer_savings.get("by_filter"), dict) else {}
+            if by_filter:
+                lines.append("  by_filter:")
+                for name in sorted(str(k) for k in by_filter.keys()):
+                    entry = by_filter.get(name) if isinstance(by_filter.get(name), dict) else {}
+                    lines.append(
+                        f"    {name}: count={int(entry.get('count') or 0)} "
+                        f"saved_chars={int(entry.get('saved_chars') or 0)} "
+                        f"saved_tokens={int(entry.get('saved_tokens') or 0)}"
+                    )
+            lines.append("  note: local publication/context savings; actual billing depends on later API calls, compaction, caching, and model pricing.")
+
     cost_lines: List[str] = ["", "Approximate cost (USD):"]
     cu = api.get("cost_usd") if isinstance(api.get("cost_usd"), dict) else {}
     total_cost = float(cu.get("total") or 0.0)
@@ -208,6 +257,10 @@ def cost_command(context: Any, arg: str):
     try:
         llm = context.llm_client if getattr(context, "llm_client", None) is not None else getattr(getattr(context, "app", None), "llm_client", None)
         stats = thread_token_stats(db, thread_id, llm=llm)
+        optimizer_savings = collect_output_optimizer_savings(db, thread_id)
+        if optimizer_savings:
+            stats = dict(stats)
+            stats["output_optimizer_savings"] = optimizer_savings
         ctx_tokens = stats.get("context_tokens")
         api = stats.get("api_usage", stats)
     except Exception as e:

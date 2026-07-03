@@ -6,6 +6,7 @@ from pathlib import Path
 
 import eggthreads as ts
 from eggthreads.output_optimizer.observability import (
+    collect_output_optimizer_savings,
     format_output_optimizer_summary,
     optimizer_public_metadata_from_output_approval,
 )
@@ -171,3 +172,49 @@ def test_output_optimizer_metadata_is_not_sent_to_provider_api(tmp_path) -> None
     assert real_tool["content"] == "optimized preview"
     user_tool = next(message for message in sanitized if message.get("role") == "user")
     assert user_tool["content"] == "user command optimized preview"
+
+
+def test_collect_output_optimizer_savings_from_output_approval_events(tmp_path) -> None:
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="optimizer-savings")
+    raw = "raw noisy output " * 100
+    preview = "short optimized preview"
+
+    db.append_event(
+        event_id="finished-savings",
+        thread_id=thread_id,
+        type_="tool_call.finished",
+        payload={"tool_call_id": "call-savings", "reason": "success", "output": raw},
+    )
+    db.append_event(
+        event_id="approval-savings",
+        thread_id=thread_id,
+        type_="tool_call.output_approval",
+        payload={
+            "tool_call_id": "call-savings",
+            "decision": "whole",
+            "preview": preview,
+            "channels": {
+                "raw": {"stored_in_finished_event": True},
+                "optimizer": {
+                    "optimized": True,
+                    "fallback": False,
+                    "filter_name": "rtk_pipe",
+                    "raw_chars": len(raw),
+                    "published_chars": len(preview),
+                    "published_savings_pct": (len(raw) - len(preview)) / len(raw) * 100,
+                },
+            },
+        },
+    )
+
+    savings = collect_output_optimizer_savings(db, thread_id)
+
+    assert savings["optimized_tool_outputs"] == 1
+    assert savings["raw_chars"] == len(raw)
+    assert savings["published_chars"] == len(preview)
+    assert savings["saved_chars"] == len(raw) - len(preview)
+    assert savings["savings_pct"] > 90.0
+    assert savings["saved_tokens"] >= 0
+    assert savings["by_filter"]["rtk_pipe"]["count"] == 1
+    assert savings["by_filter"]["rtk_pipe"]["saved_chars"] == len(raw) - len(preview)
