@@ -258,15 +258,94 @@ def test_enabled_optimizer_changes_preview_but_preserves_raw_finished_output(tmp
     assert optimizer["fallback"] is False
     assert optimizer["filter_name"] == "generic"
     assert optimizer["raw_chars"] == len(raw_output)
-    assert optimizer["optimized_chars"] == len(approval["preview"])
+    assert optimizer["optimized_chars"] < len(approval["preview"])
+    assert optimizer["published_chars"] == len(approval["preview"])
     assert optimizer["savings_pct"] > 0
+    assert approval["artifact_path"]
+    assert "read_long_tool_output(" in approval["preview"]
     assert approval["channels"]["raw"]["stored_in_finished_event"] is True
+
+    artifact_id = Path(approval["artifact_path"]).name
+    read = ts.create_default_tools().execute(
+        "read_long_tool_output",
+        {"artifact_id": artifact_id, "chunk_number": 1},
+        thread_id=tid,
+        db=db,
+    )
+    assert raw_output in read
 
     assert asyncio.run(runner.run_once()) is True
     tool_msg = _latest_payload(db, tid, "msg.create", tcid)
     assert tool_msg["role"] == "tool"
     assert "[... repeated 5 more times ...]" in tool_msg["content"]
     assert repeated_line + "\n" + repeated_line not in tool_msg["content"]
+
+
+def test_default_optimizer_bounds_medium_visible_user_command_output(tmp_path, monkeypatch):
+    monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    tcid = ts.enqueue_user_tool_call(
+        db,
+        tid,
+        "bash",
+        {"script": "python dump-medium-output.py"},
+        auto_approve=True,
+        hidden=False,
+        content="$ python dump-medium-output.py",
+    )
+    raw_output = "--- STDOUT ---\n" + "\n".join(
+        f"medium bash output line {idx:04d} with enough text to exceed the preview bound"
+        for idx in range(1, 420)
+    )
+    assert 8_000 < len(raw_output) < 100_000
+
+    tools = ToolRegistry()
+    tools.register("bash", "Bash", {"type": "object", "properties": {}}, lambda args: raw_output)
+
+    runner = ts.ThreadRunner(db, tid, llm=object(), tools=tools)
+    assert asyncio.run(runner.run_once()) is True
+
+    state = ts.build_tool_call_states(db, tid)[tcid]
+    assert state.finished_output == raw_output
+
+    approval = _latest_payload(db, tid, "tool_call.output_approval", tcid)
+    assert approval["decision"] == "whole"
+    assert approval["preview"] != raw_output
+    assert "[... omitted " in approval["preview"]
+    assert "read_long_tool_output(" in approval["preview"]
+    assert approval["artifact_path"]
+    optimizer = approval["channels"]["optimizer"]
+    assert optimizer["filter_name"] == "generic"
+    assert optimizer["metadata"]["bounded"] is True
+    assert "bounded_head_tail_fallback" in optimizer["metadata"]["operations"]
+    assert optimizer["published_chars"] == len(approval["preview"])
+
+    artifact_id = Path(approval["artifact_path"]).name
+    read = ts.create_default_tools().execute(
+        "read_long_tool_output",
+        {"artifact_id": artifact_id, "chunk_number": 1},
+        thread_id=tid,
+        db=db,
+    )
+    assert "medium bash output line 0001" in read
+    read_tail = ts.create_default_tools().execute(
+        "read_long_tool_output",
+        {"artifact_id": artifact_id, "chunk_number": 2},
+        thread_id=tid,
+        db=db,
+    )
+    assert "medium bash output line 0419" in read_tail
+
+    assert asyncio.run(runner.run_once()) is True
+    tool_msg = _latest_payload(db, tid, "msg.create", tcid)
+    assert tool_msg["role"] == "tool"
+    assert tool_msg.get("user_tool_call") is True
+    assert "no_api" not in tool_msg
+    assert "$ python dump-medium-output.py" in tool_msg["content"]
+    assert "read_long_tool_output(" in tool_msg["content"]
 
 
 def test_enabled_optimizer_preserves_hidden_user_command_no_api(tmp_path, monkeypatch):

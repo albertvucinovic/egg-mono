@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import eggthreads as ts
-from eggthreads.output_optimizer import GrepRgGroupByFileFilter, OptimizeRequest, OutputOptimizer
+from eggthreads.output_optimizer import GrepRgGroupByFileFilter, GrepRgOutputShapeFilter, OptimizeRequest, OutputOptimizer
 from eggthreads.output_optimizer.classify import simple_bash_command_name
 from eggthreads.tools import ToolRegistry
 
@@ -111,6 +111,34 @@ def test_grep_filter_accepts_bash_stdout_header() -> None:
     assert decision.metadata["original_had_stdout_header"] is True
 
 
+def test_grep_output_shape_filter_groups_complex_bash_grep_output() -> None:
+    output = "--- STDOUT ---\n" + "\n".join(
+        [
+            *(f"src/a.py:{idx}:needle in complex wrapper output" for idx in range(1, 6)),
+            *(f"src/b.py:{idx}:needle in complex wrapper output" for idx in range(10, 15)),
+        ]
+    )
+
+    decision = OutputOptimizer([GrepRgOutputShapeFilter(max_matches_per_file=3)]).optimize(
+        _request(output, script="grep -R needle src | head -n 200")
+    )
+
+    assert decision.optimized is True
+    assert decision.filter_name == "grep_rg_output_shape_group_by_file"
+    assert decision.output.startswith("src/a.py:\n  1: needle in complex wrapper output")
+    assert "[... omitted 2 more matches in this file ...]" in decision.output
+    assert decision.metadata["matched_by_output_shape"] is True
+
+
+def test_grep_output_shape_filter_requires_path_like_labels() -> None:
+    output = "\n".join(f"status:{idx}:not really a grep path" for idx in range(1, 6))
+
+    decision = OutputOptimizer([GrepRgOutputShapeFilter()]).optimize(_request(output, script="cat report.txt"))
+
+    assert decision.optimized is False
+    assert decision.output == output
+
+
 def test_enabled_policy_uses_grep_grouping_and_preserves_raw_finished_output(tmp_path, monkeypatch):
     monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER", "1")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
@@ -127,10 +155,8 @@ def test_enabled_policy_uses_grep_grouping_and_preserves_raw_finished_output(tmp
     )
     raw_output = "--- STDOUT ---\n" + "\n".join(
         [
-            "src/a.py:1:alpha needle",
-            "src/a.py:2:beta needle",
-            "src/a.py:3:gamma needle",
-            "src/b.py:10:delta needle",
+            *(f"src/packages/example/very_long_module_a.py:{idx}:alpha needle with repeated surrounding context {idx}" for idx in range(1, 51)),
+            *(f"src/packages/example/very_long_module_b.py:{idx}:delta needle with repeated surrounding context {idx}" for idx in range(1, 51)),
         ]
     )
 
@@ -145,34 +171,36 @@ def test_enabled_policy_uses_grep_grouping_and_preserves_raw_finished_output(tmp
 
     approval = _latest_payload(db, tid, "tool_call.output_approval", tcid)
     assert approval["decision"] == "whole"
-    assert approval["preview"] == "\n".join(
-        [
-            "src/a.py:",
-            "  1: alpha needle",
-            "  2: beta needle",
-            "  3: gamma needle",
-            "",
-            "src/b.py:",
-            "  10: delta needle",
-        ]
+    assert approval["preview"].startswith(
+        "\n".join(
+            [
+                "src/packages/example/very_long_module_a.py:",
+                "  1: alpha needle with repeated surrounding context 1",
+                "  2: alpha needle with repeated surrounding context 2",
+            ]
+        )
     )
+    assert "[... omitted 30 more matches in this file ...]" in approval["preview"]
+    assert "read_long_tool_output(" in approval["preview"]
+    assert approval["artifact_path"]
     optimizer = approval["channels"]["optimizer"]
     assert optimizer["filter_name"] == "grep_rg_group_by_file"
     assert optimizer["optimized"] is True
     assert optimizer["raw_chars"] == len(raw_output)
-    assert optimizer["optimized_chars"] == len(approval["preview"])
+    assert optimizer["optimized_chars"] < len(approval["preview"])
+    assert optimizer["published_chars"] == len(approval["preview"])
 
     assert asyncio.run(runner.run_once()) is True
     tool_msg = _latest_payload(db, tid, "msg.create", tcid)
     assert tool_msg["role"] == "tool"
     assert tool_msg.get("user_tool_call") is True
     assert "no_api" not in tool_msg
-    assert "src/a.py:" in tool_msg["content"]
-    assert "src/a.py:1:alpha needle" not in tool_msg["content"]
+    assert "src/packages/example/very_long_module_a.py:" in tool_msg["content"]
+    assert "src/packages/example/very_long_module_a.py:1:alpha needle" not in tool_msg["content"]
 
 
 def test_disabled_policy_keeps_default_grep_output(tmp_path, monkeypatch):
-    monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
+    monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER", "off")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     tid = ts.create_root_thread(db, name="root")

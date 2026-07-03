@@ -154,7 +154,7 @@ def test_enabled_policy_uses_git_status_filter_and_preserves_raw_finished_output
         hidden=False,
     )
     raw_output = "--- STDOUT ---\n" + "\n".join(
-        f" M src/packages/app/feature/modified_{idx:03d}.py" for idx in range(1, 30)
+        f" M src/packages/app/feature/modified_{idx:03d}.py" for idx in range(1, 130)
     )
 
     tools = ToolRegistry()
@@ -168,7 +168,9 @@ def test_enabled_policy_uses_git_status_filter_and_preserves_raw_finished_output
 
     approval = _latest_payload(db, tid, "tool_call.output_approval", tcid)
     assert approval["decision"] == "whole"
-    assert approval["preview"].startswith("[ M] Modified (29):\n  src/packages/app/feature/modified_001.py")
+    assert approval["preview"].startswith("[ M] Modified (129):\n  src/packages/app/feature/modified_001.py")
+    assert "[... omitted 49 more entries with status ' M' ...]" in approval["preview"]
+    assert "read_long_tool_output(" in approval["preview"]
     assert "--- STDOUT ---" not in approval["preview"]
     optimizer = approval["channels"]["optimizer"]
     assert optimizer["filter_name"] == "git_status_compact"
@@ -180,12 +182,12 @@ def test_enabled_policy_uses_git_status_filter_and_preserves_raw_finished_output
     assert tool_msg["role"] == "tool"
     assert tool_msg.get("user_tool_call") is True
     assert "no_api" not in tool_msg
-    assert "[ M] Modified (29):" in tool_msg["content"]
+    assert "[ M] Modified (129):" in tool_msg["content"]
     assert " M src/packages/app/feature/modified_001.py" not in tool_msg["content"]
 
 
 def test_disabled_policy_keeps_default_git_status_output(tmp_path, monkeypatch):
-    monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
+    monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER", "off")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     tid = ts.create_root_thread(db, name="root")

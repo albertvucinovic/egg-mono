@@ -104,6 +104,7 @@ class NativeOptimizerOutputPolicy:
             optimizer = create_default_output_optimizer(
                 min_size_chars=min_size_chars,
                 min_confidence=min_confidence,
+                bounded_max_chars=self._bounded_max_chars(request),
                 include_rtk=output_optimizer_rtk_enabled(request.thread_config),
                 rtk_command=output_optimizer_rtk_command(request.thread_config),
                 rtk_timeout_seconds=output_optimizer_rtk_timeout_seconds(request.thread_config),
@@ -125,27 +126,64 @@ class NativeOptimizerOutputPolicy:
                         "optimizer": self._optimizer_metadata(optimization, fallback=True),
                     },
                 )
+            if not request.thread_config:
+                # With the optimizer enabled by default, unchanged outputs
+                # should remain byte-for-byte/default-policy identical.  Only
+                # explicit per-thread/configured optimizer modes need fallback
+                # metadata for inspection.
+                return current
             return self._current_with_optimizer_metadata(
                 current,
                 self._optimizer_metadata(optimization, fallback=True),
             )
 
-        published_preview = self._append_artifact_recovery_note(optimization.output, current)
+        artifact_path = current.artifact_path if current is not None else ""
+        recovery_note = self._artifact_recovery_note(current)
+        needs_new_artifact = not artifact_path
+        if needs_new_artifact:
+            recovery_note = self._estimated_raw_artifact_recovery_note(request)
+        published_preview = self._append_artifact_recovery_note(optimization.output, recovery_note)
         if current is not None and current.preview and len(published_preview) >= len(str(current.preview)):
+            if not request.thread_config:
+                return current
             optimizer_metadata = dict(self._optimizer_metadata(optimization, fallback=True, published_output=published_preview))
             optimizer_metadata["published"] = False
             optimizer_metadata["fallback_reason"] = "not_smaller_than_current_preview"
             return self._current_with_optimizer_metadata(current, optimizer_metadata)
+
+        if needs_new_artifact:
+            recovery_note, artifact_path = self._stash_raw_artifact_recovery_note(request)
+            if not recovery_note or not artifact_path:
+                if not request.thread_config:
+                    return current if current is not None else OutputPublicationDecision("whole", request.output, reason="Raw artifact write failed")
+                optimizer_metadata = dict(self._optimizer_metadata(optimization, fallback=True, published_output=optimization.output))
+                optimizer_metadata["published"] = False
+                optimizer_metadata["fallback_reason"] = "raw_artifact_unavailable"
+                return self._current_with_optimizer_metadata(current, optimizer_metadata) if current is not None else OutputPublicationDecision(
+                    "whole",
+                    request.output,
+                    reason="Native output optimizer raw artifact unavailable",
+                    channels={"optimizer": optimizer_metadata},
+                )
+            published_preview = self._append_artifact_recovery_note(optimization.output, recovery_note)
+            if current is not None and current.preview and len(published_preview) >= len(str(current.preview)):
+                if not request.thread_config:
+                    return current
+                optimizer_metadata = dict(self._optimizer_metadata(optimization, fallback=True, published_output=published_preview))
+                optimizer_metadata["published"] = False
+                optimizer_metadata["fallback_reason"] = "not_smaller_than_current_preview"
+                return self._current_with_optimizer_metadata(current, optimizer_metadata)
 
         base_channels = dict(current.channels) if current is not None and current.channels else {}
         channels = {
             **base_channels,
             "optimizer": self._optimizer_metadata(optimization, fallback=False, published_output=published_preview),
         }
+        if artifact_path:
+            channels[OUTPUT_CHANNELS.artifact] = artifact_path
         channels[OUTPUT_CHANNELS.ui_preview] = published_preview
         channels[OUTPUT_CHANNELS.llm_message] = published_preview
         decision = current.decision if current is not None else "whole"
-        artifact_path = current.artifact_path if current is not None else ""
         reason = f"Native output optimizer: {optimization.reason}"
         if current is not None and current.reason:
             reason = f"{reason}; default={current.reason}"
@@ -173,9 +211,8 @@ class NativeOptimizerOutputPolicy:
     @staticmethod
     def _append_artifact_recovery_note(
         optimized_output: str,
-        current: OutputPublicationDecision | None,
+        note: str,
     ) -> str:
-        note = NativeOptimizerOutputPolicy._artifact_recovery_note(current)
         if not note:
             return optimized_output
         return f"{optimized_output.rstrip()}\n\n{note}" if optimized_output else note
@@ -197,6 +234,37 @@ class NativeOptimizerOutputPolicy:
             f"Artifact id: {artifact_id}. "
             f"Read chunks with read_long_tool_output('{artifact_id}', chunk_number).]"
         )
+
+    @staticmethod
+    def _stash_raw_artifact_recovery_note(request: OutputPolicyRequest) -> tuple[str, str]:
+        try:
+            from ..runner import stash_tool_output_artifact_and_build_note
+
+            metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+            return stash_tool_output_artifact_and_build_note(
+                request.db,
+                request.thread_id,
+                request.tool_call_id,
+                request.output,
+                original_char_count=metadata.get("original_char_count"),
+                output_capped=bool(metadata.get("output_capped")),
+            )
+        except Exception:
+            return "", ""
+
+    @staticmethod
+    def _estimated_raw_artifact_recovery_note(request: OutputPolicyRequest) -> str:
+        try:
+            from ..runner import estimate_tool_output_artifact_recovery_note
+
+            metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+            return estimate_tool_output_artifact_recovery_note(
+                request.output,
+                original_char_count=metadata.get("original_char_count"),
+                output_capped=bool(metadata.get("output_capped")),
+            )
+        except Exception:
+            return ""
 
     @staticmethod
     def _optimizer_request_metadata(
@@ -315,6 +383,25 @@ class NativeOptimizerOutputPolicy:
             except ValueError:
                 pass
         return 0.5
+
+    @staticmethod
+    def _bounded_max_chars(request: OutputPolicyRequest) -> int | None:
+        """Resolve the generic bounded fallback size for medium tool outputs."""
+
+        cfg = request.thread_config or {}
+        for key in ("optimizer_bounded_max_chars", "native_output_optimizer_bounded_max_chars"):
+            value = cfg.get(key)
+            try:
+                if value is not None:
+                    return max(1, int(value))
+            except (TypeError, ValueError):
+                pass
+        limits = request.limits or {}
+        value = limits.get("preview_max_chars")
+        try:
+            return max(1, int(value)) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
 
 def register_output_policies(registry: Any) -> None:

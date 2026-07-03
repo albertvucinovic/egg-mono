@@ -71,9 +71,9 @@ def _raw_output() -> str:
     return "\n".join(
         [
             "important first line that should survive",
-            "unique noisy detail alpha with enough characters to make the fake summary smaller",
-            "unique noisy detail beta with enough characters to make the fake summary smaller",
-            "unique noisy detail gamma with enough characters to make the fake summary smaller",
+            *(f"unique noisy detail alpha {idx:03d} with enough characters to make the fake summary smaller" for idx in range(1, 20)),
+            *(f"unique noisy detail beta {idx:03d} with enough characters to make the fake summary smaller" for idx in range(1, 20)),
+            *(f"unique noisy detail gamma {idx:03d} with enough characters to make the fake summary smaller" for idx in range(1, 20)),
         ]
     )
 
@@ -223,9 +223,7 @@ def test_output_policy_uses_rtk_only_when_explicitly_enabled_and_preserves_raw(t
     assert asyncio.run(runner.run_once()) is True
     disabled = _latest_payload(db, tid, "tool_call.output_approval", tcid)
     assert disabled["preview"] == raw_output
-    assert disabled["channels"]["optimizer"]["optimized"] is False
-    rejected = disabled["channels"]["optimizer"]["metadata"]["rejected_filters"]
-    assert all(item.get("filter_name") != "rtk_pipe" for item in rejected)
+    assert "optimizer" not in disabled["channels"]
 
     monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER_RTK", "1")
     db2 = ts.ThreadsDB(tmp_path / "threads2.sqlite")

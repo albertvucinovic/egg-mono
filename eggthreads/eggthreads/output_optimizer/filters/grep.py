@@ -6,7 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
-from ..classify import PathLineContent, parse_path_line_content_lines, request_command_name
+from ..classify import PathLineContent, is_plausible_path_list_line, parse_path_line_content_lines, request_command_name
 from ..core import OptimizeDecision, OptimizeRequest, make_decision
 
 
@@ -138,6 +138,45 @@ class GrepRgGroupByFileFilter:
         return "\n".join(output_lines), metadata
 
 
+@dataclass(frozen=True)
+class GrepRgOutputShapeFilter(GrepRgGroupByFileFilter):
+    """Group grep-shaped output even when bash command parsing is ambiguous.
+
+    Many high-volume bash calls are safe wrappers such as ``grep ... | head``
+    or multi-line inspection scripts.  The simple command classifier rejects
+    those by design, so this filter only trusts the output shape: every
+    non-header line must parse as ``path:line:content``.
+    """
+
+    name: str = "grep_rg_output_shape_group_by_file"
+    min_matches: int = 4
+    confidence: float = 0.85
+
+    def optimize(self, request: OptimizeRequest) -> OptimizeDecision | None:
+        if is_grep_like_request(request):
+            return None
+        matches = parse_grep_rg_matches(request.output)
+        if not matches or len(matches) < max(1, int(self.min_matches)):
+            return None
+        if not all(is_plausible_path_list_line(match.path) for match in matches):
+            return None
+
+        grouped = _group_matches_by_file(matches)
+        rendered, metadata = self._render_grouped(grouped)
+        if rendered == request.output:
+            return None
+        metadata["original_had_stdout_header"] = request.output.splitlines()[:1] == ["--- STDOUT ---"]
+        metadata["matched_by_output_shape"] = True
+        return make_decision(
+            request,
+            rendered,
+            filter_name=self.name,
+            reason="grep_rg_output_shape_grouped_by_file",
+            confidence=self.confidence,
+            metadata=metadata,
+        )
+
+
 def _group_matches_by_file(matches: tuple[PathLineContent, ...]) -> "OrderedDict[str, list[PathLineContent]]":
     grouped: "OrderedDict[str, list[PathLineContent]]" = OrderedDict()
     for match in matches:
@@ -148,6 +187,7 @@ def _group_matches_by_file(matches: tuple[PathLineContent, ...]) -> "OrderedDict
 __all__ = [
     "GREP_LIKE_COMMANDS",
     "GrepRgGroupByFileFilter",
+    "GrepRgOutputShapeFilter",
     "is_grep_like_request",
     "parse_grep_rg_matches",
 ]

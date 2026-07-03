@@ -59,10 +59,11 @@ from .observability import (
     optimizer_public_metadata_from_output_approval,
 )
 from .filters.cargo import CargoTestFailureSummaryFilter, is_cargo_test_request, parse_cargo_test_failure_output
-from .filters.find import FindPathGroupFilter, is_find_like_request, parse_find_fd_paths
+from .filters.find import FindPathGroupFilter, PathListOutputShapeFilter, is_find_like_request, parse_find_fd_paths
 from .filters.git_diff import GitDiffCompactFilter, is_git_diff_request, parse_git_diff
 from .filters.git_status import GitStatusCompactFilter, is_git_status_request, parse_git_status_entries, parse_git_status_line
-from .filters.grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
+from .filters.grep import GrepRgGroupByFileFilter, GrepRgOutputShapeFilter, is_grep_like_request, parse_grep_rg_matches
+from .filters.ls import LsLongListingFilter, is_ls_like_request, parse_ls_long_listing
 from .filters.pytest import PytestFailureSummaryFilter, is_pytest_request, parse_pytest_failure_output
 from .filters.python_traceback import PythonTracebackFocusFilter, parse_python_traceback
 from .filters.rtk import RtkPipeFilter
@@ -98,10 +99,13 @@ __all__ = [
     "BoundedHeadTailFilter",
     "CargoTestFailureSummaryFilter",
     "FindPathGroupFilter",
+    "PathListOutputShapeFilter",
     "GenericOutputFilter",
     "GitDiffCompactFilter",
     "GitStatusCompactFilter",
     "GrepRgGroupByFileFilter",
+    "GrepRgOutputShapeFilter",
+    "LsLongListingFilter",
     "OptimizeDecision",
     "OptimizeRequest",
     "OutputOptimizerThreadConfig",
@@ -133,6 +137,7 @@ __all__ = [
     "is_git_diff_request",
     "is_git_status_request",
     "is_grep_like_request",
+    "is_ls_like_request",
     "is_obvious_progress_noise_line",
     "is_plausible_path_list_line",
     "is_pytest_request",
@@ -153,6 +158,7 @@ __all__ = [
     "parse_git_status_entries",
     "parse_git_status_line",
     "parse_grep_rg_matches",
+    "parse_ls_long_listing",
     "parse_path_list_lines",
     "parse_path_line_content",
     "parse_path_line_content_lines",

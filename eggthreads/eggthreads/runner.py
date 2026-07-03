@@ -316,23 +316,20 @@ def _tool_output_preview_text(full_output: str, *, max_lines: int, max_chars: in
     return preview
 
 
-def stash_tool_output_and_build_preview(
-    db,
+def _stash_tool_output_artifact(
     thread_id: str,
     tool_call_id: str,
     full_output: str,
     *,
-    max_lines: int = PREVIEW_MAX_LINES,
-    max_chars: int = PREVIEW_MAX_CHARS,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
-) -> tuple:
-    """Persist tool output as a thread-owned artifact and return ``(preview, saved_path)``.
+) -> Dict[str, Any]:
+    """Store tool output chunks and return artifact metadata.
 
-    Artifacts are stored under ``.egg/egg_outputs/<thread_id>/<artifact_id>``.
-    The LLM-facing preview deliberately exposes only the short artifact id and
-    ``read_long_tool_output(...)`` usage, not filesystem paths.
+    This is shared by long-output previewing and optimizer raw-output recovery.
+    It never changes the canonical ``tool_call.finished.output`` event.
     """
+
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
 
@@ -351,7 +348,7 @@ def stash_tool_output_and_build_preview(
     original_line_count = _line_count(full_output)
     stored_line_count = _line_count(stored_output)
 
-    saved_path = ""  # absolute host artifact directory (for runner diagnostics/tests)
+    saved_path = ""
     artifact_id = ""
     try:
         workspace = Path.cwd().resolve()
@@ -390,6 +387,129 @@ def stash_tool_output_and_build_preview(
     except Exception:
         saved_path = ""
         artifact_id = ""
+
+    return {
+        "stored_output": stored_output,
+        "saved_path": saved_path,
+        "artifact_id": artifact_id,
+        "chunk_count": chunk_count,
+        "stored_char_count": stored_char_count,
+        "original_char_count": original_char_count,
+        "stored_line_count": stored_line_count,
+        "original_line_count": original_line_count,
+        "capped": capped,
+    }
+
+
+def stash_tool_output_artifact_and_build_note(
+    db,
+    thread_id: str,
+    tool_call_id: str,
+    full_output: str,
+    *,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
+) -> tuple[str, str]:
+    """Persist raw tool output as an artifact and return ``(note, saved_path)``.
+
+    Optimized previews can append this note so the model/user can recover the
+    original output through the existing ``read_long_tool_output`` tool.
+    """
+
+    artifact = _stash_tool_output_artifact(
+        thread_id,
+        tool_call_id,
+        full_output,
+        original_char_count=original_char_count,
+        output_capped=output_capped,
+    )
+    artifact_id = str(artifact.get("artifact_id") or "")
+    saved_path = str(artifact.get("saved_path") or "")
+    if not artifact_id:
+        return "", ""
+    chunk_count = int(artifact.get("chunk_count") or 1)
+    stored_char_count = int(artifact.get("stored_char_count") or 0)
+    note = format_tool_output_artifact_recovery_note(
+        artifact_id=artifact_id,
+        chunk_count=chunk_count,
+        stored_char_count=stored_char_count,
+    )
+    return note, saved_path
+
+
+def format_tool_output_artifact_recovery_note(*, artifact_id: str, chunk_count: int, stored_char_count: int) -> str:
+    """Return the provider-visible note for reading a raw-output artifact."""
+
+    return (
+        "[Raw output stored as artifact. "
+        f"Artifact id: {artifact_id}. Chunks: {chunk_count}. "
+        f"Stored output: {stored_char_count} chars. "
+        "Read chunks with read_long_tool_output("
+        f"'{artifact_id}', chunk_number) where chunk_number is 1-{chunk_count}"
+        "; use descendant_thread_id only when reading a descendant thread's artifact.]"
+    )
+
+
+def estimate_tool_output_artifact_recovery_note(
+    full_output: str,
+    *,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
+) -> str:
+    """Estimate the recovery note before allocating an artifact on disk."""
+
+    if not isinstance(full_output, str):
+        full_output = str(full_output or "")
+    stored_output, capped, detected_original_char_count = _capped_tool_output(full_output)
+    if original_char_count is None:
+        original_char_count = detected_original_char_count
+    else:
+        try:
+            original_char_count = max(int(original_char_count), detected_original_char_count)
+        except Exception:
+            original_char_count = detected_original_char_count
+    _ = bool(output_capped or capped or original_char_count > len(stored_output))
+    chunks = _split_tool_output_chunks(stored_output)
+    return format_tool_output_artifact_recovery_note(
+        artifact_id="x" * 8,
+        chunk_count=len(chunks),
+        stored_char_count=len(stored_output),
+    )
+
+
+def stash_tool_output_and_build_preview(
+    db,
+    thread_id: str,
+    tool_call_id: str,
+    full_output: str,
+    *,
+    max_lines: int = PREVIEW_MAX_LINES,
+    max_chars: int = PREVIEW_MAX_CHARS,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
+) -> tuple:
+    """Persist tool output as a thread-owned artifact and return ``(preview, saved_path)``.
+
+    Artifacts are stored under ``.egg/egg_outputs/<thread_id>/<artifact_id>``.
+    The LLM-facing preview deliberately exposes only the short artifact id and
+    ``read_long_tool_output(...)`` usage, not filesystem paths.
+    """
+    artifact = _stash_tool_output_artifact(
+        thread_id,
+        tool_call_id,
+        full_output,
+        original_char_count=original_char_count,
+        output_capped=output_capped,
+    )
+    stored_output = str(artifact.get("stored_output") or "")
+    saved_path = str(artifact.get("saved_path") or "")
+    artifact_id = str(artifact.get("artifact_id") or "")
+    chunk_count = int(artifact.get("chunk_count") or 1)
+    stored_char_count = int(artifact.get("stored_char_count") or 0)
+    original_char_count = int(artifact.get("original_char_count") or stored_char_count)
+    stored_line_count = int(artifact.get("stored_line_count") or 0)
+    original_line_count = int(artifact.get("original_line_count") or stored_line_count)
+    capped = bool(artifact.get("capped"))
 
     preview_body = _tool_output_preview_text(stored_output, max_lines=max_lines, max_chars=max_chars)
     if preview_body != stored_output:

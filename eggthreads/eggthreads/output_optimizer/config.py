@@ -2,9 +2,9 @@ from __future__ import annotations
 
 """Configuration helpers for the native output optimizer gate.
 
-The process/env gate from the Phase-2 integration remains the default path:
-when no event-sourced per-thread config is present, ``EGG_OUTPUT_OPTIMIZER``
-and explicit config mappings are interpreted exactly as before.
+The native optimizer is enabled by default.  When no event-sourced per-thread
+config is present, ``EGG_OUTPUT_OPTIMIZER`` and explicit config mappings can
+still override that default; false-like values such as ``0``/``off`` disable it.
 
 Per-thread control is stored as ``output_optimizer.config`` events.  Events are
 field-wise/incremental and inherit through ancestors: a child can override just
@@ -103,21 +103,24 @@ def output_optimizer_enabled(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> bool:
-    """Return whether the native optimizer is explicitly enabled.
+    """Return whether the native optimizer is enabled.
 
-    The gate is disabled by default.  It can be enabled either by an in-process
-    config mapping or by setting ``EGG_OUTPUT_OPTIMIZER`` to one of ``1``,
-    ``true``, ``on``, or ``yes``.  Existing mapping-key precedence is preserved:
+    The gate is enabled by default.  It can be disabled or enabled explicitly by
+    an in-process config mapping or by setting ``EGG_OUTPUT_OPTIMIZER`` to a
+    false-like/true-like value.  Existing mapping-key precedence is preserved:
     if one of the known mapping keys is present, its value wins over the env.
     """
 
     if config:
         for key in _CONFIG_KEYS:
             if key in config:
-                return is_truthy_output_optimizer_flag(config.get(key))
+                value = _coerce_optional_bool(config.get(key))
+                return True if value is None else bool(value)
 
     env = os.environ if environ is None else environ
-    return is_truthy_output_optimizer_flag(env.get(OUTPUT_OPTIMIZER_ENV) if env is not None else None)
+    env_value = env.get(OUTPUT_OPTIMIZER_ENV) if env is not None else None
+    value = _coerce_optional_bool(env_value)
+    return True if value is None else bool(value)
 
 
 def output_optimizer_rtk_enabled(
@@ -257,8 +260,8 @@ class OutputOptimizerThreadConfig:
     def to_policy_config(self) -> dict[str, Any]:
         """Return an ``OutputPolicyRequest.thread_config`` mapping.
 
-        No-event configs intentionally return ``{}`` so the existing
-        ``EGG_OUTPUT_OPTIMIZER`` / mapping behavior is exactly preserved.
+        No-event configs intentionally return ``{}`` so the default/env/config
+        gate remains centralized in ``output_optimizer_enabled``.
         """
 
         if not self.has_explicit_config:
@@ -455,7 +458,7 @@ def format_thread_output_optimizer_status(
     if cfg.enabled is None:
         env = os.environ if environ is None else environ
         env_value = env.get(OUTPUT_OPTIMIZER_ENV) if env is not None else None
-        enabled_source = f"env:{OUTPUT_OPTIMIZER_ENV}={env_value!r}" if env_value is not None else "default disabled"
+        enabled_source = f"env:{OUTPUT_OPTIMIZER_ENV}={env_value!r}" if env_value is not None else "default enabled"
     else:
         enabled_source = cfg.enabled_source
     min_confidence = output_optimizer_min_confidence_for_mode(cfg.mode)

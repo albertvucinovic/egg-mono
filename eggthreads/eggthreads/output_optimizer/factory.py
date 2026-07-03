@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from .core import OutputFilter, OutputOptimizer
 from .filters.cargo import CargoTestFailureSummaryFilter
-from .filters.find import FindPathGroupFilter
+from .filters.find import FindPathGroupFilter, PathListOutputShapeFilter
 from .filters.git_diff import GitDiffCompactFilter
 from .filters.git_status import GitStatusCompactFilter
-from .filters.grep import GrepRgGroupByFileFilter
+from .filters.grep import GrepRgGroupByFileFilter, GrepRgOutputShapeFilter
+from .filters.ls import LsLongListingFilter
 from .filters.pytest import PytestFailureSummaryFilter
 from .filters.python_traceback import PythonTracebackFocusFilter
 from .filters.rtk import RtkPipeFilter
@@ -29,9 +30,12 @@ def default_native_filters(
         FindPathGroupFilter(),
         GitStatusCompactFilter(),
         GitDiffCompactFilter(),
+        LsLongListingFilter(),
         PytestFailureSummaryFilter(),
         CargoTestFailureSummaryFilter(),
         PythonTracebackFocusFilter(),
+        GrepRgOutputShapeFilter(),
+        PathListOutputShapeFilter(),
     ]
     if include_rtk:
         kwargs = {"privacy_opt_in": bool(rtk_privacy_opt_in)}

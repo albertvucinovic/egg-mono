@@ -194,7 +194,7 @@ def test_enabled_policy_uses_cargo_filter_and_preserves_raw_finished_output(tmp_
 
 
 def test_disabled_policy_keeps_default_cargo_output(tmp_path, monkeypatch):
-    monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
+    monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER", "off")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     tid = ts.create_root_thread(db, name="root")

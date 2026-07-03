@@ -139,6 +139,36 @@ class FindPathGroupFilter:
         return "\n".join(output_lines), metadata
 
 
+@dataclass(frozen=True)
+class PathListOutputShapeFilter(FindPathGroupFilter):
+    """Group path-list-shaped output when the bash command is complex."""
+
+    name: str = "path_list_output_shape_group_by_directory"
+    confidence: float = 0.85
+
+    def optimize(self, request: OptimizeRequest) -> OptimizeDecision | None:
+        if is_find_like_request(request):
+            return None
+        paths = parse_find_fd_paths(request.output, min_paths=self.min_paths)
+        if not paths:
+            return None
+
+        grouped = _group_paths_by_directory(paths)
+        rendered, metadata = self._render_grouped(grouped)
+        if rendered == request.output:
+            return None
+        metadata["original_had_stdout_header"] = request.output.splitlines()[:1] == ["--- STDOUT ---"]
+        metadata["matched_by_output_shape"] = True
+        return make_decision(
+            request,
+            rendered,
+            filter_name=self.name,
+            reason="path_list_output_shape_grouped_by_directory",
+            confidence=self.confidence,
+            metadata=metadata,
+        )
+
+
 def _group_paths_by_directory(paths: tuple[str, ...]) -> "OrderedDict[str, list[str]]":
     grouped: "OrderedDict[str, list[str]]" = OrderedDict()
     for path in paths:
@@ -157,6 +187,7 @@ def _split_path(path: str) -> tuple[str, str]:
 __all__ = [
     "FIND_LIKE_COMMANDS",
     "FindPathGroupFilter",
+    "PathListOutputShapeFilter",
     "is_find_like_request",
     "parse_find_fd_paths",
 ]

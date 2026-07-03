@@ -47,8 +47,9 @@ def _latest_payload(db, thread_id: str, event_type: str, tool_call_id: str | Non
 def test_output_optimizer_env_gate_mapping_behavior_is_preserved(monkeypatch) -> None:
     monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
 
-    assert output_optimizer_enabled() is False
-    assert output_optimizer_enabled({}, environ={}) is False
+    assert output_optimizer_enabled() is True
+    assert output_optimizer_enabled({}, environ={}) is True
+    assert output_optimizer_enabled(environ={"EGG_OUTPUT_OPTIMIZER": "off"}) is False
     assert output_optimizer_enabled(environ={"EGG_OUTPUT_OPTIMIZER": "yes"}) is True
     assert output_optimizer_enabled({"output_optimizer_enabled": False}, environ={"EGG_OUTPUT_OPTIMIZER": "yes"}) is False
     assert output_optimizer_enabled({"native_output_optimizer_enabled": "on"}, environ={}) is True
@@ -65,7 +66,8 @@ def test_output_optimizer_config_inherits_from_ancestors_and_overrides_by_field(
     no_event = get_thread_output_optimizer_config(db, grandchild)
     assert no_event.has_explicit_config is False
     assert no_event.enabled is None
-    assert no_event.effective_enabled(environ={}) is False
+    assert no_event.effective_enabled(environ={}) is True
+    assert no_event.effective_enabled(environ={"EGG_OUTPUT_OPTIMIZER": "off"}) is False
     assert no_event.mode == DEFAULT_OUTPUT_OPTIMIZER_MODE
     assert get_thread_output_optimizer_policy_config(db, grandchild) == {}
 
@@ -128,7 +130,8 @@ def test_output_optimizer_slash_commands_toggle_status_and_validate_mode(tmp_pat
 
     status = registry.execute("outputOptimizerStatus", ctx)
     assert status.clear_input is True
-    assert "Enabled: DISABLED" in status.message
+    assert "Enabled: ENABLED" in status.message
+    assert "Enabled source: default enabled" in status.message
     assert "Event config present: False" in status.message
     assert any(title == "Output Optimizer" and "Mode: balanced" in text for title, text in printed)
 

@@ -4,7 +4,7 @@ import asyncio
 import json
 
 import eggthreads as ts
-from eggthreads.output_optimizer import FindPathGroupFilter, OptimizeRequest, OutputOptimizer
+from eggthreads.output_optimizer import FindPathGroupFilter, OptimizeRequest, OutputOptimizer, PathListOutputShapeFilter
 from eggthreads.tools import ToolRegistry
 
 
@@ -117,6 +117,25 @@ def test_find_filter_abstains_for_non_find_path_text_and_grep_colon_output() -> 
     assert mixed.output == "INFO starting\nsrc/app/file_001.py\nsrc/app/file_002.py"
 
 
+def test_path_list_output_shape_filter_groups_complex_bash_path_lists() -> None:
+    output = "--- STDOUT ---\n" + "\n".join(
+        [
+            *(f"src/app/feature_a/file_{idx:03d}.py" for idx in range(1, 7)),
+            *(f"src/app/feature_b/view_{idx:03d}.tsx" for idx in range(1, 7)),
+        ]
+    )
+
+    decision = OutputOptimizer([PathListOutputShapeFilter(min_paths=8, max_files_per_dir=3)]).optimize(
+        _request(output, script="printf 'files\\n'; find src/app -type f | sort")
+    )
+
+    assert decision.optimized is True
+    assert decision.filter_name == "path_list_output_shape_group_by_directory"
+    assert decision.output.startswith("src/app/feature_a:\n  file_001.py")
+    assert "[... omitted 3 more paths in this directory ...]" in decision.output
+    assert decision.metadata["matched_by_output_shape"] is True
+
+
 def test_enabled_policy_uses_find_grouping_and_preserves_raw_finished_output(tmp_path, monkeypatch):
     monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER", "1")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
@@ -134,8 +153,8 @@ def test_enabled_policy_uses_find_grouping_and_preserves_raw_finished_output(tmp
     dir_a = "src/packages/app/feature_a"
     dir_b = "src/packages/app/feature_b"
     raw_paths = [
-        *(f"{dir_a}/module_{idx:03d}.py" for idx in range(1, 6)),
-        *(f"{dir_b}/view_{idx:03d}.tsx" for idx in range(1, 6)),
+        *(f"{dir_a}/deeply_nested_component_module_{idx:03d}.py" for idx in range(1, 51)),
+        *(f"{dir_b}/very_long_view_component_name_{idx:03d}.tsx" for idx in range(1, 51)),
     ]
     raw_output = "--- STDOUT ---\n" + "\n".join(raw_paths)
 
@@ -150,23 +169,18 @@ def test_enabled_policy_uses_find_grouping_and_preserves_raw_finished_output(tmp
 
     approval = _latest_payload(db, tid, "tool_call.output_approval", tcid)
     assert approval["decision"] == "whole"
-    assert approval["preview"] == "\n".join(
-        [
-            f"{dir_a}:",
-            "  module_001.py",
-            "  module_002.py",
-            "  module_003.py",
-            "  module_004.py",
-            "  module_005.py",
-            "",
-            f"{dir_b}:",
-            "  view_001.tsx",
-            "  view_002.tsx",
-            "  view_003.tsx",
-            "  view_004.tsx",
-            "  view_005.tsx",
-        ]
+    assert approval["preview"].startswith(
+        "\n".join(
+            [
+                f"{dir_a}:",
+                "  deeply_nested_component_module_001.py",
+                "  deeply_nested_component_module_002.py",
+            ]
+        )
     )
+    assert "[... omitted 10 more paths in this directory ...]" in approval["preview"]
+    assert "read_long_tool_output(" in approval["preview"]
+    assert approval["artifact_path"]
     optimizer = approval["channels"]["optimizer"]
     assert optimizer["filter_name"] == "find_path_group_by_directory"
     assert optimizer["optimized"] is True
@@ -178,11 +192,11 @@ def test_enabled_policy_uses_find_grouping_and_preserves_raw_finished_output(tmp
     assert tool_msg.get("user_tool_call") is True
     assert "no_api" not in tool_msg
     assert f"{dir_a}:" in tool_msg["content"]
-    assert f"{dir_a}/module_001.py" not in tool_msg["content"]
+    assert f"{dir_a}/deeply_nested_component_module_001.py" not in tool_msg["content"]
 
 
 def test_disabled_policy_keeps_default_find_output(tmp_path, monkeypatch):
-    monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
+    monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER", "off")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     tid = ts.create_root_thread(db, name="root")
