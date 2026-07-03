@@ -166,20 +166,20 @@ Goal: wire optimizer into output publication without changing default behavior u
 
 Goal: capture high ROI coding-agent outputs.
 
-- [ ] Add classifier helpers for bash script text and output shape.
+- [x] Add classifier helpers for bash script text and output shape.
 - [ ] Implement semantic filters:
   - [ ] `pytest` failure summary;
   - [ ] `cargo test` failure summary;
-  - [ ] `rg`/`grep` grouping by file;
+  - [x] `rg`/`grep` grouping by file;
   - [ ] `find` path grouping;
   - [ ] `git status` compact status;
   - [ ] `git diff` compact diff preview;
   - [ ] generic Python traceback focus.
 - [ ] Each filter must be conservative:
-  - [ ] high-confidence `matches` logic;
-  - [ ] fallback unchanged on parse ambiguity;
-  - [ ] tests for non-matching similar output.
-- [ ] Tests with realistic fixtures or representative raw outputs.
+  - [x] high-confidence `matches` logic for grep/rg;
+  - [x] fallback unchanged on parse ambiguity for grep/rg;
+  - [x] tests for non-matching similar output for grep/rg.
+- [x] Tests with representative raw grep/rg outputs for this slice.
 - [ ] Update TODO and commit in small slices, not one giant commit.
 
 ### Phase 4 — User/thread configuration and commands
@@ -230,3 +230,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 - 2026-07-02: Phase 0 baseline: tracked tree clean; `plans/` is ignored, so this TODO must be force-added when committing. Focused tests to extend later include `eggthreads/tests/test_output_optimizer.py` for pure optimizer behavior and existing runner/output-policy tests around `tool_call.output_approval` publication.
 - 2026-07-03: Phase 1 implemented as a pure `eggthreads.output_optimizer` package with immutable request/decision models, ordered fallback-safe orchestrator, generic cleanup/dedupe/bounded helpers, and focused unit tests. No runtime output-policy/runner integration was added.
 - 2026-07-03: Phase 2 disabled-by-default integration implemented. `NativeOptimizerOutputPolicy` is registered after default output policy and gated by `EGG_OUTPUT_OPTIMIZER`/config truthy values; runner now supplies tool name/args, RA origin, user-tool flag, finished reason, and size/cap metadata. Enabled generic optimization rewrites publication previews/messages only, preserves `tool_call.finished.output`, and keeps long-output raw artifact recovery metadata.
+- 2026-07-03: Phase 3 first slice implemented conservative classifier helpers plus a grep/rg semantic filter. The enabled native optimizer now tries grep/rg grouping before generic fallback; disabled behavior is unchanged. Remaining semantic filters are still pending.

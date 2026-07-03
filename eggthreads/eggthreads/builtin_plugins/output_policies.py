@@ -72,7 +72,7 @@ class NativeOptimizerOutputPolicy:
         request: OutputPolicyRequest,
         current: OutputPublicationDecision | None,
     ) -> OutputPublicationDecision:
-        from ..output_optimizer import OptimizeRequest, create_generic_output_optimizer, output_optimizer_enabled
+        from ..output_optimizer import OptimizeRequest, create_default_output_optimizer, output_optimizer_enabled
 
         if not output_optimizer_enabled(request.thread_config):
             return OutputPublicationDecision("abstain", "", reason="Native output optimizer disabled")
@@ -92,7 +92,7 @@ class NativeOptimizerOutputPolicy:
                 metadata=metadata,
             )
             min_size_chars = self._min_size_chars(request)
-            optimizer = create_generic_output_optimizer(
+            optimizer = create_default_output_optimizer(
                 min_size_chars=min_size_chars,
                 min_confidence=0.5,
             )
