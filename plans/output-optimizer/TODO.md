@@ -141,26 +141,26 @@ Goal: add the native optimizer library and tests without wiring it into output p
 
 Goal: wire optimizer into output publication without changing default behavior unless explicitly enabled.
 
-- [ ] Extend `OutputPolicyRequest` population in runner to include:
-  - [ ] `tool_name`;
-  - [ ] parsed tool arguments when available;
-  - [ ] user-tool vs assistant-tool origin;
-  - [ ] finished reason;
-  - [ ] output size metadata.
-- [ ] Add `NativeOptimizerOutputPolicy`.
-- [ ] Gate policy with an explicit config/env switch, initially disabled by default.
-- [ ] Preserve default policy behavior exactly when disabled.
-- [ ] When enabled and optimization succeeds:
-  - [ ] publish optimized preview;
-  - [ ] include raw/optimized char counts and savings in channels metadata;
-  - [ ] preserve raw output in `tool_call.finished`;
-  - [ ] preserve existing long-output artifact behavior or add raw artifact where needed.
-- [ ] Tests:
-  - [ ] disabled switch matches current default output exactly;
-  - [ ] enabled optimizer changes only preview/message content;
-  - [ ] raw `tool_call.finished.output` remains raw;
-  - [ ] hidden `$$` command remains `no_api`.
-- [ ] Update TODO status and commit.
+- [x] Extend `OutputPolicyRequest` population in runner to include:
+  - [x] `tool_name`;
+  - [x] parsed tool arguments when available;
+  - [x] user-tool vs assistant-tool origin;
+  - [x] finished reason;
+  - [x] output size metadata.
+- [x] Add `NativeOptimizerOutputPolicy`.
+- [x] Gate policy with an explicit config/env switch, initially disabled by default.
+- [x] Preserve default policy behavior exactly when disabled.
+- [x] When enabled and optimization succeeds:
+  - [x] publish optimized preview;
+  - [x] include raw/optimized char counts and savings in channels metadata;
+  - [x] preserve raw output in `tool_call.finished`;
+  - [x] preserve existing long-output artifact behavior or add raw artifact where needed.
+- [x] Tests:
+  - [x] disabled switch matches current default output exactly;
+  - [x] enabled optimizer changes only preview/message content;
+  - [x] raw `tool_call.finished.output` remains raw;
+  - [x] hidden `$$` command remains `no_api`.
+- [x] Update TODO status and commit.
 
 ### Phase 3 — First semantic filters
 
@@ -229,3 +229,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 - 2026-07-02: Plan created. Latest repository state before implementation had only unrelated untracked `count-lines.sh` and latest commit `bb00ea8 none`.
 - 2026-07-02: Phase 0 baseline: tracked tree clean; `plans/` is ignored, so this TODO must be force-added when committing. Focused tests to extend later include `eggthreads/tests/test_output_optimizer.py` for pure optimizer behavior and existing runner/output-policy tests around `tool_call.output_approval` publication.
 - 2026-07-03: Phase 1 implemented as a pure `eggthreads.output_optimizer` package with immutable request/decision models, ordered fallback-safe orchestrator, generic cleanup/dedupe/bounded helpers, and focused unit tests. No runtime output-policy/runner integration was added.
+- 2026-07-03: Phase 2 disabled-by-default integration implemented. `NativeOptimizerOutputPolicy` is registered after default output policy and gated by `EGG_OUTPUT_OPTIMIZER`/config truthy values; runner now supplies tool name/args, RA origin, user-tool flag, finished reason, and size/cap metadata. Enabled generic optimization rewrites publication previews/messages only, preserves `tool_call.finished.output`, and keeps long-output raw artifact recovery metadata.

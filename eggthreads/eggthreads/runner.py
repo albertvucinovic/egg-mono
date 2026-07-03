@@ -430,6 +430,12 @@ def _emit_auto_output_approval(
     tool_call_id: str,
     full_output: str,
     *,
+    tool_name: str = "",
+    tool_args: Any = None,
+    finished_reason: str = "",
+    origin: str = "runner",
+    user_tool_call: bool = False,
+    tool_metadata: Optional[Dict[str, Any]] = None,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
 ) -> None:
@@ -460,6 +466,10 @@ def _emit_auto_output_approval(
 
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
+
+    stored_char_count = len(full_output)
+    stored_line_count = len(full_output.splitlines())
+    original_count = original_char_count if original_char_count is not None else stored_char_count
     try:
         from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
 
@@ -469,7 +479,13 @@ def _emit_auto_output_approval(
                 db=db,
                 thread_id=thread_id,
                 tool_call_id=tool_call_id,
+                tool_name=str(tool_name or ""),
+                tool_args=parse_tool_arguments(tool_args) if tool_args is not None else {},
                 output=full_output,
+                finished_reason=str(finished_reason or ""),
+                origin=str(origin or "runner"),
+                user_tool_call=bool(user_tool_call),
+                tool_metadata=dict(tool_metadata or {}),
                 limits={
                     "long_output_line_threshold": LONG_OUTPUT_LINE_THRESHOLD,
                     "long_output_char_threshold": LONG_OUTPUT_CHAR_THRESHOLD,
@@ -477,8 +493,10 @@ def _emit_auto_output_approval(
                     "preview_max_chars": PREVIEW_MAX_CHARS,
                 },
                 metadata={
-                    "original_char_count": original_char_count,
+                    "original_char_count": original_count,
                     "output_capped": output_capped,
+                    "stored_char_count": stored_char_count,
+                    "stored_line_count": stored_line_count,
                 },
             ),
         )
@@ -3040,6 +3058,17 @@ class ThreadRunner:
                         self.thread_id,
                         tc.tool_call_id,
                         full_result,
+                        tool_name=tc.name,
+                        tool_args=tc.arguments,
+                        finished_reason=finish_reason,
+                        origin=ra.kind,
+                        user_tool_call=bool(ra.kind == 'RA3_tools_user'),
+                        tool_metadata={
+                            'ra_kind': ra.kind,
+                            'parent_msg_id': tc.parent_msg_id,
+                            'parent_role': tc.parent_role,
+                            'tool_index': tc.index,
+                        },
                         original_char_count=original_output_char_count,
                         output_capped=output_was_capped,
                     )
