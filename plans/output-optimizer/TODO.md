@@ -173,13 +173,13 @@ Goal: capture high ROI coding-agent outputs.
   - [x] `rg`/`grep` grouping by file;
   - [x] `find` path grouping;
   - [x] `git status` compact status;
-  - [ ] `git diff` compact diff preview;
+  - [x] `git diff` compact diff preview;
   - [x] generic Python traceback focus.
 - [ ] Each filter must be conservative:
-  - [x] high-confidence `matches` logic for grep/rg, find/fd, git status, and Python traceback;
-  - [x] fallback unchanged on parse ambiguity for grep/rg, find/fd, git status, and Python traceback;
-  - [x] tests for non-matching similar output for grep/rg, find/fd, git status, and Python traceback.
-- [x] Tests with representative raw grep/rg, find/fd, git status, and Python traceback outputs for completed slices.
+  - [x] high-confidence `matches` logic for grep/rg, find/fd, git status, git diff, and Python traceback;
+  - [x] fallback unchanged on parse ambiguity for grep/rg, find/fd, git status, git diff, and Python traceback;
+  - [x] tests for non-matching similar output for grep/rg, find/fd, git status, git diff, and Python traceback.
+- [x] Tests with representative raw grep/rg, find/fd, git status, git diff, and Python traceback outputs for completed slices.
 - [ ] Update TODO and commit in small slices, not one giant commit.
 
 ### Phase 4 — User/thread configuration and commands
@@ -234,3 +234,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 - 2026-07-03: Phase 3 find/fd slice implemented conservative path-list grouping by directory. The enabled native optimizer now tries grep/rg, then find/fd, then generic fallback; disabled behavior remains unchanged. Pytest/cargo/git/traceback filters remain pending.
 - 2026-07-03: Phase 3 git status slice implemented conservative `git status --short`/porcelain-v1 grouping by exact status code, including renamed/copied paths and caps. Enabled native optimizer order is grep/rg, find/fd, git status, then generic fallback. Pytest/cargo/git diff/traceback filters remain pending.
 - 2026-07-03: Phase 3 Python traceback slice implemented a command-agnostic high-confidence traceback focus filter that preserves exception details and top/bottom frames while omitting middle frames with an explicit note. Enabled native optimizer order is grep/rg, find/fd, git status, Python traceback, then generic fallback. Pytest/cargo/git diff filters remain pending.
+- 2026-07-03: Phase 3 git diff slice implemented a conservative unified `git diff` preview filter that preserves file names, hunk headers, and changed lines while omitting capped context/files/hunks with explicit notes. Enabled native optimizer order is grep/rg, find/fd, git status, git diff, Python traceback, then generic fallback. Pytest/cargo filters remain pending.

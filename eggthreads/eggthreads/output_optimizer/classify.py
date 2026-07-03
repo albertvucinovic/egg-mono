@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Conservative classifiers shared by semantic output optimizer filters."""
 
+from collections.abc import Iterable as CollectionsIterable, Mapping as CollectionsMapping
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -13,6 +14,7 @@ from .core import OptimizeRequest
 
 _SIMPLE_SHELL_OPERATOR_RE = re.compile(r"(?:\n|;|\|\||&&|\||&|>|<|`|\$\(|\(|\))")
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_GIT_GLOBAL_OPTIONS_WITH_ARG = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
 
 
 def normalize_command_name(command: str) -> str:
@@ -77,6 +79,82 @@ def request_command_name(request: OptimizeRequest) -> str | None:
             script = None
         return simple_bash_command_name(script)
     return None
+
+
+def git_request_words(request: OptimizeRequest) -> tuple[str, ...]:
+    """Return a high-confidence simple ``git ...`` invocation for *request*."""
+
+    tool_name = normalize_command_name(request.tool_name)
+    if tool_name == "git":
+        return _git_tool_args_words(request.tool_args)
+    if tool_name == "bash":
+        try:
+            script = request.tool_args.get("script")
+        except Exception:
+            script = None
+        words = simple_bash_command_invocation(script)
+        return words if words and normalize_command_name(words[0]) == "git" else ()
+    return ()
+
+
+def git_request_subcommand_words(request: OptimizeRequest) -> tuple[str, ...]:
+    """Return git subcommand words after executable/global options."""
+
+    return git_subcommand_words(git_request_words(request))
+
+
+def git_subcommand_words(words: Iterable[str]) -> tuple[str, ...]:
+    """Strip ``git`` executable and global options from a simple invocation."""
+
+    words_tuple = tuple(words or ())
+    if not words_tuple or normalize_command_name(words_tuple[0]) != "git":
+        return ()
+    index = 1
+    while index < len(words_tuple):
+        word = words_tuple[index]
+        if word == "--":
+            index += 1
+            break
+        if not word.startswith("-"):
+            break
+        if word in _GIT_GLOBAL_OPTIONS_WITH_ARG:
+            index += 2
+            continue
+        if any(word.startswith(f"{option}=") for option in _GIT_GLOBAL_OPTIONS_WITH_ARG if option.startswith("--")):
+            index += 1
+            continue
+        index += 1
+    return words_tuple[index:]
+
+
+def _git_tool_args_words(tool_args: Any) -> tuple[str, ...]:
+    try:
+        args_value = tool_args.get("args")
+        if args_value is None:
+            args_value = tool_args.get("argv")
+        if args_value is None:
+            args_value = tool_args.get("command")
+        if args_value is None:
+            args_value = tool_args.get("subcommand")
+    except Exception:
+        args_value = None
+
+    if args_value is None:
+        return ()
+    if isinstance(args_value, str):
+        try:
+            words = tuple(shlex.split(args_value, comments=False, posix=True))
+        except ValueError:
+            return ()
+    elif isinstance(args_value, CollectionsMapping):
+        return ()
+    elif isinstance(args_value, CollectionsIterable):
+        words = tuple(str(item) for item in args_value)
+    else:
+        return ()
+    if words and normalize_command_name(words[0]) == "git":
+        return words
+    return ("git", *words)
 
 
 @dataclass(frozen=True)
@@ -159,6 +237,9 @@ def parse_path_list_lines(lines: Iterable[str], *, min_paths: int = 8) -> tuple[
 
 __all__ = [
     "PathLineContent",
+    "git_request_subcommand_words",
+    "git_request_words",
+    "git_subcommand_words",
     "is_plausible_path_list_line",
     "normalize_command_name",
     "parse_path_list_lines",

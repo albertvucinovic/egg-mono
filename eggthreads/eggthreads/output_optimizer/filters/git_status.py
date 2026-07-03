@@ -2,18 +2,15 @@ from __future__ import annotations
 
 """Conservative git-status short/porcelain optimizer filter."""
 
-from collections.abc import Iterable, Mapping
 from collections import OrderedDict
 from dataclasses import dataclass
-import shlex
 from typing import Any
 
-from ..classify import normalize_command_name, request_command_name, simple_bash_command_invocation
+from ..classify import git_request_subcommand_words, normalize_command_name, request_command_name
 from ..core import OptimizeDecision, OptimizeRequest, make_decision
 
 
 GIT_STATUS_TOOL_NAMES = frozenset({"git_status", "git-status"})
-_GIT_GLOBAL_OPTIONS_WITH_ARG = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
 _VALID_STATUS_CHARS = frozenset(" MADRCU?!")
 _STATUS_LABELS = {
     "??": "Untracked",
@@ -33,68 +30,11 @@ def is_git_status_request(request: OptimizeRequest) -> bool:
     tool_name = normalize_command_name(request.tool_name)
     if tool_name in GIT_STATUS_TOOL_NAMES:
         return True
-    if tool_name == "git":
-        return _git_words_are_status(_git_tool_args_words(request.tool_args))
-    if tool_name == "bash":
-        try:
-            script = request.tool_args.get("script")
-        except Exception:
-            script = None
-        return _git_words_are_status(simple_bash_command_invocation(script))
+    if tool_name in {"git", "bash"}:
+        subcommand_words = git_request_subcommand_words(request)
+        return bool(subcommand_words and subcommand_words[0] == "status")
     # Some future direct tools may expose the full command as their tool name.
     return request_command_name(request) in GIT_STATUS_TOOL_NAMES
-
-
-def _git_tool_args_words(tool_args: Any) -> tuple[str, ...]:
-    try:
-        args_value = tool_args.get("args")
-        if args_value is None:
-            args_value = tool_args.get("argv")
-        if args_value is None:
-            args_value = tool_args.get("command")
-        if args_value is None:
-            args_value = tool_args.get("subcommand")
-    except Exception:
-        args_value = None
-
-    if args_value is None:
-        return ()
-    if isinstance(args_value, str):
-        try:
-            words = tuple(shlex.split(args_value, comments=False, posix=True))
-        except ValueError:
-            return ()
-    elif isinstance(args_value, Mapping):
-        return ()
-    elif isinstance(args_value, Iterable):
-        words = tuple(str(item) for item in args_value)
-    else:
-        return ()
-    if words and normalize_command_name(words[0]) == "git":
-        return words
-    return ("git", *words)
-
-
-def _git_words_are_status(words: Iterable[str]) -> bool:
-    words_tuple = tuple(words or ())
-    if not words_tuple or normalize_command_name(words_tuple[0]) != "git":
-        return False
-    index = 1
-    while index < len(words_tuple):
-        word = words_tuple[index]
-        if word == "--":
-            index += 1
-            break
-        if not word.startswith("-"):
-            break
-        if word in _GIT_GLOBAL_OPTIONS_WITH_ARG:
-            index += 2
-            continue
-        if any(word.startswith(f"{option}=") for option in _GIT_GLOBAL_OPTIONS_WITH_ARG if option.startswith("--")):
-            index += 1
-            continue
-        index += 1
-    return index < len(words_tuple) and words_tuple[index] == "status"
 
 
 def _extract_git_status_lines(output: str) -> tuple[str, ...] | None:

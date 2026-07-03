@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .core import OutputFilter, OutputOptimizer
 from .filters.find import FindPathGroupFilter
+from .filters.git_diff import GitDiffCompactFilter
 from .filters.git_status import GitStatusCompactFilter
 from .filters.grep import GrepRgGroupByFileFilter
 from .filters.python_traceback import PythonTracebackFocusFilter
@@ -17,6 +18,7 @@ def default_native_filters(*, bounded_max_chars: int | None = None) -> list[Outp
         GrepRgGroupByFileFilter(),
         FindPathGroupFilter(),
         GitStatusCompactFilter(),
+        GitDiffCompactFilter(),
         PythonTracebackFocusFilter(),
         GenericOutputFilter(max_chars=bounded_max_chars),
     ]

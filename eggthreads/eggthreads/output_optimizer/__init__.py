@@ -27,6 +27,7 @@ from .classify import (
 )
 from .factory import create_default_output_optimizer, default_native_filters
 from .filters.find import FindPathGroupFilter, is_find_like_request, parse_find_fd_paths
+from .filters.git_diff import GitDiffCompactFilter, is_git_diff_request, parse_git_diff
 from .filters.git_status import GitStatusCompactFilter, is_git_status_request, parse_git_status_entries, parse_git_status_line
 from .filters.grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
 from .filters.python_traceback import PythonTracebackFocusFilter, parse_python_traceback
@@ -52,6 +53,7 @@ __all__ = [
     "BoundedHeadTailFilter",
     "FindPathGroupFilter",
     "GenericOutputFilter",
+    "GitDiffCompactFilter",
     "GitStatusCompactFilter",
     "GrepRgGroupByFileFilter",
     "OptimizeDecision",
@@ -72,6 +74,7 @@ __all__ = [
     "default_native_filters",
     "default_generic_filters",
     "is_find_like_request",
+    "is_git_diff_request",
     "is_git_status_request",
     "is_grep_like_request",
     "is_obvious_progress_noise_line",
@@ -81,6 +84,7 @@ __all__ = [
     "normalize_command_name",
     "output_optimizer_enabled",
     "parse_find_fd_paths",
+    "parse_git_diff",
     "parse_git_status_entries",
     "parse_git_status_line",
     "parse_grep_rg_matches",
