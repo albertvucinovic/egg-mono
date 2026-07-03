@@ -679,6 +679,49 @@ test.describe('Command Transcript Ordering', () => {
   });
 });
 
+test.describe('Output Optimizer Observability', () => {
+  test('shows optimizer badge only on optimized tool outputs', async ({ page }) => {
+    const threadId = 'optimizer-observability-thread-1';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        {
+          id: 'optimized-tool-message',
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: 'call-optimized-ui',
+          content: 'optimized preview',
+          content_text: 'optimized preview',
+          output_optimizer: {
+            optimized: true,
+            summary: 'Egg optimized · 95% saved · raw available',
+            summary_with_artifact: 'Egg optimized · 95% saved · raw artifact rawabc123',
+            raw_available: true,
+            artifact_available: true,
+            artifact_id: 'rawabc123',
+            raw_hint: "read_long_tool_output('rawabc123', chunk_number=1)",
+          },
+        },
+        {
+          id: 'plain-tool-message',
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: 'call-plain-ui',
+          content: 'plain preview',
+          content_text: 'plain preview',
+        },
+      ],
+    });
+
+    await page.goto(`/${threadId}`);
+
+    const badges = page.getByTestId('output-optimizer-badge');
+    await expect(badges).toHaveCount(1, { timeout: 5000 });
+    await expect(badges.first()).toContainText('Egg optimized · 95% saved · raw artifact rawabc123');
+    await expect(page.getByTestId('raw-output-affordance')).toContainText("read_long_tool_output('rawabc123', chunk_number=1)");
+    await expect(page.getByText('plain preview')).toBeVisible();
+  });
+});
+
 test.describe('Edit Answer Modal', () => {
   test('typing /editAnswer opens modal and loading draft populates composer without transcript pollution', async ({ page }) => {
     const threadId = 'edit-answer-thread-1';

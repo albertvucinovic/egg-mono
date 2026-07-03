@@ -753,6 +753,34 @@ class TestConsolePrintMessage:
 
         assert any('3.0 tps' in t for t in tool_titles)
 
+    def test_prints_optimizer_metadata_in_tool_message_title(self, egg_app, monkeypatch):
+        """Optimized tool messages should expose concise metadata in titles."""
+        printed = []
+        monkeypatch.setattr(egg_app.console, "print", lambda *a, **kw: printed.append((a, kw)))
+
+        egg_app.console_print_message({
+            'role': 'tool',
+            'name': 'bash',
+            'content': 'optimized preview',
+            'tool_call_id': 'call_optimized',
+            'output_optimizer': {
+                'optimized': True,
+                'summary': 'Egg optimized · 95% saved · raw available',
+                'summary_with_artifact': 'Egg optimized · 95% saved · raw artifact rawabc123',
+                'artifact_id': 'rawabc123',
+            },
+        })
+        egg_app.console_print_message({
+            'role': 'tool',
+            'name': 'bash',
+            'content': 'plain preview',
+            'tool_call_id': 'call_default',
+        })
+
+        titles = self._collect_panel_titles(printed)
+        assert any('Egg optimized · 95% saved · raw artifact rawabc123' in title for title in titles)
+        assert sum('Egg optimized' in title for title in titles) == 1
+
     @staticmethod
     def _collect_panel_bodies(printed):
         bodies = []

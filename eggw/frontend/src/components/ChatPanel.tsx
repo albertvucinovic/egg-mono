@@ -254,6 +254,25 @@ function messageMetadataText(message: Message, label: string): string {
   return parts.join(" | ");
 }
 
+function outputOptimizerSummaryText(message: Message, includeArtifactId = false): string | null {
+  const metadata = message.output_optimizer;
+  if (!metadata || metadata.optimized !== true) return null;
+  const summaryWithArtifact = typeof metadata.summary_with_artifact === "string" ? metadata.summary_with_artifact.trim() : "";
+  const summary = typeof metadata.summary === "string" ? metadata.summary.trim() : "";
+  const text = includeArtifactId && summaryWithArtifact ? summaryWithArtifact : summary;
+  return text || null;
+}
+
+function outputOptimizerRawHint(message: Message): string | null {
+  const metadata = message.output_optimizer;
+  if (!metadata || metadata.optimized !== true) return null;
+  if (typeof metadata.raw_hint === "string" && metadata.raw_hint.trim()) return metadata.raw_hint.trim();
+  if (typeof metadata.artifact_id === "string" && metadata.artifact_id.trim()) {
+    return `read_long_tool_output('${metadata.artifact_id.trim()}', chunk_number=1)`;
+  }
+  return null;
+}
+
 function isImportantSystemMessage(message: Message): boolean {
   // Match terminal Egg's min-verbosity behavior: system messages are part of
   // the visible conversation skeleton, including the initial system prompt.
@@ -924,6 +943,8 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const toolCalls = message.tool_calls || [];
   const toolStreamEntries = stringRecordEntries(message.tool_stream);
   const toolCallStreamEntries = stringRecordEntries(message.tool_calls_stream);
+  const optimizerSummary = outputOptimizerSummaryText(message, Boolean(message.output_optimizer?.artifact_available));
+  const optimizerRawHint = outputOptimizerRawHint(message);
   const showReasoningBlock = Boolean(message.reasoning) && displayVerbosity !== "min";
   const hideReasoningBody = displayVerbosity === "medium";
   const hideToolBody = (displayVerbosity === "medium" || displayVerbosity === "min") && message.role === "tool";
@@ -988,6 +1009,16 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             ← {message.tool_call_id.slice(-8)}
           </span>
         )}
+        {optimizerSummary && (
+          <span
+            className="rounded px-1.5 py-0.5 text-[11px] font-medium"
+            style={{ background: "var(--code-bg)", color: "var(--accent)", border: "1px solid var(--panel-border)" }}
+            title={optimizerRawHint ? `Raw output: ${optimizerRawHint}` : optimizerSummary}
+            data-testid="output-optimizer-badge"
+          >
+            {optimizerSummary}
+          </span>
+        )}
         {canQuoteEdit && (
           <button
             type="button"
@@ -1003,6 +1034,12 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
           </button>
         )}
       </div>
+
+      {optimizerRawHint && displayVerbosity !== "min" && (
+        <div className="mb-2 text-xs font-mono" style={{ color: "var(--muted)" }} data-testid="raw-output-affordance">
+          Raw output: {optimizerRawHint}
+        </div>
+      )}
 
       {/* Reasoning (collapsible) */}
       {showReasoningBlock && (

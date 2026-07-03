@@ -1827,6 +1827,98 @@ class TestMessageOperations:
         assert message["tool_stream"] == {"bash": "streamed tool output body"}
         assert message["tool_calls_stream"] == {"call_full_1234567890": "streamed arg body"}
 
+    def test_get_messages_exposes_output_optimizer_metadata_only_when_present(self, client):
+        """Tool message API includes compact optimizer metadata without cluttering defaults."""
+        from eggthreads import append_message, create_snapshot
+
+        create_resp = client.post("/api/threads", json={"name": "Optimizer Metadata API"})
+        thread_id = create_resp.json()["id"]
+
+        optimized_id = append_message(
+            core_state.db,
+            thread_id,
+            "tool",
+            "optimized preview",
+            extra={
+                "name": "bash",
+                "tool_call_id": "call-optimized-web",
+                "output_optimizer": {
+                    "optimized": True,
+                    "summary": "Egg optimized · 95% saved · raw available",
+                    "summary_with_artifact": "Egg optimized · 95% saved · raw artifact abc12345",
+                    "raw_available": True,
+                    "artifact_available": True,
+                    "artifact_id": "abc12345",
+                    "raw_hint": "read_long_tool_output('abc12345', chunk_number=1)",
+                },
+            },
+        )
+        default_id = append_message(
+            core_state.db,
+            thread_id,
+            "tool",
+            "plain preview",
+            extra={"name": "bash", "tool_call_id": "call-default-web"},
+        )
+        create_snapshot(core_state.db, thread_id)
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        data = response.json()
+        optimized = next(m for m in data if m["id"] == optimized_id)
+        default = next(m for m in data if m["id"] == default_id)
+        assert optimized["output_optimizer"]["summary"] == "Egg optimized · 95% saved · raw available"
+        assert optimized["output_optimizer"]["artifact_id"] == "abc12345"
+        assert default.get("output_optimizer") is None
+
+    def test_get_messages_derives_output_optimizer_metadata_from_output_approval_channels(self, client):
+        """API can shape existing output-approval optimizer channels for UI badges."""
+        from eggthreads import append_message, create_snapshot
+
+        create_resp = client.post("/api/threads", json={"name": "Optimizer Metadata Derived API"})
+        thread_id = create_resp.json()["id"]
+        tool_call_id = "call-derived-optimizer-web"
+        msg_id = append_message(
+            core_state.db,
+            thread_id,
+            "tool",
+            "optimized preview",
+            extra={"name": "bash", "tool_call_id": tool_call_id},
+        )
+        core_state.db.append_event(
+            event_id="approval-derived-optimizer-web",
+            thread_id=thread_id,
+            type_="tool_call.output_approval",
+            payload={
+                "tool_call_id": tool_call_id,
+                "decision": "whole",
+                "preview": "optimized preview",
+                "channels": {
+                    "raw": {"stored_in_finished_event": True},
+                    "optimizer": {
+                        "optimized": True,
+                        "fallback": False,
+                        "filter_name": "generic",
+                        "raw_chars": 1000,
+                        "optimized_chars": 50,
+                        "published_chars": 50,
+                        "published_savings_pct": 95.0,
+                        "savings_pct": 95.0,
+                    },
+                },
+            },
+        )
+        create_snapshot(core_state.db, thread_id)
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        data = response.json()
+        message = next(m for m in data if m["id"] == msg_id)
+        assert message["output_optimizer"]["summary"] == "Egg optimized · 95% saved · raw available"
+        assert message["output_optimizer"]["filter_name"] == "generic"
+
     def test_web_continue_appends_recovery_notice(self, client):
         """Eggw /continue persists a local recovery notice after success."""
         from eggthreads import append_message

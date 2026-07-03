@@ -43,6 +43,10 @@ from .classify import (
     simple_bash_command_words,
 )
 from .factory import create_default_output_optimizer, default_native_filters
+from .observability import (
+    format_output_optimizer_summary,
+    optimizer_public_metadata_from_output_approval,
+)
 from .filters.cargo import CargoTestFailureSummaryFilter, is_cargo_test_request, parse_cargo_test_failure_output
 from .filters.find import FindPathGroupFilter, is_find_like_request, parse_find_fd_paths
 from .filters.git_diff import GitDiffCompactFilter, is_git_diff_request, parse_git_diff
@@ -100,6 +104,7 @@ __all__ = [
     "dedupe_repeated_lines",
     "default_native_filters",
     "format_thread_output_optimizer_status",
+    "format_output_optimizer_summary",
     "get_thread_output_optimizer_config",
     "get_thread_output_optimizer_policy_config",
     "default_generic_filters",
@@ -117,6 +122,7 @@ __all__ = [
     "normalize_output_optimizer_mode",
     "output_optimizer_enabled",
     "output_optimizer_min_confidence_for_mode",
+    "optimizer_public_metadata_from_output_approval",
     "parse_cargo_test_failure_output",
     "parse_find_fd_paths",
     "parse_git_diff",

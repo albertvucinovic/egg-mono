@@ -27,6 +27,7 @@ from eggthreads.image_generation import (
     normalize_image_generation_model_key,
     normalize_openai_image_generation_options,
 )
+from eggthreads.output_optimizer.observability import optimizer_public_metadata_from_output_approval
 from eggthreads.input_artifacts import (
     InputArtifactAccessError,
     InputArtifactError,
@@ -191,6 +192,35 @@ def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> Message
     )
 
 
+def _output_optimizer_metadata_by_tool_call_id(db: ThreadsDB, thread_id: str) -> dict[str, dict]:
+    """Return compact optimizer metadata derived from output-approval events."""
+
+    try:
+        rows = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.output_approval' ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+    except Exception:
+        return {}
+
+    out: dict[str, dict] = {}
+    for row in rows:
+        try:
+            payload_json = row["payload_json"]
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        tool_call_id = str(payload.get("tool_call_id") or "")
+        if not tool_call_id:
+            continue
+        metadata = optimizer_public_metadata_from_output_approval(payload)
+        if metadata:
+            out[tool_call_id] = metadata
+    return out
+
+
 def _get_messages_sync(
     db_path: str,
     thread_id: str,
@@ -298,6 +328,8 @@ def _get_messages_sync(
         if isinstance(limit, int) and limit > 0 and len(entries) > limit:
             entries = entries[-limit:]
 
+        optimizer_metadata_by_tool_call_id = _output_optimizer_metadata_by_tool_call_id(fresh_db, thread_id)
+
         messages: List[MessageContent] = []
         for kind, raw in entries:
             if kind == "marker":
@@ -330,6 +362,11 @@ def _get_messages_sync(
                     except Exception:
                         pass
 
+            tool_call_id = msg.get("tool_call_id")
+            output_optimizer = msg.get("output_optimizer") if isinstance(msg.get("output_optimizer"), dict) else None
+            if output_optimizer is None and isinstance(tool_call_id, str):
+                output_optimizer = optimizer_metadata_by_tool_call_id.get(tool_call_id)
+
             messages.append(MessageContent(
                 id=str(msg_id or ""),
                 role=msg.get("role", ""),
@@ -339,7 +376,8 @@ def _get_messages_sync(
                 tool_calls=msg.get("tool_calls"),
                 tool_stream=msg.get("tool_stream") if isinstance(msg.get("tool_stream"), dict) else None,
                 tool_calls_stream=msg.get("tool_calls_stream") if isinstance(msg.get("tool_calls_stream"), dict) else None,
-                tool_call_id=msg.get("tool_call_id"),
+                tool_call_id=tool_call_id,
+                output_optimizer=output_optimizer,
                 name=msg.get("name"),
                 model_key=msg.get("model_key"),
                 timestamp=timestamp,

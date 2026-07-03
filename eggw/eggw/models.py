@@ -33,6 +33,7 @@ class MessageContent(BaseModel):
     tool_stream: Optional[Dict[str, Any]] = None
     tool_calls_stream: Optional[Dict[str, Any]] = None
     tool_call_id: Optional[str] = None
+    output_optimizer: Optional[Dict[str, Any]] = None
     name: Optional[str] = None
     timestamp: Optional[datetime] = None
     tokens: Optional[int] = None

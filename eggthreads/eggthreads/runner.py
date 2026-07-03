@@ -2438,6 +2438,10 @@ class ThreadRunner:
             m2 = dict(m)
             m2.pop("api_usage", None)
             m2.pop("provider_usage", None)
+            # Local/UI-only optimizer observability metadata must not be sent
+            # to providers.  The provider sees the already-approved preview in
+            # content, while raw/audit metadata remains in events/snapshots.
+            m2.pop("output_optimizer", None)
             if m2.get("answer_user_preserve_turn"):
                 continue
             role = m2.get("role")
@@ -3166,6 +3170,14 @@ class ThreadRunner:
                     'tool_call_id': tc.tool_call_id,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
+                try:
+                    from .output_optimizer.observability import optimizer_public_metadata_from_output_approval
+
+                    output_optimizer_metadata = optimizer_public_metadata_from_output_approval(payload)
+                    if output_optimizer_metadata:
+                        msg['output_optimizer'] = output_optimizer_metadata
+                except Exception:
+                    pass
                 # For user-initiated commands (RA3), keep the user turn
                 # after publishing the tool result. The model should not
                 # be invoked automatically; instead, the result becomes

@@ -17,6 +17,7 @@ from rich import box as rich_box
 
 from eggthreads import create_snapshot
 from eggthreads.content_parts import content_to_plain_text
+from eggthreads.output_optimizer.observability import format_output_optimizer_summary
 
 from .utils import snapshot_messages, looks_markdown
 from .min_run_summary import (
@@ -1206,6 +1207,17 @@ class PanelsMixin:
                 return preview[: max_chars - 3].rstrip() + "..."
             return preview
 
+    def _output_optimizer_summary(self, message: Dict[str, Any], *, include_artifact_id: bool = False) -> str:
+        """Return compact optimizer metadata for display, if present."""
+
+        metadata = message.get('output_optimizer') if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            return ''
+        try:
+            return format_output_optimizer_summary(metadata, include_artifact_id=include_artifact_id)
+        except Exception:
+            return ''
+
     def _new_static_hidden_details_state(self) -> Dict[str, Any]:
         return {
             'summary': MinHiddenActivitySummary(),
@@ -1813,6 +1825,9 @@ class PanelsMixin:
             tool_call_id = str(m.get('tool_call_id') or '')
             if tool_call_id and verbosity != 'max':
                 title += f" [dim]tool_call_id: {tool_call_id}[/dim]"
+            optimizer_summary = self._output_optimizer_summary(m, include_artifact_id=True)
+            if optimizer_summary:
+                title += f" [dim]{rich_escape(optimizer_summary)}[/dim]"
             if verbosity == 'max':
                 panel(Text(content, no_wrap=False, overflow='fold', style='yellow'), title, 'yellow')
             elif verbosity == 'medium':

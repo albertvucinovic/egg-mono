@@ -200,12 +200,12 @@ Goal: make optimizer controllable and inspectable.
 
 Goal: make optimization visible without clutter.
 
-- [ ] Terminal output should expose concise optimizer metadata when useful.
-- [ ] EggW should show a small badge or metadata line, e.g. `Egg optimized · 95% saved · raw available`.
-- [ ] Raw artifact/link affordance should be discoverable.
-- [ ] Display verbosity modes should remain respected.
-- [ ] Tests for event metadata/API shape and frontend rendering where feasible.
-- [ ] Update TODO and commit.
+- [x] Terminal output should expose concise optimizer metadata when useful.
+- [x] EggW should show a small badge or metadata line, e.g. `Egg optimized · 95% saved · raw available`.
+- [x] Raw artifact/link affordance should be discoverable.
+- [x] Display verbosity modes should remain respected.
+- [x] Tests for event metadata/API shape and frontend rendering where feasible.
+- [x] Update TODO and commit.
 
 ### Phase 6 — Optional RTK adapter/reference backend
 
@@ -238,3 +238,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 - 2026-07-03: Phase 3 pytest slice implemented a conservative pytest failure summary filter that preserves failed/error nodeids, assertion/error excerpts, and final summary while capping summaries/sections with explicit notes. Enabled native optimizer order is grep/rg, find/fd, git status, git diff, pytest, Python traceback, then generic fallback. Cargo remains pending.
 - 2026-07-03: Phase 3 cargo slice implemented a conservative Cargo/Rust test failure summary filter that preserves failing test names, panic/source excerpts, final test result, and cargo error rerun lines while capping names/sections with explicit notes. All planned Phase 3 semantic filters are now implemented in small slices.
 - 2026-07-03: Phase 4 first slice implemented event-sourced inherited `output_optimizer.config` resolution with env/config fallback compatibility, explicit per-thread enable/disable, modes `conservative`/`balanced`/`aggressive` wired to optimizer min-confidence, runner policy-config population, shared slash commands for status/on/off/mode, and EggW shared-command adapters for the new commands. No separate EggW settings UI/badges were added in this slice.
+- 2026-07-03: Phase 5 UI-observability slice implemented compact optimizer metadata derived from existing `tool_call.output_approval.channels.optimizer`, persisted it on published tool messages when available, kept it out of provider API messages, added terminal title/status display that respects verbosity, exposed EggW `output_optimizer` message metadata and a small badge/raw-output hint, and added backend/terminal/EggW-focused tests. Raw `tool_call.finished.output` remains unchanged and existing artifact recovery notes/tools remain available.

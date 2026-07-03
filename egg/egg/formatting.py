@@ -14,6 +14,7 @@ from eggthreads import (
     get_thread_statuses_bulk,
 )
 from eggthreads.content_parts import content_to_plain_text
+from eggthreads.output_optimizer.observability import format_output_optimizer_summary
 
 from .utils import snapshot_messages
 from .min_run_summary import (
@@ -278,6 +279,17 @@ class FormattingMixin:
             return preview[: max_chars - 3].rstrip() + "..."
         return preview
 
+    def _output_optimizer_summary(self, message: Dict[str, Any], *, include_artifact_id: bool = False) -> str:
+        """Return compact optimizer metadata for display, if present."""
+
+        metadata = message.get('output_optimizer') if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            return ''
+        try:
+            return format_output_optimizer_summary(metadata, include_artifact_id=include_artifact_id)
+        except Exception:
+            return ''
+
     def format_messages_text(self, thread_id: str, messages: Optional[List[Dict[str, Any]]] = None) -> str:
         """Format messages in a thread for display."""
         msgs = messages if messages is not None else snapshot_messages(self.db, thread_id)
@@ -456,13 +468,18 @@ class FormattingMixin:
                     lower_label = 'Tool'
                 content = content_to_plain_text(m.get('content')).strip()
                 if content:
+                    optimizer_summary = self._output_optimizer_summary(m, include_artifact_id=True)
                     if verbosity == 'max':
                         header = f"[Tool: {name}{tps_text}{msg_id_text}]"
+                        if optimizer_summary:
+                            header += f" [{optimizer_summary}]"
                         lines.append(f"{header}\n{content}")
                     else:
                         tool_call_id = str(m.get('tool_call_id') or '')
                         tool_call_id_text = f" [tool_call_id: {tool_call_id}]" if tool_call_id else ""
                         header = f"[{lower_label}: {name}{tps_text}{msg_id_text}{tool_call_id_text}]"
+                        if optimizer_summary:
+                            header += f" [{optimizer_summary}]"
                         if verbosity == 'medium':
                             lines.append(header)
                         else:
