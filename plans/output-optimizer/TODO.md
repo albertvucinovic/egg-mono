@@ -1,0 +1,230 @@
+# Egg native output optimizer TODO
+
+## Purpose
+
+Build an Egg-native output optimizer that captures most RTK-style token-savings benefits while preserving Egg's stronger event-sourced, sandbox-aware architecture.
+
+The optimizer must be a **presentation/publication layer**, not a command-execution layer:
+
+```text
+command/tool runs normally
+  -> raw output is captured and stored in tool_call.finished
+  -> Egg optimizer derives a compact LLM/UI preview
+  -> raw output remains inspectable/recoverable through existing artifacts/events
+```
+
+## Non-negotiable invariants
+
+- Raw tool output remains the source of truth.
+  - Do **not** replace or mutate `tool_call.finished.output` with optimized output.
+  - Optimization only affects publication decisions/previews/messages.
+- Commands execute exactly as requested.
+  - No command rewriting in the native optimizer.
+  - No proxying execution through another binary.
+- Sandboxing semantics are unchanged.
+  - The optimizer runs after capture, so it must work with unsandboxed, SRT/bwrap, Docker sandbox, and persistent REPL outputs.
+  - Never bypass sandbox by re-running a command outside it.
+- Provider-visible output and UI/audit output remain distinct.
+  - Optimized output may be provider-visible.
+  - Raw output must remain available for UI/audit/recovery.
+- Secret handling stays at provider boundaries.
+  - The optimizer may reduce output, but must not be the only secret defense.
+  - Existing provider-boundary masking must still run.
+- Never make output worse.
+  - If optimization fails, expands output, or is low-confidence, fall back to existing default behavior.
+- Every meaningful optimizer action should be inspectable.
+  - Record optimizer name/filter, raw/optimized sizes, reason, and fallback status in output-publication metadata.
+
+## Architecture sketch
+
+### Proposed modules
+
+```text
+eggthreads/eggthreads/output_optimizer/
+  __init__.py
+  core.py              # request/decision dataclasses, protocols, registry, orchestration
+  generic.py           # ANSI/control cleanup, progress/noise cleanup, dedupe, bounded fallback
+  classify.py          # command/output-shape classification helpers
+  filters/
+    __init__.py
+    cargo.py
+    pytest.py
+    git.py
+    grep.py
+    find.py
+    logs.py
+    python_traceback.py
+```
+
+### Core model
+
+```python
+@dataclass(frozen=True)
+class OptimizeRequest:
+    tool_name: str
+    tool_args: Mapping[str, Any]
+    output: str
+    finished_reason: str
+    thread_id: str
+    tool_call_id: str
+    origin: str
+    user_tool_call: bool
+    metadata: Mapping[str, Any]
+
+@dataclass(frozen=True)
+class OptimizeDecision:
+    optimized: bool
+    output: str
+    optimizer_name: str
+    filter_name: str | None
+    raw_chars: int
+    optimized_chars: int
+    savings_pct: float
+    reason: str
+    confidence: float
+    metadata: Mapping[str, Any]
+```
+
+### Integration point
+
+Use the existing `OutputPolicy` seam:
+
+```text
+runner._emit_auto_output_approval(...)
+  -> OutputPolicyRequest(...)
+  -> OutputPoliciesPlugin registers default + optimizer policy
+  -> optimizer decides preview when safe and beneficial
+  -> tool_call.output_approval.preview contains optimized content
+  -> tool_call.finished.output remains raw
+```
+
+The existing default policy should remain the fallback.
+
+## Phase checklist
+
+### Phase 0 — Planning and baseline
+
+- [x] Create this hierarchical TODO at `plans/output-optimizer/TODO.md`.
+- [x] Confirm current tracked tree is clean except known unrelated untracked files.
+- [x] Identify focused tests around output policies and runner tool publication.
+
+### Phase 1 — Pure optimizer core, no behavior change
+
+Goal: add the native optimizer library and tests without wiring it into output publication yet.
+
+- [ ] Add `eggthreads/eggthreads/output_optimizer/` package.
+- [ ] Implement immutable request/decision dataclasses.
+- [ ] Implement `OutputFilter` protocol or equivalent small interface.
+- [ ] Implement registry/orchestrator with:
+  - [ ] ordered filters;
+  - [ ] min-size threshold;
+  - [ ] confidence threshold;
+  - [ ] never-worse guard;
+  - [ ] exception-to-fallback behavior.
+- [ ] Implement generic filters/helpers:
+  - [ ] ANSI/control cleanup helper;
+  - [ ] progress/noise line suppression for obvious progress bars/spinners;
+  - [ ] repeated-line dedupe with counts;
+  - [ ] bounded head/tail fallback with omission note;
+  - [ ] size/savings metadata calculation.
+- [ ] Add unit tests using pure strings and fake filters:
+  - [ ] optimizer unavailable/no filters -> unchanged decision;
+  - [ ] beneficial filter accepted;
+  - [ ] expanding filter rejected;
+  - [ ] throwing filter rejected;
+  - [ ] generic dedupe works;
+  - [ ] bounded fallback preserves head/tail and reports omission.
+- [ ] Update status notes in this TODO.
+- [ ] Commit as one focused commit.
+
+### Phase 2 — OutputPolicy integration behind disabled/default-safe switch
+
+Goal: wire optimizer into output publication without changing default behavior unless explicitly enabled.
+
+- [ ] Extend `OutputPolicyRequest` population in runner to include:
+  - [ ] `tool_name`;
+  - [ ] parsed tool arguments when available;
+  - [ ] user-tool vs assistant-tool origin;
+  - [ ] finished reason;
+  - [ ] output size metadata.
+- [ ] Add `NativeOptimizerOutputPolicy`.
+- [ ] Gate policy with an explicit config/env switch, initially disabled by default.
+- [ ] Preserve default policy behavior exactly when disabled.
+- [ ] When enabled and optimization succeeds:
+  - [ ] publish optimized preview;
+  - [ ] include raw/optimized char counts and savings in channels metadata;
+  - [ ] preserve raw output in `tool_call.finished`;
+  - [ ] preserve existing long-output artifact behavior or add raw artifact where needed.
+- [ ] Tests:
+  - [ ] disabled switch matches current default output exactly;
+  - [ ] enabled optimizer changes only preview/message content;
+  - [ ] raw `tool_call.finished.output` remains raw;
+  - [ ] hidden `$$` command remains `no_api`.
+- [ ] Update TODO status and commit.
+
+### Phase 3 — First semantic filters
+
+Goal: capture high ROI coding-agent outputs.
+
+- [ ] Add classifier helpers for bash script text and output shape.
+- [ ] Implement semantic filters:
+  - [ ] `pytest` failure summary;
+  - [ ] `cargo test` failure summary;
+  - [ ] `rg`/`grep` grouping by file;
+  - [ ] `find` path grouping;
+  - [ ] `git status` compact status;
+  - [ ] `git diff` compact diff preview;
+  - [ ] generic Python traceback focus.
+- [ ] Each filter must be conservative:
+  - [ ] high-confidence `matches` logic;
+  - [ ] fallback unchanged on parse ambiguity;
+  - [ ] tests for non-matching similar output.
+- [ ] Tests with realistic fixtures or representative raw outputs.
+- [ ] Update TODO and commit in small slices, not one giant commit.
+
+### Phase 4 — User/thread configuration and commands
+
+Goal: make optimizer controllable and inspectable.
+
+- [ ] Add event-sourced per-thread/inherited optimizer config.
+- [ ] Add terminal shared commands:
+  - [ ] `/outputOptimizerStatus`
+  - [ ] `/outputOptimizerOn`
+  - [ ] `/outputOptimizerOff`
+  - [ ] `/outputOptimizerMode conservative|balanced|aggressive`
+- [ ] Add EggW command adapters and settings display if appropriate.
+- [ ] Tests for inheritance, toggling, and terminal/EggW parity.
+- [ ] Update TODO and commit.
+
+### Phase 5 — UI observability
+
+Goal: make optimization visible without clutter.
+
+- [ ] Terminal output should expose concise optimizer metadata when useful.
+- [ ] EggW should show a small badge or metadata line, e.g. `Egg optimized · 95% saved · raw available`.
+- [ ] Raw artifact/link affordance should be discoverable.
+- [ ] Display verbosity modes should remain respected.
+- [ ] Tests for event metadata/API shape and frontend rendering where feasible.
+- [ ] Update TODO and commit.
+
+### Phase 6 — Optional RTK adapter/reference backend
+
+Goal: optionally use RTK as one backend/filter provider, not as the foundation.
+
+- [ ] Add optional adapter that can run `rtk pipe` on captured output.
+- [ ] Force privacy-safe env defaults:
+  - [ ] `RTK_TELEMETRY_DISABLED=1`;
+  - [ ] isolated/disabled tracking unless user explicitly opts in.
+- [ ] Never depend on RTK availability for native optimizer behavior.
+- [ ] Adapter failures/timeouts must fallback cleanly.
+- [ ] Tests with fake RTK binary.
+- [ ] Update TODO and commit.
+
+## Initial implementation recommendation
+
+Start with Phase 1 only. Do not wire the optimizer into runtime behavior until the pure library has focused tests and stable fallback semantics.
+
+## Status notes
+
+- 2026-07-02: Plan created. Latest repository state before implementation had only unrelated untracked `count-lines.sh` and latest commit `bb00ea8 none`.
+- 2026-07-02: Phase 0 baseline: tracked tree clean; `plans/` is ignored, so this TODO must be force-added when committing. Focused tests to extend later include `eggthreads/tests/test_output_optimizer.py` for pure optimizer behavior and existing runner/output-policy tests around `tool_call.output_approval` publication.
