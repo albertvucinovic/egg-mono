@@ -112,30 +112,30 @@ The existing default policy should remain the fallback.
 
 Goal: add the native optimizer library and tests without wiring it into output publication yet.
 
-- [ ] Add `eggthreads/eggthreads/output_optimizer/` package.
-- [ ] Implement immutable request/decision dataclasses.
-- [ ] Implement `OutputFilter` protocol or equivalent small interface.
-- [ ] Implement registry/orchestrator with:
-  - [ ] ordered filters;
-  - [ ] min-size threshold;
-  - [ ] confidence threshold;
-  - [ ] never-worse guard;
-  - [ ] exception-to-fallback behavior.
-- [ ] Implement generic filters/helpers:
-  - [ ] ANSI/control cleanup helper;
-  - [ ] progress/noise line suppression for obvious progress bars/spinners;
-  - [ ] repeated-line dedupe with counts;
-  - [ ] bounded head/tail fallback with omission note;
-  - [ ] size/savings metadata calculation.
-- [ ] Add unit tests using pure strings and fake filters:
-  - [ ] optimizer unavailable/no filters -> unchanged decision;
-  - [ ] beneficial filter accepted;
-  - [ ] expanding filter rejected;
-  - [ ] throwing filter rejected;
-  - [ ] generic dedupe works;
-  - [ ] bounded fallback preserves head/tail and reports omission.
-- [ ] Update status notes in this TODO.
-- [ ] Commit as one focused commit.
+- [x] Add `eggthreads/eggthreads/output_optimizer/` package.
+- [x] Implement immutable request/decision dataclasses.
+- [x] Implement `OutputFilter` protocol or equivalent small interface.
+- [x] Implement registry/orchestrator with:
+  - [x] ordered filters;
+  - [x] min-size threshold;
+  - [x] confidence threshold;
+  - [x] never-worse guard;
+  - [x] exception-to-fallback behavior.
+- [x] Implement generic filters/helpers:
+  - [x] ANSI/control cleanup helper;
+  - [x] progress/noise line suppression for obvious progress bars/spinners;
+  - [x] repeated-line dedupe with counts;
+  - [x] bounded head/tail fallback with omission note;
+  - [x] size/savings metadata calculation.
+- [x] Add unit tests using pure strings and fake filters:
+  - [x] optimizer unavailable/no filters -> unchanged decision;
+  - [x] beneficial filter accepted;
+  - [x] expanding filter rejected;
+  - [x] throwing filter rejected;
+  - [x] generic dedupe works;
+  - [x] bounded fallback preserves head/tail and reports omission.
+- [x] Update status notes in this TODO.
+- [x] Commit as one focused commit.
 
 ### Phase 2 — OutputPolicy integration behind disabled/default-safe switch
 
@@ -228,3 +228,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 
 - 2026-07-02: Plan created. Latest repository state before implementation had only unrelated untracked `count-lines.sh` and latest commit `bb00ea8 none`.
 - 2026-07-02: Phase 0 baseline: tracked tree clean; `plans/` is ignored, so this TODO must be force-added when committing. Focused tests to extend later include `eggthreads/tests/test_output_optimizer.py` for pure optimizer behavior and existing runner/output-policy tests around `tool_call.output_approval` publication.
+- 2026-07-03: Phase 1 implemented as a pure `eggthreads.output_optimizer` package with immutable request/decision models, ordered fallback-safe orchestrator, generic cleanup/dedupe/bounded helpers, and focused unit tests. No runtime output-policy/runner integration was added.
