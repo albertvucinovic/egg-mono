@@ -9,6 +9,7 @@ from .git_status import GitStatusCompactFilter, is_git_status_request, parse_git
 from .grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
 from .pytest import PytestFailureSummaryFilter, is_pytest_request, parse_pytest_failure_output
 from .python_traceback import PythonTracebackFocusFilter, parse_python_traceback
+from .rtk import RtkPipeFilter
 
 __all__ = [
     "CargoTestFailureSummaryFilter",
@@ -18,6 +19,7 @@ __all__ = [
     "GrepRgGroupByFileFilter",
     "PytestFailureSummaryFilter",
     "PythonTracebackFocusFilter",
+    "RtkPipeFilter",
     "is_cargo_test_request",
     "is_find_like_request",
     "is_git_diff_request",

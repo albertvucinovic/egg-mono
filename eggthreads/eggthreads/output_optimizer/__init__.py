@@ -14,10 +14,16 @@ from .core import (
 )
 from .config import (
     DEFAULT_OUTPUT_OPTIMIZER_MODE,
+    DEFAULT_OUTPUT_OPTIMIZER_RTK_COMMAND,
+    DEFAULT_OUTPUT_OPTIMIZER_RTK_TIMEOUT_SECONDS,
     OUTPUT_OPTIMIZER_CONFIG_EVENT_TYPE,
     OUTPUT_OPTIMIZER_ENV,
     OUTPUT_OPTIMIZER_MODE_MIN_CONFIDENCE,
     OUTPUT_OPTIMIZER_MODES,
+    OUTPUT_OPTIMIZER_RTK_BIN_ENV,
+    OUTPUT_OPTIMIZER_RTK_ENV,
+    OUTPUT_OPTIMIZER_RTK_PRIVACY_OPT_IN_ENV,
+    OUTPUT_OPTIMIZER_RTK_TIMEOUT_ENV,
     OutputOptimizerThreadConfig,
     append_output_optimizer_config_event,
     format_thread_output_optimizer_status,
@@ -27,6 +33,10 @@ from .config import (
     normalize_output_optimizer_mode,
     output_optimizer_enabled,
     output_optimizer_min_confidence_for_mode,
+    output_optimizer_rtk_command,
+    output_optimizer_rtk_enabled,
+    output_optimizer_rtk_privacy_opt_in,
+    output_optimizer_rtk_timeout_seconds,
     set_thread_output_optimizer_enabled,
     set_thread_output_optimizer_mode,
 )
@@ -54,6 +64,7 @@ from .filters.git_status import GitStatusCompactFilter, is_git_status_request, p
 from .filters.grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
 from .filters.pytest import PytestFailureSummaryFilter, is_pytest_request, parse_pytest_failure_output
 from .filters.python_traceback import PythonTracebackFocusFilter, parse_python_traceback
+from .filters.rtk import RtkPipeFilter
 from .generic import (
     AnsiControlCleanupFilter,
     BoundedHeadTailFilter,
@@ -72,10 +83,16 @@ from .generic import (
 __all__ = [
     "DEFAULT_OPTIMIZER_NAME",
     "DEFAULT_OUTPUT_OPTIMIZER_MODE",
+    "DEFAULT_OUTPUT_OPTIMIZER_RTK_COMMAND",
+    "DEFAULT_OUTPUT_OPTIMIZER_RTK_TIMEOUT_SECONDS",
     "OUTPUT_OPTIMIZER_CONFIG_EVENT_TYPE",
     "OUTPUT_OPTIMIZER_ENV",
     "OUTPUT_OPTIMIZER_MODE_MIN_CONFIDENCE",
     "OUTPUT_OPTIMIZER_MODES",
+    "OUTPUT_OPTIMIZER_RTK_BIN_ENV",
+    "OUTPUT_OPTIMIZER_RTK_ENV",
+    "OUTPUT_OPTIMIZER_RTK_PRIVACY_OPT_IN_ENV",
+    "OUTPUT_OPTIMIZER_RTK_TIMEOUT_ENV",
     "AnsiControlCleanupFilter",
     "BoundedHeadTailFilter",
     "CargoTestFailureSummaryFilter",
@@ -95,6 +112,7 @@ __all__ = [
     "PytestFailureSummaryFilter",
     "PythonTracebackFocusFilter",
     "RepeatedLineDedupeFilter",
+    "RtkPipeFilter",
     "append_output_optimizer_config_event",
     "bounded_head_tail",
     "calculate_size_metadata",
@@ -122,6 +140,10 @@ __all__ = [
     "normalize_output_optimizer_mode",
     "output_optimizer_enabled",
     "output_optimizer_min_confidence_for_mode",
+    "output_optimizer_rtk_command",
+    "output_optimizer_rtk_enabled",
+    "output_optimizer_rtk_privacy_opt_in",
+    "output_optimizer_rtk_timeout_seconds",
     "optimizer_public_metadata_from_output_approval",
     "parse_cargo_test_failure_output",
     "parse_find_fd_paths",

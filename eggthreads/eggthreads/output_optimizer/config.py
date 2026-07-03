@@ -22,8 +22,14 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..db import ThreadsDB
 
 OUTPUT_OPTIMIZER_ENV = "EGG_OUTPUT_OPTIMIZER"
+OUTPUT_OPTIMIZER_RTK_ENV = "EGG_OUTPUT_OPTIMIZER_RTK"
+OUTPUT_OPTIMIZER_RTK_BIN_ENV = "EGG_OUTPUT_OPTIMIZER_RTK_BIN"
+OUTPUT_OPTIMIZER_RTK_TIMEOUT_ENV = "EGG_OUTPUT_OPTIMIZER_RTK_TIMEOUT"
+OUTPUT_OPTIMIZER_RTK_PRIVACY_OPT_IN_ENV = "EGG_OUTPUT_OPTIMIZER_RTK_PRIVACY_OPT_IN"
 OUTPUT_OPTIMIZER_CONFIG_EVENT_TYPE = "output_optimizer.config"
 DEFAULT_OUTPUT_OPTIMIZER_MODE = "balanced"
+DEFAULT_OUTPUT_OPTIMIZER_RTK_COMMAND = "rtk"
+DEFAULT_OUTPUT_OPTIMIZER_RTK_TIMEOUT_SECONDS = 3.0
 OUTPUT_OPTIMIZER_MODES = ("conservative", "balanced", "aggressive")
 OUTPUT_OPTIMIZER_MODE_MIN_CONFIDENCE: Mapping[str, float] = MappingProxyType(
     {
@@ -41,6 +47,27 @@ _CONFIG_KEYS = (
     "output_optimizer_enabled",
     "native_output_optimizer_enabled",
     "egg_output_optimizer",
+)
+_RTK_CONFIG_KEYS = (
+    "output_optimizer_rtk_enabled",
+    "native_output_optimizer_rtk_enabled",
+    "egg_output_optimizer_rtk",
+)
+_RTK_COMMAND_CONFIG_KEYS = (
+    "output_optimizer_rtk_command",
+    "output_optimizer_rtk_binary",
+    "native_output_optimizer_rtk_command",
+    "native_output_optimizer_rtk_binary",
+)
+_RTK_TIMEOUT_CONFIG_KEYS = (
+    "output_optimizer_rtk_timeout_seconds",
+    "output_optimizer_rtk_timeout",
+    "native_output_optimizer_rtk_timeout_seconds",
+    "native_output_optimizer_rtk_timeout",
+)
+_RTK_PRIVACY_OPT_IN_CONFIG_KEYS = (
+    "output_optimizer_rtk_privacy_opt_in",
+    "native_output_optimizer_rtk_privacy_opt_in",
 )
 _EVENT_ENABLED_KEYS = ("enabled", *_CONFIG_KEYS)
 _EVENT_MODE_KEYS = ("mode", "output_optimizer_mode", "native_output_optimizer_mode")
@@ -91,6 +118,90 @@ def output_optimizer_enabled(
 
     env = os.environ if environ is None else environ
     return is_truthy_output_optimizer_flag(env.get(OUTPUT_OPTIMIZER_ENV) if env is not None else None)
+
+
+def output_optimizer_rtk_enabled(
+    config: Mapping[str, Any] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether the optional RTK adapter is explicitly enabled.
+
+    RTK integration is disabled by default and remains independent from the
+    native optimizer gate.  It can only participate when this dedicated config
+    or env switch is true, so Egg never depends on RTK availability for native
+    optimizer behavior.
+    """
+
+    if config:
+        for key in _RTK_CONFIG_KEYS:
+            if key in config:
+                return is_truthy_output_optimizer_flag(config.get(key))
+
+    env = os.environ if environ is None else environ
+    return is_truthy_output_optimizer_flag(env.get(OUTPUT_OPTIMIZER_RTK_ENV) if env is not None else None)
+
+
+def output_optimizer_rtk_command(
+    config: Mapping[str, Any] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Return the RTK executable/command configured for the optional adapter."""
+
+    if config:
+        for key in _RTK_COMMAND_CONFIG_KEYS:
+            value = config.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    env = os.environ if environ is None else environ
+    value = env.get(OUTPUT_OPTIMIZER_RTK_BIN_ENV) if env is not None else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return DEFAULT_OUTPUT_OPTIMIZER_RTK_COMMAND
+
+
+def output_optimizer_rtk_timeout_seconds(
+    config: Mapping[str, Any] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> float:
+    """Return the bounded RTK adapter subprocess timeout in seconds."""
+
+    values: list[Any] = []
+    if config:
+        values.extend(config.get(key) for key in _RTK_TIMEOUT_CONFIG_KEYS if key in config)
+    env = os.environ if environ is None else environ
+    if env is not None and OUTPUT_OPTIMIZER_RTK_TIMEOUT_ENV in env:
+        values.append(env.get(OUTPUT_OPTIMIZER_RTK_TIMEOUT_ENV))
+
+    for value in values:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return DEFAULT_OUTPUT_OPTIMIZER_RTK_TIMEOUT_SECONDS
+
+
+def output_optimizer_rtk_privacy_opt_in(
+    config: Mapping[str, Any] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Return True only when the user explicitly opts into normal RTK state/telemetry."""
+
+    if config:
+        for key in _RTK_PRIVACY_OPT_IN_CONFIG_KEYS:
+            if key in config:
+                return is_truthy_output_optimizer_flag(config.get(key))
+
+    env = os.environ if environ is None else environ
+    return is_truthy_output_optimizer_flag(
+        env.get(OUTPUT_OPTIMIZER_RTK_PRIVACY_OPT_IN_ENV) if env is not None else None
+    )
 
 
 def normalize_output_optimizer_mode(value: Any) -> str:
@@ -362,10 +473,16 @@ def format_thread_output_optimizer_status(
 
 __all__ = [
     "DEFAULT_OUTPUT_OPTIMIZER_MODE",
+    "DEFAULT_OUTPUT_OPTIMIZER_RTK_COMMAND",
+    "DEFAULT_OUTPUT_OPTIMIZER_RTK_TIMEOUT_SECONDS",
     "OUTPUT_OPTIMIZER_CONFIG_EVENT_TYPE",
     "OUTPUT_OPTIMIZER_ENV",
     "OUTPUT_OPTIMIZER_MODE_MIN_CONFIDENCE",
     "OUTPUT_OPTIMIZER_MODES",
+    "OUTPUT_OPTIMIZER_RTK_BIN_ENV",
+    "OUTPUT_OPTIMIZER_RTK_ENV",
+    "OUTPUT_OPTIMIZER_RTK_PRIVACY_OPT_IN_ENV",
+    "OUTPUT_OPTIMIZER_RTK_TIMEOUT_ENV",
     "OutputOptimizerThreadConfig",
     "append_output_optimizer_config_event",
     "format_thread_output_optimizer_status",
@@ -375,6 +492,10 @@ __all__ = [
     "normalize_output_optimizer_mode",
     "output_optimizer_enabled",
     "output_optimizer_min_confidence_for_mode",
+    "output_optimizer_rtk_command",
+    "output_optimizer_rtk_enabled",
+    "output_optimizer_rtk_privacy_opt_in",
+    "output_optimizer_rtk_timeout_seconds",
     "set_thread_output_optimizer_enabled",
     "set_thread_output_optimizer_mode",
 ]

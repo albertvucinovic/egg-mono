@@ -211,14 +211,14 @@ Goal: make optimization visible without clutter.
 
 Goal: optionally use RTK as one backend/filter provider, not as the foundation.
 
-- [ ] Add optional adapter that can run `rtk pipe` on captured output.
-- [ ] Force privacy-safe env defaults:
-  - [ ] `RTK_TELEMETRY_DISABLED=1`;
-  - [ ] isolated/disabled tracking unless user explicitly opts in.
-- [ ] Never depend on RTK availability for native optimizer behavior.
-- [ ] Adapter failures/timeouts must fallback cleanly.
-- [ ] Tests with fake RTK binary.
-- [ ] Update TODO and commit.
+- [x] Add optional adapter that can run `rtk pipe` on captured output.
+- [x] Force privacy-safe env defaults:
+  - [x] `RTK_TELEMETRY_DISABLED=1`;
+  - [x] isolated/disabled tracking unless user explicitly opts in.
+- [x] Never depend on RTK availability for native optimizer behavior.
+- [x] Adapter failures/timeouts must fallback cleanly.
+- [x] Tests with fake RTK binary.
+- [x] Update TODO and commit.
 
 ## Initial implementation recommendation
 
@@ -239,3 +239,4 @@ Start with Phase 1 only. Do not wire the optimizer into runtime behavior until t
 - 2026-07-03: Phase 3 cargo slice implemented a conservative Cargo/Rust test failure summary filter that preserves failing test names, panic/source excerpts, final test result, and cargo error rerun lines while capping names/sections with explicit notes. All planned Phase 3 semantic filters are now implemented in small slices.
 - 2026-07-03: Phase 4 first slice implemented event-sourced inherited `output_optimizer.config` resolution with env/config fallback compatibility, explicit per-thread enable/disable, modes `conservative`/`balanced`/`aggressive` wired to optimizer min-confidence, runner policy-config population, shared slash commands for status/on/off/mode, and EggW shared-command adapters for the new commands. No separate EggW settings UI/badges were added in this slice.
 - 2026-07-03: Phase 5 UI-observability slice implemented compact optimizer metadata derived from existing `tool_call.output_approval.channels.optimizer`, persisted it on published tool messages when available, kept it out of provider API messages, added terminal title/status display that respects verbosity, exposed EggW `output_optimizer` message metadata and a small badge/raw-output hint, and added backend/terminal/EggW-focused tests. Raw `tool_call.finished.output` remains unchanged and existing artifact recovery notes/tools remain available.
+- 2026-07-03: Phase 6 optional RTK adapter implemented as an explicitly enabled `rtk pipe` filter that runs only on already-captured output, after native semantic filters and before generic fallback. It is disabled by default, has independent `EGG_OUTPUT_OPTIMIZER_RTK`/config gating, uses privacy-safe subprocess defaults (`RTK_TELEMETRY_DISABLED=1`, isolated RTK/XDG state/cache unless explicitly opted in), and cleanly falls back on missing RTK, failures, timeouts, empty/unchanged/expanded output, or optimizer never-worse rejection. Fake-RTK tests cover success, fallback, privacy env, and raw-output preservation.

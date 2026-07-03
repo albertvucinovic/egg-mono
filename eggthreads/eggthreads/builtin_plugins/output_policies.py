@@ -72,7 +72,15 @@ class NativeOptimizerOutputPolicy:
         request: OutputPolicyRequest,
         current: OutputPublicationDecision | None,
     ) -> OutputPublicationDecision:
-        from ..output_optimizer import OptimizeRequest, create_default_output_optimizer, output_optimizer_enabled
+        from ..output_optimizer import (
+            OptimizeRequest,
+            create_default_output_optimizer,
+            output_optimizer_enabled,
+            output_optimizer_rtk_command,
+            output_optimizer_rtk_enabled,
+            output_optimizer_rtk_privacy_opt_in,
+            output_optimizer_rtk_timeout_seconds,
+        )
 
         if not output_optimizer_enabled(request.thread_config):
             return OutputPublicationDecision("abstain", "", reason="Native output optimizer disabled")
@@ -96,6 +104,10 @@ class NativeOptimizerOutputPolicy:
             optimizer = create_default_output_optimizer(
                 min_size_chars=min_size_chars,
                 min_confidence=min_confidence,
+                include_rtk=output_optimizer_rtk_enabled(request.thread_config),
+                rtk_command=output_optimizer_rtk_command(request.thread_config),
+                rtk_timeout_seconds=output_optimizer_rtk_timeout_seconds(request.thread_config),
+                rtk_privacy_opt_in=output_optimizer_rtk_privacy_opt_in(request.thread_config),
             )
             optimization = optimizer.optimize(opt_request)
         except Exception as exc:
