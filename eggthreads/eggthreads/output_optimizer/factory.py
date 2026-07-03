@@ -7,6 +7,7 @@ from .filters.find import FindPathGroupFilter
 from .filters.git_diff import GitDiffCompactFilter
 from .filters.git_status import GitStatusCompactFilter
 from .filters.grep import GrepRgGroupByFileFilter
+from .filters.pytest import PytestFailureSummaryFilter
 from .filters.python_traceback import PythonTracebackFocusFilter
 from .generic import GenericOutputFilter
 
@@ -19,6 +20,7 @@ def default_native_filters(*, bounded_max_chars: int | None = None) -> list[Outp
         FindPathGroupFilter(),
         GitStatusCompactFilter(),
         GitDiffCompactFilter(),
+        PytestFailureSummaryFilter(),
         PythonTracebackFocusFilter(),
         GenericOutputFilter(max_chars=bounded_max_chars),
     ]

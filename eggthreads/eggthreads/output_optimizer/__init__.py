@@ -30,6 +30,7 @@ from .filters.find import FindPathGroupFilter, is_find_like_request, parse_find_
 from .filters.git_diff import GitDiffCompactFilter, is_git_diff_request, parse_git_diff
 from .filters.git_status import GitStatusCompactFilter, is_git_status_request, parse_git_status_entries, parse_git_status_line
 from .filters.grep import GrepRgGroupByFileFilter, is_grep_like_request, parse_grep_rg_matches
+from .filters.pytest import PytestFailureSummaryFilter, is_pytest_request, parse_pytest_failure_output
 from .filters.python_traceback import PythonTracebackFocusFilter, parse_python_traceback
 from .generic import (
     AnsiControlCleanupFilter,
@@ -63,6 +64,7 @@ __all__ = [
     "OutputOptimizerRegistry",
     "PathLineContent",
     "ProgressNoiseFilter",
+    "PytestFailureSummaryFilter",
     "PythonTracebackFocusFilter",
     "RepeatedLineDedupeFilter",
     "bounded_head_tail",
@@ -79,6 +81,7 @@ __all__ = [
     "is_grep_like_request",
     "is_obvious_progress_noise_line",
     "is_plausible_path_list_line",
+    "is_pytest_request",
     "is_truthy_output_optimizer_flag",
     "make_decision",
     "normalize_command_name",
@@ -91,6 +94,7 @@ __all__ = [
     "parse_path_list_lines",
     "parse_path_line_content",
     "parse_path_line_content_lines",
+    "parse_pytest_failure_output",
     "parse_python_traceback",
     "request_command_name",
     "simple_bash_command_invocation",
