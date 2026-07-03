@@ -3,6 +3,7 @@ from __future__ import annotations
 """Factory helpers for composing native output optimizer filters."""
 
 from .core import OutputFilter, OutputOptimizer
+from .filters.find import FindPathGroupFilter
 from .filters.grep import GrepRgGroupByFileFilter
 from .generic import GenericOutputFilter
 
@@ -12,6 +13,7 @@ def default_native_filters(*, bounded_max_chars: int | None = None) -> list[Outp
 
     return [
         GrepRgGroupByFileFilter(),
+        FindPathGroupFilter(),
         GenericOutputFilter(max_chars=bounded_max_chars),
     ]
 

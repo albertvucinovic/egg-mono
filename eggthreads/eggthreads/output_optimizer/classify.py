@@ -110,9 +110,51 @@ def parse_path_line_content_lines(lines: Iterable[str]) -> tuple[PathLineContent
     return tuple(parsed)
 
 
+def is_plausible_path_list_line(line: str) -> bool:
+    """Return True for conservative one-path-per-line output entries."""
+
+    if not isinstance(line, str) or not line:
+        return False
+    if line != line.strip():
+        return False
+    if "\x00" in line or "\r" in line:
+        return False
+    if line.startswith("---") or line.startswith("["):
+        return False
+    # Avoid colliding with grep-style ``path:line:content`` and other colon
+    # diagnostics.  POSIX paths can contain colons, but this optimizer is
+    # deliberately conservative.
+    if ":" in line:
+        return False
+
+    basename = line.rstrip("/").rsplit("/", 1)[-1]
+    if not basename:
+        return line in {"/"}
+    return (
+        "/" in line
+        or line.startswith((".", "~"))
+        or ("." in basename and not basename.endswith("."))
+    )
+
+
+def parse_path_list_lines(lines: Iterable[str], *, min_paths: int = 8) -> tuple[str, ...] | None:
+    """Parse conservative one-path-per-line output or return ``None``."""
+
+    non_empty = tuple(line for line in lines if isinstance(line, str) and line.strip())
+    if len(non_empty) < max(1, int(min_paths)):
+        return None
+    if parse_path_line_content_lines(non_empty) is not None:
+        return None
+    if not all(is_plausible_path_list_line(line) for line in non_empty):
+        return None
+    return non_empty
+
+
 __all__ = [
     "PathLineContent",
+    "is_plausible_path_list_line",
     "normalize_command_name",
+    "parse_path_list_lines",
     "parse_path_line_content",
     "parse_path_line_content_lines",
     "request_command_name",
