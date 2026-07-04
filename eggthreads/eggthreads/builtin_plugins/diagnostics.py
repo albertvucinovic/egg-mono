@@ -143,39 +143,56 @@ def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
 
     optimizer_savings = stats.get("output_optimizer_savings")
     if isinstance(optimizer_savings, dict) and optimizer_savings:
-        optimized_count = int(optimizer_savings.get("optimized_tool_outputs") or 0)
-        if optimized_count > 0:
-            raw_chars = int(optimizer_savings.get("raw_chars") or 0)
-            published_chars = int(optimizer_savings.get("published_chars") or 0)
-            saved_chars = int(optimizer_savings.get("saved_chars") or 0)
-            raw_tokens = int(optimizer_savings.get("raw_tokens") or 0)
-            published_tokens = int(optimizer_savings.get("published_tokens") or 0)
-            saved_tokens = int(optimizer_savings.get("saved_tokens") or 0)
-            savings_pct = float(optimizer_savings.get("savings_pct") or 0.0)
-            token_savings_pct = float(optimizer_savings.get("token_savings_pct") or 0.0)
+        total_tool_outputs = int(optimizer_savings.get("total_tool_calls") or optimizer_savings.get("total_tool_outputs") or 0)
+        optimized_count = int(optimizer_savings.get("optimized_tool_calls") or optimizer_savings.get("optimized_tool_outputs") or 0)
+        if total_tool_outputs > 0:
+            optimized_pct = float(optimizer_savings.get("optimized_tool_call_pct") or optimizer_savings.get("optimized_tool_output_pct") or 0.0)
+            context_tool_outputs = int(optimizer_savings.get("context_tool_calls") or optimizer_savings.get("total_tool_outputs") or 0)
+            context_optimized_count = int(optimizer_savings.get("context_optimized_tool_calls") or optimizer_savings.get("optimized_tool_outputs") or 0)
+            context_optimized_pct = float(optimizer_savings.get("context_optimized_tool_call_pct") or optimizer_savings.get("optimized_tool_output_pct") or 0.0)
+            context_chars = int(optimizer_savings.get("total_context_chars") or optimizer_savings.get("raw_chars") or 0)
+            published_context_chars = int(optimizer_savings.get("published_context_chars") or optimizer_savings.get("published_chars") or 0)
+            context_saved_chars = int(optimizer_savings.get("context_saved_chars") or optimizer_savings.get("saved_chars") or 0)
+            context_savings_pct = float(optimizer_savings.get("context_savings_pct") or 0.0)
+            context_tokens = int(optimizer_savings.get("total_context_tokens") or optimizer_savings.get("raw_tokens") or 0)
+            published_context_tokens = int(optimizer_savings.get("published_context_tokens") or optimizer_savings.get("published_tokens") or 0)
+            context_saved_tokens = int(optimizer_savings.get("context_saved_tokens") or optimizer_savings.get("saved_tokens") or 0)
+            context_token_savings_pct = float(optimizer_savings.get("context_token_savings_pct") or 0.0)
             lines.append("")
             lines.append("Output optimizer publication savings:")
-            lines.append(f"  optimized_tool_outputs: {optimized_count}")
+            lines.append(f"  tool_calls_optimized: {optimized_count}/{total_tool_outputs} ({optimized_pct:.1f}%)")
+            if context_tool_outputs and (context_tool_outputs != total_tool_outputs or context_optimized_count != optimized_count):
+                lines.append(
+                    f"  provider_visible_tool_calls_optimized: {context_optimized_count}/{context_tool_outputs} "
+                    f"({context_optimized_pct:.1f}%)"
+                )
             lines.append(
-                "  chars: raw={raw} published={published} saved={saved} ({pct:.1f}%)".format(
-                    raw=raw_chars,
-                    published=published_chars,
-                    saved=saved_chars,
-                    pct=savings_pct,
+                "  total_tool_output_chars: baseline={raw} published={published} saved={saved} ({pct:.1f}% of all tool output)".format(
+                    raw=context_chars,
+                    published=published_context_chars,
+                    saved=context_saved_chars,
+                    pct=context_savings_pct,
                 )
             )
-            if raw_tokens or published_tokens or saved_tokens:
+            if context_tokens or published_context_tokens or context_saved_tokens:
                 lines.append(
-                    "  approx_tokens: raw={raw} ({raw_fmt}) published={published} ({published_fmt}) "
-                    "saved={saved} ({saved_fmt}, {pct:.1f}%)".format(
-                        raw=raw_tokens,
-                        raw_fmt=_fmt_tok(raw_tokens),
-                        published=published_tokens,
-                        published_fmt=_fmt_tok(published_tokens),
-                        saved=saved_tokens,
-                        saved_fmt=_fmt_tok(saved_tokens),
-                        pct=token_savings_pct,
+                    "  total_tool_output_tokens: baseline={raw} ({raw_fmt}) published={published} ({published_fmt}) "
+                    "saved={saved} ({saved_fmt}, {pct:.1f}% of all tool output)".format(
+                        raw=context_tokens,
+                        raw_fmt=_fmt_tok(context_tokens),
+                        published=published_context_tokens,
+                        published_fmt=_fmt_tok(published_context_tokens),
+                        saved=context_saved_tokens,
+                        saved_fmt=_fmt_tok(context_saved_tokens),
+                        pct=context_token_savings_pct,
                     )
+                )
+            if isinstance(full_thread_tokens, int) and context_saved_tokens > 0:
+                pre_optimizer_full_tokens = int(full_thread_tokens) + context_saved_tokens
+                full_pct = (context_saved_tokens / pre_optimizer_full_tokens * 100.0) if pre_optimizer_full_tokens else 0.0
+                lines.append(
+                    f"  full_thread_context_saved_estimate: {context_saved_tokens} ({_fmt_tok(context_saved_tokens)}) "
+                    f"of ~{pre_optimizer_full_tokens} ({_fmt_tok(pre_optimizer_full_tokens)}) tokens ({full_pct:.1f}%)"
                 )
             by_filter = optimizer_savings.get("by_filter") if isinstance(optimizer_savings.get("by_filter"), dict) else {}
             if by_filter:

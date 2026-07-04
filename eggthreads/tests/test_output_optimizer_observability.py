@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import eggthreads as ts
+import pytest
 from eggthreads.output_optimizer.observability import (
     collect_output_optimizer_savings,
     format_output_optimizer_summary,
@@ -179,6 +180,7 @@ def test_collect_output_optimizer_savings_from_output_approval_events(tmp_path) 
     thread_id = ts.create_root_thread(db, name="optimizer-savings")
     raw = "raw noisy output " * 100
     preview = "short optimized preview"
+    plain_preview = "plain unoptimized tool output"
 
     db.append_event(
         event_id="finished-savings",
@@ -207,14 +209,77 @@ def test_collect_output_optimizer_savings_from_output_approval_events(tmp_path) 
             },
         },
     )
+    db.append_event(
+        event_id="message-savings",
+        thread_id=thread_id,
+        type_="msg.create",
+        payload={"role": "tool", "tool_call_id": "call-savings", "content": preview},
+    )
+    db.append_event(
+        event_id="finished-plain",
+        thread_id=thread_id,
+        type_="tool_call.finished",
+        payload={"tool_call_id": "call-plain", "reason": "success", "output": plain_preview},
+    )
+    db.append_event(
+        event_id="approval-plain",
+        thread_id=thread_id,
+        type_="tool_call.output_approval",
+        payload={
+            "tool_call_id": "call-plain",
+            "decision": "whole",
+            "preview": plain_preview,
+            "channels": {"raw": {"stored_in_finished_event": True}},
+        },
+    )
+    db.append_event(
+        event_id="message-plain",
+        thread_id=thread_id,
+        type_="msg.create",
+        payload={"role": "tool", "tool_call_id": "call-plain", "content": plain_preview},
+    )
+    db.append_event(
+        event_id="finished-hidden",
+        thread_id=thread_id,
+        type_="tool_call.finished",
+        payload={"tool_call_id": "call-hidden", "reason": "success", "output": "hidden raw output"},
+    )
+    db.append_event(
+        event_id="approval-hidden",
+        thread_id=thread_id,
+        type_="tool_call.output_approval",
+        payload={
+            "tool_call_id": "call-hidden",
+            "decision": "whole",
+            "preview": "hidden preview",
+            "channels": {"raw": {"stored_in_finished_event": True}},
+        },
+    )
+    db.append_event(
+        event_id="message-hidden",
+        thread_id=thread_id,
+        type_="msg.create",
+        payload={"role": "tool", "tool_call_id": "call-hidden", "content": "hidden preview", "no_api": True},
+    )
 
     savings = collect_output_optimizer_savings(db, thread_id)
 
-    assert savings["optimized_tool_outputs"] == 1
+    assert savings["total_tool_calls"] == 3
+    assert savings["context_tool_calls"] == 2
+    assert savings["total_tool_outputs"] == 2
+    assert savings["optimized_tool_calls"] == 1
+    assert savings["context_optimized_tool_calls"] == 1
+    assert savings["optimized_tool_call_pct"] == pytest.approx(100.0 / 3.0)
+    assert savings["optimized_tool_output_pct"] == 50.0
+    assert savings["context_optimized_tool_call_pct"] == 50.0
     assert savings["raw_chars"] == len(raw)
     assert savings["published_chars"] == len(preview)
     assert savings["saved_chars"] == len(raw) - len(preview)
     assert savings["savings_pct"] > 90.0
+    assert savings["total_context_chars"] == len(raw) + len(plain_preview)
+    assert savings["published_context_chars"] == len(preview) + len(plain_preview)
+    assert savings["context_saved_chars"] == len(raw) - len(preview)
+    assert savings["context_savings_pct"] < savings["savings_pct"]
     assert savings["saved_tokens"] >= 0
     assert savings["by_filter"]["rtk_pipe"]["count"] == 1
     assert savings["by_filter"]["rtk_pipe"]["saved_chars"] == len(raw) - len(preview)

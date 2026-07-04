@@ -146,7 +146,12 @@ class NativeOptimizerOutputPolicy:
         if current is not None and current.preview and len(published_preview) >= len(str(current.preview)):
             if not request.thread_config:
                 return current
-            optimizer_metadata = dict(self._optimizer_metadata(optimization, fallback=True, published_output=published_preview))
+            optimizer_metadata = dict(self._optimizer_metadata(
+                optimization,
+                fallback=True,
+                published_output=published_preview,
+                baseline_output=current.preview,
+            ))
             optimizer_metadata["published"] = False
             optimizer_metadata["fallback_reason"] = "not_smaller_than_current_preview"
             return self._current_with_optimizer_metadata(current, optimizer_metadata)
@@ -169,7 +174,12 @@ class NativeOptimizerOutputPolicy:
             if current is not None and current.preview and len(published_preview) >= len(str(current.preview)):
                 if not request.thread_config:
                     return current
-                optimizer_metadata = dict(self._optimizer_metadata(optimization, fallback=True, published_output=published_preview))
+                optimizer_metadata = dict(self._optimizer_metadata(
+                    optimization,
+                    fallback=True,
+                    published_output=published_preview,
+                    baseline_output=current.preview,
+                ))
                 optimizer_metadata["published"] = False
                 optimizer_metadata["fallback_reason"] = "not_smaller_than_current_preview"
                 return self._current_with_optimizer_metadata(current, optimizer_metadata)
@@ -177,7 +187,12 @@ class NativeOptimizerOutputPolicy:
         base_channels = dict(current.channels) if current is not None and current.channels else {}
         channels = {
             **base_channels,
-            "optimizer": self._optimizer_metadata(optimization, fallback=False, published_output=published_preview),
+            "optimizer": self._optimizer_metadata(
+                optimization,
+                fallback=False,
+                published_output=published_preview,
+                baseline_output=current.preview if current is not None else request.output,
+            ),
         }
         if artifact_path:
             channels[OUTPUT_CHANNELS.artifact] = artifact_path
@@ -291,6 +306,7 @@ class NativeOptimizerOutputPolicy:
         *,
         fallback: bool,
         published_output: str | None = None,
+        baseline_output: str | None = None,
     ) -> Mapping[str, Any]:
         metadata = {
             "name": optimization.optimizer_name,
@@ -309,6 +325,14 @@ class NativeOptimizerOutputPolicy:
             published_chars = len(published_output)
             metadata["published_chars"] = published_chars
             metadata["published_savings_pct"] = ((raw_chars - published_chars) / raw_chars * 100.0) if raw_chars else 0.0
+        if baseline_output is not None:
+            baseline_chars = len(str(baseline_output))
+            metadata["baseline_chars"] = baseline_chars
+            if published_output is not None:
+                published_chars = len(published_output)
+                baseline_saved_chars = baseline_chars - published_chars
+                metadata["baseline_saved_chars"] = baseline_saved_chars
+                metadata["baseline_savings_pct"] = ((baseline_saved_chars / baseline_chars * 100.0) if baseline_chars else 0.0)
         return metadata
 
     @staticmethod
