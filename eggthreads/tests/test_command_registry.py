@@ -461,6 +461,7 @@ def test_diagnostics_commands_are_registered_handlers(monkeypatch) -> None:
                     },
                 },
             },
+            "compaction": {"compacted": True},
             "api_usage_since_compaction": {
                 "total_input_tokens": 3,
                 "cached_input_tokens": 1,

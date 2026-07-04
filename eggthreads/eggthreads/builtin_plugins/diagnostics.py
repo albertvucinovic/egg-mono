@@ -58,6 +58,8 @@ def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
 
     ctx_tokens = stats.get("context_tokens")
     full_thread_tokens = stats.get("full_thread_tokens")
+    compaction_info = stats.get("compaction") if isinstance(stats.get("compaction"), dict) else {}
+    compaction_active = bool(compaction_info.get("compacted"))
     api = stats.get("api_usage", stats)
     since_api = stats.get("api_usage_since_compaction")
     if not isinstance(api, dict):
@@ -135,9 +137,10 @@ def format_cost_report(stats: Dict[str, Any], target_thread: Any) -> str:
         lines.append(f"  current_provider_context_tokens:  {ctx_tokens} ({_fmt_tok(ctx_tokens)})")
     if compacted_away_tokens:
         lines.append(f"  compacted_away_tokens:            {compacted_away_tokens} ({_fmt_tok(compacted_away_tokens)})")
+    lines.append(f"  compaction:                       {'active' if compaction_active else 'inactive'}")
     lines.append("")
     _append_usage_section(lines, "Full context usage (full effective history):", api)
-    if since_api is not None:
+    if since_api is not None and compaction_active:
         lines.append("")
         _append_usage_section(lines, "Current provider context usage (after last compaction):", since_api)
 
@@ -274,6 +277,13 @@ def cost_command(context: Any, arg: str):
     try:
         llm = context.llm_client if getattr(context, "llm_client", None) is not None else getattr(getattr(context, "app", None), "llm_client", None)
         stats = thread_token_stats(db, thread_id, llm=llm)
+        try:
+            from ..api import thread_compaction_status
+
+            stats = dict(stats)
+            stats["compaction"] = thread_compaction_status(db, thread_id)
+        except Exception:
+            pass
         optimizer_savings = collect_output_optimizer_savings(db, thread_id)
         if optimizer_savings:
             stats = dict(stats)

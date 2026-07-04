@@ -6,6 +6,7 @@ authors = [{name="Entropy Gradient", email="noreply@example.com"}]
 requires-python = ">=3.10"
 dependencies = [
   "rich",
+  "tiktoken>=0.7",
   "uvloop; platform_system != 'Windows'",
   "eggllm>=0.1.0",
   "requests",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 This module computes *approximate* token statistics for a thread
 snapshot using the ``tiktoken`` ``cl100k_base`` encoding when
-available, falling back to a simple character‑based heuristic when
+available, falling back to a conservative character/run heuristic when
 ``tiktoken`` is not installed.
 
 Design goals
@@ -117,8 +117,10 @@ def _count_text_tokens(text: str) -> int:
 
     * If ``tiktoken`` / ``cl100k_base`` is available, we use it
       directly.
-    * Otherwise we fall back to a simple ``len(text) // 4`` heuristic,
-      which is good enough for high‑level estimates.
+    * Otherwise we fall back to a conservative heuristic that keeps the
+      historical ``len(text) // 4`` estimate for normal prose, but counts
+      token-dense structured text (for example ARC grids like ``0 0 0``)
+      by whitespace/non-whitespace runs.
     """
 
     if not isinstance(text, str) or not text:
@@ -126,13 +128,63 @@ def _count_text_tokens(text: str) -> int:
 
     enc = _get_encoding()
     if enc is None:  # pragma: no cover - depends on environment
-        # Rough average of 4 characters per token for English‑ish text.
-        # Add 1 for non‑empty strings to avoid zero counts.
-        return max(1, len(text) // 4)
+        return _fallback_count_text_tokens(text)
     try:
         return len(enc.encode(text))
     except Exception:  # pragma: no cover - extremely defensive
-        return max(1, len(text) // 4)
+        return _fallback_count_text_tokens(text)
+
+
+def _fallback_count_text_tokens(text: str) -> int:
+    """Fallback token estimate used only when ``tiktoken`` is unavailable.
+
+    The old fallback was just ``len(text) // 4``.  That is acceptable for
+    English-ish prose, but badly undercounts token-dense structured output such
+    as ARC grids, compact logs, and code fragments with many short symbols.
+
+    Keep the cheap char estimate as the default, then use a single linear scan
+    to detect dense structured text.  For such text, a whitespace/non-whitespace
+    run count is a much safer approximation while still avoiding regex work or
+    provider-specific tokenizers in the hot path.
+    """
+
+    if not isinstance(text, str) or not text:
+        return 0
+
+    char_estimate = max(1, len(text) // 4)
+
+    runs = 0
+    nonspace_runs = 0
+    nonspace_chars = 0
+    digit_or_symbol_chars = 0
+    previous_was_space: Optional[bool] = None
+
+    for ch in text:
+        is_space = ch.isspace()
+        if previous_was_space is None or is_space != previous_was_space:
+            runs += 1
+            previous_was_space = is_space
+            if not is_space:
+                nonspace_runs += 1
+        if is_space:
+            continue
+        nonspace_chars += 1
+        if not ch.isalpha():
+            digit_or_symbol_chars += 1
+
+    if nonspace_runs <= 0:
+        return char_estimate
+
+    average_nonspace_run = nonspace_chars / float(nonspace_runs)
+    digit_or_symbol_ratio = digit_or_symbol_chars / float(len(text))
+    dense_structured_text = (
+        nonspace_runs >= 16
+        and average_nonspace_run <= 5.0
+        and digit_or_symbol_ratio >= 0.12
+    )
+    if dense_structured_text:
+        return max(char_estimate, runs)
+    return char_estimate
 
 
 def count_text_tokens(text: str) -> int:
@@ -1895,27 +1947,47 @@ def thread_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> D
     """
 
     full = total_token_stats(db, thread_id, llm=llm)
+    has_compaction = False
     try:
-        provider = provider_context_token_stats(db, thread_id)
+        from .api import latest_effective_thread_compaction
+
+        has_compaction = latest_effective_thread_compaction(db, thread_id) is not None
     except Exception:
-        provider = {}
+        has_compaction = False
+
+    provider: Dict[str, Any] = {}
+    if has_compaction:
+        try:
+            provider = provider_context_token_stats(db, thread_id)
+        except Exception:
+            provider = {}
 
     out = dict(full) if isinstance(full, dict) else {}
     try:
         out["full_thread_tokens"] = int((full or {}).get("context_tokens") or 0)
     except Exception:
         out["full_thread_tokens"] = 0
-    try:
-        provider_context_tokens = int((provider or {}).get("context_tokens") or 0)
-    except Exception:
+    if has_compaction:
+        try:
+            provider_context_tokens = int((provider or {}).get("context_tokens") or 0)
+        except Exception:
+            provider_context_tokens = int(out.get("full_thread_tokens") or 0)
+    else:
+        # Without compaction the provider prompt and full effective thread are
+        # the same logical context.  Avoid comparing cached full-history stats
+        # against a separately recomputed provider view and presenting the
+        # difference as if tokens had been compacted away.
         provider_context_tokens = int(out.get("full_thread_tokens") or 0)
     out["context_tokens"] = int(provider_context_tokens)
-    try:
-        provider_image_tokens = int((provider or {}).get("image_tokens") or 0)
-    except Exception:
+    if has_compaction:
+        try:
+            provider_image_tokens = int((provider or {}).get("image_tokens") or 0)
+        except Exception:
+            provider_image_tokens = int(out.get("image_tokens") or 0)
+    else:
         provider_image_tokens = int(out.get("image_tokens") or 0)
     out["image_tokens"] = int(provider_image_tokens)
-    if isinstance(provider, dict) and "per_message" in provider:
+    if has_compaction and isinstance(provider, dict) and "per_message" in provider:
         out["provider_per_message"] = provider.get("per_message") or {}
     return out
 
