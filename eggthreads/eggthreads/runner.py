@@ -3184,6 +3184,7 @@ class ThreadRunner:
                 # references read_long_tool_output usage. A UI cancellation (Ctrl+C)
                 # that already recorded an explicit decision is respected.
                 try:
+                    parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
                     _emit_auto_output_approval(
                         self.db,
                         self.thread_id,
@@ -3198,6 +3199,7 @@ class ThreadRunner:
                             'ra_kind': ra.kind,
                             'parent_msg_id': tc.parent_msg_id,
                             'parent_role': tc.parent_role,
+                            'parent_no_api': parent_no_api,
                             'tool_index': tc.index,
                         },
                         original_char_count=original_output_char_count,

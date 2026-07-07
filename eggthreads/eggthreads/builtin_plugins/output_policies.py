@@ -82,6 +82,13 @@ class NativeOptimizerOutputPolicy:
             output_optimizer_rtk_timeout_seconds,
         )
 
+        if request.user_tool_call and self._is_hidden_user_command(request):
+            return OutputPublicationDecision(
+                "abstain",
+                "",
+                reason="Native output optimizer skipped for hidden user command",
+            )
+
         if not output_optimizer_enabled(request.thread_config):
             return OutputPublicationDecision("abstain", "", reason="Native output optimizer disabled")
 
@@ -360,6 +367,19 @@ class NativeOptimizerOutputPolicy:
         if isinstance(value, (list, tuple, set, frozenset)):
             return [NativeOptimizerOutputPolicy._plain_metadata(item) for item in value]
         return value
+
+    @staticmethod
+    def _is_hidden_user_command(request: OutputPolicyRequest) -> bool:
+        """Return True for ``$$`` / ``no_api`` user-command outputs.
+
+        Hidden user commands are local-only: the final tool message is marked
+        ``no_api`` and is not sent to the model.  They should still receive the
+        default publication policy for safety/artifacts, but not semantic LLM
+        output optimization.
+        """
+
+        metadata = request.tool_metadata if isinstance(request.tool_metadata, Mapping) else {}
+        return bool(metadata.get("parent_no_api") or metadata.get("no_api") or metadata.get("hidden_user_command"))
 
     @staticmethod
     def _min_size_chars(request: OutputPolicyRequest) -> int:

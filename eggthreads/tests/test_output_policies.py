@@ -174,7 +174,15 @@ def test_enabled_optimizer_preserves_long_output_artifact_recovery(tmp_path, mon
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
     db.init_schema()
     tid = ts.create_root_thread(db, name="root")
-    tcid = ts.enqueue_user_tool_call(db, tid, "long_repeat", {}, auto_approve=True, hidden=True)
+    tcid = ts.enqueue_user_tool_call(
+        db,
+        tid,
+        "long_repeat",
+        {},
+        auto_approve=True,
+        hidden=False,
+        content="$ long_repeat",
+    )
     line = "long optimizer repeated raw line " * 8
     raw_output = "\n".join([line] * 60)
 
@@ -348,7 +356,7 @@ def test_default_optimizer_bounds_medium_visible_user_command_output(tmp_path, m
     assert "read_long_tool_output(" in tool_msg["content"]
 
 
-def test_enabled_optimizer_preserves_hidden_user_command_no_api(tmp_path, monkeypatch):
+def test_enabled_optimizer_skips_hidden_user_command_no_api(tmp_path, monkeypatch):
     monkeypatch.setenv("EGG_OUTPUT_OPTIMIZER", "yes")
     monkeypatch.setenv("EGG_SANDBOX_MODE", "off")
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
@@ -362,8 +370,9 @@ def test_enabled_optimizer_preserves_hidden_user_command_no_api(tmp_path, monkey
     assert asyncio.run(runner.run_once()) is True
 
     approval = _latest_payload(db, tid, "tool_call.output_approval", tcid)
-    assert approval["channels"]["optimizer"]["optimized"] is True
-    assert "[... repeated 5 more times ...]" in approval["preview"]
+    assert "optimizer" not in approval["channels"]
+    assert "[... repeated" not in approval["preview"]
+    assert f"{line}\n{line}" in approval["preview"]
 
     assert asyncio.run(runner.run_once()) is True
     tool_msg = _latest_payload(db, tid, "msg.create", tcid)
@@ -371,4 +380,6 @@ def test_enabled_optimizer_preserves_hidden_user_command_no_api(tmp_path, monkey
     assert tool_msg["tool_call_id"] == tcid
     assert tool_msg.get("no_api") is True
     assert tool_msg.get("keep_user_turn") is True
-    assert "[... repeated 5 more times ...]" in tool_msg["content"]
+    assert "output_optimizer" not in tool_msg
+    assert "[... repeated" not in tool_msg["content"]
+    assert f"{line}\n{line}" in tool_msg["content"]
