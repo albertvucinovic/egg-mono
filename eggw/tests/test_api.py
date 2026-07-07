@@ -2720,6 +2720,7 @@ class TestCommands:
         assert "/theme [name]" in data["message"]
         assert "/rename <name>" in data["message"]
         assert "/editAnswer [assistant_msg_id|suffix]" in data["message"]
+        assert "/editor" in data["message"]
         assert "/spawn <context>" not in data["message"]
         assert "/redraw — No-op in EggW" in data["message"]
         assert "/displayMode — Terminal-only" in data["message"]
@@ -3136,6 +3137,7 @@ class TestAutocomplete:
             "clearAttachments",
             "imageGenerate",
             "editAnswer",
+            "editor",
         }
         assert {f"/{name}" for name in extra_eggw_commands} <= set(EGGW_COMMAND_COMPLETIONS)
         assert "/spawn" not in EGGW_COMMAND_COMPLETIONS

@@ -127,6 +127,31 @@ def test_prepare_edit_answer_draft_selects_latest_textual_assistant_by_default(t
     assert draft.source_suffix == latest_id[-8:]
 
 
+def test_prepare_edit_answer_draft_reports_no_textual_assistant_by_default(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+
+    with pytest.raises(ValueError, match="No assistant answer with textual content"):
+        prepare_edit_answer_draft(db, tid)
+
+
+def test_prepare_edit_answer_draft_can_fallback_to_empty_input(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+
+    draft = prepare_edit_answer_draft(db, tid, fallback_to_empty_input=True)
+
+    assert draft.draft == ""
+    assert draft.source_msg_id == ""
+    assert draft.source_kind == "input_message"
+    assert draft.source_label == "input message"
+
+
+def test_prepare_edit_answer_draft_selector_still_errors_with_empty_fallback(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+
+    with pytest.raises(ValueError, match="No assistant answer matched selector"):
+        prepare_edit_answer_draft(db, tid, "missing", fallback_to_empty_input=True)
+
+
 def test_prepare_edit_answer_draft_selects_active_waiting_assistant_note(tmp_path: Path) -> None:
     db, tid = _make_db(tmp_path)
     ts.append_message(db, tid, "assistant", "Older final answer")

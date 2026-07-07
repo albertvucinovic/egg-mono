@@ -134,7 +134,7 @@ class EditAnswerDraftResponse(BaseModel):
     action: Literal["open_edit_answer_modal"] = "open_edit_answer_modal"
     draft: str
     source_msg_id: str
-    source_kind: Literal["assistant_answer", "assistant_note"]
+    source_kind: Literal["assistant_answer", "assistant_note", "input_message"]
     source_suffix: str = ""
     source_label: str = ""
     suppress_transcript: bool = True

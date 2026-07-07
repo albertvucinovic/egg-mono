@@ -104,7 +104,7 @@ export interface SystemLog {
   type: "info" | "error" | "success";
 }
 
-export type EditAnswerSourceKind = "assistant_answer" | "assistant_note";
+export type EditAnswerSourceKind = "assistant_answer" | "assistant_note" | "input_message";
 export type EditAnswerOrigin = "command" | "quote_button";
 
 export interface EditAnswerModalState {

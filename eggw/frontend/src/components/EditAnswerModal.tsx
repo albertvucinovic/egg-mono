@@ -19,6 +19,10 @@ function sourceTitle(sourceLabel: string, sourceSuffix: string) {
   return `${label}${sourceSuffix ? ` ${sourceSuffix}` : ""}`;
 }
 
+function isInputMessageSource(sourceLabel: string, sourceKind: string) {
+  return sourceKind === "input_message" || sourceLabel === "input message";
+}
+
 function DraftEditorLoading() {
   return (
     <div
@@ -59,6 +63,7 @@ export function EditAnswerModal() {
 
   const isVisible = modal.isOpen && Boolean(modal.threadId) && modal.threadId === currentThreadId;
   const source = useMemo(() => sourceTitle(modal.sourceLabel, modal.sourceSuffix), [modal.sourceLabel, modal.sourceSuffix]);
+  const isInputMessage = isInputMessageSource(modal.sourceLabel, modal.sourceKind);
   const replacesCommandText = Boolean(modal.replaceCommandText && composerDraft === modal.replaceCommandText);
   const hasExistingComposerDraft = Boolean(composerDraft.trim()) && !replacesCommandText;
   const canLoadDirectly = !hasExistingComposerDraft;
@@ -74,7 +79,7 @@ export function EditAnswerModal() {
   }, [isVisible, modal.threadId, modal.sourceMsgId]);
 
   const finishLoad = (verb: "Loaded" | "Appended") => {
-    addSystemLog(`${verb} quoted ${source} into composer`, "success");
+    addSystemLog(isInputMessage ? `${verb} input message draft into composer` : `${verb} quoted ${source} into composer`, "success");
     closeEditAnswerModal();
     focusComposerSoon();
   };
@@ -135,11 +140,11 @@ export function EditAnswerModal() {
         style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
         role="dialog"
         aria-modal="true"
-        aria-label="Edit assistant answer"
+        aria-label={isInputMessage ? "Edit input message" : "Edit assistant answer"}
       >
         <div className="flex items-start justify-between gap-3 border-b p-4" style={{ borderColor: "var(--panel-border)" }}>
           <div className="min-w-0">
-            <h2 className="text-lg font-semibold">Edit assistant answer</h2>
+            <h2 className="text-lg font-semibold">{isInputMessage ? "Edit input message" : "Edit assistant answer"}</h2>
             <div className="mt-1 text-xs font-mono" style={{ color: "var(--muted)" }}>
               Source: {source}{modal.sourceMsgId ? ` · ${modal.sourceMsgId}` : ""}
             </div>
@@ -156,7 +161,9 @@ export function EditAnswerModal() {
 
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <p className="mb-3 text-sm" style={{ color: "var(--muted)" }}>
-            Editing raw quoted assistant markdown in Monaco. This will load into the composer; it will not send automatically.
+            {isInputMessage
+              ? "Write an input message in Monaco. This will load into the composer; it will not send automatically."
+              : "Editing raw quoted assistant markdown in Monaco. This will load into the composer; it will not send automatically."}
           </p>
           <DraftEditor
             value={modal.draft}

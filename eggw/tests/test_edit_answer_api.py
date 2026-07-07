@@ -282,6 +282,52 @@ def test_edit_answer_endpoint_reports_no_assistant_answer(client: TestClient):
     assert "No assistant answer with textual content" in response.json()["detail"]
 
 
+def test_edit_answer_command_opens_empty_editor_when_no_answer(client: TestClient):
+    thread_id = _create_thread(client, "Edit Empty Fallback Command")
+
+    response = client.post(f"/api/threads/{thread_id}/command", json={"command": "/editAnswer"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["message"] == "Prepared empty input message draft."
+    assert payload["data"] == {
+        "action": "open_edit_answer_modal",
+        "draft": "",
+        "source_msg_id": "",
+        "source_kind": "input_message",
+        "source_suffix": "",
+        "source_label": "input message",
+        "suppress_transcript": True,
+        "message": "Prepared empty input message draft.",
+    }
+
+
+def test_editor_command_opens_empty_editor_draft(client: TestClient):
+    thread_id = _create_thread(client, "Editor Command")
+
+    response = client.post(f"/api/threads/{thread_id}/command", json={"command": "/editor"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["source_kind"] == "input_message"
+    assert payload["data"]["draft"] == ""
+    assert payload["data"]["source_label"] == "input message"
+
+
+def test_editor_command_rejects_arguments(client: TestClient):
+    thread_id = _create_thread(client, "Editor Command Args")
+
+    response = client.post(f"/api/threads/{thread_id}/command", json={"command": "/editor unexpected"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["data"] is None
+    assert "/editor does not take arguments" in payload["message"]
+
+
 def test_edit_answer_command_reports_no_selector_match(client: TestClient):
     from eggthreads import append_message
 

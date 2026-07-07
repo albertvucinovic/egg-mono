@@ -223,7 +223,7 @@ export interface EditAnswerDraftResponse {
   action: "open_edit_answer_modal";
   draft: string;
   source_msg_id: string;
-  source_kind: "assistant_answer" | "assistant_note";
+  source_kind: "assistant_answer" | "assistant_note" | "input_message";
   source_suffix?: string;
   source_label?: string;
   suppress_transcript?: boolean;

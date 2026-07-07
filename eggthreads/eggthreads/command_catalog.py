@@ -478,6 +478,7 @@ EGGW_COMMAND_COMPLETIONS: List[str] = [
     '/clearAttachments',
     '/imageGenerate',
     '/editAnswer',
+    '/editor',
     # Web-only options.
     '/rename',
     '/theme',

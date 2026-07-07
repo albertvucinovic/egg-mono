@@ -50,7 +50,7 @@ from .attachments import (
     cmd_save_provider_artifact,
 )
 from .image_generation import cmd_image_generate
-from .edit_answer import cmd_edit_answer
+from .edit_answer import cmd_edit_answer, cmd_editor
 from .utility import (
     cmd_toggle_auto_approval,
     cmd_toggle_auto_continue_on_error,
@@ -183,6 +183,7 @@ __all__ = [
     # Image generation commands
     "cmd_image_generate",
     "cmd_edit_answer",
+    "cmd_editor",
     # Auth commands
     "cmd_login",
     "cmd_logout",
@@ -275,6 +276,8 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
             return await cmd_image_generate(thread_id, command_arg)
         elif command_name == "editAnswer":
             return await cmd_edit_answer(thread_id, command_arg)
+        elif command_name == "editor":
+            return await cmd_editor(thread_id, command_arg)
         elif command_name == "toolsOn":
             return await cmd_tools_on(thread_id)
         elif command_name == "toolsOff":

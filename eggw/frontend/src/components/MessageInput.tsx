@@ -282,7 +282,11 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
             threadId: currentThreadId,
             draft: typeof response.data?.draft === "string" ? response.data.draft : "",
             sourceMsgId: typeof response.data?.source_msg_id === "string" ? response.data.source_msg_id : "",
-            sourceKind: response.data?.source_kind === "assistant_note" ? "assistant_note" : "assistant_answer",
+            sourceKind: response.data?.source_kind === "assistant_note"
+              ? "assistant_note"
+              : response.data?.source_kind === "input_message"
+                ? "input_message"
+                : "assistant_answer",
             sourceSuffix: typeof response.data?.source_suffix === "string" ? response.data.source_suffix : "",
             sourceLabel: typeof response.data?.source_label === "string" ? response.data.source_label : "",
             origin: "command",
@@ -304,11 +308,12 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
             timestamp,
           });
         }
-        addSystemLog(response.message || "Command completed", "success");
-
         if (isEditAnswerModalAction) {
+          addSystemLog(response.message || "Command completed", "success");
           return;
         }
+
+        addSystemLog(response.message || "Command completed", "success");
 
         if (response.data?.action === "reload") {
           setTimeout(() => {
