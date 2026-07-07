@@ -87,14 +87,19 @@ export function useSSE(threadId: string | null) {
     }
   }, []);
 
+  const refreshMessagesNow = useCallback(() => {
+    if (!threadId) return;
+    queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+  }, [queryClient, threadId]);
+
   const scheduleMessageRefresh = useCallback((delayMs = 750) => {
     if (!threadId) return;
     clearScheduledMessageRefresh();
     messageRefreshTimeoutRef.current = window.setTimeout(() => {
       messageRefreshTimeoutRef.current = null;
-      queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+      refreshMessagesNow();
     }, delayMs);
-  }, [clearScheduledMessageRefresh, queryClient, threadId]);
+  }, [clearScheduledMessageRefresh, refreshMessagesNow, threadId]);
 
   const connect = useCallback(() => {
     if (!threadId) return;
@@ -156,6 +161,12 @@ export function useSSE(threadId: string | null) {
         }
         setStreamingProviderRequest(null);
         setIsStreaming(true);
+        // A stream can begin from another client immediately after that client
+        // appends the user turn.  If EggW connected/reconnected between the
+        // msg.create and stream.open events, it may not have observed the user
+        // msg.create event directly.  Refresh the transcript at the stream
+        // boundary so the visible streaming answer has its triggering message.
+        refreshMessagesNow();
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
         addSystemLog(`Streaming started${modelKey ? ` (${modelKey})` : ""}`, "info");
       } catch (err) {
@@ -252,7 +263,16 @@ export function useSSE(threadId: string | null) {
         const payload = data.payload || {};
         const role = payload.role || "unknown";
         addSystemLog(`Message created: ${role}`, "info");
-        scheduleMessageRefresh(750);
+        if (role === "user") {
+          // User messages can be produced by another client (terminal Egg) just
+          // before stream.open.  stream.open intentionally clears delayed
+          // transcript refreshes, so fetch user turns immediately instead of
+          // relying only on the debounced refresh.  This keeps EggW's transcript
+          // synchronized while provider streaming is already visible.
+          refreshMessagesNow();
+        } else {
+          scheduleMessageRefresh(750);
+        }
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
@@ -484,6 +504,7 @@ export function useSSE(threadId: string | null) {
   }, [
     threadId,
     clearScheduledMessageRefresh,
+    refreshMessagesNow,
     scheduleMessageRefresh,
     setStreamingToolCalls,
     setStreamingToolOutputs,

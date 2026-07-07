@@ -2042,6 +2042,44 @@ class TestMessageOperations:
 class TestEventStreaming:
     """Test SSE event shaping for streaming UI clients."""
 
+    def test_sse_replay_for_active_stream_includes_preceding_user_message(self, client):
+        """Joining mid-stream must also replay the user turn that triggered it."""
+        from eggthreads import append_message
+        from eggw.routes.events import stream_events
+
+        create_resp = client.post("/api/threads", json={"name": "Active Stream User Replay"})
+        thread_id = create_resp.json()["id"]
+        user_msg_id = append_message(core_state.db, thread_id, "user", "hello from terminal egg")
+        invoke_id = "invoke-user-replay"
+        core_state.db.append_event(
+            event_id=os.urandom(10).hex(),
+            thread_id=thread_id,
+            type_="stream.open",
+            msg_id=os.urandom(10).hex(),
+            invoke_id=invoke_id,
+            payload={"stream_kind": "llm", "model_key": "test-model"},
+        )
+
+        async def collect_first_two_events():
+            generator = await stream_events(thread_id)
+            try:
+                return [await generator.__anext__(), await generator.__anext__()]
+            finally:
+                await generator.aclose()
+
+        with patch("eggw.routes.events.EventSourceResponse", lambda generator, **kwargs: generator):
+            first, second = asyncio.run(collect_first_two_events())
+
+        assert first["event"] == "msg.create"
+        first_data = json.loads(first["data"])
+        assert first_data["msg_id"] == user_msg_id
+        assert first_data["payload"]["role"] == "user"
+        assert first_data["payload"]["content"] == "hello from terminal egg"
+
+        assert second["event"] == "stream.open"
+        second_data = json.loads(second["data"])
+        assert second_data["invoke_id"] == invoke_id
+
     def test_sse_replays_active_tool_stream_with_preview_limit_indicator(self, client):
         """An eggw client joining mid-tool-stream sees preview + suppressed event."""
         pytest.skip("SSE TestClient stream hangs in CI; needs real-server SSE test")
@@ -2609,6 +2647,7 @@ class TestCommands:
                         },
                     },
                 },
+                "compaction": {"compacted": True},
                 "api_usage_since_compaction": {
                     "total_input_tokens": 3,
                     "cached_input_tokens": 1,
