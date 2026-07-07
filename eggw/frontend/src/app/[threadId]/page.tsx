@@ -355,7 +355,7 @@ export default function ThreadPage() {
               <p>/sessionStatus, /sessionOn, /sessionOff, /sessionStop, /sessionReset</p>
               <p>/sessionCleanup, /pythonRepl, /bashRepl</p>
               <p>/setContextLimit, /setThreadPriority, /authStatus, /login, /logout</p>
-              <p>/editAnswer, /togglePanel, /toggleBorders, /enterMode, /theme, /cost, /reload, /quit</p>
+              <p>/editor, /editAnswer, /togglePanel, /toggleBorders, /enterMode, /theme, /cost, /reload, /quit</p>
               <p>/startSearxng, /stopSearxng</p>
               <p>$ cmd - Shell, $$ cmd - Hidden shell</p>
             </div>

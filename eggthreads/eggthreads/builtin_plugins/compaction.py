@@ -175,14 +175,22 @@ def build_context_status(db: Any, thread_id: str, *, llm: Any = None) -> tuple[s
     context_limit = get_context_limit(db, thread_id)
     auto_threshold = resolve_auto_compact_threshold(db, thread_id)
 
+    compaction_active = bool(compaction.get("compacted"))
+    if compaction_active:
+        provider_calculation = "provider/API prompt after compaction"
+        full_calculation = "full effective thread before compaction filtering"
+    else:
+        provider_calculation = "full provider/API prompt (no compaction active)"
+        full_calculation = "same as current provider context; no compaction filtering"
+
     lines = [
         f"Thread {thread_id[-8:]} context:",
         "  current_provider_context:",
         f"    context_tokens:       {fmt_tok(context_tokens)}",
-        "    calculation:          provider/API prompt after compaction",
+        f"    calculation:          {provider_calculation}",
         "  full_thread_context:",
         f"    context_tokens:       {fmt_tok(full_thread_tokens)}",
-        "    calculation:          full effective thread before compaction filtering",
+        f"    calculation:          {full_calculation}",
     ]
     if compacted_away_tokens:
         lines.append(f"  compacted_away_tokens: {fmt_tok(compacted_away_tokens)}")
@@ -199,7 +207,7 @@ def build_context_status(db: Any, thread_id: str, *, llm: Any = None) -> tuple[s
     else:
         lines.append(f"  auto_compact_threshold: disabled (source: {auto_threshold.source})")
 
-    if compaction.get("compacted"):
+    if compaction_active:
         lines.extend([
             "  compaction:             active",
             f"  prompt_start_msg_id:    {compaction.get('current_prompt_start_msg_id') or 'unknown'}",

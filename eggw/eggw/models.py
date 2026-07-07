@@ -33,6 +33,7 @@ class MessageContent(BaseModel):
     tool_stream: Optional[Dict[str, Any]] = None
     tool_calls_stream: Optional[Dict[str, Any]] = None
     tool_call_id: Optional[str] = None
+    output_optimizer: Optional[Dict[str, Any]] = None
     name: Optional[str] = None
     timestamp: Optional[datetime] = None
     tokens: Optional[int] = None
@@ -133,7 +134,7 @@ class EditAnswerDraftResponse(BaseModel):
     action: Literal["open_edit_answer_modal"] = "open_edit_answer_modal"
     draft: str
     source_msg_id: str
-    source_kind: Literal["assistant_answer", "assistant_note"]
+    source_kind: Literal["assistant_answer", "assistant_note", "input_message", "message"]
     source_suffix: str = ""
     source_label: str = ""
     suppress_transcript: bool = True

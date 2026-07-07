@@ -637,7 +637,7 @@ def format_auto_continue_notice(
     if detail:
         lines.append(f"Detail: {detail}")
     if decision.source_summary:
-        lines.append(f"Source: {decision.source_summary}")
+        lines.append(f"Previous error: {decision.source_summary}")
     return "\n".join(lines)
 
 

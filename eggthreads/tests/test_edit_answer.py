@@ -127,6 +127,42 @@ def test_prepare_edit_answer_draft_selects_latest_textual_assistant_by_default(t
     assert draft.source_suffix == latest_id[-8:]
 
 
+def test_prepare_edit_answer_draft_reports_no_textual_assistant_by_default(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+
+    with pytest.raises(ValueError, match="No assistant answer with textual content"):
+        prepare_edit_answer_draft(db, tid)
+
+
+def test_prepare_edit_answer_draft_can_fallback_to_empty_input(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+
+    draft = prepare_edit_answer_draft(db, tid, fallback_to_empty_input=True)
+
+    assert draft.draft == ""
+    assert draft.source_msg_id == ""
+    assert draft.source_kind == "input_message"
+    assert draft.source_label == "input message"
+
+
+def test_prepare_edit_answer_draft_selector_still_errors_with_empty_fallback(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+
+    with pytest.raises(ValueError, match="No message matched selector"):
+        prepare_edit_answer_draft(db, tid, "missing", fallback_to_empty_input=True)
+
+
+def test_prepare_edit_answer_draft_can_treat_unmatched_selector_as_input_text(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+
+    draft = prepare_edit_answer_draft(db, tid, "write this prompt", fallback_unmatched_selector_to_input=True)
+
+    assert draft.draft == "write this prompt"
+    assert draft.source_msg_id == ""
+    assert draft.source_kind == "input_message"
+    assert draft.source_label == "input message"
+
+
 def test_prepare_edit_answer_draft_selects_active_waiting_assistant_note(tmp_path: Path) -> None:
     db, tid = _make_db(tmp_path)
     ts.append_message(db, tid, "assistant", "Older final answer")
@@ -154,6 +190,19 @@ def test_prepare_edit_answer_draft_explicit_selector_overrides_waiting_note(tmp_
     assert draft.source_kind == "assistant_answer"
 
 
+def test_prepare_edit_answer_draft_selector_can_edit_user_message(tmp_path: Path) -> None:
+    db, tid = _make_db(tmp_path)
+    user_id = ts.append_message(db, tid, "user", "Original user prompt")
+    ts.append_message(db, tid, "assistant", "Assistant answer")
+
+    draft = prepare_edit_answer_draft(db, tid, user_id[-8:])
+
+    assert draft.draft == "Original user prompt"
+    assert draft.source_msg_id == user_id
+    assert draft.source_kind == "message"
+    assert draft.source_label == "user message"
+
+
 def test_prepare_edit_answer_draft_rejects_ambiguous_suffix(tmp_path: Path) -> None:
     db, tid = _make_db(tmp_path)
     ts.append_message(db, tid, "assistant", "first")
@@ -172,16 +221,19 @@ def test_prepare_edit_answer_draft_rejects_ambiguous_suffix(tmp_path: Path) -> N
         msg_id="01BBBBSAME",
     )
 
-    with pytest.raises(ValueError, match="matched multiple assistant answers"):
+    with pytest.raises(ValueError, match="matched multiple messages"):
         prepare_edit_answer_draft(db, tid, "SAME")
 
 
-def test_prepare_edit_answer_draft_reports_selected_empty_answer(tmp_path: Path) -> None:
+def test_prepare_edit_answer_draft_allows_selected_empty_answer(tmp_path: Path) -> None:
     db, tid = _make_db(tmp_path)
     empty_id = ts.append_message(db, tid, "assistant", "")
 
-    with pytest.raises(ValueError, match="selected assistant answer is empty"):
-        prepare_edit_answer_draft(db, tid, empty_id)
+    draft = prepare_edit_answer_draft(db, tid, empty_id)
+
+    assert draft.draft == ""
+    assert draft.source_msg_id == empty_id
+    assert draft.source_kind == "assistant_answer"
 
 
 def test_prepare_edit_answer_draft_converts_multipart_content_consistently(tmp_path: Path) -> None:

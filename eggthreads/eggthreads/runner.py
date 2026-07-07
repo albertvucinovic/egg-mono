@@ -316,23 +316,20 @@ def _tool_output_preview_text(full_output: str, *, max_lines: int, max_chars: in
     return preview
 
 
-def stash_tool_output_and_build_preview(
-    db,
+def _stash_tool_output_artifact(
     thread_id: str,
     tool_call_id: str,
     full_output: str,
     *,
-    max_lines: int = PREVIEW_MAX_LINES,
-    max_chars: int = PREVIEW_MAX_CHARS,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
-) -> tuple:
-    """Persist tool output as a thread-owned artifact and return ``(preview, saved_path)``.
+) -> Dict[str, Any]:
+    """Store tool output chunks and return artifact metadata.
 
-    Artifacts are stored under ``.egg/egg_outputs/<thread_id>/<artifact_id>``.
-    The LLM-facing preview deliberately exposes only the short artifact id and
-    ``read_long_tool_output(...)`` usage, not filesystem paths.
+    This is shared by long-output previewing and optimizer raw-output recovery.
+    It never changes the canonical ``tool_call.finished.output`` event.
     """
+
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
 
@@ -351,7 +348,7 @@ def stash_tool_output_and_build_preview(
     original_line_count = _line_count(full_output)
     stored_line_count = _line_count(stored_output)
 
-    saved_path = ""  # absolute host artifact directory (for runner diagnostics/tests)
+    saved_path = ""
     artifact_id = ""
     try:
         workspace = Path.cwd().resolve()
@@ -390,6 +387,129 @@ def stash_tool_output_and_build_preview(
     except Exception:
         saved_path = ""
         artifact_id = ""
+
+    return {
+        "stored_output": stored_output,
+        "saved_path": saved_path,
+        "artifact_id": artifact_id,
+        "chunk_count": chunk_count,
+        "stored_char_count": stored_char_count,
+        "original_char_count": original_char_count,
+        "stored_line_count": stored_line_count,
+        "original_line_count": original_line_count,
+        "capped": capped,
+    }
+
+
+def stash_tool_output_artifact_and_build_note(
+    db,
+    thread_id: str,
+    tool_call_id: str,
+    full_output: str,
+    *,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
+) -> tuple[str, str]:
+    """Persist raw tool output as an artifact and return ``(note, saved_path)``.
+
+    Optimized previews can append this note so the model/user can recover the
+    original output through the existing ``read_long_tool_output`` tool.
+    """
+
+    artifact = _stash_tool_output_artifact(
+        thread_id,
+        tool_call_id,
+        full_output,
+        original_char_count=original_char_count,
+        output_capped=output_capped,
+    )
+    artifact_id = str(artifact.get("artifact_id") or "")
+    saved_path = str(artifact.get("saved_path") or "")
+    if not artifact_id:
+        return "", ""
+    chunk_count = int(artifact.get("chunk_count") or 1)
+    stored_char_count = int(artifact.get("stored_char_count") or 0)
+    note = format_tool_output_artifact_recovery_note(
+        artifact_id=artifact_id,
+        chunk_count=chunk_count,
+        stored_char_count=stored_char_count,
+    )
+    return note, saved_path
+
+
+def format_tool_output_artifact_recovery_note(*, artifact_id: str, chunk_count: int, stored_char_count: int) -> str:
+    """Return the provider-visible note for reading a raw-output artifact."""
+
+    return (
+        "[Raw output stored as artifact. "
+        f"Artifact id: {artifact_id}. Chunks: {chunk_count}. "
+        f"Stored output: {stored_char_count} chars. "
+        "Read chunks with read_long_tool_output("
+        f"'{artifact_id}', chunk_number) where chunk_number is 1-{chunk_count}"
+        "; use descendant_thread_id only when reading a descendant thread's artifact.]"
+    )
+
+
+def estimate_tool_output_artifact_recovery_note(
+    full_output: str,
+    *,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
+) -> str:
+    """Estimate the recovery note before allocating an artifact on disk."""
+
+    if not isinstance(full_output, str):
+        full_output = str(full_output or "")
+    stored_output, capped, detected_original_char_count = _capped_tool_output(full_output)
+    if original_char_count is None:
+        original_char_count = detected_original_char_count
+    else:
+        try:
+            original_char_count = max(int(original_char_count), detected_original_char_count)
+        except Exception:
+            original_char_count = detected_original_char_count
+    _ = bool(output_capped or capped or original_char_count > len(stored_output))
+    chunks = _split_tool_output_chunks(stored_output)
+    return format_tool_output_artifact_recovery_note(
+        artifact_id="x" * 8,
+        chunk_count=len(chunks),
+        stored_char_count=len(stored_output),
+    )
+
+
+def stash_tool_output_and_build_preview(
+    db,
+    thread_id: str,
+    tool_call_id: str,
+    full_output: str,
+    *,
+    max_lines: int = PREVIEW_MAX_LINES,
+    max_chars: int = PREVIEW_MAX_CHARS,
+    original_char_count: Optional[int] = None,
+    output_capped: bool = False,
+) -> tuple:
+    """Persist tool output as a thread-owned artifact and return ``(preview, saved_path)``.
+
+    Artifacts are stored under ``.egg/egg_outputs/<thread_id>/<artifact_id>``.
+    The LLM-facing preview deliberately exposes only the short artifact id and
+    ``read_long_tool_output(...)`` usage, not filesystem paths.
+    """
+    artifact = _stash_tool_output_artifact(
+        thread_id,
+        tool_call_id,
+        full_output,
+        original_char_count=original_char_count,
+        output_capped=output_capped,
+    )
+    stored_output = str(artifact.get("stored_output") or "")
+    saved_path = str(artifact.get("saved_path") or "")
+    artifact_id = str(artifact.get("artifact_id") or "")
+    chunk_count = int(artifact.get("chunk_count") or 1)
+    stored_char_count = int(artifact.get("stored_char_count") or 0)
+    original_char_count = int(artifact.get("original_char_count") or stored_char_count)
+    stored_line_count = int(artifact.get("stored_line_count") or 0)
+    original_line_count = int(artifact.get("original_line_count") or stored_line_count)
+    capped = bool(artifact.get("capped"))
 
     preview_body = _tool_output_preview_text(stored_output, max_lines=max_lines, max_chars=max_chars)
     if preview_body != stored_output:
@@ -430,6 +550,12 @@ def _emit_auto_output_approval(
     tool_call_id: str,
     full_output: str,
     *,
+    tool_name: str = "",
+    tool_args: Any = None,
+    finished_reason: str = "",
+    origin: str = "runner",
+    user_tool_call: bool = False,
+    tool_metadata: Optional[Dict[str, Any]] = None,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
 ) -> None:
@@ -460,8 +586,18 @@ def _emit_auto_output_approval(
 
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
+
+    stored_char_count = len(full_output)
+    stored_line_count = len(full_output.splitlines())
+    original_count = original_char_count if original_char_count is not None else stored_char_count
     try:
         from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
+        from .output_optimizer.config import get_thread_output_optimizer_policy_config
+
+        try:
+            thread_output_optimizer_config = get_thread_output_optimizer_policy_config(db, thread_id)
+        except Exception:
+            thread_output_optimizer_config = {}
 
         publication = decide_output_publication(
             create_output_policy_registry(),
@@ -469,7 +605,14 @@ def _emit_auto_output_approval(
                 db=db,
                 thread_id=thread_id,
                 tool_call_id=tool_call_id,
+                tool_name=str(tool_name or ""),
+                tool_args=parse_tool_arguments(tool_args) if tool_args is not None else {},
                 output=full_output,
+                finished_reason=str(finished_reason or ""),
+                origin=str(origin or "runner"),
+                user_tool_call=bool(user_tool_call),
+                tool_metadata=dict(tool_metadata or {}),
+                thread_config=thread_output_optimizer_config,
                 limits={
                     "long_output_line_threshold": LONG_OUTPUT_LINE_THRESHOLD,
                     "long_output_char_threshold": LONG_OUTPUT_CHAR_THRESHOLD,
@@ -477,8 +620,10 @@ def _emit_auto_output_approval(
                     "preview_max_chars": PREVIEW_MAX_CHARS,
                 },
                 metadata={
-                    "original_char_count": original_char_count,
+                    "original_char_count": original_count,
                     "output_capped": output_capped,
+                    "stored_char_count": stored_char_count,
+                    "stored_line_count": stored_line_count,
                 },
             ),
         )
@@ -1285,7 +1430,12 @@ class ThreadRunner:
                                 thread_id=self.thread_id,
                                 type_='msg.create',
                                 msg_id=os.urandom(10).hex(),
-                                payload={'role': 'system', 'content': f'LLM/runner error: {error_msg}'},
+                                payload={
+                                    'role': 'system',
+                                    'content': f'LLM/runner error: {error_msg}',
+                                    'no_api': True,
+                                    'runner_error': True,
+                                },
                             )
                             raise ContextLimitExceeded(error_msg)  # Propagate to outer handler
                     except ImportError:
@@ -1334,7 +1484,12 @@ class ThreadRunner:
                 except Exception:
                     pass
                 try:
-                    err_payload = {'role': 'system', 'content': f'LLM/runner error: {error_msg}'}
+                    err_payload = {
+                        'role': 'system',
+                        'content': f'LLM/runner error: {error_msg}',
+                        'no_api': True,
+                        'runner_error': True,
+                    }
                     if current_model:
                         err_payload['model_key'] = current_model
                     self.db.append_event(
@@ -1438,7 +1593,12 @@ class ThreadRunner:
                     raise RuntimeError(summary_result.message)
             except Exception as recovery_error:
                 try:
-                    err_payload = {'role': 'system', 'content': f'LLM/runner error: {recovery_error}'}
+                    err_payload = {
+                        'role': 'system',
+                        'content': f'LLM/runner error: {recovery_error}',
+                        'no_api': True,
+                        'runner_error': True,
+                    }
                     if current_model:
                         err_payload['model_key'] = current_model
                     self.db.append_event(
@@ -2062,6 +2222,8 @@ class ThreadRunner:
                 err_payload: Dict[str, Any] = {
                     'role': 'system',
                     'content': 'LLM error: empty assistant message returned by provider',
+                    'no_api': True,
+                    'runner_error': True,
                 }
                 if current_model:
                     err_payload['model_key'] = current_model
@@ -2413,6 +2575,10 @@ class ThreadRunner:
             m2 = dict(m)
             m2.pop("api_usage", None)
             m2.pop("provider_usage", None)
+            # Local/UI-only optimizer observability metadata must not be sent
+            # to providers.  The provider sees the already-approved preview in
+            # content, while raw/audit metadata remains in events/snapshots.
+            m2.pop("output_optimizer", None)
             if m2.get("answer_user_preserve_turn"):
                 continue
             role = m2.get("role")
@@ -3035,11 +3201,24 @@ class ThreadRunner:
                 # references read_long_tool_output usage. A UI cancellation (Ctrl+C)
                 # that already recorded an explicit decision is respected.
                 try:
+                    parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
                     _emit_auto_output_approval(
                         self.db,
                         self.thread_id,
                         tc.tool_call_id,
                         full_result,
+                        tool_name=tc.name,
+                        tool_args=tc.arguments,
+                        finished_reason=finish_reason,
+                        origin=ra.kind,
+                        user_tool_call=bool(ra.kind == 'RA3_tools_user'),
+                        tool_metadata={
+                            'ra_kind': ra.kind,
+                            'parent_msg_id': tc.parent_msg_id,
+                            'parent_role': tc.parent_role,
+                            'parent_no_api': parent_no_api,
+                            'tool_index': tc.index,
+                        },
                         original_char_count=original_output_char_count,
                         output_capped=output_was_capped,
                     )
@@ -3130,6 +3309,14 @@ class ThreadRunner:
                     'tool_call_id': tc.tool_call_id,
                     'user_tool_call': bool(ra.kind == 'RA3_tools_user'),
                 }
+                try:
+                    from .output_optimizer.observability import optimizer_public_metadata_from_output_approval
+
+                    output_optimizer_metadata = optimizer_public_metadata_from_output_approval(payload)
+                    if output_optimizer_metadata:
+                        msg['output_optimizer'] = output_optimizer_metadata
+                except Exception:
+                    pass
                 # For user-initiated commands (RA3), keep the user turn
                 # after publishing the tool result. The model should not
                 # be invoked automatically; instead, the result becomes

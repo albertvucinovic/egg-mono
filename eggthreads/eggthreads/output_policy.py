@@ -35,6 +35,9 @@ class OutputPolicyRequest:
     thread_config: Mapping[str, Any] = field(default_factory=dict)
     limits: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    tool_args: Mapping[str, Any] = field(default_factory=dict)
+    finished_reason: str = ""
+    user_tool_call: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,13 +92,19 @@ def decide_output_publication(registry: OutputPolicyRegistry, request: OutputPol
     """Compose output policy decisions in registry order.
 
     Policies are advisory. Later policies may refine earlier decisions; a
-    decision value of ``"abstain"`` leaves the current decision unchanged. If
-    no policy decides, core falls back to publishing the whole output.
+    decision value of ``"abstain"`` leaves the current decision unchanged. A
+    policy that needs to preserve/override metadata from earlier policies may
+    implement ``decide_with_current(request, current_decision)``. If no policy
+    decides, core falls back to publishing the whole output.
     """
 
     decision: OutputPublicationDecision | None = None
     for policy in registry.policies():
-        proposed = policy.decide(request)
+        decide_with_current = getattr(policy, "decide_with_current", None)
+        if callable(decide_with_current):
+            proposed = decide_with_current(request, decision)
+        else:
+            proposed = policy.decide(request)
         if proposed.decision == "abstain":
             continue
         decision = proposed

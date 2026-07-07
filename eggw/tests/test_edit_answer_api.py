@@ -282,7 +282,53 @@ def test_edit_answer_endpoint_reports_no_assistant_answer(client: TestClient):
     assert "No assistant answer with textual content" in response.json()["detail"]
 
 
-def test_edit_answer_command_reports_no_selector_match(client: TestClient):
+def test_edit_answer_command_opens_empty_editor_when_no_answer(client: TestClient):
+    thread_id = _create_thread(client, "Edit Empty Fallback Command")
+
+    response = client.post(f"/api/threads/{thread_id}/command", json={"command": "/editAnswer"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["message"] == "Prepared empty input message draft."
+    assert payload["data"] == {
+        "action": "open_edit_answer_modal",
+        "draft": "",
+        "source_msg_id": "",
+        "source_kind": "input_message",
+        "source_suffix": "",
+        "source_label": "input message",
+        "suppress_transcript": True,
+        "message": "Prepared empty input message draft.",
+    }
+
+
+def test_editor_command_opens_empty_editor_draft(client: TestClient):
+    thread_id = _create_thread(client, "Editor Command")
+
+    response = client.post(f"/api/threads/{thread_id}/command", json={"command": "/editor"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["source_kind"] == "input_message"
+    assert payload["data"]["draft"] == ""
+    assert payload["data"]["source_label"] == "input message"
+
+
+def test_editor_command_opens_argument_text(client: TestClient):
+    thread_id = _create_thread(client, "Editor Command Args")
+
+    response = client.post(f"/api/threads/{thread_id}/command", json={"command": "/editor write this prompt"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["source_kind"] == "input_message"
+    assert payload["data"]["draft"] == "write this prompt"
+
+
+def test_edit_answer_command_opens_unmatched_selector_as_input_text(client: TestClient):
     from eggthreads import append_message
 
     thread_id = _create_thread(client, "Edit No Match")
@@ -292,12 +338,33 @@ def test_edit_answer_command_reports_no_selector_match(client: TestClient):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["success"] is False
-    assert payload["data"] is None
-    assert "No assistant answer matched selector 'missing'" in payload["message"]
+    assert payload["success"] is True
+    assert payload["data"]["source_kind"] == "input_message"
+    assert payload["data"]["draft"] == "missing"
 
 
-def test_edit_answer_endpoint_reports_selected_empty_answer(client: TestClient):
+def test_edit_answer_command_selector_can_edit_user_message(client: TestClient):
+    from eggthreads import append_message
+
+    thread_id = _create_thread(client, "Edit User Message")
+    user_id = append_message(core_state.db, thread_id, "user", "Original user prompt")
+    append_message(core_state.db, thread_id, "assistant", "Assistant answer")
+
+    response = client.post(
+        f"/api/threads/{thread_id}/command",
+        json={"command": f"/editAnswer {user_id[-8:]}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["draft"] == "Original user prompt"
+    assert payload["data"]["source_msg_id"] == user_id
+    assert payload["data"]["source_kind"] == "message"
+    assert payload["data"]["source_label"] == "user message"
+
+
+def test_edit_answer_endpoint_allows_selected_empty_answer(client: TestClient):
     from eggthreads import append_message
 
     thread_id = _create_thread(client, "Edit Empty Answer")
@@ -308,8 +375,11 @@ def test_edit_answer_endpoint_reports_selected_empty_answer(client: TestClient):
         json={"source_msg_id": empty_id},
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "selected assistant answer is empty."
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["draft"] == ""
+    assert payload["source_msg_id"] == empty_id
+    assert payload["source_kind"] == "assistant_answer"
 
 
 def test_edit_answer_endpoint_reports_ambiguous_selector(client: TestClient):
@@ -332,4 +402,4 @@ def test_edit_answer_endpoint_reports_ambiguous_selector(client: TestClient):
     response = client.post(f"/api/threads/{thread_id}/edit-answer-draft", json={"selector": "SAME"})
 
     assert response.status_code == 400
-    assert "matched multiple assistant answers" in response.json()["detail"]
+    assert "matched multiple messages" in response.json()["detail"]

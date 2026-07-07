@@ -120,6 +120,9 @@ def test_ra1_503_error_auto_continues_and_reruns_once(tmp_path):
     notices = _notices(db, tid)
     assert any(notice.get("action") == "scheduled" for notice in notices)
     assert any(notice.get("action") == "applied" and notice.get("trigger_msg_id") == user_msg_id for notice in notices)
+    assert any("Previous error: LLM/runner error: HTTP 503 Service Unavailable" in notice.get("content", "") for notice in notices)
+    errors = [payload for payload in payloads if payload.get("runner_error")]
+    assert errors and all(error.get("no_api") is True for error in errors)
     assert user_msg_id not in _skipped_msg_ids(db, tid)
 
 
@@ -263,6 +266,7 @@ def test_generic_400_does_not_auto_continue(tmp_path):
     assert llm.calls == 1
     notices = _notices(db, tid)
     assert any(notice.get("action") == "stopped" and notice.get("decision_category") == "bad_request" for notice in notices)
+    assert any("Previous error: LLM/runner error: HTTP 400 Bad Request" in notice.get("content", "") for notice in notices)
     assert ts.discover_runner_actionable(db, tid) is None
 
 

@@ -12,6 +12,7 @@ from .compaction import CompactionPlugin
 from .image_generation import ImageGenerationPlugin
 from .long_output import LongOutputPlugin
 from .model import ModelPlugin
+from .output_optimizer_admin import OutputOptimizerAdminPlugin
 from .sandbox_admin import SandboxAdminPlugin
 from .session import SessionPlugin
 from .skills import SkillsPlugin
@@ -21,7 +22,7 @@ from .tool_help import ToolHelpPlugin
 from .tools_admin import ToolsAdminPlugin
 from .web import WebPlugin
 
-__all__ = ["AnswerUserPlugin", "ApprovalPoliciesPlugin", "AttachmentToolsPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ImageGenerationPlugin", "LongOutputPlugin", "ModelPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolHelpPlugin", "ToolsAdminPlugin", "WebPlugin"]
+__all__ = ["AnswerUserPlugin", "ApprovalPoliciesPlugin", "AttachmentToolsPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ImageGenerationPlugin", "LongOutputPlugin", "ModelPlugin", "OutputOptimizerAdminPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolHelpPlugin", "ToolsAdminPlugin", "WebPlugin"]
 
 
 def __getattr__(name: str):

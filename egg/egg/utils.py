@@ -60,7 +60,7 @@ Commands:
     /startSearxng — start the local SearXNG docker container (web_search local/no-key fallback)
     /stopSearxng — stop the local SearXNG docker container
   Other:
-    /enterMode <send|newline>, /cost, /paste, /editAnswer [assistant_msg_id|suffix], /reload, /quit
+    /enterMode <send|newline>, /cost, /paste, /editor [text], /editAnswer [msg_id|suffix|text], /reload, /quit
     /setContextLimit [limit]
     /help
 """

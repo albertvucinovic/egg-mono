@@ -605,6 +605,123 @@ test.describe('Image Generation UI', () => {
 });
 
 
+
+test.describe('Command Transcript Ordering', () => {
+  test('keeps local command output visible when backend transcript is empty', async ({ page }) => {
+    const threadId = 'command-empty-thread-1';
+    await mockThreadShell(page, threadId, { messages: [] });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Help output stays visible',
+          command_id: 'command-empty-1',
+          command_name: 'help',
+          started_at: '2026-01-01T00:00:00.000Z',
+          finished_at: '2026-01-01T00:00:00.000Z',
+          elapsed_sec: 0.01,
+          data: { action: 'help' },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible({ timeout: 5000 });
+    await input.fill('/help');
+    await input.press('Enter');
+
+    await expect(page.getByTestId('chat-panel-content')).toContainText('Help output stays visible', { timeout: 5000 });
+  });
+
+  test('inserts local command output by response timestamp', async ({ page }) => {
+    const threadId = 'command-order-thread-1';
+    const beforeTimestamp = '2026-01-01T00:00:00.000Z';
+    const commandTimestamp = '2026-01-01T00:00:01.000Z';
+    const afterTimestamp = '2026-01-01T00:00:02.000Z';
+
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'message-before-command', role: 'user', timestamp: beforeTimestamp, content: 'Before command', content_text: 'Before command' },
+        { id: 'message-after-command', role: 'assistant', timestamp: afterTimestamp, content: 'After command', content_text: 'After command' },
+      ],
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Command output in timestamp position',
+          command_id: 'command-order-1',
+          command_name: 'attachments',
+          started_at: commandTimestamp,
+          finished_at: commandTimestamp,
+          elapsed_sec: 0.01,
+          data: { action: 'list_attachments' },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible({ timeout: 5000 });
+    await input.fill('/attachments');
+    await input.press('Enter');
+
+    const chatContent = page.getByTestId('chat-panel-content');
+    await expect(chatContent).toContainText('Command output in timestamp position', { timeout: 5000 });
+    const orderedText = await chatContent.innerText();
+    expect(orderedText.indexOf('Before command')).toBeLessThan(orderedText.indexOf('Command output in timestamp position'));
+    expect(orderedText.indexOf('Command output in timestamp position')).toBeLessThan(orderedText.indexOf('After command'));
+  });
+});
+
+test.describe('Output Optimizer Observability', () => {
+  test('shows optimizer badge only on optimized tool outputs', async ({ page }) => {
+    const threadId = 'optimizer-observability-thread-1';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        {
+          id: 'optimized-tool-message',
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: 'call-optimized-ui',
+          content: 'optimized preview',
+          content_text: 'optimized preview',
+          output_optimizer: {
+            optimized: true,
+            summary: 'Egg optimized · 95% saved · raw available',
+            summary_with_artifact: 'Egg optimized · 95% saved · raw artifact rawabc123',
+            raw_available: true,
+            artifact_available: true,
+            artifact_id: 'rawabc123',
+            raw_hint: "read_long_tool_output('rawabc123', chunk_number=1)",
+          },
+        },
+        {
+          id: 'plain-tool-message',
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: 'call-plain-ui',
+          content: 'plain preview',
+          content_text: 'plain preview',
+        },
+      ],
+    });
+
+    await page.goto(`/${threadId}`);
+
+    const badges = page.getByTestId('output-optimizer-badge');
+    await expect(badges).toHaveCount(1, { timeout: 5000 });
+    await expect(badges.first()).toContainText('Egg optimized · 95% saved · raw artifact rawabc123');
+    await expect(page.getByTestId('raw-output-affordance')).toContainText("read_long_tool_output('rawabc123', chunk_number=1)");
+    await expect(page.getByText('plain preview')).toBeVisible();
+  });
+});
+
 test.describe('Edit Answer Modal', () => {
   test('typing /editAnswer opens modal and loading draft populates composer without transcript pollution', async ({ page }) => {
     const threadId = 'edit-answer-thread-1';
@@ -717,7 +834,7 @@ test.describe('Edit Answer Modal', () => {
         headers: mockApiHeaders,
         json: {
           success: false,
-          message: "/editAnswer failed: No assistant answer matched selector 'missing'.",
+          message: "/editAnswer failed: Selector 'SAME' matched multiple messages; use a longer msg_id.",
           command_id: 'cmd-edit-answer-3',
           command_name: 'editAnswer',
           started_at: new Date().toISOString(),
@@ -732,11 +849,11 @@ test.describe('Edit Answer Modal', () => {
     const input = page.getByTestId('message-input');
     await expect(input).toBeVisible({ timeout: 5000 });
 
-    await input.fill('/editAnswer missing');
+    await input.fill('/editAnswer SAME');
     await input.press('Enter');
 
     await expect(page.getByTestId('edit-answer-modal')).not.toBeVisible({ timeout: 5000 });
-    await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: No assistant answer matched selector 'missing'.");
+    await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: Selector 'SAME' matched multiple messages; use a longer msg_id.");
     await expect(input).toHaveValue('');
   });
 });

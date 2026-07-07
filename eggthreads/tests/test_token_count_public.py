@@ -20,6 +20,17 @@ def test_count_text_tokens_positive_for_nonempty_string():
     assert count_text_tokens("hello world") > 0
 
 
+def test_fallback_token_count_handles_dense_grid_text(monkeypatch):
+    import eggthreads.token_count as tc
+
+    monkeypatch.setattr(tc, "tiktoken", None)
+    monkeypatch.setattr(tc, "_encoding", None)
+
+    dense_grid = "\n".join(["0 1 4 0 1 4 0 1 4 0"] * 10)
+
+    assert count_text_tokens(dense_grid) > len(dense_grid) // 4
+
+
 def test_live_llm_tps_for_invoke_counts_text_and_reasoning(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = ThreadsDB()
@@ -114,6 +125,32 @@ def test_thread_token_stats_usage_since_compaction_uses_provider_context(tmp_pat
     assert full_api["approx_call_count"] == 2
     assert current_api["approx_call_count"] == 1
     assert current_api["total_input_tokens"] < full_api["total_input_tokens"]
+
+
+def test_thread_token_stats_no_compaction_does_not_compare_fresh_provider_to_cached_full(tmp_path):
+    import json
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "prompt " * 20)
+    ts.append_message(db, tid, "assistant", "answer", extra={"model_key": "m"})
+    snap = ts.create_snapshot(db, tid)
+
+    cached_stats = dict(snap["token_stats"])
+    cached_stats["context_tokens"] = int(cached_stats["context_tokens"]) + 12345
+    snap["token_stats"] = cached_stats
+    db.conn.execute(
+        "UPDATE threads SET snapshot_json=? WHERE thread_id=?",
+        (json.dumps(snap), tid),
+    )
+
+    stats = thread_token_stats(db, tid)
+
+    assert ts.latest_effective_thread_compaction(db, tid) is None
+    assert stats["context_tokens"] == stats["full_thread_tokens"]
+    assert stats["context_tokens"] == cached_stats["context_tokens"]
 
 
 def test_thread_token_stats_since_compaction_excludes_pre_boundary_input_tokens(tmp_path):

@@ -50,7 +50,7 @@ from .attachments import (
     cmd_save_provider_artifact,
 )
 from .image_generation import cmd_image_generate
-from .edit_answer import cmd_edit_answer
+from .edit_answer import cmd_edit_answer, cmd_editor
 from .utility import (
     cmd_toggle_auto_approval,
     cmd_toggle_auto_continue_on_error,
@@ -80,7 +80,14 @@ from ..models import CommandResponse
 from .. import core
 from ..core import ensure_scheduler_for
 
-_SHARED_COMMAND_ADAPTER_COMMANDS = {"btw", "waitForThreads"}
+_SHARED_COMMAND_ADAPTER_COMMANDS = {
+    "btw",
+    "waitForThreads",
+    "outputOptimizerStatus",
+    "outputOptimizerOn",
+    "outputOptimizerOff",
+    "outputOptimizerMode",
+}
 
 
 def _execute_shared_command(thread_id: str, command_name: str, command_arg: str) -> CommandResponse:
@@ -176,6 +183,7 @@ __all__ = [
     # Image generation commands
     "cmd_image_generate",
     "cmd_edit_answer",
+    "cmd_editor",
     # Auth commands
     "cmd_login",
     "cmd_logout",
@@ -268,6 +276,8 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
             return await cmd_image_generate(thread_id, command_arg)
         elif command_name == "editAnswer":
             return await cmd_edit_answer(thread_id, command_arg)
+        elif command_name == "editor":
+            return await cmd_editor(thread_id, command_arg)
         elif command_name == "toolsOn":
             return await cmd_tools_on(thread_id)
         elif command_name == "toolsOff":
@@ -313,6 +323,14 @@ async def dispatch_command(thread_id: str, command: str, *, staged_attachments=N
         elif command_name == "toolsSecrets":
             return await cmd_tools_secrets(thread_id, command_arg)
         elif command_name == "waitForThreads":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerStatus":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerOn":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerOff":
+            return _execute_shared_command(thread_id, command_name, command_arg)
+        elif command_name == "outputOptimizerMode":
             return _execute_shared_command(thread_id, command_name, command_arg)
         elif command_name == "togglePanel":
             return cmd_toggle_panel(command_arg)
