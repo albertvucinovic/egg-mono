@@ -10,6 +10,10 @@ Tests verify that:
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import signal
+import textwrap
+import time
 
 import pytest
 
@@ -70,6 +74,57 @@ class TestToolTimeout:
 
         assert "TIMEOUT" not in result
         assert "hello" in result
+
+    def test_bash_tool_completes_when_background_child_keeps_pipes_open(self, tmp_path, monkeypatch):
+        """Background descendants inheriting stdout/stderr must not hang Egg."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+        marker = tmp_path / "child.pid"
+        child = tmp_path / "hold_pipes.py"
+        child.write_text(
+            textwrap.dedent(
+                f"""
+                import os
+                import signal
+                import time
+
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                with open({str(marker)!r}, "w") as f:
+                    f.write(str(os.getpid()))
+                    f.flush()
+                time.sleep(4)
+                """
+            )
+        )
+
+        start = time.monotonic()
+        result = tools.execute(
+            "bash",
+            {
+                "script": f"python3 {child} &\nfor i in $(seq 1 100); do [ -f {marker} ] && break; sleep 0.05; done\necho shell done",
+                "timeout": 1,
+            },
+        )
+        elapsed = time.monotonic() - start
+
+        try:
+            child_pid = int(marker.read_text()) if marker.exists() else None
+            if child_pid:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+            assert elapsed < 3
+            assert "TIMEOUT" not in result
+            assert "shell done" in result
+        finally:
+            if marker.exists():
+                try:
+                    child_pid = int(marker.read_text())
+                    os.kill(child_pid, signal.SIGKILL)
+                except Exception:
+                    pass
 
     def test_python_tool_llm_timeout_kills_long_running_script(self, tmp_path, monkeypatch):
         """Python tool should timeout when LLM specifies timeout."""
