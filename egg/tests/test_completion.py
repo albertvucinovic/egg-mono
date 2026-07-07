@@ -321,6 +321,12 @@ class TestGetAutocompleteItems:
         assert '/thread' in displays
         assert '/sessionStatus' in displays
         assert '/pythonRepl' in displays
+
+    def test_filters_command_completions_by_prefix(self, isolated_db):
+        """Should return matching commands even when root completions are capped."""
+        items = get_autocomplete_items("/ski", 4, isolated_db, lambda: "tid", None)
+
+        displays = [item['display'] for item in items]
         assert '/skills' in displays
         assert '/skill' in displays
 

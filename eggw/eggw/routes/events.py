@@ -23,6 +23,63 @@ from ..core.scheduler import scheduler_running
 router = APIRouter(tags=["events"])
 
 
+def _active_stream_replay_after_seq(db: ThreadsDB, thread_id: str, stream_open_seq: int) -> int:
+    """Return the event_seq to replay after when attaching mid-stream.
+
+    Replaying only from ``stream.open`` is enough for the live deltas, but it
+    can miss user messages written by another client immediately before the
+    provider stream began.  Include those pending user turns when they are after
+    the previous completed stream boundary so EggW stays synchronized with
+    terminal Egg while the answer is already streaming.
+    """
+
+    try:
+        previous_close_row = db.conn.execute(
+            """
+            SELECT MAX(event_seq) AS event_seq FROM events
+            WHERE thread_id = ? AND type = 'stream.close' AND event_seq < ?
+            """,
+            (thread_id, stream_open_seq),
+        ).fetchone()
+        previous_close_seq = int(previous_close_row["event_seq"]) if previous_close_row and previous_close_row["event_seq"] is not None else -1
+    except Exception:
+        previous_close_seq = -1
+
+    try:
+        rows = db.conn.execute(
+            """
+            SELECT event_seq, payload_json FROM events
+            WHERE thread_id = ?
+              AND type = 'msg.create'
+              AND event_seq > ?
+              AND event_seq < ?
+            ORDER BY event_seq ASC
+            """,
+            (thread_id, previous_close_seq, stream_open_seq),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    first_user_seq = None
+    for row in rows:
+        try:
+            payload_json = row["payload_json"]
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("role") == "user":
+            try:
+                first_user_seq = int(row["event_seq"])
+            except Exception:
+                pass
+            break
+
+    if first_user_seq is not None:
+        return first_user_seq - 1
+
+    return stream_open_seq - 1
+
+
 @router.get("/api/threads/{thread_id}/events")
 async def stream_events(thread_id: str):
     """Stream events for a thread via SSE.
@@ -57,9 +114,10 @@ async def stream_events(thread_id: str):
             last_seq = last_event["event_seq"] if "event_seq" in last_event.keys() else last_event[1]
 
             if last_type == "stream.open":
-                # Stream is in progress - start from just before stream.open
-                # so we catch up with the current streaming session
-                current_max_seq = last_seq - 1
+                # Stream is in progress - start from just before stream.open,
+                # but include the preceding user turn when another client wrote
+                # it just before provider streaming began.
+                current_max_seq = _active_stream_replay_after_seq(core.db, thread_id, int(last_seq))
     except Exception:
         current_max_seq = -1
 
