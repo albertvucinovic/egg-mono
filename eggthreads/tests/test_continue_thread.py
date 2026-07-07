@@ -21,6 +21,7 @@ from eggthreads import (
     create_snapshot,
     diagnose_thread,
     continue_thread,
+    continue_thread_manually,
     is_thread_continuable,
     wait_thread_settled,
 )
@@ -192,6 +193,124 @@ class TestRA1BoundaryReset:
         assert ra is not None
         assert ra.kind == "RA1_llm"
         assert ra.msg_id == user_msg_id
+
+    def test_manual_continue_retries_user_after_auto_continue_stopped_notice(self, tmp_path):
+        """No-arg manual /continue should retry the trigger, not the local notice."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        user_msg_id = append_message(db, tid, "user", "Hello")
+        invoke_id = _ulid_like()
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_="stream.open",
+            payload={"stream_kind": "llm"},
+            msg_id=_ulid_like(),
+            invoke_id=invoke_id,
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_="stream.delta",
+            payload={"reason": "LLM/runner error: HTTP 400 Bad Request"},
+            invoke_id=invoke_id,
+            chunk_seq=0,
+        )
+        error_msg_id = append_message(
+            db,
+            tid,
+            "system",
+            "LLM/runner error: HTTP 400 Bad Request",
+            extra={"no_api": True, "runner_error": True},
+        )
+        db.append_event(
+            event_id=_ulid_like(),
+            thread_id=tid,
+            type_="stream.close",
+            payload={},
+            invoke_id=invoke_id,
+        )
+        append_recovery_notice(
+            db,
+            tid,
+            "Recovery: auto-continue stopped.\nDecision: stop (bad_request).",
+            extra={
+                "auto_continue": True,
+                "action": "stopped",
+                "trigger_msg_id": user_msg_id,
+                "source_msg_id": error_msg_id,
+                "decision_category": "bad_request",
+            },
+        )
+
+        assert discover_runner_actionable(db, tid) is None
+        diagnosis = diagnose_thread(db, tid)
+        assert diagnosis.is_healthy is False
+        assert diagnosis.suggested_continue_point == user_msg_id
+        assert diagnosis.details["stuck_ra1_trigger_msg_id"] == user_msg_id
+
+        result = continue_thread_manually(db, tid)
+        assert result.success is True
+        assert result.continue_from_msg_id == user_msg_id
+        assert error_msg_id in result.skipped_msg_ids
+        assert user_msg_id not in result.skipped_msg_ids
+
+        messages = create_snapshot(db, tid)["messages"]
+        notices = [msg for msg in messages if msg.get("recovery_notice")]
+        assert any("auto-continue stopped" in msg.get("content", "") for msg in notices)
+        assert any(
+            "manual /continue" in msg.get("content", "")
+            and "Previous error: LLM/runner error: HTTP 400 Bad Request" in msg.get("content", "")
+            for msg in notices
+        )
+
+        ra = discover_runner_actionable(db, tid)
+        assert ra is not None
+        assert ra.kind == "RA1_llm"
+        assert ra.msg_id == user_msg_id
+
+    def test_manual_continue_retries_user_after_cancel_with_recovery_notice(self, tmp_path):
+        """A local recovery notice after a cancelled pending RA1 must not hide U1."""
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        user_msg_id = append_message(db, tid, "user", "Hello")
+        interrupt_thread(db, tid, reason="user cancelled")
+        append_recovery_notice(
+            db,
+            tid,
+            "Recovery: auto-continue stopped.\nDetail: interrupted before retry.",
+            extra={
+                "auto_continue": True,
+                "action": "stopped",
+                "trigger_msg_id": user_msg_id,
+                "stop_reason": "interrupted",
+            },
+        )
+
+        assert discover_runner_actionable(db, tid) is None
+        result = continue_thread_manually(db, tid)
+
+        assert result.success is True
+        assert result.continue_from_msg_id == user_msg_id
+        ra = discover_runner_actionable(db, tid)
+        assert ra is not None
+        assert ra.kind == "RA1_llm"
+        assert ra.msg_id == user_msg_id
+
+    def test_manual_continue_does_not_replay_user_after_successful_assistant(self, tmp_path):
+        db, _ = _make_temp_db(tmp_path)
+        tid = create_root_thread(db, name="test")
+
+        append_message(db, tid, "user", "Hello")
+        append_message(db, tid, "assistant", "Hi")
+
+        diagnosis = diagnose_thread(db, tid)
+        assert diagnosis.is_healthy is True
+        result = continue_thread(db, tid)
+        assert result.success is True
+        assert result.continue_from_msg_id is None
 
 
 class TestSkippedMessages:

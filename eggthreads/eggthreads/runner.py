@@ -1430,7 +1430,12 @@ class ThreadRunner:
                                 thread_id=self.thread_id,
                                 type_='msg.create',
                                 msg_id=os.urandom(10).hex(),
-                                payload={'role': 'system', 'content': f'LLM/runner error: {error_msg}'},
+                                payload={
+                                    'role': 'system',
+                                    'content': f'LLM/runner error: {error_msg}',
+                                    'no_api': True,
+                                    'runner_error': True,
+                                },
                             )
                             raise ContextLimitExceeded(error_msg)  # Propagate to outer handler
                     except ImportError:
@@ -1479,7 +1484,12 @@ class ThreadRunner:
                 except Exception:
                     pass
                 try:
-                    err_payload = {'role': 'system', 'content': f'LLM/runner error: {error_msg}'}
+                    err_payload = {
+                        'role': 'system',
+                        'content': f'LLM/runner error: {error_msg}',
+                        'no_api': True,
+                        'runner_error': True,
+                    }
                     if current_model:
                         err_payload['model_key'] = current_model
                     self.db.append_event(
@@ -1583,7 +1593,12 @@ class ThreadRunner:
                     raise RuntimeError(summary_result.message)
             except Exception as recovery_error:
                 try:
-                    err_payload = {'role': 'system', 'content': f'LLM/runner error: {recovery_error}'}
+                    err_payload = {
+                        'role': 'system',
+                        'content': f'LLM/runner error: {recovery_error}',
+                        'no_api': True,
+                        'runner_error': True,
+                    }
                     if current_model:
                         err_payload['model_key'] = current_model
                     self.db.append_event(
@@ -2207,6 +2222,8 @@ class ThreadRunner:
                 err_payload: Dict[str, Any] = {
                     'role': 'system',
                     'content': 'LLM error: empty assistant message returned by provider',
+                    'no_api': True,
+                    'runner_error': True,
                 }
                 if current_model:
                     err_payload['model_key'] = current_model

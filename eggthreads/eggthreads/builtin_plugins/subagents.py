@@ -270,13 +270,13 @@ def send_message_to_child_tool(args: Dict[str, Any]) -> str:
 
 
 def continue_subthread_tool(args: Dict[str, Any]) -> str:
-    from ..api import continue_child_thread
+    from ..api import continue_child_thread_manually
     from ..db import ThreadsDB
 
     manager_id = (args.get("_thread_id") or args.get("manager_thread_id") or "").strip()
     child_id = (args.get("child_thread_id") or args.get("thread_id") or "").strip()
     msg_id = clean_optional_text(args.get("msg_id"))
-    result = continue_child_thread(ThreadsDB(), manager_id, child_id, msg_id=msg_id)
+    result = continue_child_thread_manually(ThreadsDB(), manager_id, child_id, msg_id=msg_id)
     payload = {
         "success": result.success,
         "thread_id": child_id,

@@ -219,6 +219,11 @@ def test_continue_subthread_tool_uses_current_thread_context(tmp_path, monkeypat
 
     assert payload["success"] is True
     assert payload["continue_from_msg_id"] == assistant_msg
+    messages = ts.create_snapshot(db, child)["messages"]
+    notices = [msg for msg in messages if msg.get("recovery_notice")]
+    assert len(notices) == 1
+    assert "manual continue_subthread" in notices[0]["content"]
+    assert "Previous error: LLM/runner error: provider exploded" in notices[0]["content"]
 
 
 def test_continue_subthread_registered_and_exposed():

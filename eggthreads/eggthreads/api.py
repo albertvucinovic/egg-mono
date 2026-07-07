@@ -819,6 +819,28 @@ def _provider_error_text_from_payload(payload: Dict[str, Any]) -> str:
     return ''
 
 
+def _provider_failure_text_from_payload(payload: Dict[str, Any]) -> str:
+    """Return concise provider/runner failure text represented by a message.
+
+    Recovery notices use this to preserve the useful failure/audit content when
+    the original provider-visible message is later skipped by ``/continue``.
+    Keep this intentionally narrow: normal tool output containing the word
+    "error" is not a thread-level provider failure.
+
+    Runner error messages may be marked ``no_api`` because they are local
+    runtime state, but they are still the failure source that recovery notices
+    should summarize.
+    """
+
+    error_text = _provider_error_text_from_payload(payload)
+    if error_text:
+        return error_text
+    incomplete_reason = payload.get('incomplete_reason')
+    if payload.get('incomplete') or incomplete_reason:
+        return str(incomplete_reason or 'assistant message marked incomplete')
+    return ''
+
+
 def _continue_notice_skipped_payloads(
     db: ThreadsDB,
     thread_id: str,
@@ -898,6 +920,27 @@ def append_continue_recovery_notice(
         thread_id,
         _format_continue_recovery_notice(db, thread_id, result, source=source),
     )
+
+
+def continue_thread_manually(
+    db: ThreadsDB,
+    thread_id: str,
+    msg_id: Optional[str] = None,
+    *,
+    source: str = 'manual /continue',
+) -> ContinueResult:
+    """Apply manual continue semantics and append the local recovery notice.
+
+    This is the user/tool-facing wrapper for explicit manual continuation.  It
+    keeps the core ``continue_thread`` mutation reusable while ensuring UI
+    ``/continue`` and tool-based continuation leave the same preserved audit
+    notice summarizing skipped provider failures.
+    """
+
+    result = continue_thread(db, thread_id, msg_id=msg_id)
+    if result.success:
+        append_continue_recovery_notice(db, thread_id, result, source=source)
+    return result
 
 
 # --------- Compaction API -----------------------------------------------------
@@ -2282,6 +2325,164 @@ class ThreadDiagnosis:
     details: Dict[str, Any]
 
 
+def _payload_from_json(value: Any) -> Dict[str, Any]:
+    try:
+        payload = json.loads(value) if isinstance(value, str) else (value or {})
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_manual_continue_trigger_payload(payload: Dict[str, Any], msg_id: Optional[str], consumed_user_msg_ids: set) -> bool:
+    role = payload.get('role')
+    no_api = bool(payload.get('no_api'))
+    keep_user_turn = bool(payload.get('keep_user_turn'))
+    tool_calls = payload.get('tool_calls') or []
+    if role == 'user':
+        return bool(msg_id) and str(msg_id) not in consumed_user_msg_ids and not tool_calls and not keep_user_turn and not no_api
+    if role == 'tool':
+        return not keep_user_turn and not no_api
+    return False
+
+
+def _manual_continue_retry_trigger(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    """Return the latest user/tool trigger that explicit manual continue should retry.
+
+    Scheduler RA discovery must stay conservative: after an interrupted/failing
+    LLM turn or a non-retriable auto-continue stop, it is correct for the thread
+    to be idle instead of automatically bothering the provider again.  Manual
+    ``/continue`` is different; it is user intent to retry/repair.  This helper
+    finds the stuck trigger only when there is evidence after that trigger that
+    the previous RA1 was cancelled/failed/stopped, and no newer successful
+    provider-visible result supersedes it.
+    """
+
+    try:
+        from .tool_state import discover_runner_actionable_cached
+
+        if discover_runner_actionable_cached(db, thread_id) is not None:
+            return None
+    except Exception:
+        # Diagnosis should remain best-effort.  If RA discovery itself fails,
+        # fall through to the event-log evidence below.
+        pass
+
+    skipped_msg_ids, deleted_msg_ids = _compaction_skipped_and_deleted_msg_ids(db, thread_id)
+    consumed_user_msg_ids = _consumed_get_user_message_msg_ids(db, thread_id)
+    try:
+        rows = db.conn.execute(
+            "SELECT event_seq, msg_id, payload_json FROM events "
+            "WHERE thread_id=? AND type='msg.create' ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    messages: List[Dict[str, Any]] = []
+    latest_trigger: Optional[Dict[str, Any]] = None
+    for event_seq, msg_id, payload_json in rows:
+        if msg_id and (str(msg_id) in skipped_msg_ids or str(msg_id) in deleted_msg_ids):
+            continue
+        payload = _payload_from_json(payload_json)
+        item = {
+            'event_seq': int(event_seq),
+            'msg_id': str(msg_id) if msg_id else None,
+            'payload': payload,
+        }
+        messages.append(item)
+        if _is_manual_continue_trigger_payload(payload, item['msg_id'], consumed_user_msg_ids):
+            latest_trigger = {
+                'msg_id': item['msg_id'],
+                'event_seq': int(event_seq),
+                'role': payload.get('role'),
+            }
+
+    if latest_trigger is None:
+        return None
+
+    trigger_msg_id = latest_trigger.get('msg_id')
+    trigger_seq = int(latest_trigger.get('event_seq') or -1)
+    evidence: Optional[Dict[str, Any]] = None
+    evidence_seq = trigger_seq
+
+    for item in messages:
+        if int(item['event_seq']) <= trigger_seq:
+            continue
+        payload = item['payload']
+        msg_id = item['msg_id']
+
+        if _is_manual_continue_trigger_payload(payload, msg_id, consumed_user_msg_ids):
+            # A newer trigger should have become ``latest_trigger`` above.  If
+            # this branch is ever reached, avoid retrying the older one.
+            return None
+
+        if payload.get('answer_user_preserve_turn'):
+            continue
+
+        if payload.get('recovery_notice'):
+            if (
+                payload.get('auto_continue') is True
+                and payload.get('trigger_msg_id') == trigger_msg_id
+                and payload.get('action') in {'scheduled', 'stopped'}
+            ):
+                evidence = {
+                    'reason': f"auto_continue_{payload.get('action')}",
+                    'source_failure_msg_id': payload.get('source_msg_id'),
+                    'source_failure_text': _message_content_text(payload.get('content', '')),
+                }
+                evidence_seq = int(item['event_seq'])
+            continue
+
+        failure_text = _provider_failure_text_from_payload(payload)
+        if failure_text:
+            evidence = {
+                'reason': 'provider_failure_after_trigger',
+                'source_failure_msg_id': msg_id,
+                'source_failure_text': failure_text,
+            }
+            evidence_seq = int(item['event_seq'])
+            continue
+
+        if payload.get('no_api'):
+            continue
+
+        role = payload.get('role')
+        if role == 'assistant':
+            # A complete assistant message after the trigger means this trigger
+            # already received a provider result.  Plain /continue should not
+            # silently replay it; the user can still pass an explicit msg_id.
+            return None
+        if role == 'system' and _message_content_text(payload.get('content', '')).strip():
+            return None
+
+    try:
+        interrupt_rows = db.conn.execute(
+            "SELECT event_seq, payload_json FROM events "
+            "WHERE thread_id=? AND type='control.interrupt' AND event_seq>? ORDER BY event_seq ASC",
+            (thread_id, trigger_seq),
+        ).fetchall()
+    except Exception:
+        interrupt_rows = []
+    for event_seq, payload_json in interrupt_rows:
+        payload = _payload_from_json(payload_json)
+        if payload.get('purpose') == 'llm':
+            evidence = {'reason': 'llm_interrupt_after_trigger'}
+            evidence_seq = int(event_seq)
+        elif payload.get('purpose') == 'continue' and payload.get('continue_from_msg_id') == trigger_msg_id:
+            # If the latest manual reset is newer than the latest failure or
+            # cancellation evidence, repeating the same reset would be noisy
+            # and not helpful.  Older continue interrupts must not suppress a
+            # later failed retry of the same trigger.
+            if int(event_seq) > evidence_seq:
+                return None
+
+    if evidence is None:
+        return None
+
+    latest_trigger.update(evidence)
+    return latest_trigger
+
+
 def diagnose_thread(db: ThreadsDB, thread_id: str) -> ThreadDiagnosis:
     """Diagnose thread state and suggest fixes.
 
@@ -2409,55 +2610,27 @@ def diagnose_thread(db: ThreadsDB, thread_id: str) -> ThreadDiagnosis:
             issues.append("Thread ends with error message")
             details['last_error'] = last_content[:200]
 
-    # A pending RA1 turn can be explicitly cancelled by a Ctrl+C-style
-    # ``control.interrupt`` with ``purpose='llm'`` before a runner acquires a
-    # lease.  That is intentional for plain interrupt/cancel, but it leaves an
-    # otherwise normal thread looking deceptively healthy: the last effective
-    # provider-visible message is still a user/tool trigger, yet
-    # discover_runner_actionable() returns None because the RA1 boundary was
-    # advanced past that trigger.  Manual ``/continue`` without an explicit
-    # msg_id must diagnose that stuck state and reset the boundary to before
-    # the trigger, otherwise the user sees "last message is user" but the
-    # scheduler has no RA1 work to run.
-    if not issues:
-        latest_trigger_msg_id = None
-        latest_trigger_seq = None
-        latest_trigger_role = None
-        for msg_id, payload, ev_seq in reversed(messages):
-            if not isinstance(payload, dict):
-                continue
-            role = payload.get('role')
-            no_api = bool(payload.get('no_api'))
-            keep_user_turn = bool(payload.get('keep_user_turn'))
-            tool_calls = payload.get('tool_calls') or []
-            if role == 'user' and not tool_calls and not keep_user_turn and not no_api:
-                latest_trigger_msg_id = msg_id
-                latest_trigger_seq = ev_seq
-                latest_trigger_role = role
-                break
-            if role == 'tool' and not keep_user_turn and not no_api:
-                latest_trigger_msg_id = msg_id
-                latest_trigger_seq = ev_seq
-                latest_trigger_role = role
-                break
-            # Stop at the newest non-local, non-hidden provider message.  If
-            # it is not a trigger, the thread is not in the "last message is a
-            # user/tool trigger but RA1 is stuck" shape.
-            if not no_api:
-                break
-
-        if latest_trigger_msg_id is not None:
-            try:
-                from .tool_state import discover_runner_actionable_cached
-
-                ra = discover_runner_actionable_cached(db, thread_id)
-            except Exception:
-                ra = None
-            if ra is None:
+    # A manual ``/continue`` request is an explicit retry/repair intent.  It
+    # should not be gated only on provider-protocol health: after a cancelled
+    # pending RA1, a failed RA1 stream, or an auto-continue ``stopped`` notice,
+    # the thread can be intentionally idle while the latest meaningful
+    # user/tool trigger is still the right manual retry point.  Detect that
+    # shape separately from normal RA discovery and prefer the trigger as the
+    # continue point.  Do not override protocol blockers such as unpublished
+    # tool calls or consecutive assistant messages; those need the older repair
+    # selection logic to remove stale tool-call state safely.
+    if not unpublished and not consecutive_assistants:
+        stuck_retry = _manual_continue_retry_trigger(db, thread_id)
+        if stuck_retry is not None:
+            if 'stuck_ra1_trigger_msg_id' not in details:
                 issues.append("Last user/tool message is not runnable for RA1")
-                details['stuck_ra1_trigger_msg_id'] = latest_trigger_msg_id
-                details['stuck_ra1_trigger_event_seq'] = latest_trigger_seq
-                details['stuck_ra1_trigger_role'] = latest_trigger_role
+            details['stuck_ra1_trigger_msg_id'] = stuck_retry['msg_id']
+            details['stuck_ra1_trigger_event_seq'] = stuck_retry['event_seq']
+            details['stuck_ra1_trigger_role'] = stuck_retry['role']
+            details['stuck_ra1_reason'] = stuck_retry['reason']
+            if stuck_retry.get('source_failure_msg_id'):
+                details['stuck_ra1_source_failure_msg_id'] = stuck_retry['source_failure_msg_id']
+                details['stuck_ra1_source_failure'] = stuck_retry.get('source_failure_text', '')[:200]
 
     # Determine if thread is healthy and find continue point
     is_healthy = len(issues) == 0
@@ -2862,6 +3035,22 @@ def continue_child_thread(
             message="target thread must be a child or descendant of the calling thread",
         )
     return continue_thread(db, child, msg_id=msg_id)
+
+
+def continue_child_thread_manually(
+    db: ThreadsDB,
+    manager_thread_id: str,
+    child_thread_id: str,
+    msg_id: Optional[str] = None,
+    *,
+    source: str = 'manual continue_subthread',
+) -> ContinueResult:
+    """Manual-continue wrapper for descendant threads with recovery notice."""
+
+    result = continue_child_thread(db, manager_thread_id, child_thread_id, msg_id=msg_id)
+    if result.success:
+        append_continue_recovery_notice(db, child_thread_id, result, source=source)
+    return result
 
 
 async def continue_thread_async(
