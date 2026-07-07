@@ -129,6 +129,12 @@ async def _open_editor_draft_command_async(ctx: Any, arg: str, *, command_name: 
             clear_input=False,
             message="Loaded edited input message draft into the input panel.",
         )
+    if draft.source_kind == "message":
+        label = draft.source_label or "message"
+        return CommandResult(
+            clear_input=False,
+            message=f"Loaded edited {label}{suffix} into the input panel.",
+        )
     label = draft.source_label or ("assistant note" if draft.source_kind == "assistant_note" else "assistant answer")
     return CommandResult(
         clear_input=False,
@@ -158,6 +164,7 @@ async def edit_answer_command_async(ctx: Any, arg: str) -> CommandResult:
             selector,
             prefer_waiting_note=True,
             fallback_to_empty_input=True,
+            fallback_unmatched_selector_to_input=True,
         )
     except ValueError as e:
         return CommandResult(clear_input=False, message=f"/editAnswer failed: {e}")
@@ -168,13 +175,11 @@ async def edit_answer_command_async(ctx: Any, arg: str) -> CommandResult:
 async def editor_command_async(ctx: Any, arg: str) -> CommandResult:
     """Open an empty external editor for composing the input message."""
 
-    if (arg or "").strip():
-        return CommandResult(clear_input=False, message="/editor does not take arguments; it opens an empty input draft.")
     return await _open_editor_draft_command_async(
         ctx,
         arg,
         command_name="editor",
-        draft=empty_input_message_draft(),
+        draft=empty_input_message_draft((arg or "").strip()),
     )
 
 
@@ -192,10 +197,10 @@ def register_edit_answer_command(registry: Any, app: Any | None = None) -> None:
                 _EDIT_ANSWER_COMMAND,
                 edit_answer_command_async,
                 category="input",
-                usage="/editAnswer [assistant_msg_id|suffix]",
+                usage="/editAnswer [msg_id|suffix|text]",
                 description=(
-                    "Quote an assistant answer as raw markdown in $EDITOR, then load it into input; "
-                    "falls back to an empty input editor when there is no assistant answer."
+                    "Edit a message by id/suffix or open text in $EDITOR, then load it into input; "
+                    "without arguments quotes the latest assistant answer or opens an empty editor."
                 ),
             )
         )
@@ -208,8 +213,8 @@ def register_edit_answer_command(registry: Any, app: Any | None = None) -> None:
                 _EDITOR_COMMAND,
                 editor_command_async,
                 category="input",
-                usage="/editor",
-                description="Open an empty $EDITOR draft, then load it into input.",
+                usage="/editor [text]",
+                description="Open a $EDITOR draft, then load it into input.",
             )
         )
 

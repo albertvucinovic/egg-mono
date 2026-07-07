@@ -457,8 +457,8 @@ EggW-only commands:
     /theme [name] — List or switch browser themes.
 
 Edit answer:
-    /editAnswer [assistant_msg_id|suffix] — Quote an assistant answer into an editable browser draft.
-    /editor — Open an empty browser editor draft for the next input message.
+    /editAnswer [msg_id|suffix|text] — Edit a message by id/suffix, or open text in an editable browser draft.
+    /editor [text] — Open a browser editor draft for the next input message.
 
 Attachments:
     /attach <path> — Stage a server-side local file path for the next message.

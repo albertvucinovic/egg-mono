@@ -834,7 +834,7 @@ test.describe('Edit Answer Modal', () => {
         headers: mockApiHeaders,
         json: {
           success: false,
-          message: "/editAnswer failed: No assistant answer matched selector 'missing'.",
+          message: "/editAnswer failed: Selector 'SAME' matched multiple messages; use a longer msg_id.",
           command_id: 'cmd-edit-answer-3',
           command_name: 'editAnswer',
           started_at: new Date().toISOString(),
@@ -849,11 +849,11 @@ test.describe('Edit Answer Modal', () => {
     const input = page.getByTestId('message-input');
     await expect(input).toBeVisible({ timeout: 5000 });
 
-    await input.fill('/editAnswer missing');
+    await input.fill('/editAnswer SAME');
     await input.press('Enter');
 
     await expect(page.getByTestId('edit-answer-modal')).not.toBeVisible({ timeout: 5000 });
-    await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: No assistant answer matched selector 'missing'.");
+    await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: Selector 'SAME' matched multiple messages; use a longer msg_id.");
     await expect(input).toHaveValue('');
   });
 });

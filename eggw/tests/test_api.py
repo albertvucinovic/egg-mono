@@ -2719,7 +2719,7 @@ class TestCommands:
         assert "EggW-only commands:" in data["message"]
         assert "/theme [name]" in data["message"]
         assert "/rename <name>" in data["message"]
-        assert "/editAnswer [assistant_msg_id|suffix]" in data["message"]
+        assert "/editAnswer [msg_id|suffix|text]" in data["message"]
         assert "/editor" in data["message"]
         assert "/spawn <context>" not in data["message"]
         assert "/redraw — No-op in EggW" in data["message"]

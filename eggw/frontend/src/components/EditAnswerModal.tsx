@@ -23,6 +23,10 @@ function isInputMessageSource(sourceLabel: string, sourceKind: string) {
   return sourceKind === "input_message" || sourceLabel === "input message";
 }
 
+function isQuotedAssistantSource(sourceKind: string) {
+  return sourceKind === "assistant_answer" || sourceKind === "assistant_note";
+}
+
 function DraftEditorLoading() {
   return (
     <div
@@ -64,6 +68,7 @@ export function EditAnswerModal() {
   const isVisible = modal.isOpen && Boolean(modal.threadId) && modal.threadId === currentThreadId;
   const source = useMemo(() => sourceTitle(modal.sourceLabel, modal.sourceSuffix), [modal.sourceLabel, modal.sourceSuffix]);
   const isInputMessage = isInputMessageSource(modal.sourceLabel, modal.sourceKind);
+  const isQuotedAssistant = isQuotedAssistantSource(modal.sourceKind);
   const replacesCommandText = Boolean(modal.replaceCommandText && composerDraft === modal.replaceCommandText);
   const hasExistingComposerDraft = Boolean(composerDraft.trim()) && !replacesCommandText;
   const canLoadDirectly = !hasExistingComposerDraft;
@@ -79,7 +84,14 @@ export function EditAnswerModal() {
   }, [isVisible, modal.threadId, modal.sourceMsgId]);
 
   const finishLoad = (verb: "Loaded" | "Appended") => {
-    addSystemLog(isInputMessage ? `${verb} input message draft into composer` : `${verb} quoted ${source} into composer`, "success");
+    addSystemLog(
+      isInputMessage
+        ? `${verb} input message draft into composer`
+        : isQuotedAssistant
+          ? `${verb} quoted ${source} into composer`
+          : `${verb} edited ${source} into composer`,
+      "success",
+    );
     closeEditAnswerModal();
     focusComposerSoon();
   };
@@ -163,7 +175,9 @@ export function EditAnswerModal() {
           <p className="mb-3 text-sm" style={{ color: "var(--muted)" }}>
             {isInputMessage
               ? "Write an input message in Monaco. This will load into the composer; it will not send automatically."
-              : "Editing raw quoted assistant markdown in Monaco. This will load into the composer; it will not send automatically."}
+              : isQuotedAssistant
+                ? "Editing raw quoted assistant markdown in Monaco. This will load into the composer; it will not send automatically."
+                : "Editing raw message text in Monaco. This will load into the composer; it will not send automatically."}
           </p>
           <DraftEditor
             value={modal.draft}

@@ -14,7 +14,7 @@ from typing import Any, Literal, Mapping, Sequence
 from .content_parts import content_to_plain_text
 
 
-EditAnswerSourceKind = Literal["assistant_answer", "assistant_note", "input_message"]
+EditAnswerSourceKind = Literal["assistant_answer", "assistant_note", "input_message", "message"]
 
 
 @dataclass(frozen=True)
@@ -43,11 +43,11 @@ def quote_markdown_blockquote(text: str) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in normalized.split("\n"))
 
 
-def empty_input_message_draft() -> EditAnswerDraft:
-    """Return an empty editor draft for composing a new user input message."""
+def empty_input_message_draft(initial_text: str = "") -> EditAnswerDraft:
+    """Return an editor draft for composing a new user input message."""
 
     return EditAnswerDraft(
-        draft="",
+        draft=str(initial_text or ""),
         source_msg_id="",
         source_kind="input_message",
         source_suffix="",
@@ -112,6 +112,38 @@ def _assistant_selector_matches(
             continue
         matches.append((message, message_raw_text(message)))
     return matches
+
+
+def _message_selector_matches(
+    messages: Sequence[Mapping[str, Any]],
+    selector: str,
+) -> list[tuple[Mapping[str, Any], str]]:
+    matches: list[tuple[Mapping[str, Any], str]] = []
+    for message in messages:
+        if not _selector_matches_message(message, selector):
+            continue
+        matches.append((message, message_raw_text(message)))
+    return matches
+
+
+def _draft_from_selected_message(message: Mapping[str, Any], raw_text: str) -> EditAnswerDraft:
+    role = str(message.get("role") or "message")
+    source_msg_id = message_id(message)
+    if role == "assistant":
+        source_kind: EditAnswerSourceKind = "assistant_note" if is_assistant_note(message) else "assistant_answer"
+        source_label = "assistant note" if source_kind == "assistant_note" else "assistant answer"
+        draft = quote_markdown_blockquote(raw_text)
+    else:
+        source_kind = "message"
+        source_label = f"{role} message" if role else "message"
+        draft = str(raw_text or "")
+    return EditAnswerDraft(
+        draft=draft,
+        source_msg_id=source_msg_id,
+        source_kind=source_kind,
+        source_suffix=source_msg_id[-8:] if source_msg_id else "",
+        source_label=source_label,
+    )
 
 
 def select_assistant_message(
@@ -206,6 +238,7 @@ def prepare_edit_answer_draft(
     *,
     prefer_waiting_note: bool = True,
     fallback_to_empty_input: bool = False,
+    fallback_unmatched_selector_to_input: bool = False,
 ) -> EditAnswerDraft:
     """Prepare a quoted edit-answer draft from a thread's assistant message.
 
@@ -219,6 +252,9 @@ def prepare_edit_answer_draft(
         fallback_to_empty_input: When True and no selector is provided, return
             an empty input-message draft instead of failing if there is no
             textual assistant answer or Assistant Note to quote.
+        fallback_unmatched_selector_to_input: When True and a non-empty
+            selector matches no message, treat the selector text itself as the
+            initial input-message draft.
 
     Raises:
         ValueError: if the thread/selection has no usable textual assistant
@@ -233,6 +269,18 @@ def prepare_edit_answer_draft(
     messages = _fresh_snapshot_messages(db, normalized_thread_id)
     waiting_note: Mapping[str, Any] | None = None
     preferred_msg_id = ""
+
+    if wanted:
+        matches = _message_selector_matches(messages, wanted)
+        if len(matches) > 1:
+            raise ValueError(f"Selector {wanted!r} matched multiple messages; use a longer msg_id.")
+        if len(matches) == 1:
+            message, raw_text = matches[0]
+            return _draft_from_selected_message(message, raw_text)
+        if fallback_unmatched_selector_to_input:
+            return empty_input_message_draft(wanted)
+        raise ValueError(f"No message matched selector {wanted!r}.")
+
     if prefer_waiting_note and not wanted:
         waiting_note = _active_waiting_note(db, normalized_thread_id)
         preferred_msg_id = str((waiting_note or {}).get("msg_id") or "").strip()

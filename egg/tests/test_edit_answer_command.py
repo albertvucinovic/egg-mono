@@ -183,6 +183,23 @@ def test_editor_command_opens_empty_external_editor_for_input_prompt(egg_app, mo
     assert any("input message draft" in entry for entry in egg_app._system_log)
 
 
+def test_editor_command_opens_argument_text_in_external_editor(egg_app, monkeypatch):
+    seen_initial = {}
+
+    async def fake_external(argv):
+        path = Path(argv[-1])
+        seen_initial["text"] = path.read_text(encoding="utf-8")
+        path.write_text(path.read_text(encoding="utf-8") + "edited\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(egg_app, "run_external_terminal_command", fake_external)
+
+    egg_app.handle_command("/editor Draft prompt")
+
+    assert seen_initial["text"] == "Draft prompt\n"
+    assert egg_app.input_panel.editor.editor.get_text() == "Draft prompt\nedited"
+
+
 def test_edit_answer_command_falls_back_to_empty_editor_without_answer(egg_app, monkeypatch):
     seen_initial = {}
 
@@ -199,6 +216,49 @@ def test_edit_answer_command_falls_back_to_empty_editor_without_answer(egg_app, 
     assert seen_initial["text"] == ""
     assert egg_app.input_panel.editor.editor.get_text() == "Prompt when no assistant exists"
     assert any("input message draft" in entry for entry in egg_app._system_log)
+
+
+def test_edit_answer_command_opens_unmatched_argument_text(egg_app, monkeypatch):
+    from eggthreads import append_message, create_snapshot
+
+    append_message(egg_app.db, egg_app.current_thread, "assistant", "Existing answer")
+    create_snapshot(egg_app.db, egg_app.current_thread)
+    seen_initial = {}
+
+    async def fake_external(argv):
+        path = Path(argv[-1])
+        seen_initial["text"] = path.read_text(encoding="utf-8")
+        path.write_text(path.read_text(encoding="utf-8") + "edited\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(egg_app, "run_external_terminal_command", fake_external)
+
+    egg_app.handle_command("/editAnswer Write this prompt")
+
+    assert seen_initial["text"] == "Write this prompt\n"
+    assert egg_app.input_panel.editor.editor.get_text() == "Write this prompt\nedited"
+
+
+def test_edit_answer_command_can_edit_user_message_by_selector(egg_app, monkeypatch):
+    from eggthreads import append_message, create_snapshot
+
+    user_id = append_message(egg_app.db, egg_app.current_thread, "user", "Original user prompt")
+    append_message(egg_app.db, egg_app.current_thread, "assistant", "Assistant answer")
+    create_snapshot(egg_app.db, egg_app.current_thread)
+    seen_initial = {}
+
+    async def fake_external(argv):
+        path = Path(argv[-1])
+        seen_initial["text"] = path.read_text(encoding="utf-8")
+        path.write_text("Edited user prompt\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(egg_app, "run_external_terminal_command", fake_external)
+
+    egg_app.handle_command(f"/editAnswer {user_id[-8:]}")
+
+    assert seen_initial["text"] == "Original user prompt\n"
+    assert egg_app.input_panel.editor.editor.get_text() == "Edited user prompt"
 
 
 def test_edit_answer_command_refuses_to_overwrite_existing_input(egg_app, monkeypatch):

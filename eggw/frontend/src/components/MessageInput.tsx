@@ -286,7 +286,9 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               ? "assistant_note"
               : response.data?.source_kind === "input_message"
                 ? "input_message"
-                : "assistant_answer",
+                : response.data?.source_kind === "message"
+                  ? "message"
+                  : "assistant_answer",
             sourceSuffix: typeof response.data?.source_suffix === "string" ? response.data.source_suffix : "",
             sourceLabel: typeof response.data?.source_label === "string" ? response.data.source_label : "",
             origin: "command",
