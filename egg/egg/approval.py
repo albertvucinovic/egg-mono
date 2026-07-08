@@ -24,7 +24,7 @@ class ApprovalMixin:
         pending prompt *changes* (kind or ids).
         """
         try:
-            from eggthreads import list_tool_calls_for_thread, thread_state
+            from eggthreads import list_tool_calls_for_thread
         except Exception:
             self._pending_prompt = {}
             return
@@ -32,26 +32,25 @@ class ApprovalMixin:
         old = getattr(self, '_pending_prompt', {}) or {}
         new = {}
         try:
-            st = thread_state(self.db, self.current_thread)
+            tcs = list_tool_calls_for_thread(self.db, self.current_thread)
         except Exception:
-            st = 'unknown'
-
-        if st in ('waiting_tool_approval', 'waiting_output_approval'):
-            try:
-                tcs = list_tool_calls_for_thread(self.db, self.current_thread)
-            except Exception:
-                tcs = []
-            # Prefer execution approval first
-            exec_needed = [tc for tc in tcs if tc.state == 'TC1']
-            if exec_needed:
-                ids = [tc.tool_call_id for tc in exec_needed]
-                new = {'kind': 'exec', 'tool_call_ids': ids}
-            else:
-                # Otherwise, check output approval for finished tool calls
-                out_needed = [tc for tc in tcs if tc.state == 'TC4' and tc.finished_output]
-                if out_needed:
-                    ids = [tc.tool_call_id for tc in out_needed]
-                    new = {'kind': 'output', 'tool_call_ids': ids}
+            tcs = []
+        # Prefer execution approval first. Do not gate this on thread_state():
+        # the watcher can receive the final assistant msg.create/stream.close
+        # before the runner releases the open_streams lease. In that small
+        # window thread_state() still reports "running", and no later event is
+        # emitted for the lease release, so the CLI approval panel could remain
+        # hidden forever even though a TC1/TC4 approval is already durable.
+        exec_needed = [tc for tc in tcs if tc.state == 'TC1']
+        if exec_needed:
+            ids = [tc.tool_call_id for tc in exec_needed]
+            new = {'kind': 'exec', 'tool_call_ids': ids}
+        else:
+            # Otherwise, check output approval for finished tool calls
+            out_needed = [tc for tc in tcs if tc.state == 'TC4' and tc.finished_output]
+            if out_needed:
+                ids = [tc.tool_call_id for tc in out_needed]
+                new = {'kind': 'output', 'tool_call_ids': ids}
 
         # Update and log only if changed
         if new != old:
