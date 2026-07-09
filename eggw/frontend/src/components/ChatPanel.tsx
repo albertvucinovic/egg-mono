@@ -1511,11 +1511,12 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     loadingOlderRef.current = true;
     setIsLoadingOlder(true);
     try {
-      const older = await fetchMessages(currentThreadId, {
+      const olderSnapshot = await fetchMessages(currentThreadId, {
         limit: INITIAL_TRANSCRIPT_MESSAGE_LIMIT,
         beforeId: firstId,
       });
-      if (!Array.isArray(older) || older.length === 0) {
+      const older = olderSnapshot.items as unknown as Message[];
+      if (older.length === 0) {
         setHasOlderMessages(false);
         return;
       }
@@ -1776,7 +1777,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       // message can shrink content and make an intentionally scrolled-up view
       // look "at bottom" for one render.
       const wasSticky = stickToBottomRef.current;
-      const fetchedMessages = Array.isArray(data) ? data : [];
+      const fetchedMessages = (data.items || []) as unknown as Message[];
       const currentMessages = useAppStore.getState().messages;
       const merged = mergeFetchedTranscriptMessages(currentMessages, fetchedMessages);
       setMessages(merged.messages);

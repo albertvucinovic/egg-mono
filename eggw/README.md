@@ -111,7 +111,11 @@ Common REST endpoints:
 - `GET /api/threads/{id}` — thread details
 - `POST /api/threads` — create thread
 - `DELETE /api/threads/{id}` — delete thread
-- `GET /api/threads/{id}/messages` — messages plus compaction marker items
+- `GET /api/threads/{id}/messages` — legacy message/compaction-marker array plus
+  `X-Egg-Event-Cursor`; pass `envelope=true` for
+  `{items, snapshot_cursor, next_before}`. The cursor is the exact event
+  watermark represented by the returned page and is valid even with `limit` or
+  `before_id` pagination.
 - `POST /api/threads/{id}/messages` — send user message
 - `GET /api/threads/{id}/stats` — token stats
 - `GET /api/models` — configured models
@@ -121,7 +125,14 @@ Common REST endpoints:
 
 Streaming endpoints:
 
-- `GET /api/threads/{id}/events` — server-sent thread events
+- `GET /api/threads/{id}/events` — cursor-resumable server-sent thread events.
+  Pass the message `snapshot_cursor` as `after_seq`; on reconnect the browser
+  client sends `Last-Event-ID`. Explicit `after_seq` takes precedence. Each
+  frame emits `id: <event_seq>` and JSON
+  `{event_id,event_seq,type,ts,msg_id,invoke_id,chunk_seq,payload}`. Events are
+  strictly after the cursor, so reconnect is duplicate-safe. A cursorless
+  connection replays only an exact unexpired lease invocation; unmatched stale
+  `stream.open` events do not imply active work. Missing threads return `404`.
 - `WS /ws/{id}` — bidirectional websocket channel where enabled
 
 ## Development checks

@@ -24,6 +24,17 @@ Quick start::
 See API.md for comprehensive documentation.
 """
 from .db import InvocationEventWriter, LeaseLost, ThreadsDB  # type: ignore
+from .event_feed import (
+    ActiveThreadLease,
+    ThreadEventBatch,
+    ThreadEventCursorError,
+    ThreadEventEnvelope,
+    ThreadEventFeed,
+    ThreadEventFeedError,
+    ThreadEventFeedNotFound,
+    parse_event_cursor,
+    resolve_event_cursor,
+)
 from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig, set_default_tool_timeout, get_default_tool_timeout, runner_actionable_resource_class  # type: ignore
 from .terminal_safety import sanitize_terminal_text  # type: ignore
 from .snapshot import SnapshotBuilder  # type: ignore
@@ -369,6 +380,9 @@ from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill
 from .llm import create_llm_client
 
 __all__ = [
+    'ActiveThreadLease', 'ThreadEventBatch', 'ThreadEventCursorError',
+    'ThreadEventEnvelope', 'ThreadEventFeed', 'ThreadEventFeedError',
+    'ThreadEventFeedNotFound', 'parse_event_cursor', 'resolve_event_cursor',
     'ThreadsDB', 'InvocationEventWriter', 'LeaseLost', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
     'ProjectedMessage', 'ThreadProjection', 'ThreadProjectionError', 'load_thread_projection',
     'set_default_tool_timeout', 'get_default_tool_timeout',

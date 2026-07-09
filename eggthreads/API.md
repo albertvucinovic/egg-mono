@@ -326,6 +326,20 @@ fallback; compaction, context-only/system messages, attachments, tools protocol,
 provider fields, and usage sanitization continue through the existing provider
 boundary.
 
+### `ThreadEventFeed(db: ThreadsDB, *, batch_size: int = 256)`
+
+Typed cursor/event boundary for transport synchronization. `read_after()`
+returns a bounded `ThreadEventBatch` of canonical `ThreadEventEnvelope` values
+strictly after `event_seq`; envelopes contain event ID/sequence/type/timestamp,
+message/invocation/chunk identity, and decoded payload. `active_lease()` and
+`active_replay_after_seq()` consult only an unexpired `open_streams` lease and
+its exact invocation, never unmatched historical stream events.
+
+`resolve_event_cursor()` documents shared precedence: explicit `after_seq`, then
+SSE `Last-Event-ID`, then the supplied default. `-1` is the beginning sentinel.
+Missing threads and invalid cursors produce typed errors. Reads are bounded by
+the configured batch size and require no schema change.
+
 ### `create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]`
 
 Build a canonical projection through a captured event watermark, attach derived

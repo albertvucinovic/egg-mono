@@ -59,14 +59,29 @@ export class AuthenticatedEventSource {
   onopen: ((event: Event) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
 
-  private readonly connectResponse: (signal: AbortSignal) => Promise<Response>;
+  private readonly connectResponse: (
+    signal: AbortSignal,
+    cursor: string,
+    reconnect: boolean,
+  ) => Promise<Response>;
   private readonly listeners = new Map<string, Set<SSEListener>>();
   private controller: AbortController | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  private lastEventId: string;
+  private hasConnected = false;
+  private reconnectDelayMs = 1000;
 
-  constructor(connectResponse: (signal: AbortSignal) => Promise<Response>) {
+  constructor(
+    connectResponse: (
+      signal: AbortSignal,
+      cursor: string,
+      reconnect: boolean,
+    ) => Promise<Response>,
+    initialCursor = -1,
+  ) {
     this.connectResponse = connectResponse;
+    this.lastEventId = String(initialCursor);
     void this.connect();
   }
 
@@ -93,11 +108,24 @@ export class AuthenticatedEventSource {
     const controller = new AbortController();
     this.controller = controller;
     try {
-      const response = await this.connectResponse(controller.signal);
+      const reconnect = this.hasConnected;
+      const response = await this.connectResponse(
+        controller.signal,
+        this.lastEventId,
+        reconnect,
+      );
       if (this.closed || controller.signal.aborted) return;
+      this.hasConnected = true;
+      this.reconnectDelayMs = 1000;
       this.onopen?.(new Event("open"));
       await consumeSSE(response, ({ event, data, id }) => {
-        const message = new MessageEvent(event, { data, lastEventId: id || "" });
+        if (!id) return;
+        const next = Number(id);
+        const current = Number(this.lastEventId);
+        if (!Number.isSafeInteger(next) || next < 0) return;
+        if (Number.isSafeInteger(current) && next <= current) return;
+        this.lastEventId = id;
+        const message = new MessageEvent(event, { data, lastEventId: id });
         this.listeners.get(event)?.forEach((listener) => listener(message));
       });
       if (!this.closed) this.reportErrorAndReconnect();
@@ -109,9 +137,11 @@ export class AuthenticatedEventSource {
   private reportErrorAndReconnect(): void {
     this.onerror?.(new Event("error"));
     if (this.closed || this.reconnectTimer !== null) return;
+    const delay = this.reconnectDelayMs;
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 10000);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.connect();
-    }, 1000);
+    }, delay);
   }
 }

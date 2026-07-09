@@ -123,14 +123,31 @@ export async function interruptThread(threadId: string) {
   return res.json();
 }
 
-export async function fetchMessages(threadId: string, options: { limit?: number; beforeId?: string } = {}) {
-  const params = new URLSearchParams();
+export interface ApiMessage extends Record<string, unknown> {
+  id: string;
+  role: string;
+}
+
+export interface MessageSnapshot<T = ApiMessage> {
+  items: T[];
+  snapshot_cursor: number;
+  next_before: string | null;
+}
+
+export async function fetchMessages(
+  threadId: string,
+  options: { limit?: number; beforeId?: string } = {},
+): Promise<MessageSnapshot> {
+  const params = new URLSearchParams({ envelope: "true" });
   if (options.limit && options.limit > 0) params.set("limit", String(Math.trunc(options.limit)));
   if (options.beforeId) params.set("before_id", options.beforeId);
-  const query = params.toString();
-  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages${query ? `?${query}` : ""}`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages?${params.toString()}`);
   if (!res.ok) throw new Error("Failed to fetch messages");
-  return res.json();
+  const payload = await res.json();
+  if (!payload || !Array.isArray(payload.items) || !Number.isSafeInteger(payload.snapshot_cursor)) {
+    throw new Error("Invalid message snapshot response");
+  }
+  return payload;
 }
 
 export async function sendMessage(threadId: string, content: EggMessageContent) {
@@ -373,9 +390,19 @@ export async function setAutoApproval(threadId: string, enabled: boolean) {
   return res.json();
 }
 
-async function openEventStream(threadId: string, signal: AbortSignal): Promise<Response> {
-  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/events`, {
-    headers: { Accept: "text/event-stream" },
+async function openEventStream(
+  threadId: string,
+  signal: AbortSignal,
+  cursor: string,
+  reconnect: boolean,
+): Promise<Response> {
+  const headers: Record<string, string> = { Accept: "text/event-stream" };
+  const url = reconnect
+    ? `${API_BASE}/api/threads/${threadId}/events`
+    : `${API_BASE}/api/threads/${threadId}/events?after_seq=${encodeURIComponent(cursor)}`;
+  if (reconnect) headers["Last-Event-ID"] = cursor;
+  const res = await apiFetch(url, {
+    headers,
     signal,
   });
   if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to connect to event stream"));
@@ -383,8 +410,11 @@ async function openEventStream(threadId: string, signal: AbortSignal): Promise<R
   return res;
 }
 
-export function createEventSource(threadId: string): AuthenticatedEventSource {
-  return new AuthenticatedEventSource((signal) => openEventStream(threadId, signal));
+export function createEventSource(threadId: string, afterSeq = -1): AuthenticatedEventSource {
+  return new AuthenticatedEventSource(
+    (signal, cursor, reconnect) => openEventStream(threadId, signal, cursor, reconnect),
+    afterSeq,
+  );
 }
 
 export function createWebSocket(threadId: string) {

@@ -112,7 +112,7 @@ async function mockThreadShell(page: Page, threadId: string, options: { messages
     await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
   });
   await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
-    await route.fulfill({ status: 200, headers: mockApiHeaders, json: options.messages || [] });
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: options.messages || [], snapshot_cursor: 0, next_before: null } });
   });
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
     await route.fulfill({
@@ -292,8 +292,8 @@ test.describe('Attachment Composer UX', () => {
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
       await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
     });
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/messages`, async (route) => {
-      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: [], snapshot_cursor: 0, next_before: null } });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/attachments`, async (route, request) => {
       uploadCalled = true;
@@ -443,13 +443,17 @@ test.describe('Image Generation UI', () => {
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
       await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
     });
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/messages`, async (route, request) => {
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
       messagesRequests.push(request.method());
       if (imageGenerated) messagesRequestsAfterGeneration.push(request.method());
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: imageGenerated ? [generatedMessage, attachmentMessage] : [],
+        json: {
+          items: imageGenerated ? [generatedMessage, attachmentMessage] : [],
+          snapshot_cursor: imageGenerated ? 1 : 0,
+          next_before: null,
+        },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/image-generation`, async (route, request) => {
@@ -950,25 +954,30 @@ test.describe('Streaming', () => {
 
 test.describe('Live Tool Streaming', () => {
   test('keeps tool arguments visible while the tool is running', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
     const threadId = 'running-tool-args-thread';
     const toolCallId = 'call-running-tool-args';
 
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
       const startedAt = new Date().toISOString();
       await route.fulfill({
         status: 200,
         headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
         body: [
+          'id: 1',
           'event: stream.open',
           `data: ${JSON.stringify({
-            event_type: 'stream.open',
+            type: 'stream.open',
             ts: startedAt,
             payload: { stream_kind: 'tool' },
           })}`,
           '',
+          'id: 2',
           'event: tool_call.execution_started',
           `data: ${JSON.stringify({
-            event_type: 'tool_call.execution_started',
+            type: 'tool_call.execution_started',
             ts: startedAt,
             payload: {
               tool_call_id: toolCallId,
@@ -990,7 +999,7 @@ test.describe('Live Tool Streaming', () => {
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: [{ id: 'user-before-running-tool', role: 'user', content: 'run slow tool', content_text: 'run slow tool' }],
+        json: { items: [{ id: 'user-before-running-tool', role: 'user', content: 'run slow tool', content_text: 'run slow tool' }], snapshot_cursor: 0, next_before: null },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {

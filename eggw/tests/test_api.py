@@ -681,6 +681,26 @@ class TestMessageOperations:
         data = response.json()
         assert [message["content"] for message in data] == ["second", "third"]
 
+    def test_get_messages_envelope_exposes_pagination_cursor(self, client):
+        from eggthreads import append_message
+
+        thread_id = client.post("/api/threads", json={"name": "Envelope"}).json()["id"]
+        append_message(core_state.db, thread_id, role="user", content="first")
+        append_message(core_state.db, thread_id, role="assistant", content="second")
+
+        response = client.get(
+            f"/api/threads/{thread_id}/messages?envelope=true&limit=1"
+        )
+        body = response.json()
+
+        assert response.status_code == 200
+        assert [item["content"] for item in body["items"]] == ["second"]
+        assert body["snapshot_cursor"] == int(
+            response.headers["x-egg-event-cursor"]
+        )
+        assert body["next_before"] == body["items"][0]["id"]
+
+
     def test_get_messages_before_id_paginates_older_history(self, client):
         """Bounded transcript API can page older messages before the first loaded id."""
         from eggthreads import append_message
@@ -2041,107 +2061,239 @@ class TestMessageOperations:
 
 
 class TestEventStreaming:
-    """Test SSE event shaping for streaming UI clients."""
+    """Actual HTTP/SSE protocol tests for cursor-resumable synchronization."""
 
-    def test_sse_replay_for_active_stream_includes_preceding_user_message(self, client):
-        """Joining mid-stream must also replay the user turn that triggered it."""
-        from eggthreads import append_message
-        from eggw.routes.events import stream_events
+    @staticmethod
+    def _finite_event_source_response(generator, **_kwargs):
+        from starlette.responses import StreamingResponse
 
-        create_resp = client.post("/api/threads", json={"name": "Active Stream User Replay"})
-        thread_id = create_resp.json()["id"]
-        user_msg_id = append_message(core_state.db, thread_id, "user", "hello from terminal egg")
-        invoke_id = "invoke-user-replay"
-        core_state.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="stream.open",
-            msg_id=os.urandom(10).hex(),
-            invoke_id=invoke_id,
-            payload={"stream_kind": "llm", "model_key": "test-model"},
-        )
-
-        async def collect_first_two_events():
-            generator = await stream_events(thread_id)
+        async def body():
             try:
-                return [await generator.__anext__(), await generator.__anext__()]
+                frame = await generator.__anext__()
+                lines = [
+                    f"id: {frame['id']}",
+                    f"event: {frame['event']}",
+                    f"data: {frame['data']}",
+                    "",
+                ]
+                yield ("\n".join(lines) + "\n").encode()
             finally:
                 await generator.aclose()
 
-        with patch("eggw.routes.events.EventSourceResponse", lambda generator, **kwargs: generator):
-            first, second = asyncio.run(collect_first_two_events())
+        return StreamingResponse(body(), media_type="text/event-stream")
 
-        assert first["event"] == "msg.create"
-        first_data = json.loads(first["data"])
-        assert first_data["msg_id"] == user_msg_id
-        assert first_data["payload"]["role"] == "user"
-        assert first_data["payload"]["content"] == "hello from terminal egg"
+    @staticmethod
+    def _sse_events(response):
+        events = []
+        for block in response.text.strip().split("\n\n"):
+            fields = {}
+            for line in block.splitlines():
+                if ": " in line:
+                    key, value = line.split(": ", 1)
+                    fields[key] = value
+            if "data" in fields:
+                events.append(
+                    {
+                        "id": int(fields["id"]),
+                        "event": fields["event"],
+                        "data": json.loads(fields["data"]),
+                    }
+                )
+        return events
 
-        assert second["event"] == "stream.open"
-        second_data = json.loads(second["data"])
-        assert second_data["invoke_id"] == invoke_id
+    def _finite_get(self, client, url, *, headers=None):
+        with patch(
+            "eggw.routes.events.EventSourceResponse",
+            self._finite_event_source_response,
+        ):
+            return client.get(url, headers=headers or {})
 
-    def test_sse_replays_active_tool_stream_with_preview_limit_indicator(self, client):
-        """An eggw client joining mid-tool-stream sees preview + suppressed event."""
-        pytest.skip("SSE TestClient stream hangs in CI; needs real-server SSE test")
-        # Create thread
-        create_resp = client.post("/api/threads", json={"name": "Tool Stream"})
-        thread_id = create_resp.json()["id"]
-        invoke_id = "invoke-tool-sse"
+    def test_message_snapshot_legacy_array_keeps_cursor_header(self, client):
+        from eggthreads import append_message
 
-        # Simulate an active tool stream. The SSE endpoint should start from
-        # stream.open and replay the current stream so a joining web client can
-        # reconstruct the same limited preview the TUI shows.
-        assert core_state.db.try_open_stream(
-            thread_id,
-            invoke_id,
-            "2999-01-01 00:00:00",
-            owner="test",
-            purpose="tool",
+        thread_id = client.post("/api/threads", json={"name": "legacy snapshot"}).json()["id"]
+        append_message(core_state.db, thread_id, "user", "legacy")
+
+        response = client.get(f"/api/threads/{thread_id}/messages")
+
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+        assert int(response.headers["x-egg-event-cursor"]) == core_state.db.max_event_seq(
+            thread_id
         )
+
+
+    def test_message_snapshot_cursor_closes_snapshot_to_connect_race(self, client):
+        from eggthreads import append_message
+
+        thread_id = client.post("/api/threads", json={"name": "snapshot race"}).json()["id"]
+        append_message(core_state.db, thread_id, "user", "in snapshot")
+
+        snapshot_response = client.get(
+            f"/api/threads/{thread_id}/messages?envelope=true"
+        )
+        assert snapshot_response.status_code == 200
+        snapshot = snapshot_response.json()
+        assert snapshot_response.headers["x-egg-event-cursor"] == str(
+            snapshot["snapshot_cursor"]
+        )
+        assert snapshot["items"][-1]["content"] == "in snapshot"
+
+        raced_msg_id = append_message(core_state.db, thread_id, "user", "after snapshot")
+        response = self._finite_get(
+            client,
+            f"/api/threads/{thread_id}/events?after_seq={snapshot['snapshot_cursor']}",
+        )
+        events = self._sse_events(response)
+
+        assert response.status_code == 200
+        assert [event["data"]["msg_id"] for event in events] == [raced_msg_id]
+        assert events[0]["id"] == events[0]["data"]["event_seq"]
+        assert events[0]["data"]["type"] == "msg.create"
+        assert set(events[0]["data"]) == {
+            "event_id",
+            "event_seq",
+            "type",
+            "ts",
+            "msg_id",
+            "invoke_id",
+            "chunk_seq",
+            "payload",
+        }
+
+    def test_after_seq_precedes_last_event_id_and_reconnect_has_no_duplicates(self, client):
+        from eggthreads import append_message
+
+        thread_id = client.post("/api/threads", json={"name": "cursor precedence"}).json()["id"]
+        first = append_message(core_state.db, thread_id, "user", "one")
+        first_seq = core_state.db.max_event_seq(thread_id)
+        second = append_message(core_state.db, thread_id, "user", "two")
+        second_seq = core_state.db.max_event_seq(thread_id)
+        third = append_message(core_state.db, thread_id, "user", "three")
+
+        explicit = self._finite_get(
+            client,
+            f"/api/threads/{thread_id}/events?after_seq={first_seq}",
+            headers={"Last-Event-ID": str(second_seq)},
+        )
+        explicit_events = self._sse_events(explicit)
+        assert [event["data"]["msg_id"] for event in explicit_events] == [second]
+
+        reconnect = self._finite_get(
+            client,
+            f"/api/threads/{thread_id}/events",
+            headers={"Last-Event-ID": str(explicit_events[-1]["id"])},
+        )
+        reconnect_events = self._sse_events(reconnect)
+        assert [event["data"]["msg_id"] for event in reconnect_events] == [third]
+        assert all(event["id"] > second_seq for event in reconnect_events)
+        assert first not in [event["data"]["msg_id"] for event in explicit_events]
+
+    def test_live_lease_without_cursor_replays_exact_active_invoke(self, client):
+        from datetime import datetime, timedelta, timezone
+
+        thread_id = client.post("/api/threads", json={"name": "live lease"}).json()["id"]
+        # Historical unmatched open must not win over the current live lease.
         core_state.db.append_event(
-            event_id=os.urandom(10).hex(),
+            event_id="old-open",
             thread_id=thread_id,
             type_="stream.open",
-            msg_id=os.urandom(10).hex(),
-            invoke_id=invoke_id,
-            payload={"stream_kind": "tool", "model_key": "test-model"},
+            msg_id="old-message",
+            invoke_id="old-invoke",
+            payload={"stream_kind": "llm"},
         )
-        core_state.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="stream.delta",
-            invoke_id=invoke_id,
-            chunk_seq=1,
-            payload={"tool": {"id": "tc1", "name": "bash", "text": "preview"}},
+        lease_until = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime(
+            "%Y-%m-%d %H:%M:%S"
         )
-        core_state.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="stream.delta",
-            invoke_id=invoke_id,
-            chunk_seq=2,
-            payload={"tool": {"id": "tc1", "name": "bash", "suppressed": True}},
+        assert core_state.db.try_open_stream(
+            thread_id, "live-invoke", lease_until, owner="test", purpose="llm"
+        )
+        live_open_seq = core_state.db.invocation_writer(
+            thread_id, "live-invoke"
+        ).append_event(
+            event_id="live-open",
+            type_="stream.open",
+            msg_id="live-message",
+            payload={"stream_kind": "llm"},
         )
 
-        with client.stream("GET", f"/api/threads/{thread_id}/events") as response:
-            assert response.status_code == 200
-            lines = []
-            for line in response.iter_lines():
-                if line:
-                    lines.append(line)
-                if sum(1 for line in lines if line.startswith("data: ")) >= 3:
-                    break
+        response = self._finite_get(client, f"/api/threads/{thread_id}/events")
+        event = self._sse_events(response)[0]
+        assert event["id"] == live_open_seq
+        assert event["data"]["invoke_id"] == "live-invoke"
 
-        data_events = [json.loads(line.removeprefix("data: ")) for line in lines if line.startswith("data: ")]
-        assert [event["event_type"] for event in data_events] == [
-            "stream.open",
-            "stream.delta",
-            "stream.delta",
-        ]
-        assert data_events[0]["payload"]["stream_kind"] == "tool"
-        assert data_events[1]["payload"]["tool"]["text"] == "preview"
-        assert data_events[2]["payload"]["tool"]["suppressed"] is True
+
+    def test_expired_lease_with_unmatched_open_does_not_trigger_stale_replay(self, client):
+        thread_id = client.post("/api/threads", json={"name": "expired lease"}).json()["id"]
+        core_state.db.append_event(
+            event_id="historical-open",
+            thread_id=thread_id,
+            type_="stream.open",
+            msg_id="historical-stream-message",
+            invoke_id="historical-invoke",
+            payload={"stream_kind": "llm"},
+        )
+        core_state.db.conn.execute(
+            "INSERT INTO open_streams(thread_id, invoke_id, lease_until, purpose) "
+            "VALUES (?, ?, datetime('now', '-1 second'), 'llm')",
+            (thread_id, "historical-invoke"),
+        )
+
+        # No cursor and no live lease starts at current max; the stale open is
+        # not replayed. Add one event after route cursor selection to terminate.
+        def append_then_finite(generator, **kwargs):
+            from eggthreads import append_message
+
+            append_message(core_state.db, thread_id, "user", "fresh only")
+            return self._finite_event_source_response(generator, **kwargs)
+
+        with patch("eggw.routes.events.EventSourceResponse", append_then_finite):
+            response = client.get(f"/api/threads/{thread_id}/events")
+        events = self._sse_events(response)
+        assert [event["event"] for event in events] == ["msg.create"]
+        assert events[0]["data"]["payload"]["content"] == "fresh only"
+
+    def test_concurrent_invokes_keep_chunk_identity_in_canonical_envelope(self, client):
+        thread_id = client.post("/api/threads", json={"name": "invoke identity"}).json()["id"]
+        base = core_state.db.max_event_seq(thread_id)
+        for invoke_id, chunk_seq, text in (
+            ("invoke-a", 0, "a0"),
+            ("invoke-b", 0, "b0"),
+            ("invoke-a", 1, "a1"),
+        ):
+            core_state.db.append_event(
+                event_id=f"{invoke_id}-{chunk_seq}",
+                thread_id=thread_id,
+                type_="stream.delta",
+                invoke_id=invoke_id,
+                chunk_seq=chunk_seq,
+                payload={"text": text},
+            )
+
+        events = []
+        cursor = base
+        for _ in range(3):
+            response = self._finite_get(
+                client, f"/api/threads/{thread_id}/events?after_seq={cursor}"
+            )
+            event = self._sse_events(response)[0]
+            events.append(event)
+            cursor = event["id"]
+        assert [
+            (event["data"]["invoke_id"], event["data"]["chunk_seq"])
+            for event in events
+        ] == [("invoke-a", 0), ("invoke-b", 0), ("invoke-a", 1)]
+        assert len({event["id"] for event in events}) == 3
+
+    def test_event_stream_missing_thread_and_invalid_cursor_are_http_errors(self, client):
+        missing = client.get("/api/threads/missing/events?after_seq=-1")
+        assert missing.status_code == 404
+        assert missing.json() == {"detail": "Thread not found"}
+
+        thread_id = client.post("/api/threads", json={"name": "bad cursor"}).json()["id"]
+        bad = client.get(f"/api/threads/{thread_id}/events?after_seq=not-an-int")
+        assert bad.status_code == 400
+        assert "after_seq" in bad.json()["detail"]
 
 
 class TestToolCalls:

@@ -82,8 +82,16 @@ def test_authenticated_sse_reaches_route(client: TestClient, monkeypatch: pytest
 
     # A finite stream avoids TestClient waiting on the production event loop;
     # reaching this replacement proves middleware accepted SSE credentials.
+    from eggthreads import create_root_thread
+    from eggw.core import state as core_state
+
+    from eggthreads import ThreadsDB
+
+    setup_db = ThreadsDB(core_state.db.path)
+    thread_id = create_root_thread(setup_db, name="security-sse")
+    setup_db.conn.close()
     monkeypatch.setattr("eggw.routes.events.EventSourceResponse", FiniteEventSourceResponse)
-    response = client.get("/api/threads/thread-id/events", headers=auth_headers())
+    response = client.get(f"/api/threads/{thread_id}/events", headers=auth_headers())
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.text == "event: connected\ndata: {}\n\n"

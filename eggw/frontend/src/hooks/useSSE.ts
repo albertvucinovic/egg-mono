@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
-import { createEventSource, type AuthenticatedEventSource } from "@/lib/api";
+import { createEventSource, fetchMessages, type AuthenticatedEventSource } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import { streamingBuffer } from "@/lib/streamingBuffer";
 import { useQueryClient } from "@tanstack/react-query";
@@ -101,8 +101,8 @@ export function useSSE(threadId: string | null) {
     }, delayMs);
   }, [clearScheduledMessageRefresh, refreshMessagesNow, threadId]);
 
-  const connect = useCallback(() => {
-    if (!threadId) return;
+  const connect = useCallback(async () => {
+    if (!threadId) return null;
 
     // Close existing connection
     if (eventSourceRef.current) {
@@ -110,7 +110,22 @@ export function useSSE(threadId: string | null) {
     }
     clearScheduledMessageRefresh();
 
-    // Clear streaming state
+    // Establish the transcript/cursor first. React Query deduplicates this with
+    // ChatPanel's initial request. Events committed after that exact snapshot
+    // are then replayed from snapshot_cursor, closing the snapshot-to-live gap.
+    let snapshot: { snapshot_cursor?: number };
+    try {
+      snapshot = await queryClient.ensureQueryData({
+        queryKey: ["messages", threadId],
+        queryFn: () => fetchMessages(threadId, { limit: 300 }),
+      });
+    } catch (error) {
+      addSystemLog("Unable to establish message synchronization cursor", "error");
+      return null;
+    }
+    // Initial synchronization owns the baseline streaming reset. Transport
+    // reconnects stay inside AuthenticatedEventSource and never clear durable
+    // stream state merely because the network dropped.
     streamingBuffer.clear();
     setStreamingToolCalls({});
     setStreamingToolOutputs({});
@@ -120,7 +135,10 @@ export function useSSE(threadId: string | null) {
     setActiveUserCommand(null);
     setIsStreaming(false);
 
-    const es = createEventSource(threadId);
+    const snapshotCursor = Number.isSafeInteger(snapshot.snapshot_cursor)
+      ? Number(snapshot.snapshot_cursor)
+      : -1;
+    const es = createEventSource(threadId, snapshotCursor);
     eventSourceRef.current = es;
 
     es.onopen = () => {
@@ -128,8 +146,7 @@ export function useSSE(threadId: string | null) {
     };
 
     es.onerror = () => {
-      addSystemLog("SSE connection error", "error");
-      setIsStreaming(false);
+      addSystemLog("SSE connection error; reconnecting from cursor", "error");
     };
 
     // Handle stream.open - streaming started
@@ -532,12 +549,19 @@ export function useSSE(threadId: string | null) {
   }, [clearScheduledMessageRefresh]);
 
   useEffect(() => {
-    const es = connect();
-    return () => {
-      clearScheduledMessageRefresh();
-      if (es) {
-        es.close();
+    let cancelled = false;
+    let es: AuthenticatedEventSource | null = null;
+    void connect().then((connected) => {
+      if (cancelled) {
+        connected?.close();
+      } else {
+        es = connected;
       }
+    });
+    return () => {
+      cancelled = true;
+      clearScheduledMessageRefresh();
+      es?.close();
     };
   }, [clearScheduledMessageRefresh, connect]);
 
