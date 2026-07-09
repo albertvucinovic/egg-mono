@@ -5,6 +5,7 @@ import os from 'os';
 // Use different ports for testing to avoid conflicts
 const TEST_BACKEND_PORT = 8099;
 const TEST_FRONTEND_PORT = 3099;
+const TEST_API_TOKEN = 'test-eggw-browser-token-' + 'a'.repeat(48);
 
 // Use isolated test database in temp directory
 const TEST_DB_PATH = path.join(os.tmpdir(), 'eggw-test', 'threads.sqlite');
@@ -34,13 +35,13 @@ export default defineConfig({
   webServer: [
     {
       // Enable test mode for mock LLM responses
-      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && cd .. && PYTHONPATH=.. EGG_TEST_MODE=true EGG_DB_PATH="${TEST_DB_PATH}" python -m hypercorn eggw.main:app --bind 0.0.0.0:${TEST_BACKEND_PORT}`,
+      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && cd .. && PYTHONPATH=.. EGG_TEST_MODE=true EGG_DB_PATH="${TEST_DB_PATH}" EGGW_API_TOKEN="${TEST_API_TOKEN}" EGGW_ALLOWED_ORIGINS="http://localhost:${TEST_FRONTEND_PORT}" python -m hypercorn eggw.main:app --bind 0.0.0.0:${TEST_BACKEND_PORT}`,
       url: `http://localhost:${TEST_BACKEND_PORT}/health`,
       reuseExistingServer: false, // Always start fresh for tests
       timeout: 30000,
     },
     {
-      command: `NEXT_PUBLIC_API_URL=http://localhost:${TEST_BACKEND_PORT} npm run dev -- -p ${TEST_FRONTEND_PORT}`,
+      command: `NEXT_PUBLIC_API_URL=http://localhost:${TEST_BACKEND_PORT} NEXT_PUBLIC_EGGW_API_TOKEN="${TEST_API_TOKEN}" npm run dev -- -p ${TEST_FRONTEND_PORT}`,
       url: `http://localhost:${TEST_FRONTEND_PORT}`,
       reuseExistingServer: false, // Always start fresh for tests
       timeout: 60000,

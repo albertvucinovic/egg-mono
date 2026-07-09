@@ -13,6 +13,7 @@ import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import { attachmentUrl, createEditAnswerDraft, fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
+import { ProtectedFileLink, ProtectedImage } from "@/components/ProtectedFileLink";
 import {
   artifactFilename,
   artifactPlaceholder,
@@ -710,9 +711,9 @@ function ContentPartsView({
                 {attachmentPlaceholder(part)}
               </div>
               {openUrl && isImage && (
-                <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
-                  <img
-                    src={openUrl}
+                <ProtectedFileLink url={openUrl} newWindow className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
+                  <ProtectedImage
+                    url={openUrl}
                     alt={`Preview of ${attachmentFilename(part)}`}
                     loading="lazy"
                     decoding="async"
@@ -723,16 +724,16 @@ function ContentPartsView({
                       event.currentTarget.style.display = "none";
                     }}
                   />
-                </a>
+                </ProtectedFileLink>
               )}
               {openUrl && downloadUrl && (
                 <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
-                  <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={openUrl} newWindow className="underline" style={{ color: "var(--accent)" }}>
                     Open
-                  </a>
-                  <a href={downloadUrl} className="underline" style={{ color: "var(--accent)" }}>
+                  </ProtectedFileLink>
+                  <ProtectedFileLink url={downloadUrl} filename={attachmentFilename(part)} className="underline" style={{ color: "var(--accent)" }}>
                     Download
-                  </a>
+                  </ProtectedFileLink>
                 </div>
               )}
             </div>
@@ -771,9 +772,9 @@ function ContentPartsView({
                 {artifactPlaceholder(part)}
               </div>
               {openUrl && isImage && (
-                <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
-                  <img
-                    src={openUrl}
+                <ProtectedFileLink url={openUrl} newWindow className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
+                  <ProtectedImage
+                    url={openUrl}
                     alt={`Preview of ${artifactFilename(part)}`}
                     loading="lazy"
                     decoding="async"
@@ -784,16 +785,16 @@ function ContentPartsView({
                       event.currentTarget.style.display = "none";
                     }}
                   />
-                </a>
+                </ProtectedFileLink>
               )}
               {openUrl && downloadUrl && (
                 <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
-                  <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={openUrl} newWindow className="underline" style={{ color: "var(--accent)" }}>
                     Open
-                  </a>
-                  <a href={downloadUrl} className="underline" style={{ color: "var(--accent)" }}>
+                  </ProtectedFileLink>
+                  <ProtectedFileLink url={downloadUrl} filename={artifactFilename(part)} className="underline" style={{ color: "var(--accent)" }}>
                     Download
-                  </a>
+                  </ProtectedFileLink>
                   {canPromote && (
                     <button
                       type="button"

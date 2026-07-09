@@ -1,0 +1,128 @@
+# Semantic refactor implementation TODO — 2026-07-09
+
+Implement items 1, 2, 4, and 5 from `review-20260709.md` final prioritization.
+
+## Non-negotiable constraints
+
+- Keep `review-20260709.md` untracked and uncommitted.
+- Preserve the stable EggThreads SQLite schema unless a migration is explicitly justified and reviewed.
+- Make root-cause fixes; do not hide races with sleeps/polling.
+- Keep every commit coherent and run focused tests before committing.
+- Preserve existing inspectability, event history, raw-output recovery, and cross-client semantics.
+- Update this file with commit/test/next-step notes before every implementation commit.
+
+## Phase 1 — Secure EggW defaults and API authorization
+
+Status: complete
+
+Acceptance criteria:
+
+- EggW binds to loopback by default; non-loopback/public binding is explicit.
+- A high-entropy API token is required for every non-health HTTP mutation/read and for SSE/WebSocket connections.
+- EggW launcher creates/passes a token when one is not supplied.
+- The browser client authenticates REST, SSE, and WebSocket requests without logging the token.
+- CORS defaults to the actual local frontend origin(s), not `*`; explicit configured origins remain possible.
+- Auth behavior is centralized, not repeated per route.
+- Tests cover unauthenticated denial, authenticated success, health access, SSE, and WebSocket auth.
+
+## Phase 2 — Fail-closed tool policy
+
+Status: pending
+
+Acceptance criteria:
+
+- Raw tool output is masked by default, matching documentation.
+- Missing explicit policy remains usable with safe defaults.
+- DB/payload read failures are distinguishable from “no policy” and fail closed for tool exposure/execution/raw publication.
+- Descendant tool capability semantics match `invariants.md`: ordinary descendants cannot widen beyond effective ancestors.
+- Child policy initialization is not best-effort advisory state.
+- Corrupt-policy, read-failure, and ancestor-restriction tests exist.
+
+## Phase 3 — Lease-fenced invocation writes
+
+Status: pending
+
+Acceptance criteria:
+
+- Invocation-owned event writes atomically verify `(thread_id, invoke_id)` and unexpired lease in the same transaction as append.
+- Stale LLM/tool owners cannot append terminal messages, lifecycle events, approvals, publication, deltas, or stream close after interrupt/takeover/expiry.
+- Lease loss is represented by a typed result/error and does not depend on cooperative cancellation.
+- Deterministic two-connection/barrier tests cover late LLM and late tool completion.
+
+## Phase 4 — Transactional tool-output finalization
+
+Status: pending
+
+Acceptance criteria:
+
+- One backend operation owns TC4 output-decision finalization.
+- It validates expected state/version and applies explicit precedence; user cancellation/omit cannot be overwritten by automatic policy.
+- Terminal Egg and runner use the same operation rather than appending competing events.
+- Publication/artifact metadata remains inspectable and provider sanitization remains intact.
+- Race and append-failure tests cover manual/automatic/cancellation paths.
+
+## Phase 5 — Canonical watermark-based thread projection core
+
+Status: pending
+
+Acceptance criteria:
+
+- A canonical projection at a fixed event watermark applies create/edit/delete/continue and preserves provider-specific fields.
+- Snapshot is an optional acceleration only, never a semantic prerequisite.
+- Snapshot publication is monotonic/CAS-safe under concurrent builders.
+- Projection contracts are typed enough to keep raw `payload_json`/SQLite rows internal.
+- Tests cover no snapshot, stale snapshot, edits/deletes, and concurrent publication.
+
+## Phase 6 — Migrate high-risk projection consumers
+
+Status: pending
+
+Acceptance criteria:
+
+- RA1 provider context uses the canonical projection and cannot omit system/history/queued turns due to missing snapshot.
+- Thread duplication/forking uses effective projected state and does not resurrect edited/deleted messages.
+- Existing compaction/provider-field behavior remains intact.
+- Differential/behavioral tests cover provider context and duplication.
+
+## Phase 7 — Cursor-resumable EggW synchronization
+
+Status: pending
+
+Acceptance criteria:
+
+- Message snapshot response exposes its event cursor/watermark without breaking pagination compatibility.
+- SSE accepts explicit `after_seq` and browser `Last-Event-ID`, emits SSE `id`, and uses canonical event envelopes.
+- Snapshot-to-live connection has no omission gap.
+- Reconnect is duplicate-safe; active work comes from unexpired leases, not unmatched historical opens.
+- Nonexistent threads return `404`.
+- Tests cover snapshot/connect race, reconnect, duplicates, expired lease, and missing thread.
+
+## Phase 8 — Per-thread frontend state and reconciliation
+
+Status: pending
+
+Acceptance criteria:
+
+- Persisted transcript pages are owned per thread (prefer React Query/infinite query), not one global active-thread array.
+- Every async mutation is bound to originating `threadId` and operation/optimistic ID.
+- Optimistic send success replaces the temporary ID; failure removes it and restores draft/attachments.
+- SSE connection state is separate from thread run state.
+- Reconnect performs authoritative reconciliation and rejects stale/duplicate event sequences.
+- Unit/component tests cover cross-thread pagination, mutation navigation races, optimistic rollback, and reconnect.
+
+## Phase 9 — Integration, documentation, and final verification
+
+Status: pending
+
+Acceptance criteria:
+
+- Egg and EggW preserve the same core thread/tool/approval semantics.
+- Full Python suite, frontend typecheck/build, and relevant browser tests pass.
+- Security launch/configuration is documented.
+- No generated test artifacts are committed.
+- `review-20260709.md` remains untracked and uncommitted.
+
+## Status notes
+
+- 2026-07-09: Plan created. No implementation commits yet. Next: Phase 1.
+- 2026-07-09: Phase 1 complete and committed. Added one centralized ASGI authorization/origin boundary for REST, SSE, and WebSocket; kept `/health` public; made the launcher generate and privately pass a high-entropy token; defaulted backend binding to loopback with `EGGW_PUBLIC=1` required for non-loopback; restricted CORS/origins; authenticated browser REST, fetch-based SSE, WebSocket subprotocols, and protected artifact/attachment fetches without token query parameters or logging. Added behavioral backend and launcher coverage and updated frontend test launch configuration/documentation. Verification: `PYTHONPATH=eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests` (135 passed, 2 skipped); `cd eggw/frontend && npx tsc --noEmit --pretty false` (passed); `cd eggw/frontend && npm run build` (passed); `python -m compileall -q eggw/eggw eggw/tests`, `bash -n eggw/eggw.sh`, and `git diff --check` (passed). Next: manager review, then Phase 2 only when assigned.

@@ -38,6 +38,7 @@ def app(test_db_path, monkeypatch):
     """Create a test app instance with isolated database."""
     # Set environment to use test database
     monkeypatch.setenv("EGG_DB_PATH", test_db_path)
+    monkeypatch.setenv("EGGW_API_TOKEN", "test-eggw-token-" + "a" * 48)
 
     # Import main after setting env - force reimport
     if "eggw.main" in sys.modules:
@@ -66,8 +67,8 @@ def app(test_db_path, monkeypatch):
 
 @pytest.fixture
 def client(app):
-    """Create a test client."""
-    return TestClient(app)
+    """Create an authenticated test client."""
+    return TestClient(app, headers={"Authorization": "Bearer test-eggw-token-" + "a" * 48})
 
 
 class TestHealthAndBasics:

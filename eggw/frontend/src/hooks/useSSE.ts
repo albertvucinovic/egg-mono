@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
-import { createEventSource } from "@/lib/api";
+import { createEventSource, type AuthenticatedEventSource } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import { streamingBuffer } from "@/lib/streamingBuffer";
 import { useQueryClient } from "@tanstack/react-query";
@@ -62,7 +62,7 @@ function eventStartedAtMs(value: unknown): number {
 }
 
 export function useSSE(threadId: string | null) {
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const eventSourceRef = useRef<AuthenticatedEventSource | null>(null);
   const messageRefreshTimeoutRef = useRef<number | null>(null);
   const queryClient = useQueryClient();
   const setStreamingToolCalls = useAppStore((state) => state.setStreamingToolCalls);

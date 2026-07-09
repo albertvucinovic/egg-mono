@@ -19,6 +19,7 @@ from .mock_llm import is_test_mode, get_llm_client
 from . import core
 from .core import state as core_state
 from .core import load_models_config
+from .security import ApiAuthorizationMiddleware, SecurityConfig
 
 
 @asynccontextmanager
@@ -74,6 +75,9 @@ async def lifespan(app: FastAPI):
     pass
 
 
+security_config = SecurityConfig.from_env()
+
+
 app = FastAPI(
     title="eggw API",
     description="Web API for eggthreads",
@@ -81,13 +85,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware for frontend
+# Authentication is transport-wide rather than copied onto individual routes.
+# Add CORS last so it is the outer middleware and authenticated/denied responses
+# receive the appropriate headers for an allowed browser origin.
+app.add_middleware(ApiAuthorizationMiddleware, config=security_config)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=list(security_config.allowed_origins),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
 )
 
 # Register routers
@@ -134,5 +141,5 @@ if __name__ == "__main__":
     from hypercorn.asyncio import serve
 
     config = Config()
-    config.bind = ["0.0.0.0:8000"]
+    config.bind = ["127.0.0.1:8000"]
     asyncio.run(serve(app, config))

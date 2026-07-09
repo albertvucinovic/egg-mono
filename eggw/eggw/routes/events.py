@@ -220,7 +220,10 @@ class ConnectionManager:
         self.active_connections: Dict[str, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, thread_id: str):
-        await websocket.accept()
+        # Echo only the fixed application protocol, never the credential-bearing
+        # protocol used by browser WebSocket authentication.
+        selected_protocol = "eggw" if "eggw" in websocket.scope.get("subprotocols", []) else None
+        await websocket.accept(subprotocol=selected_protocol)
         if thread_id not in self.active_connections:
             self.active_connections[thread_id] = []
         self.active_connections[thread_id].append(websocket)

@@ -34,7 +34,9 @@ Backend, from the directory whose `.egg/threads.sqlite` database you want to use
 ```bash
 export EGG_DB_PATH="$PWD/.egg/threads.sqlite"
 export EGG_CWD="$PWD"
-hypercorn eggw.main:app --bind 0.0.0.0:8000
+export EGGW_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export EGGW_ALLOWED_ORIGINS="http://localhost:3000"
+hypercorn eggw.main:app --bind 127.0.0.1:8000
 ```
 
 Frontend:
@@ -42,13 +44,41 @@ Frontend:
 ```bash
 cd /path/to/egg-mono/eggw/frontend
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev -- -p 3000
+NEXT_PUBLIC_API_URL=http://localhost:8000 \
+NEXT_PUBLIC_EGGW_API_TOKEN="$EGGW_API_TOKEN" \
+npm run dev -- -p 3000
 ```
 
 Then open `http://localhost:3000`.
 
 Hypercorn is preferred because HTTP/2 support avoids the low per-origin
 connection limits that make multiple active thread views awkward under HTTP/1.1.
+
+### Security and network configuration
+
+`eggw.sh` is secure by default: it binds the backend to `127.0.0.1`, generates a
+fresh high-entropy API token when `EGGW_API_TOKEN` is unset, passes that token to
+the backend and browser build without printing it, and permits only the launched
+local frontend origin. Health checks at `/health` remain public; every other
+REST endpoint plus SSE and WebSocket connections require the token.
+
+Configuration variables:
+
+- `EGGW_API_TOKEN`: explicit API token (at least 32 non-whitespace characters).
+  Omit it when using `eggw.sh` to generate a new token for that launch.
+- `EGGW_ALLOWED_ORIGINS`: comma-separated exact `http://` or `https://` browser
+  origins. Wildcards are rejected. The launcher defaults this to the local
+  frontend on `EGGW_FRONTEND_PORT`.
+- `EGGW_BIND_HOST`: backend bind address. Loopback values work by default.
+- `EGGW_PUBLIC=1`: mandatory explicit acknowledgement for any non-loopback bind.
+  For example, use `EGGW_PUBLIC=1 EGGW_BIND_HOST=0.0.0.0` together with an
+  explicit token and the real public frontend origin. Put TLS and normal network
+  access controls in front of EggW; the bearer token is an API capability, not
+  a replacement for encrypted transport.
+
+The token is sent in the `Authorization` header for REST/SSE and in a WebSocket
+subprotocol for browser WebSockets. It is never placed in query strings or
+logged by EggW. Manual non-browser callers use `Authorization: Bearer <token>`.
 
 ## Configuration
 

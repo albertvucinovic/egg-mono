@@ -50,7 +50,7 @@ const TEST_API_BASE = 'http://localhost:8099';
 const mockApiHeaders = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'content-type',
+  'access-control-allow-headers': 'authorization, content-type',
 };
 
 function mockGeneratedImageMessage(threadId: string, prompt: string) {
@@ -953,56 +953,35 @@ test.describe('Live Tool Streaming', () => {
     const threadId = 'running-tool-args-thread';
     const toolCallId = 'call-running-tool-args';
 
-    await page.addInitScript(({ tcId }) => {
-      class MockEventSource {
-        url: string;
-        readyState = 1;
-        onopen: ((event: Event) => void) | null = null;
-        onerror: ((event: Event) => void) | null = null;
-        private listeners: Record<string, Array<(event: MessageEvent) => void>> = {};
-
-        constructor(url: string) {
-          this.url = url;
-          window.setTimeout(() => {
-            this.onopen?.(new Event('open'));
-            this.dispatch('stream.open', {
-              event_type: 'stream.open',
-              ts: new Date().toISOString(),
-              payload: { stream_kind: 'tool' },
-            });
-            this.dispatch('tool_call.execution_started', {
-              event_type: 'tool_call.execution_started',
-              ts: new Date().toISOString(),
-              payload: {
-                tool_call_id: tcId,
-                name: 'bash',
-                arguments: JSON.stringify({ script: 'echo visible args; sleep 30', timeout: 300 }),
-                timeout: 300,
-              },
-            });
-          }, 25);
-        }
-
-        addEventListener(type: string, listener: (event: MessageEvent) => void) {
-          this.listeners[type] = [...(this.listeners[type] || []), listener];
-        }
-
-        removeEventListener(type: string, listener: (event: MessageEvent) => void) {
-          this.listeners[type] = (this.listeners[type] || []).filter((item) => item !== listener);
-        }
-
-        close() {
-          this.readyState = 2;
-        }
-
-        private dispatch(type: string, data: unknown) {
-          const event = new MessageEvent(type, { data: JSON.stringify(data) });
-          for (const listener of this.listeners[type] || []) listener(event);
-        }
-      }
-
-      (window as unknown as { EventSource: typeof EventSource }).EventSource = MockEventSource as unknown as typeof EventSource;
-    }, { tcId: toolCallId });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
+      const startedAt = new Date().toISOString();
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          'event: stream.open',
+          `data: ${JSON.stringify({
+            event_type: 'stream.open',
+            ts: startedAt,
+            payload: { stream_kind: 'tool' },
+          })}`,
+          '',
+          'event: tool_call.execution_started',
+          `data: ${JSON.stringify({
+            event_type: 'tool_call.execution_started',
+            ts: startedAt,
+            payload: {
+              tool_call_id: toolCallId,
+              name: 'bash',
+              arguments: JSON.stringify({ script: 'echo visible args; sleep 30', timeout: 300 }),
+              timeout: 300,
+            },
+          })}`,
+          '',
+          '',
+        ].join('\n'),
+      });
+    });
 
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
       await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });

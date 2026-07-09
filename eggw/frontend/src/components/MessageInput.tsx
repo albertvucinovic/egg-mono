@@ -8,6 +8,7 @@ import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocompl
 import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
 import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, isImageContentPart, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore } from "@/lib/store";
+import { ProtectedImage } from "@/components/ProtectedFileLink";
 import clsx from "clsx";
 
 function formatElapsed(startedAtMs: number | null | undefined): string | null {
@@ -845,8 +846,8 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
               >
                 <Paperclip className="h-3.5 w-3.5 flex-shrink-0" />
                 {previewUrl && (
-                  <img
-                    src={previewUrl}
+                  <ProtectedImage
+                    url={previewUrl}
                     alt={`Preview of ${attachmentFilename(attachment)}`}
                     loading="lazy"
                     decoding="async"
