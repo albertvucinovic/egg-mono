@@ -13,7 +13,7 @@ try:
     from eggllm import LLMClient
 except Exception:
     LLMClient = None  # type: ignore
-from .db import ThreadsDB
+from .db import InvocationEventWriter, LeaseLost, ThreadsDB
 from .tools import (
     ToolExecutionResult,
     ToolRegistry,
@@ -558,6 +558,7 @@ def _emit_auto_output_approval(
     tool_metadata: Optional[Dict[str, Any]] = None,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
+    writer: InvocationEventWriter,
 ) -> None:
     """Emit a ``tool_call.output_approval`` event for a finished tool call.
 
@@ -664,24 +665,19 @@ def _emit_auto_output_approval(
             artifact_path = ""
         channels = {}
 
-    try:
-        db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="tool_call.output_approval",
-            msg_id=None,
-            invoke_id=None,
-            payload={
-                "tool_call_id": tool_call_id,
-                "decision": decision,
-                "reason": reason,
-                "preview": preview,
-                "channels": channels,
-                "artifact_path": artifact_path,
-            },
-        )
-    except Exception:
-        pass
+    payload = {
+        "tool_call_id": tool_call_id,
+        "decision": decision,
+        "reason": reason,
+        "preview": preview,
+        "channels": channels,
+        "artifact_path": artifact_path,
+    }
+    writer.append_event(
+        event_id=os.urandom(10).hex(),
+        type_="tool_call.output_approval",
+        payload=payload,
+    )
 
 
 def _tool_output_content_parts_for_transcript(tool_name: str, output: str) -> Optional[List[Dict[str, Any]]]:
@@ -730,6 +726,7 @@ def emit_tool_stream_delta(
     current_model: Optional[str] = None,
     suppressed: bool = False,
     chunk_seq: Optional[int] = None,
+    writer: Optional[InvocationEventWriter] = None,
 ) -> None:
     """Append one tool-output stream.delta event."""
     payload_tool: Dict[str, Any] = {
@@ -741,11 +738,10 @@ def emit_tool_stream_delta(
     else:
         payload_tool['text'] = text
     payload: Dict[str, Any] = {'tool': payload_tool, 'model_key': current_model}
-    db.append_event(
+    event_writer = writer or db.invocation_writer(thread_id, invoke_id)
+    event_writer.append_event(
         event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
         type_='stream.delta',
-        invoke_id=invoke_id,
         chunk_seq=chunk_seq if chunk_seq is not None else db.max_chunk_seq(invoke_id) + 1,
         payload=payload,
     )
@@ -835,15 +831,17 @@ def emit_tool_summary_event(
     tool_call_id: str,
     tool_name: str = "",
     summary: str,
+    writer: Optional[InvocationEventWriter] = None,
 ) -> None:
     """Append a persisted tool_call.summary event for live status display."""
     if not isinstance(summary, str) or not summary:
         return
-    db.append_event(
+    if not invoke_id:
+        raise ValueError("invoke_id is required for runner-owned tool summaries")
+    event_writer = writer or db.invocation_writer(thread_id, invoke_id)
+    event_writer.append_event(
         event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
         type_='tool_call.summary',
-        invoke_id=invoke_id,
         payload={
             'tool_call_id': tool_call_id,
             'name': tool_name or 'tool',
@@ -865,6 +863,7 @@ def emit_limited_tool_stream_delta(
     heartbeat,
     suppressed_counter: Optional[Dict[str, int]] = None,
     next_chunk_seq: Optional[Callable[[], int]] = None,
+    writer: Optional[InvocationEventWriter] = None,
 ) -> bool:
     """Emit bounded live preview for a tool-output chunk.
 
@@ -887,6 +886,7 @@ def emit_limited_tool_stream_delta(
             current_model=current_model,
             suppressed=True,
             chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
+            writer=writer,
         )
         if suppressed_counter is not None:
             suppressed_counter['count'] = int(suppressed_counter.get('count') or 0) + 1
@@ -904,6 +904,7 @@ def emit_limited_tool_stream_delta(
                 current_model=current_model,
                 suppressed=True,
                 chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
+                writer=writer,
             )
     if not preview_text:
         return True
@@ -918,6 +919,7 @@ def emit_limited_tool_stream_delta(
         text=preview_text,
         current_model=current_model,
         chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
+        writer=writer,
     )
     return True
 
@@ -1035,6 +1037,30 @@ class ThreadRunner:
                 self.image_generation_models_path = str(default_image_generation_models_path(self.models_path))
             except Exception:
                 self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
+        self._invocation_writer: Optional[InvocationEventWriter] = None
+
+    def _owned_writer(self, invoke_id: str) -> InvocationEventWriter:
+        writer = self._invocation_writer
+        if writer is not None and writer.invoke_id == invoke_id:
+            return writer
+        return self.db.invocation_writer(self.thread_id, invoke_id)
+
+    def _owned_append(
+        self,
+        invoke_id: str,
+        *,
+        type_: str,
+        payload: Dict[str, Any],
+        msg_id: Optional[str] = None,
+        chunk_seq: Optional[int] = None,
+    ) -> int:
+        return self._owned_writer(invoke_id).append_event(
+            event_id=os.urandom(10).hex(),
+            type_=type_,
+            payload=payload,
+            msg_id=msg_id,
+            chunk_seq=chunk_seq,
+        )
 
     def _has_compaction_summary_request_between(self, start_event_seq: int, before_event_seq: int) -> bool:
         rows = self.db.conn.execute(
@@ -1315,6 +1341,8 @@ class ThreadRunner:
 
         if not self.db.try_open_stream(self.thread_id, invoke_id, lease_until, owner=self.owner, purpose=purpose):
             return False
+        invocation_writer = self.db.invocation_writer(self.thread_id, invoke_id)
+        self._invocation_writer = invocation_writer
 
         # Resolve current model for this turn from eggthreads API so that
         # the provider call and the event annotations stay in sync. Fall
@@ -1359,12 +1387,10 @@ class ThreadRunner:
         # Open streaming event tagged with model_key and kind so that
         # downstream boundary detection can distinguish RA1 from
         # tool streaming.
-        self.db.append_event(
+        invocation_writer.append_event(
             event_id=os.urandom(10).hex(),
-            thread_id=self.thread_id,
             type_='stream.open',
             msg_id=os.urandom(10).hex(),
-            invoke_id=invoke_id,
             payload={'model_key': current_model, 'stream_kind': purpose, 'ra_kind': ra.kind},
         )
 
@@ -1387,11 +1413,9 @@ class ThreadRunner:
         def _append_delta(payload: Dict[str, Any]):
             nonlocal chunk_seq
             chunk_seq += 1
-            self.db.append_event(
+            invocation_writer.append_event(
                 event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
                 type_='stream.delta',
-                invoke_id=invoke_id,
                 chunk_seq=chunk_seq,
                 payload=payload,
             )
@@ -1408,6 +1432,7 @@ class ThreadRunner:
             context_limit = self.cfg.context_limit
 
         was_cancelled = False
+        lease_lost = False
         context_length_error: Optional[str] = None
         ra1_emitted_assistant_tool_calls = False
         try:
@@ -1425,9 +1450,8 @@ class ThreadRunner:
                             # Emit error instead of calling API
                             error_msg = f"Context limit exceeded: {current_tokens} tokens >= {context_limit} limit"
                             _append_delta({'reason': error_msg, 'model_key': current_model})
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='msg.create',
                                 msg_id=os.urandom(10).hex(),
                                 payload={
@@ -1456,6 +1480,11 @@ class ThreadRunner:
                 # approved tool calls and advance their states.
                 await self._run_ra_tools(invoke_id, current_model, ra)
 
+        except LeaseLost:
+            # Database fencing, not cooperative cancellation, is authoritative.
+            was_cancelled = True
+            lease_lost = True
+            stop_flag = True
         except asyncio.CancelledError:
             # Cooperative shutdown/cancellation should not be recorded as an
             # LLM/runner error. Defer re-raising until after stream/lease cleanup.
@@ -1467,6 +1496,8 @@ class ThreadRunner:
                     # Advance the failed RA1 boundary; the summary request is
                     # appended after stream.close so it is the next RA1 turn.
                     _append_delta({'reason': f'LLM/runner context length exceeded: {context_length_error}', 'model_key': current_model})
+                except LeaseLost:
+                    raise
                 except Exception:
                     pass
             else:
@@ -1481,6 +1512,8 @@ class ThreadRunner:
                     # LLM stream. This prevents the same user message from
                     # repeatedly triggering a failing RA1 turn.
                     _append_delta({'reason': f'LLM/runner error: {error_msg}', 'model_key': current_model})
+                except LeaseLost:
+                    raise
                 except Exception:
                     pass
                 try:
@@ -1492,9 +1525,8 @@ class ThreadRunner:
                     }
                     if current_model:
                         err_payload['model_key'] = current_model
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.thread_id,
+                    self._owned_append(
+                        invoke_id,
                         type_='msg.create',
                         msg_id=os.urandom(10).hex(),
                         payload=err_payload,
@@ -1502,6 +1534,8 @@ class ThreadRunner:
                     if 'context length' in str(error_msg).lower() or 'context limit' in str(error_msg).lower():
                         context_length_error = error_msg
                     print(f"Runner error: {error_msg}")
+                except LeaseLost:
+                    raise
                 except Exception:
                     pass
         finally:
@@ -1512,23 +1546,34 @@ class ThreadRunner:
             except Exception:
                 pass
 
-        # Close stream if we still own the lease
-        try:
-            row = self.db.current_open(self.thread_id)
-            still_owner = bool(
-                row
-                and row['invoke_id'] == invoke_id
-            )
-        except Exception:
-            still_owner = False
-        if still_owner:
-            self.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
-                type_='stream.close',
-                invoke_id=invoke_id,
-                payload={},
-            )
+        # Stream close is itself lease-fenced. A stale owner emits nothing.
+        # Cooperative task cancellation is different from lease loss: if this
+        # invocation still owns a live lease, close and release it before
+        # propagating cancellation. Never release after a fenced write proves
+        # that another owner took over (or that this lease expired).
+        if not lease_lost:
+            try:
+                invocation_writer.close(event_id=os.urandom(10).hex())
+            except LeaseLost:
+                lease_lost = True
+                was_cancelled = True
+
+        if lease_lost:
+            if self._invocation_writer is invocation_writer:
+                self._invocation_writer = None
+            raise asyncio.CancelledError
+
+        if was_cancelled:
+            try:
+                invocation_writer.release()
+            except LeaseLost:
+                # An interrupt/takeover may race cooperative cancellation. The
+                # exact-owner predicate guarantees we cannot delete its lease.
+                pass
+            finally:
+                if self._invocation_writer is invocation_writer:
+                    self._invocation_writer = None
+            raise asyncio.CancelledError
 
         # Rebuild snapshot and short_recap for readability
         try:
@@ -1601,9 +1646,8 @@ class ThreadRunner:
                     }
                     if current_model:
                         err_payload['model_key'] = current_model
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.thread_id,
+                    self._owned_append(
+                        invoke_id,
                         type_='msg.create',
                         msg_id=os.urandom(10).hex(),
                         payload=err_payload,
@@ -1682,11 +1726,14 @@ class ThreadRunner:
                 # the existing runner path on advisory compaction.
                 print(f"Warning: auto compaction check failed: {e}")
 
-        # Attempt lease release (no-op if preempted)
+        # Release through the same exact-owner, unexpired lease authority.
         try:
-            self.db.release(self.thread_id, invoke_id)
-        except Exception:
-            pass
+            invocation_writer.release()
+        except LeaseLost:
+            raise asyncio.CancelledError
+        finally:
+            if self._invocation_writer is invocation_writer:
+                self._invocation_writer = None
 
         if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None and not recovery_compaction_queued:
             try:
@@ -2134,12 +2181,9 @@ class ThreadRunner:
         # Convert to int for aiohttp; 0 means no timeout
         api_timeout_int = int(api_timeout) if api_timeout > 0 else 0
 
-        self.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=self.thread_id,
+        self._owned_append(
+            invoke_id,
             type_='provider_request.started',
-            msg_id=None,
-            invoke_id=invoke_id,
             payload={
                 'timeout': api_timeout_int,
                 'timeout_kind': 'inactivity',
@@ -2148,6 +2192,7 @@ class ThreadRunner:
         )
 
         interrupted = False
+        lease_lost_during_stream = False
         transport_error_after_output: Optional[BaseException] = None
 
         def _persist_assistant_message(final: Dict[str, Any]) -> bool:
@@ -2227,9 +2272,8 @@ class ThreadRunner:
                 }
                 if current_model:
                     err_payload['model_key'] = current_model
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=err_payload,
@@ -2249,9 +2293,8 @@ class ThreadRunner:
                     assistant_msg['tps'] = tps
             except Exception:
                 pass
-            self.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
+            self._owned_append(
+                invoke_id,
                 type_='msg.create',
                 msg_id=os.urandom(10).hex(),
                 payload=assistant_msg,
@@ -2298,13 +2341,12 @@ class ThreadRunner:
                             # Heartbeat / lease extension; stop if we lost lease
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                                 interrupted = True
+                                lease_lost_during_stream = True
                                 break
                             chunk_seq += 1
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='stream.delta',
-                                invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
                                 payload={'text': content, 'model_key': current_model},
                             )
@@ -2319,16 +2361,18 @@ class ThreadRunner:
                                 reasoning_parts.append(reason)
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                                 interrupted = True
+                                lease_lost_during_stream = True
                                 break
                             chunk_seq += 1
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='stream.delta',
-                                invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
-                                payload={'reasoning_summary': reason, 'model_key': current_model}
-                                if is_reasoning_summary else {'reason': reason, 'model_key': current_model},
+                                payload=(
+                                    {'reasoning_summary': reason, 'model_key': current_model}
+                                    if is_reasoning_summary
+                                    else {'reason': reason, 'model_key': current_model}
+                                ),
                             )
                             await asyncio.sleep(0)
                     elif et == 'tool_calls_delta':
@@ -2361,13 +2405,12 @@ class ThreadRunner:
                             # Heartbeat and stop if we lose the lease.
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                                 interrupted = True
+                                lease_lost_during_stream = True
                                 break
                             chunk_seq += 1
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='stream.delta',
-                                invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
                                 payload={
                                     'tool_call': {
@@ -2388,17 +2431,19 @@ class ThreadRunner:
                         return _persist_assistant_message(final)
                 if interrupted:
                     break
+        except LeaseLost:
+            interrupted = True
+            lease_lost_during_stream = True
+            raise
         except Exception as e:
             if assistant_text_parts or reasoning_parts or tool_calls_args_so_far:
                 transport_error_after_output = e
             else:
                 raise
         finally:
-            # If the stream was interrupted (e.g. via Ctrl+C removing the
-            # lease), we still want to persist whatever partial assistant
-            # content we have as a user-visible message so that users can
-            # inspect or edit it and the model can see what was interrupted.
-            if interrupted and (assistant_text_parts or reasoning_parts):
+            # Provider interruption while the lease is still live may preserve
+            # partial output. Lease loss itself must never append stale content.
+            if interrupted and not lease_lost_during_stream and (assistant_text_parts or reasoning_parts):
                 assistant_msg: Dict[str, Any] = {'role': 'assistant'}
                 if assistant_text_parts:
                     assistant_msg['content'] = ''.join(assistant_text_parts)
@@ -2418,9 +2463,8 @@ class ThreadRunner:
                         assistant_msg['tps'] = tps
                 except Exception:
                     pass
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=assistant_msg,
@@ -2453,9 +2497,8 @@ class ThreadRunner:
                 partial_msg['tool_calls'] = partial_tool_calls
             partial_msg['incomplete'] = True
             partial_msg['incomplete_reason'] = f'provider stream ended early: {transport_error_after_output}'
-            self.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
+            self._owned_append(
+                invoke_id,
                 type_='msg.create',
                 msg_id=os.urandom(10).hex(),
                 payload=partial_msg,
@@ -2892,29 +2935,37 @@ class ThreadRunner:
                 text = self._filter_tool_output(text, mask_secrets=False)
             except Exception:
                 pass
-            return emit_limited_tool_stream_delta(
-                self.db,
-                stream_limiter,
-                text,
-                thread_id=self.thread_id,
-                invoke_id=invoke_id,
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.name or '',
-                current_model=current_model,
-                heartbeat=_heartbeat,
-                suppressed_counter=suppressed_counter,
-                next_chunk_seq=_next_chunk_seq,
-            )
+            try:
+                return emit_limited_tool_stream_delta(
+                    self.db,
+                    stream_limiter,
+                    text,
+                    thread_id=self.thread_id,
+                    invoke_id=invoke_id,
+                    tool_call_id=tc.tool_call_id,
+                    tool_name=tc.name or '',
+                    current_model=current_model,
+                    heartbeat=_heartbeat,
+                    suppressed_counter=suppressed_counter,
+                    next_chunk_seq=_next_chunk_seq,
+                    writer=self._owned_writer(invoke_id),
+                )
+            except LeaseLost:
+                return False
 
         def _emit_summary(summary: str) -> None:
-            emit_tool_summary_event(
-                self.db,
-                thread_id=self.thread_id,
-                invoke_id=invoke_id,
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.name or '',
-                summary=summary,
-            )
+            try:
+                emit_tool_summary_event(
+                    self.db,
+                    thread_id=self.thread_id,
+                    invoke_id=invoke_id,
+                    tool_call_id=tc.tool_call_id,
+                    tool_name=tc.name or '',
+                    summary=summary,
+                    writer=self._owned_writer(invoke_id),
+                )
+            except LeaseLost:
+                return
 
         return ToolStreamContext(
             db=self.db,
@@ -2955,9 +3006,8 @@ class ThreadRunner:
                 }
                 if current_model:
                     msg['model_key'] = current_model
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=msg,
@@ -2976,12 +3026,9 @@ class ThreadRunner:
                         f"Tool '{tc.name}' is not allowed for this thread and "
                         "was not executed."
                     )
-                    self.db.append_event(
-                        event_id=_os.urandom(10).hex(),
-                        thread_id=self.thread_id,
+                    self._owned_append(
+                        invoke_id,
                         type_='tool_call.finished',
-                        msg_id=None,
-                        invoke_id=invoke_id,
                         payload={
                             'tool_call_id': tc.tool_call_id,
                             'reason': 'policy_error' if policy_error_message else 'disabled',
@@ -2991,12 +3038,9 @@ class ThreadRunner:
                     # Immediately approve the small synthetic output so
                     # it can be published as a tool message on the next
                     # RA2/RA3 pass without user interaction.
-                    self.db.append_event(
-                        event_id=_os.urandom(10).hex(),
-                        thread_id=self.thread_id,
+                    self._owned_append(
+                        invoke_id,
                         type_='tool_call.output_approval',
-                        msg_id=None,
-                        invoke_id=None,
                         payload={
                             'tool_call_id': tc.tool_call_id,
                             'decision': 'whole',
@@ -3031,12 +3075,10 @@ class ThreadRunner:
                 }
                 if tool_timeout_sec is not None:
                     started_payload['timeout'] = tool_timeout_sec
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='tool_call.execution_started',
                     msg_id=None,
-                    invoke_id=invoke_id,
                     payload=started_payload,
                 )
 
@@ -3054,8 +3096,11 @@ class ThreadRunner:
                                 import sqlite3
                                 local.conn = sqlite3.connect(str(db_path), timeout=5)
                             row = local.conn.execute(
-                                "SELECT 1 FROM open_streams WHERE thread_id=? AND invoke_id=?",
-                                (thread_id, invoke_id)
+                                """
+                                SELECT 1 FROM open_streams
+                                WHERE thread_id=? AND invoke_id=? AND lease_until>datetime('now')
+                                """,
+                                (thread_id, invoke_id),
                             ).fetchone()
                             return row is None  # True = cancelled (lease lost)
                         except Exception:
@@ -3096,12 +3141,9 @@ class ThreadRunner:
                         "Tool execution was interrupted because the runner task was cancelled."
                     )
                     try:
-                        self.db.append_event(
-                            event_id=os.urandom(10).hex(),
-                            thread_id=self.thread_id,
+                        self._owned_append(
+                            invoke_id,
                             type_='tool_call.finished',
-                            msg_id=None,
-                            invoke_id=invoke_id,
                             payload={
                                 'tool_call_id': tc.tool_call_id,
                                 'reason': 'interrupted',
@@ -3111,12 +3153,9 @@ class ThreadRunner:
                     except Exception:
                         pass
                     try:
-                        self.db.append_event(
-                            event_id=os.urandom(10).hex(),
-                            thread_id=self.thread_id,
+                        self._owned_append(
+                            invoke_id,
                             type_='tool_call.output_approval',
-                            msg_id=None,
-                            invoke_id=None,
                             payload={
                                 'tool_call_id': tc.tool_call_id,
                                 'decision': 'whole',
@@ -3187,6 +3226,7 @@ class ThreadRunner:
                             heartbeat=_heartbeat,
                             suppressed_counter=suppressed_counter,
                             next_chunk_seq=_next_chunk_seq,
+                            writer=self._owned_writer(invoke_id),
                         )
                         if not ok:
                             cancelled = True
@@ -3194,12 +3234,9 @@ class ThreadRunner:
                         await asyncio.sleep(0)
                 if cancelled and finish_reason == 'success':
                     finish_reason = 'interrupted'
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='tool_call.finished',
-                    msg_id=None,
-                    invoke_id=invoke_id,
                     payload={
                         'tool_call_id': tc.tool_call_id,
                         'reason': finish_reason,
@@ -3232,7 +3269,10 @@ class ThreadRunner:
                         },
                         original_char_count=original_output_char_count,
                         output_capped=output_was_capped,
+                        writer=self._owned_writer(invoke_id),
                     )
+                except LeaseLost:
+                    raise
                 except Exception:
                     pass
 
@@ -3338,9 +3378,8 @@ class ThreadRunner:
                     msg['no_api'] = True
                 if current_model:
                     msg['model_key'] = current_model
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=msg,

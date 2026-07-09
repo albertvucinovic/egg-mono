@@ -37,6 +37,61 @@ class ThreadRow:
     created_at: str
 
 
+class LeaseLost(RuntimeError):
+    """Raised when an invocation attempts to write without its live lease."""
+
+    def __init__(self, thread_id: str, invoke_id: str, operation: str = "append_event"):
+        self.thread_id = thread_id
+        self.invoke_id = invoke_id
+        self.operation = operation
+        super().__init__(
+            f"Invocation lease lost for thread {thread_id}, invoke {invoke_id} during {operation}"
+        )
+
+
+class InvocationEventWriter:
+    """Lease-fenced persistence authority for one runner invocation."""
+
+    def __init__(self, db: "ThreadsDB", thread_id: str, invoke_id: str):
+        self.db = db
+        self.thread_id = thread_id
+        self.invoke_id = invoke_id
+
+    def append_event(
+        self,
+        *,
+        event_id: str,
+        type_: str,
+        payload: Dict[str, Any],
+        msg_id: Optional[str] = None,
+        chunk_seq: Optional[int] = None,
+    ) -> int:
+        return self.db.append_event_with_lease(
+            event_id=event_id,
+            thread_id=self.thread_id,
+            invoke_id=self.invoke_id,
+            type_=type_,
+            payload=payload,
+            msg_id=msg_id,
+            chunk_seq=chunk_seq,
+        )
+
+    def close(self, *, event_id: str, payload: Optional[Dict[str, Any]] = None) -> int:
+        """Append a lease-fenced stream.close event."""
+
+        return self.db.close_invocation_with_lease(
+            event_id=event_id,
+            thread_id=self.thread_id,
+            invoke_id=self.invoke_id,
+            payload=payload or {},
+        )
+
+    def release(self) -> bool:
+        """Release only this invocation's still-live lease."""
+
+        return self.db.release_invocation_with_lease(self.thread_id, self.invoke_id)
+
+
 class ThreadsDB:
     """Thin DB layer adhering to ../egg/SQLITE_PLAN_CLEAN.md schema."""
 
@@ -109,6 +164,85 @@ class ThreadsDB:
         )
         return cur.lastrowid
 
+    def invocation_writer(self, thread_id: str, invoke_id: str) -> InvocationEventWriter:
+        return InvocationEventWriter(self, thread_id, invoke_id)
+
+    def append_event_with_lease(
+        self,
+        *,
+        event_id: str,
+        thread_id: str,
+        invoke_id: str,
+        type_: str,
+        payload: Dict[str, Any],
+        msg_id: Optional[str] = None,
+        chunk_seq: Optional[int] = None,
+    ) -> int:
+        """Append only if the exact invocation owns an unexpired lease.
+
+        The lease predicate and event insertion are one SQLite statement, so a
+        takeover/interrupt cannot interleave between authorization and append.
+        """
+
+        cur = self.conn.execute(
+            """
+            INSERT INTO events(event_id, thread_id, type, msg_id, invoke_id, chunk_seq, payload_json)
+            SELECT ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+                SELECT 1 FROM open_streams
+                WHERE thread_id=? AND invoke_id=? AND lease_until>datetime('now')
+            )
+            """,
+            (
+                event_id,
+                thread_id,
+                type_,
+                msg_id,
+                invoke_id,
+                chunk_seq,
+                json.dumps(payload),
+                thread_id,
+                invoke_id,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise LeaseLost(thread_id, invoke_id, type_)
+        return cur.lastrowid
+
+    def close_invocation_with_lease(
+        self,
+        *,
+        event_id: str,
+        thread_id: str,
+        invoke_id: str,
+        payload: Dict[str, Any],
+    ) -> int:
+        """Append a lease-fenced stream.close event.
+
+        Release remains a separate exact-owner operation so runner post-stream
+        work can stay fenced by the same lease until all owned writes finish.
+        """
+
+        return self.append_event_with_lease(
+            event_id=event_id,
+            thread_id=thread_id,
+            invoke_id=invoke_id,
+            type_="stream.close",
+            payload=payload,
+        )
+
+    def release_invocation_with_lease(self, thread_id: str, invoke_id: str) -> bool:
+        cur = self.conn.execute(
+            """
+            DELETE FROM open_streams
+            WHERE thread_id=? AND invoke_id=? AND lease_until>datetime('now')
+            """,
+            (thread_id, invoke_id),
+        )
+        if cur.rowcount != 1:
+            raise LeaseLost(thread_id, invoke_id, "release")
+        return True
+
     def max_chunk_seq(self, invoke_id: str) -> int:
         cur = self.conn.execute("SELECT MAX(chunk_seq) FROM events WHERE invoke_id=? AND type='stream.delta'", (invoke_id,))
         v = cur.fetchone()[0]
@@ -139,62 +273,73 @@ class ThreadsDB:
     # Open streams (per-thread lease) ----------------------------------
     def try_open_stream(self, thread_id: str, invoke_id: str, lease_until_iso: str,
                         owner: Optional[str] = None, purpose: Optional[str] = None) -> bool:
-        # First, try to takeover an expired lease (most common case after crash recovery)
-        cur = self.conn.execute(
-            "SELECT invoke_id, purpose FROM open_streams WHERE thread_id=? AND lease_until<=datetime('now')",
-            (thread_id,),
-        )
-        expired_row = cur.fetchone()
-        old_invoke_id = expired_row[0] if expired_row else None
-        old_purpose = expired_row[1] if expired_row else None
+        """Acquire an absent lease or atomically take over an expired one."""
 
-        cur = self.conn.execute(
-            """
-            UPDATE open_streams
-               SET invoke_id=?, lease_until=?, owner=?, purpose=?, heartbeat_at=datetime('now')
-             WHERE thread_id=? AND lease_until<=datetime('now')
-            """,
-            (invoke_id, lease_until_iso, owner, purpose, thread_id)
-        )
-        if cur.rowcount == 1:
-            self.append_event(
-                event_id=f"lease-takeover-{invoke_id}",
-                thread_id=thread_id,
-                type_="control.interrupt",
-                payload={
-                    "reason": "expired_lease_takeover",
-                    "old_invoke_id": old_invoke_id,
-                    "new_invoke_id": invoke_id,
-                    "purpose": old_purpose or purpose,
-                },
-            )
-            return True
-
-        # No expired lease to takeover, check if there's an active lease
-        cur = self.conn.execute(
-            "SELECT 1 FROM open_streams WHERE thread_id=? AND lease_until>datetime('now')",
-            (thread_id,)
-        )
-        if cur.fetchone():
-            return False  # Active lease held by another process
-
-        # No row exists at all, insert a new one
+        savepoint = f"open_stream_{uuid.uuid4().hex}"
+        self.conn.execute(f"SAVEPOINT {savepoint}")
         try:
-            cur = self.conn.execute(
+            expired = self.conn.execute(
+                """
+                SELECT invoke_id, purpose FROM open_streams
+                WHERE thread_id=? AND lease_until<=datetime('now')
+                """,
+                (thread_id,),
+            ).fetchone()
+            if expired is not None:
+                updated = self.conn.execute(
+                    """
+                    UPDATE open_streams
+                       SET invoke_id=?, lease_until=?, owner=?, purpose=?, heartbeat_at=datetime('now')
+                     WHERE thread_id=? AND invoke_id=? AND lease_until<=datetime('now')
+                    """,
+                    (invoke_id, lease_until_iso, owner, purpose, thread_id, expired[0]),
+                )
+                if updated.rowcount == 1:
+                    self.append_event(
+                        event_id=f"lease-takeover-{invoke_id}",
+                        thread_id=thread_id,
+                        type_="control.interrupt",
+                        payload={
+                            "reason": "expired_lease_takeover",
+                            "old_invoke_id": expired[0],
+                            "new_invoke_id": invoke_id,
+                            "purpose": expired[1] or purpose,
+                        },
+                    )
+                    self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    return True
+
+            active = self.conn.execute(
+                "SELECT 1 FROM open_streams WHERE thread_id=?",
+                (thread_id,),
+            ).fetchone()
+            if active is not None:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return False
+            self.conn.execute(
                 """
                 INSERT INTO open_streams(thread_id, invoke_id, lease_until, owner, purpose, heartbeat_at)
                 VALUES (?, ?, ?, ?, ?, datetime('now'))
                 """,
-                (thread_id, invoke_id, lease_until_iso, owner, purpose)
+                (thread_id, invoke_id, lease_until_iso, owner, purpose),
             )
-            return cur.rowcount == 1
-        except Exception:
-            # Race condition: another process inserted between our check and insert
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return True
+        except sqlite3.IntegrityError:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
             return False
+        except Exception:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
 
     def heartbeat(self, thread_id: str, invoke_id: str, lease_until_iso: str) -> bool:
         cur = self.conn.execute(
-            "UPDATE open_streams SET lease_until=?, heartbeat_at=datetime('now') WHERE thread_id=? AND invoke_id=?",
+            """
+            UPDATE open_streams SET lease_until=?, heartbeat_at=datetime('now')
+            WHERE thread_id=? AND invoke_id=? AND lease_until>datetime('now')
+            """,
             (lease_until_iso, thread_id, invoke_id)
         )
         return cur.rowcount == 1

@@ -90,3 +90,61 @@ def test_open_streams_lease_heartbeat_and_release(tmp_path) -> None:
     assert db.heartbeat(tid, "inv-lease", "2999-01-02 00:00:00") is True
     assert db.release(tid, "inv-lease") is True
     assert db.current_open(tid) is None
+
+
+def test_invocation_writer_rejects_expired_lease_without_appending(tmp_path) -> None:
+    import pytest
+
+    from eggthreads import LeaseLost
+
+    db = _make_temp_db(tmp_path)
+    thread_id = "thread-expired-fence"
+    invoke_id = "invoke-expired"
+    db.create_thread(thread_id=thread_id, name="expired")
+    assert db.try_open_stream(thread_id, invoke_id, "2000-01-01 00:00:00", owner="old")
+    writer = db.invocation_writer(thread_id, invoke_id)
+    before = db.max_event_seq(thread_id)
+
+    with pytest.raises(LeaseLost) as exc_info:
+        writer.append_event(event_id="late", type_="msg.create", payload={"role": "assistant", "content": "late"})
+
+    assert exc_info.value.thread_id == thread_id
+    assert exc_info.value.invoke_id == invoke_id
+    assert exc_info.value.operation == "msg.create"
+    assert db.max_event_seq(thread_id) == before
+
+
+def test_invocation_writer_rejects_old_owner_after_takeover(tmp_path) -> None:
+    import pytest
+
+    from eggthreads import LeaseLost
+
+    db_old = _make_temp_db(tmp_path)
+    thread_id = "thread-takeover-fence"
+    db_old.create_thread(thread_id=thread_id, name="takeover")
+    assert db_old.try_open_stream(thread_id, "old-invoke", "2000-01-01 00:00:00", owner="old")
+    old_writer = db_old.invocation_writer(thread_id, "old-invoke")
+
+    db_new = ThreadsDB(db_old.path)
+    assert db_new.try_open_stream(thread_id, "new-invoke", "2999-01-01 00:00:00", owner="new")
+    takeover_seq = db_new.max_event_seq(thread_id)
+
+    with pytest.raises(LeaseLost):
+        old_writer.append_event(event_id="late-old", type_="tool_call.finished", payload={"output": "late"})
+    with pytest.raises(LeaseLost) as release_error:
+        old_writer.release()
+
+    assert release_error.value.operation == "release"
+    assert db_new.max_event_seq(thread_id) == takeover_seq
+    assert db_new.current_open(thread_id)["invoke_id"] == "new-invoke"
+
+
+def test_heartbeat_cannot_revive_expired_lease(tmp_path) -> None:
+    db = _make_temp_db(tmp_path)
+    thread_id = "thread-expired-heartbeat"
+    invoke_id = "invoke-expired-heartbeat"
+    db.create_thread(thread_id=thread_id, name="expired")
+    assert db.try_open_stream(thread_id, invoke_id, "2000-01-01 00:00:00", owner="old")
+
+    assert db.heartbeat(thread_id, invoke_id, "2999-01-01 00:00:00") is False
+    assert db.current_open(thread_id)["lease_until"] == "2000-01-01 00:00:00"

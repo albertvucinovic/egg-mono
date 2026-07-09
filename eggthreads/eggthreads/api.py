@@ -3563,19 +3563,30 @@ def interrupt_thread(db: ThreadsDB, thread_id: str, reason: str = 'user') -> Opt
     new_inv = _ulid_like()
 
     if old:
-        # Remove the existing open_streams row so that:
-        #  - the current runner loses its lease (heartbeat will fail), and
-        #  - future runners can immediately acquire a new lease.
+        # Delete the lease and append the control boundary in one transaction;
+        # invocation-owned INSERT...WHERE EXISTS writes cannot land after it.
+        savepoint = f"interrupt_{_ulid_like()}"
+        db.conn.execute(f"SAVEPOINT {savepoint}")
         try:
-            db.conn.execute("DELETE FROM open_streams WHERE thread_id=? AND invoke_id=?", (thread_id, old))
+            deleted = db.conn.execute(
+                "DELETE FROM open_streams WHERE thread_id=? AND invoke_id=?",
+                (thread_id, old),
+            )
+            if deleted.rowcount != 1:
+                db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return None
+            db.append_event(
+                event_id=_ulid_like(),
+                thread_id=thread_id,
+                type_='control.interrupt',
+                payload={"reason": reason, "old_invoke_id": old, "new_invoke_id": new_inv, "purpose": purpose},
+            )
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         except Exception:
-            pass
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=thread_id,
-            type_='control.interrupt',
-            payload={"reason": reason, "old_invoke_id": old, "new_invoke_id": new_inv, "purpose": purpose},
-        )
+            db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
         return old
 
     # No active lease: best-effort cancel a pending RA1 LLM invocation.

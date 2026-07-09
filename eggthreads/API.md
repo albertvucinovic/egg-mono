@@ -934,8 +934,11 @@ Return word count of thread, including events after last snapshot.
 
 ### `ThreadRunner(db: 'ThreadsDB', thread_id: 'str', llm: 'Optional[LLMClient]' = None, owner: 'Optional[str]' = None, purpose: 'str' = 'assistant_stream', config: 'Optional[RunnerConfig]' = None, models_path: 'Optional[str]' = None, all_models_path: 'Optional[str]' = None, tools: 'Optional[ToolRegistry]' = None)`
 
-Runs a single thread by acquiring the per-thread lease (open_streams with invoke_id fence)
-and streaming assistant output.
+Runs a single thread by acquiring the per-thread lease (``open_streams`` with an
+``invoke_id`` fence) and streaming assistant output. Every invocation-owned
+runner event is appended through ``InvocationEventWriter`` so ownership and
+lease expiry are checked atomically with the write. ``LeaseLost`` terminates a
+stale invocation without appending fallback output.
 
 ### `SubtreeScheduler(db: 'ThreadsDB', root_thread_id: 'str', llm: 'Optional[LLMClient]' = None, owner: 'Optional[str]' = None, config: 'Optional[RunnerConfig]' = None, models_path: 'Optional[str]' = None, all_models_path: 'Optional[str]' = None, tools: 'Optional[ToolRegistry]' = None)`
 
@@ -958,6 +961,20 @@ RunnerConfig(lease_ttl_sec: 'int' = 10, heartbeat_sec: 'float' = 1.0, max_concur
 ### `ThreadsDB(db_path: 'Path | str' = PosixPath('.egg/threads.sqlite'))`
 
 Thin DB layer adhering to ../egg/SQLITE_PLAN_CLEAN.md schema.
+
+### `ThreadsDB.invocation_writer(thread_id: str, invoke_id: str) -> InvocationEventWriter`
+
+Return the persistence authority for one runner invocation. Its
+``append_event()``, ``close()``, and ``release()`` operations require the exact
+``(thread_id, invoke_id)`` row to own an unexpired lease. Event authorization
+and insertion are one SQLite statement, preventing interrupt or takeover from
+interleaving between a lease check and the write.
+
+### `LeaseLost`
+
+Typed exception raised when an invocation-owned append, close, or release no
+longer has its exact live lease. The exception exposes ``thread_id``,
+``invoke_id``, and ``operation`` for callers and diagnostics.
 
 ### `ThreadRow`
 

@@ -23,7 +23,7 @@ Quick start::
 
 See API.md for comprehensive documentation.
 """
-from .db import ThreadsDB  # type: ignore
+from .db import InvocationEventWriter, LeaseLost, ThreadsDB  # type: ignore
 from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig, set_default_tool_timeout, get_default_tool_timeout, runner_actionable_resource_class  # type: ignore
 from .terminal_safety import sanitize_terminal_text  # type: ignore
 from .snapshot import SnapshotBuilder  # type: ignore
@@ -354,7 +354,7 @@ from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill
 from .llm import create_llm_client
 
 __all__ = [
-    'ThreadsDB', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
+    'ThreadsDB', 'InvocationEventWriter', 'LeaseLost', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
     'set_default_tool_timeout', 'get_default_tool_timeout',
     'validate_model_handle', 'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable', 'get_thread_status', 'get_thread_statuses_bulk', 'get_thread_auto_approval_status',
     'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'current_open_invoke',

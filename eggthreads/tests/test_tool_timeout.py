@@ -529,7 +529,8 @@ class TestToolTimeout:
             )
             return await runner.run_once()
 
-        assert asyncio.run(asyncio.wait_for(run_once(), timeout=5)) is True
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(asyncio.wait_for(run_once(), timeout=5))
 
         events = [
             (row["type"], row["invoke_id"])
@@ -541,14 +542,14 @@ class TestToolTimeout:
         tool_invokes = [invoke for typ, invoke in events if typ == "stream.open" and invoke]
         assert len(tool_invokes) == 1
         invoke_id = tool_invokes[0]
-        assert ("tool_call.finished", invoke_id) in events
-        assert ("stream.close", invoke_id) in events
-        assert db.current_open(tid) is None
+        # Lease expiry fences timeout completion, output decisions, and close;
+        # the stale invocation cannot persist terminal state.
+        assert ("tool_call.finished", invoke_id) not in events
+        assert ("stream.close", invoke_id) not in events
+        assert not any(typ == "tool_call.output_approval" for typ, _ in events)
 
         state = eggthreads.build_tool_call_states(db, tid)[tcid]
-        assert state.state == "TC5"
-        assert state.finished_reason == "timeout"
-        assert "TIMEOUT" in (state.finished_output or "")
+        assert state.state == "TC3"
         started_payload = db.conn.execute(
             "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.execution_started'",
             (tid,),
