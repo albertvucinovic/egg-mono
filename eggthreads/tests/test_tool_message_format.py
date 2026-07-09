@@ -443,3 +443,26 @@ class TestProviderExpectations:
         # Mistral requires exactly 9 alphanumeric characters
         assert len(tool_msg["tool_call_id"]) == 9
         assert tool_msg["tool_call_id"].isalnum()
+
+
+def test_missing_tools_policy_masks_secret_like_tool_output_by_default(tmp_path) -> None:
+    from eggthreads import ThreadsDB, create_root_thread
+
+    db = ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = create_root_thread(db, name="root")
+    runner = _DummyRunner()
+    runner.db = db
+    runner.thread_id = thread_id
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "tc", "function": {"name": "bash", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "tc", "content": "API_KEY=supersecretvalue"},
+    ]
+
+    out = runner._sanitize_messages_for_api(messages)
+
+    assert out[-1]["content"] == "API_KEY=***"

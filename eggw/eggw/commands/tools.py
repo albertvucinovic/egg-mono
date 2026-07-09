@@ -54,6 +54,10 @@ async def cmd_tools_status(thread_id: str) -> CommandResponse:
         # Build status message
         lines = []
 
+        policy_error = getattr(cfg, "policy_error", None)
+        if policy_error:
+            lines.append(f"Tool policy error (fail closed): {policy_error}")
+
         # Overall tools status
         llm_tools_enabled = bool(getattr(cfg, "llm_tools_enabled", True))
         tools_status = "ENABLED" if llm_tools_enabled else "DISABLED"
@@ -106,6 +110,7 @@ async def cmd_tools_status(thread_id: str) -> CommandResponse:
                 "allow_raw_tool_output": allow_raw_tool_output,
                 "allowed_tools": allowed_tools_data,
                 "disabled_tools": sorted(getattr(cfg, "disabled_tools", set()) or set()),
+                "policy_error": policy_error,
                 "tools": tool_statuses,
             },
         )

@@ -15,7 +15,8 @@ Payload schema (all keys optional)::
       "llm_tools_enabled": true | false,
       "disable": ["tool_name", ...],
       "enable":  ["tool_name", ...],
-      "allow_only": ["tool_name", ...] | null
+      "allow_only": ["tool_name", ...] | null,
+      "allow_raw_tool_output": true | false
     }
 
 Semantics:
@@ -28,10 +29,14 @@ Semantics:
     finished with a synthetic "tool disabled" output instead of being
     executed.
   - ``allow_only`` restricts the thread to exactly those tool names.
-    ``null`` clears the allowlist. Disabled tools still win over
+    ``null`` clears the local allowlist. Disabled tools still win over
     allowlist entries.
+  - ``allow_raw_tool_output`` defaults to False; it must be True at every
+    level of a thread's ancestry before unmasked output reaches a provider.
 
-Callers should use the helpers in this module rather than emitting
+Effective policy is the intersection of the thread and all ancestors. Any
+policy DB/decode failure is distinguishable and fails closed. Callers should
+use the helpers in this module rather than emitting
 ``tools.config`` events directly.
 """
 
@@ -41,174 +46,279 @@ from typing import Any, Mapping, Optional, Set, List
 from .db import ThreadsDB
 
 
+class ToolPolicyReadError(RuntimeError):
+    """Raised when a tool policy cannot be read or validated safely."""
+
+    def __init__(self, kind: str, source_thread_id: str, detail: str):
+        self.kind = kind
+        self.source_thread_id = source_thread_id
+        self.detail = detail
+        super().__init__(f"{kind} for thread {source_thread_id}: {detail}")
+
+
 @dataclass
 class ToolsConfig:
-    """Represents the effective tools configuration for a thread.
+    """Effective tool capability after intersecting the complete ancestry.
 
-    Attributes:
-      - llm_tools_enabled: if False, RA1 will not expose tools to the
-        LLM for this thread (``tools=None`` / ``tool_choice=None``).
-      - disabled_tools: set of tool *names* (as used in ToolRegistry)
-        that must not be exposed to the LLM and must not be executed
-        when tool calls are processed (RA2/RA3).
-      - has_explicit_config: True if at least one ``tools.config``
-        event has been applied for this thread. This allows callers to
-        decide whether to overlay model-level defaults when there is no
-        explicit per-thread configuration.
-      - allow_raw_tool_output: when False (default), tool outputs are
-        *masked for secrets* when constructing the provider API request
-        (see ThreadRunner._sanitize_messages_for_api). When True, tool
-        outputs are sent to the provider as-is (still with control-char
-        sanitization for safety).
-
-        This flag does not prevent tool outputs from being stored in the
-        local database or shown in the local UI; its primary purpose is
-        to prevent accidental secret leakage to the LLM provider.
+    Missing policy events use safe, usable defaults: tools are available but
+    provider-bound tool output is secret-masked. ``has_explicit_config`` means
+    any event exists on the effective ancestry. ``policy_error`` distinguishes a
+    read/decode failure from that ordinary no-policy state. A config carrying
+    an error is fail-closed for exposure, execution, and raw publication.
     """
 
     llm_tools_enabled: bool = True
     disabled_tools: Set[str] = field(default_factory=set)
     has_explicit_config: bool = False
-    allow_raw_tool_output: bool = True
+    allow_raw_tool_output: bool = False
     allowed_tools: Optional[Set[str]] = None
+    policy_error: Optional[str] = None
+    policy_error_kind: Optional[str] = None
+    policy_error_source_thread_id: Optional[str] = None
+
+    @classmethod
+    def fail_closed(cls, error: ToolPolicyReadError) -> "ToolsConfig":
+        return cls(
+            llm_tools_enabled=False,
+            allow_raw_tool_output=False,
+            allowed_tools=set(),
+            policy_error=str(error),
+            policy_error_kind=error.kind,
+            policy_error_source_thread_id=error.source_thread_id,
+        )
 
     def is_tool_allowed(self, name: str) -> bool:
-        """Return True if *name* may be exposed/executed in this thread.
+        """Return whether *name* may be exposed or executed."""
 
-        ``allowed_tools=None`` means "all registered tools are potentially
-        allowed".  ``disabled_tools`` is always applied last so an explicit
-        disable wins over an allowlist entry.
-        """
-
-        if not isinstance(name, str) or not name.strip():
+        if self.policy_error or not isinstance(name, str) or not name.strip():
             return False
         key = name.strip().lower()
-        disabled = {n.lower() for n in self.disabled_tools}
-        if key in disabled:
+        if key in self.disabled_tools:
             return False
-        if self.allowed_tools is None:
-            return True
-        allowed = {n.lower() for n in self.allowed_tools}
-        return key in allowed
+        return self.allowed_tools is None or key in self.allowed_tools
 
 
-def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
-    """Return the effective ToolsConfig for a thread.
-
-    This walks ``tools.config`` events in order and applies their
-    payloads to an initially permissive configuration.
-    """
-
-    cfg = ToolsConfig()
-    try:
-        cur = db.conn.execute(
-            "SELECT payload_json FROM events WHERE thread_id=? AND type='tools.config' ORDER BY event_seq ASC",
-            (thread_id,),
+def _clean_tool_names(value: Any, *, field_name: str, thread_id: str) -> Set[str]:
+    if not isinstance(value, (list, tuple)):
+        raise ToolPolicyReadError(
+            "invalid_payload",
+            thread_id,
+            f"{field_name} must be an array of non-empty tool names",
         )
-    except Exception:
-        return cfg
+    names: Set[str] = set()
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise ToolPolicyReadError(
+                "invalid_payload",
+                thread_id,
+                f"{field_name} contains an invalid tool name",
+            )
+        names.add(name.strip().lower())
+    return names
+
+
+def _read_local_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
+    """Read one thread's local events, raising on any ambiguous policy state."""
 
     import json as _json
 
-    for (pj,) in cur.fetchall():
+    try:
+        cursor = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='tools.config' ORDER BY event_seq ASC",
+            (thread_id,),
+        )
+        rows = cursor.fetchall()
+    except Exception as exc:
+        raise ToolPolicyReadError("db_read", thread_id, f"{type(exc).__name__}: {exc}") from exc
+
+    cfg = ToolsConfig()
+    for row in rows:
         try:
-            payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
-        except Exception:
-            payload = {}
+            raw_payload = row[0]
+        except Exception as exc:
+            raise ToolPolicyReadError("db_read", thread_id, f"unreadable tools.config row: {exc}") from exc
+        try:
+            payload = _json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+        except Exception as exc:
+            raise ToolPolicyReadError("payload_decode", thread_id, f"invalid tools.config JSON: {exc}") from exc
         if not isinstance(payload, dict):
-            continue
+            raise ToolPolicyReadError("invalid_payload", thread_id, "tools.config payload must be an object")
+
+        recognized = False
         if "llm_tools_enabled" in payload:
-            try:
-                cfg.llm_tools_enabled = bool(payload["llm_tools_enabled"])
-            except Exception:
-                pass
-            cfg.has_explicit_config = True
+            if not isinstance(payload["llm_tools_enabled"], bool):
+                raise ToolPolicyReadError("invalid_payload", thread_id, "llm_tools_enabled must be boolean")
+            cfg.llm_tools_enabled = payload["llm_tools_enabled"]
+            recognized = True
         if "allow_raw_tool_output" in payload:
-            try:
-                cfg.allow_raw_tool_output = bool(payload["allow_raw_tool_output"])
-            except Exception:
-                pass
-            cfg.has_explicit_config = True
+            if not isinstance(payload["allow_raw_tool_output"], bool):
+                raise ToolPolicyReadError("invalid_payload", thread_id, "allow_raw_tool_output must be boolean")
+            cfg.allow_raw_tool_output = payload["allow_raw_tool_output"]
+            recognized = True
         if "allow_only" in payload:
-            allow_only = payload.get("allow_only")
-            if allow_only is None:
-                cfg.allowed_tools = None
-                cfg.has_explicit_config = True
-            elif isinstance(allow_only, (list, tuple)):
-                allowed: Set[str] = set()
-                for name in allow_only:
-                    if isinstance(name, str) and name.strip():
-                        allowed.add(name.strip())
-                cfg.allowed_tools = allowed
-                cfg.has_explicit_config = True
-        # Apply incremental enables/disables for tool names
-        disable = payload.get("disable") or []
-        if isinstance(disable, (list, tuple)):
-            for name in disable:
-                if isinstance(name, str) and name.strip():
-                    cfg.disabled_tools.add(name.strip())
-                    cfg.has_explicit_config = True
-        enable = payload.get("enable") or []
-        if isinstance(enable, (list, tuple)):
-            for name in enable:
-                if isinstance(name, str) and name.strip():
-                    cfg.disabled_tools.discard(name.strip())
-                    cfg.has_explicit_config = True
+            allow_only = payload["allow_only"]
+            cfg.allowed_tools = None if allow_only is None else _clean_tool_names(
+                allow_only,
+                field_name="allow_only",
+                thread_id=thread_id,
+            )
+            recognized = True
+        if "disable" in payload:
+            cfg.disabled_tools.update(
+                _clean_tool_names(payload["disable"], field_name="disable", thread_id=thread_id)
+            )
+            recognized = True
+        if "enable" in payload:
+            cfg.disabled_tools.difference_update(
+                _clean_tool_names(payload["enable"], field_name="enable", thread_id=thread_id)
+            )
+            recognized = True
+        if recognized:
+            cfg.has_explicit_config = True
 
     return cfg
 
 
-def _append_tools_config_event(db: ThreadsDB, thread_id: str, payload: dict) -> None:
-    """Internal helper: append a ``tools.config`` event with given payload."""
+def _thread_ancestry(db: ThreadsDB, thread_id: str) -> List[str]:
+    """Return root-to-thread ancestry, rejecting missing/ambiguous/cyclic links."""
 
+    chain: List[str] = []
+    seen: Set[str] = set()
+    current = thread_id
+    while current:
+        if current in seen:
+            raise ToolPolicyReadError("ancestry_read", current, "cycle in child ancestry")
+        seen.add(current)
+        chain.append(current)
+        try:
+            exists = db.conn.execute(
+                "SELECT 1 FROM threads WHERE thread_id=?",
+                (current,),
+            ).fetchone()
+            parents = db.conn.execute(
+                "SELECT parent_id FROM children WHERE child_id=?",
+                (current,),
+            ).fetchall()
+        except Exception as exc:
+            raise ToolPolicyReadError("ancestry_read", current, f"{type(exc).__name__}: {exc}") from exc
+        if not exists:
+            raise ToolPolicyReadError("ancestry_read", current, "thread does not exist")
+        if len(parents) > 1:
+            raise ToolPolicyReadError("ancestry_read", current, "thread has multiple parents")
+        if parents and (not isinstance(parents[0][0], str) or not parents[0][0].strip()):
+            raise ToolPolicyReadError("ancestry_read", current, "parent id is invalid")
+        current = parents[0][0].strip() if parents else ""
+    chain.reverse()
+    return chain
+
+
+def _intersect_allowed(
+    current: Optional[Set[str]],
+    restriction: Optional[Set[str]],
+) -> Optional[Set[str]]:
+    if current is None:
+        return None if restriction is None else set(restriction)
+    if restriction is None:
+        return current
+    return current.intersection(restriction)
+
+
+def _emit_policy_error_diagnostic(db: ThreadsDB, target_thread_id: str, error: ToolPolicyReadError) -> None:
+    """Best-effort durable diagnostic for an already fail-closed read result."""
+
+    import json as _json
     import os as _os
+
+    payload = {
+        "operation": "read_tools_config",
+        "error_kind": error.kind,
+        "source_thread_id": error.source_thread_id,
+        "detail": error.detail,
+        "fail_closed": True,
+    }
+    try:
+        row = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='tools.policy_error' ORDER BY event_seq DESC LIMIT 1",
+            (target_thread_id,),
+        ).fetchone()
+        if row:
+            previous = _json.loads(row[0])
+            if isinstance(previous, dict) and all(previous.get(key) == value for key, value in payload.items()):
+                return
+    except Exception:
+        pass
     try:
         db.append_event(
             event_id=_os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="tools.config",
+            thread_id=target_thread_id,
+            type_="tools.policy_error",
             msg_id=None,
             invoke_id=None,
             payload=payload,
         )
     except Exception:
-        # Best-effort; configuration is advisory.
+        # The typed error remains inspectable on the returned config even when
+        # the same DB fault prevents durable diagnostics.
         pass
 
 
-def set_thread_tools_enabled(db: ThreadsDB, thread_id: str, enabled: bool) -> None:
-    """Enable or disable LLM tools for a thread (RA1 exposure).
+def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
+    """Return fail-closed effective policy intersected across all ancestors.
 
-    When ``enabled`` is False, RA1 will stop exposing tools to the LLM
-    in this thread (``tools=None`` / ``tool_choice=None``), but
-    user-initiated commands (RA3) can still be modelled as tool calls
-    and executed locally according to per-tool disabled lists.
+    A missing ``tools.config`` event is not an error and retains usable defaults.
+    Any ancestry, database, or payload failure returns a distinguishable
+    fail-closed config and attempts to append a ``tools.policy_error`` event.
     """
+
+    try:
+        ancestry = _thread_ancestry(db, thread_id)
+        # Intersection identities. Each thread's local no-policy default still
+        # has allow_raw_tool_output=False, so a policy-free root stays masked.
+        effective = ToolsConfig(allow_raw_tool_output=True)
+        for source_thread_id in ancestry:
+            local = _read_local_tools_config(db, source_thread_id)
+            effective.llm_tools_enabled = effective.llm_tools_enabled and local.llm_tools_enabled
+            effective.allow_raw_tool_output = effective.allow_raw_tool_output and local.allow_raw_tool_output
+            # A local "enable" only edits that local reducer. Unioning each
+            # final local disabled set means it can never erase an ancestor deny.
+            effective.disabled_tools.update(local.disabled_tools)
+            effective.allowed_tools = _intersect_allowed(effective.allowed_tools, local.allowed_tools)
+            effective.has_explicit_config = effective.has_explicit_config or local.has_explicit_config
+        return effective
+    except ToolPolicyReadError as error:
+        _emit_policy_error_diagnostic(db, thread_id, error)
+        return ToolsConfig.fail_closed(error)
+
+
+def _append_tools_config_event(db: ThreadsDB, thread_id: str, payload: dict) -> None:
+    """Append a policy event; configuration writes are never advisory."""
+
+    import os as _os
+
+    db.append_event(
+        event_id=_os.urandom(10).hex(),
+        thread_id=thread_id,
+        type_="tools.config",
+        msg_id=None,
+        invoke_id=None,
+        payload=payload,
+    )
+
+
+def set_thread_tools_enabled(db: ThreadsDB, thread_id: str, enabled: bool) -> None:
+    """Set whether this thread may expose tools to its LLM."""
 
     _append_tools_config_event(db, thread_id, {"llm_tools_enabled": bool(enabled)})
 
 
 def set_thread_allow_raw_tool_output(db: ThreadsDB, thread_id: str, allow: bool) -> None:
-    """Enable or disable raw (unfiltered) tool output for a thread.
-
-    When ``allow`` is False (default), tool outputs are masked for
-    secret-like values when constructing provider API messages.
-
-    When True, tool outputs are sent to the provider without secret
-    masking (but still with control-character sanitization).
-    """
+    """Set raw provider publication; effective ancestors may still deny it."""
 
     _append_tools_config_event(db, thread_id, {"allow_raw_tool_output": bool(allow)})
 
 
 def disable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
-    """Mark a tool as disabled for this thread.
-
-    Disabled tools are hidden from the LLM and, when a tool call is
-    attempted (assistant- or user-originated), they are treated as
-    immediately finished with a synthetic "tool disabled" output
-    instead of being executed.
-    """
+    """Disable a tool locally; ancestor restrictions also remain effective."""
 
     if not isinstance(name, str) or not name.strip():
         return
@@ -216,7 +326,7 @@ def disable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
 
 
 def enable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
-    """Remove a tool from the disabled set for this thread."""
+    """Remove a local disable without overriding an ancestor restriction."""
 
     if not isinstance(name, str) or not name.strip():
         return
@@ -224,12 +334,7 @@ def enable_tool_for_thread(db: ThreadsDB, thread_id: str, name: str) -> None:
 
 
 def set_thread_tool_allowlist(db: ThreadsDB, thread_id: str, names: List[str] | Set[str]) -> None:
-    """Restrict a thread to exactly the given tool names.
-
-    The allowlist controls both LLM tool exposure and RA2/RA3 execution.
-    Existing disabled tools remain disabled; i.e. disables still override
-    allowlist membership.
-    """
+    """Set a local allowlist, intersected with all effective ancestors."""
 
     if not isinstance(names, (list, tuple, set)):
         names = []
@@ -238,37 +343,37 @@ def set_thread_tool_allowlist(db: ThreadsDB, thread_id: str, names: List[str] | 
 
 
 def clear_thread_tool_allowlist(db: ThreadsDB, thread_id: str) -> None:
-    """Clear any explicit allowlist, returning to all-tools-minus-disabled."""
+    """Clear the local allowlist without clearing ancestor restrictions."""
 
     _append_tools_config_event(db, thread_id, {"allow_only": None})
 
 
-def inherit_tools_config_for_child(db: ThreadsDB, parent_thread_id: str, child_thread_id: str) -> None:
-    """Copy the parent's effective tools config onto a newly-created child.
-
-    Tool configuration is a capability boundary, so descendants should start
-    with the parent's current restrictions.  We intentionally copy by value at
-    creation time instead of resolving through ancestors dynamically: later
-    parent changes do not silently mutate existing children, while trusted
-    programmatic code can still widen a child explicitly with the normal
-    ``set_thread_tool_allowlist`` / ``clear_thread_tool_allowlist`` /
-    ``enable_tool_for_thread`` helpers.
-    """
+def inherited_tools_config_payload(db: ThreadsDB, parent_thread_id: str) -> dict[str, Any]:
+    """Build the mandatory policy payload for an ordinary new child."""
 
     cfg = get_thread_tools_config(db, parent_thread_id)
-    if not cfg.has_explicit_config:
-        return
-
-    payload: dict[str, Any] = {
-        "llm_tools_enabled": bool(cfg.llm_tools_enabled),
-        "allow_raw_tool_output": bool(cfg.allow_raw_tool_output),
+    if cfg.policy_error:
+        raise ToolPolicyReadError(
+            cfg.policy_error_kind or "policy_read",
+            cfg.policy_error_source_thread_id or parent_thread_id,
+            cfg.policy_error,
+        )
+    return {
+        "llm_tools_enabled": cfg.llm_tools_enabled,
+        "allow_raw_tool_output": cfg.allow_raw_tool_output,
+        "allow_only": None if cfg.allowed_tools is None else sorted(cfg.allowed_tools),
+        "disable": sorted(cfg.disabled_tools),
     }
-    if cfg.allowed_tools is not None:
-        payload["allow_only"] = sorted(cfg.allowed_tools)
-    if cfg.disabled_tools:
-        payload["disable"] = sorted(cfg.disabled_tools)
 
-    _append_tools_config_event(db, child_thread_id, payload)
+
+def inherit_tools_config_for_child(db: ThreadsDB, parent_thread_id: str, child_thread_id: str) -> None:
+    """Persist a child's initial effective policy, raising on any failure."""
+
+    _append_tools_config_event(
+        db,
+        child_thread_id,
+        inherited_tools_config_payload(db, parent_thread_id),
+    )
 
 
 def get_tool_statuses_for_config(
@@ -285,7 +390,8 @@ def get_tool_statuses_for_config(
     Each returned dict contains:
       - ``name``: registered tool name
       - ``enabled``: effective usability in this thread
-      - ``status``: one of ``"enabled"``, ``"disabled"``, ``"not_allowed"``
+      - ``status``: one of ``"enabled"``, ``"disabled"``, ``"not_allowed"``,
+        or ``"policy_error"``
       - ``status_label``: human-readable label for command output
       - ``disabled``: whether the tool is explicitly disabled
       - ``allowed_by_allowlist``: whether the allowlist permits the tool
@@ -314,9 +420,13 @@ def get_tool_statuses_for_config(
         key = name.strip().lower() if isinstance(name, str) else ""
         is_disabled = key in disabled_set
         allowed_by_allowlist = allowed_set is None or key in allowed_set
-        enabled = bool(key) and allowed_by_allowlist and not is_disabled
+        policy_error = bool(getattr(cfg, "policy_error", None))
+        enabled = bool(key) and allowed_by_allowlist and not is_disabled and not policy_error
 
-        if is_disabled:
+        if policy_error:
+            status = "policy_error"
+            status_label = "POLICY ERROR"
+        elif is_disabled:
             status = "disabled"
             status_label = "DISABLED"
         elif not allowed_by_allowlist:

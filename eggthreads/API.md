@@ -617,23 +617,28 @@ Attributes:
 - `llm_tools_enabled`: `bool` = `True`
 - `disabled_tools`: `Set[str]` (default factory)
 - `has_explicit_config`: `bool` = `False`
-- `allow_raw_tool_output`: `bool` = `True`
+- `allow_raw_tool_output`: `bool` = `False`
+- `allowed_tools`: `Optional[Set[str]]` = `None`
+- `policy_error`: `Optional[str]` = `None`
+- `policy_error_kind`: `Optional[str]` = `None`
+- `policy_error_source_thread_id`: `Optional[str]` = `None`
 
 ### `get_thread_tools_config(db: 'ThreadsDB', thread_id: 'str') -> 'ToolsConfig'`
 
 Return the effective ToolsConfig for a thread.
 
-This walks ``tools.config`` events in order and applies their
-payloads to an initially permissive configuration.
+This validates ``tools.config`` events and intersects policy across the
+complete live ancestry. Missing policy uses safe usable defaults; DB/decode
+failures return a distinguishable fail-closed config and diagnostic.
 
 ### `inherit_tools_config_for_child(db: 'ThreadsDB', parent_thread_id: 'str', child_thread_id: 'str') -> 'None'`
 
 Copy the parent's effective tools config onto a newly-created child.
 
-Tool configuration is copied by value at child creation time rather than
-resolved dynamically through ancestors. This gives new children the
-parent's current restrictions while still allowing trusted programmatic
-code to widen the child later with the normal tools configuration helpers.
+The child receives an initial effective policy in the same transaction as
+its thread/link creation. Runtime reads also intersect every live ancestor
+policy, so children cannot widen above ancestors or escape later parent
+restrictions.
 
 ### `set_thread_tools_enabled(db: 'ThreadsDB', thread_id: 'str', enabled: 'bool') -> 'None'`
 

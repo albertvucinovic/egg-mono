@@ -2091,7 +2091,8 @@ def test_scheduler_bulk_max_event_seqs(tmp_path):
 
     assert seqs[root] == db.max_event_seq(root)
     assert seqs[child] == db.max_event_seq(child)
-    assert seqs[empty] == -1
+    # Child creation atomically persists its mandatory initial tool policy.
+    assert seqs[empty] == db.max_event_seq(empty)
 
 
 def test_scheduler_bulk_active_open_threads_excludes_expired_leases(tmp_path):

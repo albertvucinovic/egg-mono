@@ -52,7 +52,10 @@ class ThreadsDB:
 
     # Threads -----------------------------------------------------------
     def create_thread(self, thread_id: str, name: Optional[str] = None, parent_id: Optional[str] = None,
-                      waiting_until: Optional[str] = None, initial_model_key: Optional[str] = None, depth: int = 0) -> str:
+                      waiting_until: Optional[str] = None, initial_model_key: Optional[str] = None, depth: int = 0,
+                      initial_events: Optional[Iterable[tuple[str, Any]]] = None) -> str:
+        """Create a thread and mandatory initial events in one transaction."""
+
         savepoint = f"create_thread_{uuid.uuid4().hex}"
         self.conn.execute(f"SAVEPOINT {savepoint}")
         try:
@@ -64,6 +67,14 @@ class ThreadsDB:
                 self.conn.execute(
                     "INSERT INTO children(parent_id, child_id, waiting_until) VALUES (?,?,?)",
                     (parent_id, thread_id, waiting_until)
+                )
+            for type_, payload_source in initial_events or ():
+                payload = payload_source() if callable(payload_source) else payload_source
+                self.append_event(
+                    event_id=uuid.uuid4().hex,
+                    thread_id=thread_id,
+                    type_=type_,
+                    payload=payload,
                 )
             self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
         except Exception:

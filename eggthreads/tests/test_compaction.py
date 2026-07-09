@@ -1548,7 +1548,8 @@ def test_build_repl_thread_context_excludes_no_api_and_sanitizes_tool_output(tmp
     assert hidden_tool not in ctx["messages_by_id"]
     content = ctx["messages_by_id"][visible_tool]["content"]
     assert "\x1b" not in content
-    assert "API_KEY=supersecretvalue" in content
+    assert "API_KEY=***" in content
+    assert "supersecretvalue" not in content
 
 
 def test_build_repl_thread_context_uses_effective_view_after_continue(tmp_path):

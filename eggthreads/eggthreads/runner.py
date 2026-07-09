@@ -2936,6 +2936,13 @@ class ThreadRunner:
         # both for assistant-originated tool calls (RA2) and
         # user-initiated ones (RA3).
         tools_cfg = get_thread_tools_config(self.db, self.thread_id)
+        if tools_cfg.policy_error:
+            # The config already carries a durable/best-effort diagnostic. Keep
+            # processing states so calls can terminate inspectably, but execute
+            # no tool while policy authorization is unknown.
+            policy_error_message = f"Tool policy unavailable; execution denied: {tools_cfg.policy_error}"
+        else:
+            policy_error_message = ""
         for tc in tool_calls:
             # Denied -> publish denial message and move to TC6
             if tc.state == 'TC2.2' and not tc.published:
@@ -2965,7 +2972,7 @@ class ThreadRunner:
                 # to assistant- and user-originated calls.
                 if not tools_cfg.is_tool_allowed(tc.name):
                     import os as _os
-                    disabled_msg = (
+                    disabled_msg = policy_error_message or (
                         f"Tool '{tc.name}' is not allowed for this thread and "
                         "was not executed."
                     )
@@ -2977,7 +2984,7 @@ class ThreadRunner:
                         invoke_id=invoke_id,
                         payload={
                             'tool_call_id': tc.tool_call_id,
-                            'reason': 'disabled',
+                            'reason': 'policy_error' if policy_error_message else 'disabled',
                             'output': disabled_msg,
                         },
                     )
@@ -2993,7 +3000,11 @@ class ThreadRunner:
                         payload={
                             'tool_call_id': tc.tool_call_id,
                             'decision': 'whole',
-                            'reason': 'Auto: tool not allowed for this thread',
+                            'reason': (
+                                'Auto: tool policy read failed closed'
+                                if policy_error_message
+                                else 'Auto: tool not allowed for this thread'
+                            ),
                             'preview': disabled_msg,
                         },
                     )

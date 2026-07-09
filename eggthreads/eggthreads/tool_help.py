@@ -422,9 +422,14 @@ def _availability(name: str, entry: Mapping[str, Any], tools_cfg: Any | None) ->
             return False, "LLM tools disabled for this thread"
         try:
             if not tools_cfg.is_tool_allowed(name):
-                return False, "not allowed for this thread"
+                reason = (
+                    "tool policy unavailable (fail closed)"
+                    if getattr(tools_cfg, "policy_error", None)
+                    else "not allowed for this thread"
+                )
+                return False, reason
         except Exception:
-            pass
+            return False, "tool policy evaluation failed (fail closed)"
     return True, "available to the LLM in this context"
 
 
