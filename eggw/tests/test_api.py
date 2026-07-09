@@ -3336,3 +3336,50 @@ class TestAutocomplete:
         inserts = [s["insert"] for s in response.json()["suggestions"]]
         assert any("exports/" in item for item in inserts)
         assert saved.artifact_id not in inserts
+
+
+def test_output_finalization_failure_returns_conflict_and_keeps_tc4(client, monkeypatch):
+    """Web output approval failure is explicit and leaves a retriable prompt."""
+    from eggthreads import append_message, build_tool_call_states
+
+    monkeypatch.setattr("eggw.routes.tools.ensure_scheduler_for", lambda tid: None)
+    thread_id = client.post("/api/threads", json={"name": "Output Failure"}).json()["id"]
+    tool_call_id = "call-output-failure-web"
+    append_message(
+        core_state.db,
+        thread_id,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {"id": tool_call_id, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+            ]
+        },
+    )
+    core_state.db.append_event(
+        "approve-output-failure-web",
+        thread_id,
+        "tool_call.approval",
+        {"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    core_state.db.append_event(
+        "finish-output-failure-web",
+        thread_id,
+        "tool_call.finished",
+        {"tool_call_id": tool_call_id, "reason": "success", "output": "raw"},
+    )
+
+    def fail_finalize(*args, **kwargs):
+        from eggthreads import ToolOutputPlanError
+
+        raise ToolOutputPlanError(thread_id, tool_call_id, "artifact unavailable")
+
+    monkeypatch.setattr("eggw.routes.tools.finalize_tool_output", fail_finalize)
+    response = client.post(
+        f"/api/threads/{thread_id}/tools/approve",
+        json={"tool_call_id": tool_call_id, "approved": True, "output_decision": "partial"},
+    )
+
+    assert response.status_code == 409
+    assert "artifact unavailable" in response.json()["detail"]
+    assert build_tool_call_states(core_state.db, thread_id)[tool_call_id].state == "TC4"

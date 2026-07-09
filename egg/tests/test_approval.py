@@ -251,3 +251,37 @@ class TestOutputApproval:
         except Exception:
             # May fail if approval record doesn't exist in db
             pass
+
+
+def test_output_finalization_failure_keeps_terminal_prompt_and_input(egg_app, monkeypatch):
+    """A failed TC4 transition remains visible/retriable in Terminal Egg."""
+    from eggthreads import append_message, build_tool_call_states
+
+    tid = egg_app.current_thread
+    tcid = "tc-terminal-finalize-failure"
+    append_message(
+        egg_app.db,
+        tid,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {"id": tcid, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+            ]
+        },
+    )
+    egg_app.db.append_event("terminal-approve", tid, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+    egg_app.db.append_event("terminal-finish", tid, "tool_call.finished", {"tool_call_id": tcid, "reason": "success", "output": "raw"})
+    assert build_tool_call_states(egg_app.db, tid)[tcid].state == "TC4"
+    egg_app._pending_prompt = {"kind": "output", "tool_call_ids": [tcid]}
+    egg_app.input_panel.editor.editor.set_text("n")
+
+    def fail_finalize(*args, **kwargs):
+        raise RuntimeError("artifact unavailable")
+
+    monkeypatch.setattr("egg.approval.finalize_tool_output", fail_finalize)
+    assert egg_app.handle_pending_approval_answer("n", source="test") is True
+
+    assert egg_app._pending_prompt == {"kind": "output", "tool_call_ids": [tcid]}
+    assert egg_app.input_panel.get_text() == "n"
+    assert build_tool_call_states(egg_app.db, tid)[tcid].state == "TC4"

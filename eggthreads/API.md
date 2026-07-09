@@ -565,6 +565,26 @@ Args:
                   If omitted, the decision applies to the whole thread
                   (or to the current turn, depending on the decision).
 
+### `finalize_tool_output(db, thread_id, tool_call_id, *, decision, source, reason='', expected_state='TC4', expected_event_seq=None, publication_plan=None, invocation_writer=None) -> ToolOutputFinalizationResult`
+
+The single backend authority for the TC4-to-TC5 output-decision transition. It
+locks the thread writer, reconstructs current tool-call state, validates the
+expected lifecycle event watermark, and commits the decision with a SQL
+state/version compare-and-set. Runner callers pass an ``InvocationEventWriter``
+so lease ownership is verified in the same insert.
+
+Automatic and ordinary manual duplicates are first-commit/idempotent. Explicit
+``source='user_cancel'`` and explicit ``source='user_omit'`` have highest
+precedence and may supersede an unpublished automatic decision; the reducer
+preserves that outcome for legacy competing events too. ``partial`` requires a readable thread-owned raw-output artifact.
+Policy, artifact, state/version, lease, and append failures raise typed errors
+and leave TC4 durable for retry.
+
+``ToolOutputPublicationPlan`` carries the decision, preview, artifact path,
+optimizer/channel metadata, and additional audit metadata. The committed result
+reports whether this call appended the event or returned an idempotent existing
+outcome.
+
 ### `list_tool_calls_for_thread(db: 'ThreadsDB', thread_id: 'str') -> 'List[ToolCallState]'`
 
 Return ToolCallState objects for all tool calls in this thread.
@@ -575,11 +595,13 @@ Return ToolCallState objects for tool calls declared in a given message.
 
 ### `build_tool_call_states(db: 'ThreadsDB', thread_id: 'str') -> 'Dict[str, ToolCallState]'`
 
-Scan events for a thread and reconstruct ToolCallState per tool_call_id.
+Reconstruct ``ToolCallState`` per tool-call ID from the event log. Returned
+states include ``state_event_seq`` as the lifecycle watermark accepted by
+``finalize_tool_output`` and ``output_decision_event_seq`` for the authoritative
+output decision.
 
-This is intentionally stateless and computed on demand; threads are
-typically small enough that this is acceptable, and it avoids schema
-changes.
+The private reducer cache avoids replaying unchanged histories while SQLite
+events remain authoritative; no schema change is required.
 
 Note: This function respects the skipped_on_continue flag: tool calls
 from messages that have been marked as skipped are not included.

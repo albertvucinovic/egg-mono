@@ -14,6 +14,7 @@ from eggthreads import (
     append_message,
     build_tool_call_states,
     approve_tool_calls_for_thread,
+    finalize_tool_output,
 )
 
 from .. import core
@@ -272,12 +273,22 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
                         decision = "granted" if approved else "denied"
                         if tc.state == "TC4":
                             decision = data.get("output_decision", "whole" if approved else "omit")
-                        approve_tool_calls_for_thread(
-                            core.db,
-                            thread_id,
-                            decision=decision,
-                            tool_call_id=tc_id,
-                        )
+                            finalize_tool_output(
+                                core.db,
+                                thread_id,
+                                tc_id,
+                                decision=decision,
+                                source="user_omit" if decision == "omit" else "user",
+                                reason="User decided over web socket",
+                                expected_event_seq=tc.state_event_seq,
+                            )
+                        else:
+                            approve_tool_calls_for_thread(
+                                core.db,
+                                thread_id,
+                                decision=decision,
+                                tool_call_id=tc_id,
+                            )
 
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})

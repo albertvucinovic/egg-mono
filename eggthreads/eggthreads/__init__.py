@@ -296,6 +296,15 @@ from .approval import (
     create_approval_policy_registry,
     evaluate_approval_policies,
 )
+from .tool_output import (
+    ToolOutputFinalizationError,
+    ToolOutputFinalizationResult,
+    ToolOutputPersistenceError,
+    ToolOutputPlanError,
+    ToolOutputPublicationPlan,
+    ToolOutputStateConflict,
+    finalize_tool_output,
+)
 from .output_policy import (
     OutputPolicyRegistry,
     OutputPolicyRequest,
@@ -364,7 +373,9 @@ __all__ = [
     'set_subtree_working_directory',
     'is_descendant_thread', 'send_message_to_child_thread',
     'ChildThreadStatus', 'get_child_thread_status', 'get_child_thread_statuses', 'get_active_get_user_message_waiting_note',
-    'approve_tool_calls_for_thread',
+    'approve_tool_calls_for_thread', 'finalize_tool_output',
+    'ToolOutputFinalizationError', 'ToolOutputFinalizationResult', 'ToolOutputPersistenceError',
+    'ToolOutputPlanError', 'ToolOutputPublicationPlan', 'ToolOutputStateConflict',
     'ToolCallResult', 'ThreadWaitResult', 'enqueue_user_tool_call',
     'execute_bash_command', 'execute_bash_command_hidden', 'get_user_command_result', 'wait_for_user_command_result',
     'wait_for_tool_call_result', 'wait_for_tool_call_result_async',

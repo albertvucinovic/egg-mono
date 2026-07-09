@@ -1,19 +1,20 @@
 """Tool call API routes for eggw backend."""
 from __future__ import annotations
 
-import os
 from typing import List
 
 from fastapi import APIRouter, HTTPException
 
 from eggthreads import (
+    ToolOutputFinalizationError,
     build_tool_call_states,
     approve_tool_calls_for_thread,
+    finalize_tool_output,
 )
 
 from ..models import ToolCallInfo, ApprovalRequest
 from .. import core
-from ..core import ensure_scheduler_for, shorten_output_preview
+from ..core import ensure_scheduler_for
 
 router = APIRouter(prefix="/api/threads", tags=["tools"])
 
@@ -73,60 +74,21 @@ async def approve_tool(thread_id: str, request: ApprovalRequest):
                 decision=decision,
                 tool_call_id=request.tool_call_id,
             )
-    elif tc.state == "TC4":
-        # Output approval - emit tool_call.output_approval event directly
-        # (not tool_call.approval which is for execution approval)
+    elif tc.state in ("TC4", "TC5"):
         output_decision = request.output_decision or ("whole" if request.approved else "omit")
-
-        # Get the full output from the tool call state
-        full_output = tc.finished_output or ""
-        if not isinstance(full_output, str):
-            full_output = str(full_output)
-
-        # Compute preview based on decision
-        if output_decision == "whole":
-            preview = full_output
-        elif output_decision == "partial":
-            try:
-                from eggthreads.runner import stash_tool_output_and_build_preview
-
-                preview, artifact_path = stash_tool_output_and_build_preview(
-                    core.db,
-                    thread_id,
-                    request.tool_call_id,
-                    full_output,
-                )
-            except Exception:
-                preview = shorten_output_preview(full_output)
-                artifact_path = ""
-        else:  # omit
-            preview = "Output omitted."
-            artifact_path = ""
-
-        # Compute stats for the payload
-        line_count = len(full_output.splitlines()) if full_output else 0
-        char_count = len(full_output)
-
-        # Emit tool_call.output_approval event
-        payload = {
-            'tool_call_id': request.tool_call_id,
-            'decision': output_decision,
-            'reason': 'User decided in web UI',
-            'preview': preview,
-            'line_count': line_count,
-            'char_count': char_count,
-        }
-        if output_decision == "partial":
-            payload['artifact_path'] = artifact_path
-
-        core.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_='tool_call.output_approval',
-            msg_id=None,
-            invoke_id=None,
-            payload=payload,
-        )
+        try:
+            finalize_tool_output(
+                core.db,
+                thread_id,
+                request.tool_call_id,
+                decision=output_decision,
+                source="user_omit" if output_decision == "omit" else "user",
+                reason="User decided in web UI",
+                expected_event_seq=tc.state_event_seq,
+            )
+        except ToolOutputFinalizationError as exc:
+            # Keep TC4 durable/retriable and report the failed transition.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     else:
         raise HTTPException(status_code=400, detail=f"Tool call in state {tc.state} cannot be approved")
 

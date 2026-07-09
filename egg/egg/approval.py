@@ -4,7 +4,13 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
-from eggthreads import approve_tool_calls_for_thread, create_snapshot
+from eggthreads import (
+    ToolOutputFinalizationError,
+    ToolOutputPublicationPlan,
+    approve_tool_calls_for_thread,
+    create_snapshot,
+    finalize_tool_output,
+)
 
 from .utils import shorten_output_preview
 
@@ -179,51 +185,33 @@ class ApprovalMixin:
                     decision = 'partial'
                 else:
                     decision = 'omit'
+                committed_ids = []
                 for tcid in ids:
                     tc = states.get(str(tcid))
-                    if not tc or not tc.finished_output:
+                    if not tc or tc.state not in ('TC4', 'TC5'):
                         continue
-                    _saved = ''
-                    full = tc.finished_output
-                    if not isinstance(full, str):
-                        full = str(full)
-                    line_count = len(full.splitlines())
-                    char_count = len(full)
-                    if decision == 'whole':
-                        preview = full
-                    elif decision == 'partial':
-                        # Store the full output as an artifact and build the
-                        # same preview/read-tool note as the runner's
-                        # auto-resolve path, so user-initiated 'n' choices
-                        # preserve the complete output too.
-                        try:
-                            from eggthreads.runner import stash_tool_output_and_build_preview
-                            preview, _saved = stash_tool_output_and_build_preview(
-                                self.db, self.current_thread, tcid, full,
-                            )
-                        except Exception:
-                            preview = shorten_output_preview(full)
-                    else:
-                        preview = "Output omitted."
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.current_thread,
-                        type_='tool_call.output_approval',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'tool_call_id': tcid,
-                            'decision': decision,
-                            'reason': f'User decided in UI ({source})',
-                            'preview': preview,
-                            'artifact_path': _saved if decision == 'partial' else '',
-                            'line_count': line_count,
-                            'char_count': char_count,
-                        },
+                    result = finalize_tool_output(
+                        self.db,
+                        self.current_thread,
+                        str(tcid),
+                        decision=decision,
+                        source='user_omit' if decision == 'omit' else 'user',
+                        reason=f'User decided in UI ({source})',
+                        expected_event_seq=tc.state_event_seq,
                     )
-                self.log_system(f"Tool calls {ids} output decision: {decision} (via {source}).")
+                    committed_ids.append(result.tool_call_id)
+                if not committed_ids:
+                    raise ToolOutputFinalizationError(
+                        self.current_thread,
+                        str(ids[0]),
+                        'No pending tool output could be finalized',
+                    )
+                self.log_system(f"Tool calls {committed_ids} output decision: {decision} (via {source}).")
             except Exception as e:
+                # A policy/artifact/append failure leaves TC4 durable and keeps
+                # the prompt/input available for an explicit retry.
                 self.log_system(f'Error recording approval: {e}')
+                return True
             self._pending_prompt = {}
             self.input_panel.clear_text()
             self.input_panel.increment_message_count()
@@ -300,18 +288,20 @@ class ApprovalMixin:
                 )
                 if get_user_wait_interrupted:
                     content = 'User interrupted get_user_message_while_preserving_llm_turn.'
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.current_thread,
-                        type_='tool_call.output_approval',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'tool_call_id': tool_call_id,
-                            'decision': 'whole',
-                            'reason': 'Cancelled by user via Ctrl+C',
-                            'preview': content,
-                        },
+                    finalize_tool_output(
+                        self.db,
+                        self.current_thread,
+                        tool_call_id,
+                        decision='whole',
+                        source='user_cancel',
+                        reason='Cancelled by user via Ctrl+C',
+                        expected_state=('TC3', 'TC4', 'TC5'),
+                        expected_event_seq=tc.state_event_seq,
+                        publication_plan=ToolOutputPublicationPlan(
+                            decision='whole',
+                            preview=content,
+                            reason='Cancelled by user via Ctrl+C',
+                        ),
                     )
                     if getattr(tc, 'parent_role', None) == 'assistant':
                         payload = {
@@ -365,22 +355,19 @@ class ApprovalMixin:
                             payload=payload,
                         )
                         any_tool_msg = True
-                # TC2.1 (approved), TC3 (executing), TC4 (finished, waiting
-                # for output approval): mark output as omitted so the
-                # runner will not auto-approve or surface it.
-                elif tc.state in ('TC2.1', 'TC3', 'TC4'):
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.current_thread,
-                        type_='tool_call.output_approval',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'tool_call_id': tool_call_id,
-                            'decision': 'omit',
-                            'reason': 'Cancelled by user via Ctrl+C',
-                            'preview': 'Output omitted (cancelled by user).',
-                        },
+                # Approved/running/finished/unpublished output: commit a
+                # highest-precedence cancellation. TC5 is included so Ctrl+C
+                # can win a race with automatic policy before publication.
+                elif tc.state in ('TC2.1', 'TC3', 'TC4', 'TC5'):
+                    finalize_tool_output(
+                        self.db,
+                        self.current_thread,
+                        tool_call_id,
+                        decision='omit',
+                        source='user_cancel',
+                        reason='Cancelled by user via Ctrl+C',
+                        expected_state=('TC2.1', 'TC3', 'TC4', 'TC5'),
+                        expected_event_seq=tc.state_event_seq,
                     )
                     # Assistant-originated tool calls should still get a
                     # tool message so that the tools protocol invariant

@@ -14,10 +14,12 @@ from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
     SnapshotBuilder,
+    ToolOutputPublicationPlan,
     ThreadsDB,
     append_message,
     build_tool_call_states,
     create_snapshot,
+    finalize_tool_output,
     get_active_get_user_message_waiting_note,
     interrupt_thread,
 )
@@ -128,18 +130,20 @@ def _cancel_active_get_user_wait(thread_id: str, waiting_note: dict | None) -> b
     if name != GET_USER_MESSAGE_TOOL_NAME:
         return False
 
-    core.db.append_event(
-        event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
-        type_="tool_call.output_approval",
-        msg_id=None,
-        invoke_id=None,
-        payload={
-            "tool_call_id": tool_call_id,
-            "decision": "whole",
-            "reason": "Cancelled by user via web interrupt",
-            "preview": GET_USER_INTERRUPT_CONTENT,
-        },
+    finalize_tool_output(
+        core.db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="user_cancel",
+        reason="Cancelled by user via web interrupt",
+        expected_state=("TC3", "TC4", "TC5"),
+        expected_event_seq=tc.state_event_seq,
+        publication_plan=ToolOutputPublicationPlan(
+            decision="whole",
+            preview=GET_USER_INTERRUPT_CONTENT,
+            reason="Cancelled by user via web interrupt",
+        ),
     )
 
     if getattr(tc, "parent_role", None) == "assistant":
@@ -717,28 +721,17 @@ async def interrupt_thread_endpoint(thread_id: str):
 
     states = build_tool_call_states(core.db, thread_id)
     for tc in states.values():
-        if tc.state == "TC4" and tc.finished_reason == "interrupted":
-            # Emit output approval with 'whole' decision - runner handles interrupted specially
-            full_output = tc.finished_output or ""
-            if not isinstance(full_output, str):
-                full_output = str(full_output)
-            line_count = len(full_output.splitlines()) if full_output else 0
-            char_count = len(full_output)
-
-            core.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=thread_id,
-                type_='tool_call.output_approval',
-                msg_id=None,
-                invoke_id=None,
-                payload={
-                    'tool_call_id': tc.tool_call_id,
-                    'decision': 'whole',
-                    'reason': 'Auto-approved after interrupt',
-                    'preview': full_output,
-                    'line_count': line_count,
-                    'char_count': char_count,
-                },
+        if tc.state in ("TC4", "TC5") and tc.finished_reason == "interrupted":
+            # Commit through the shared authority; user-cancel precedence wins
+            # any concurrent automatic policy decision.
+            finalize_tool_output(
+                core.db,
+                thread_id,
+                tc.tool_call_id,
+                decision='whole',
+                source='user_cancel',
+                reason='Auto-approved after interrupt',
+                expected_event_seq=tc.state_event_seq,
             )
 
     return {

@@ -31,6 +31,13 @@ from .tool_state import (
     _prune_reducer_cache_for_threads,
 )
 from .tools_config import get_thread_tools_config
+from .tool_output import (
+    ToolOutputPersistenceError,
+    ToolOutputPlanError,
+    ToolOutputPublicationPlan,
+    ToolOutputStateConflict,
+    finalize_tool_output,
+)
 from .tool_call_id import normalize_tool_call_id
 from .terminal_safety import sanitize_terminal_text
 from .content_parts import content_has_artifacts, content_has_attachments, content_to_plain_text, validate_content_parts
@@ -544,7 +551,7 @@ def stash_tool_output_and_build_preview(
     return f"{preview_body}\n\n{note}" if preview_body else note, saved_path
 
 
-def _emit_auto_output_approval(
+def _finalize_auto_tool_output(
     db,
     thread_id: str,
     tool_call_id: str,
@@ -558,48 +565,39 @@ def _emit_auto_output_approval(
     tool_metadata: Optional[Dict[str, Any]] = None,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
+    expected_event_seq: int,
     writer: InvocationEventWriter,
-) -> None:
-    """Emit a ``tool_call.output_approval`` event for a finished tool call.
+):
+    """Build policy output, then commit it through the TC4 authority."""
 
-    No-op if an explicit decision already exists (e.g. user-cancelled
-    via Ctrl+C). Small outputs are approved as ``whole``; large outputs
-    are stored as artifacts via :func:`stash_tool_output_and_build_preview`
-    and approved as ``partial`` with a bounded preview plus read-tool note.
-    """
-    try:
-        cur = db.conn.execute(
-            """
-            SELECT 1
-              FROM events
-             WHERE thread_id=?
-               AND type='tool_call.output_approval'
-               AND json_extract(payload_json, '$.tool_call_id')=?
-             LIMIT 1
-            """,
-            (thread_id, str(tool_call_id)),
-        )
-        has_decision = cur.fetchone() is not None
-    except Exception:
-        has_decision = False
-    if has_decision:
-        return
+    from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
+    from .output_optimizer.config import get_thread_output_optimizer_policy_config
 
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
+
+    # Avoid policy/optimizer/artifact side effects when an explicit user
+    # decision already won. This is only a fast path; finalize_tool_output still
+    # performs the authoritative locked state/version check below.
+    from .tool_state import _reduce_thread_events
+
+    current = _reduce_thread_events(db, thread_id).tool_call_states.get(str(tool_call_id))
+    if current is not None and current.output_decision is not None:
+        return finalize_tool_output(
+            db,
+            thread_id,
+            tool_call_id,
+            decision=str(current.output_decision),
+            source="automatic_policy",
+            expected_event_seq=current.state_event_seq,
+            invocation_writer=writer,
+        )
 
     stored_char_count = len(full_output)
     stored_line_count = len(full_output.splitlines())
     original_count = original_char_count if original_char_count is not None else stored_char_count
     try:
-        from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
-        from .output_optimizer.config import get_thread_output_optimizer_policy_config
-
-        try:
-            thread_output_optimizer_config = get_thread_output_optimizer_policy_config(db, thread_id)
-        except Exception:
-            thread_output_optimizer_config = {}
-
+        thread_output_optimizer_config = get_thread_output_optimizer_policy_config(db, thread_id)
         publication = decide_output_publication(
             create_output_policy_registry(),
             OutputPolicyRequest(
@@ -628,55 +626,34 @@ def _emit_auto_output_approval(
                 },
             ),
         )
-        preview = publication.preview
-        decision = publication.decision
-        reason = publication.reason
-        channels = dict(publication.channels or {})
-        artifact_path = publication.artifact_path
-    except Exception:
-        line_count = len(full_output.splitlines())
-        char_count = len(full_output)
-        is_long = (
-            line_count > LONG_OUTPUT_LINE_THRESHOLD
-            or char_count > LONG_OUTPUT_CHAR_THRESHOLD
-        )
-
-        if is_long:
-            preview, saved = stash_tool_output_and_build_preview(
-                db,
-                thread_id,
-                tool_call_id,
-                full_output,
-                original_char_count=original_char_count,
-                output_capped=output_capped,
-            )
-            decision = "partial"
-            reason = (
-                f"Auto: output too long ({line_count} lines, {char_count} chars) — "
-                "stored as artifact" if saved else
-                f"Auto: output too long ({line_count} lines, {char_count} chars); "
-                "artifact write failed, sending preview only"
-            )
-            artifact_path = saved
-        else:
-            preview = full_output
-            decision = "whole"
-            reason = "Auto: output below size thresholds"
-            artifact_path = ""
-        channels = {}
-
-    payload = {
-        "tool_call_id": tool_call_id,
-        "decision": decision,
-        "reason": reason,
-        "preview": preview,
-        "channels": channels,
-        "artifact_path": artifact_path,
-    }
-    writer.append_event(
-        event_id=os.urandom(10).hex(),
-        type_="tool_call.output_approval",
-        payload=payload,
+    except Exception as exc:
+        raise ToolOutputPlanError(
+            thread_id,
+            str(tool_call_id),
+            f"Automatic output policy failed: {type(exc).__name__}: {exc}",
+        ) from exc
+    plan = ToolOutputPublicationPlan(
+        decision=publication.decision,
+        preview=publication.preview,
+        reason=publication.reason,
+        artifact_path=publication.artifact_path,
+        channels=dict(publication.channels or {}),
+        metadata={
+            "line_count": stored_line_count,
+            "char_count": stored_char_count,
+            "original_char_count": original_count,
+            "output_capped": bool(output_capped),
+        },
+    )
+    return finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision=publication.decision,
+        source="automatic_policy",
+        expected_event_seq=expected_event_seq,
+        publication_plan=plan,
+        invocation_writer=writer,
     )
 
 
@@ -1489,6 +1466,11 @@ class ThreadRunner:
             # Cooperative shutdown/cancellation should not be recorded as an
             # LLM/runner error. Defer re-raising until after stream/lease cleanup.
             was_cancelled = True
+        except (ToolOutputPlanError, ToolOutputPersistenceError, ToolOutputStateConflict) as e:
+            # TC4 finalization failures are deliberately retriable. Do not append
+            # a generic runner error (which would move the turn boundary or hide
+            # the pending output prompt); leave the finished output in TC4.
+            print(f"Tool output finalization pending retry: {e}")
         except Exception as e:
             if ra.kind == 'RA1_llm' and _is_context_length_exceeded_error(e):
                 context_length_error = str(e) if str(e) else f"{type(e).__name__}: (no message)"
@@ -3026,7 +3008,7 @@ class ThreadRunner:
                         f"Tool '{tc.name}' is not allowed for this thread and "
                         "was not executed."
                     )
-                    self._owned_append(
+                    finished_seq = self._owned_append(
                         invoke_id,
                         type_='tool_call.finished',
                         payload={
@@ -3035,22 +3017,27 @@ class ThreadRunner:
                             'output': disabled_msg,
                         },
                     )
-                    # Immediately approve the small synthetic output so
-                    # it can be published as a tool message on the next
-                    # RA2/RA3 pass without user interaction.
-                    self._owned_append(
-                        invoke_id,
-                        type_='tool_call.output_approval',
-                        payload={
-                            'tool_call_id': tc.tool_call_id,
-                            'decision': 'whole',
-                            'reason': (
-                                'Auto: tool policy read failed closed'
-                                if policy_error_message
-                                else 'Auto: tool not allowed for this thread'
-                            ),
-                            'preview': disabled_msg,
-                        },
+                    # Synthetic policy/disabled output goes through the same
+                    # transactional TC4 authority as normal tool output.
+                    synthetic_reason = (
+                        'Auto: tool policy read failed closed'
+                        if policy_error_message
+                        else 'Auto: tool not allowed for this thread'
+                    )
+                    finalize_tool_output(
+                        self.db,
+                        self.thread_id,
+                        tc.tool_call_id,
+                        decision='whole',
+                        source='automatic_synthetic',
+                        reason=synthetic_reason,
+                        expected_event_seq=finished_seq,
+                        publication_plan=ToolOutputPublicationPlan(
+                            decision='whole',
+                            preview=disabled_msg,
+                            reason=synthetic_reason,
+                        ),
+                        invocation_writer=self._owned_writer(invoke_id),
                     )
                     continue
 
@@ -3141,7 +3128,7 @@ class ThreadRunner:
                         "Tool execution was interrupted because the runner task was cancelled."
                     )
                     try:
-                        self._owned_append(
+                        finished_seq = self._owned_append(
                             invoke_id,
                             type_='tool_call.finished',
                             payload={
@@ -3150,18 +3137,20 @@ class ThreadRunner:
                                 'output': full_result,
                             },
                         )
-                    except Exception:
-                        pass
-                    try:
-                        self._owned_append(
-                            invoke_id,
-                            type_='tool_call.output_approval',
-                            payload={
-                                'tool_call_id': tc.tool_call_id,
-                                'decision': 'whole',
-                                'reason': 'Runner task cancelled',
-                                'preview': full_result,
-                            },
+                        finalize_tool_output(
+                            self.db,
+                            self.thread_id,
+                            tc.tool_call_id,
+                            decision='whole',
+                            source='automatic_synthetic',
+                            reason='Runner task cancelled',
+                            expected_event_seq=finished_seq,
+                            publication_plan=ToolOutputPublicationPlan(
+                                decision='whole',
+                                preview=full_result,
+                                reason='Runner task cancelled',
+                            ),
+                            invocation_writer=self._owned_writer(invoke_id),
                         )
                     except Exception:
                         pass
@@ -3234,7 +3223,7 @@ class ThreadRunner:
                         await asyncio.sleep(0)
                 if cancelled and finish_reason == 'success':
                     finish_reason = 'interrupted'
-                self._owned_append(
+                finished_seq = self._owned_append(
                     invoke_id,
                     type_='tool_call.finished',
                     payload={
@@ -3248,33 +3237,29 @@ class ThreadRunner:
                 # artifacts and get decision='partial' with a preview that
                 # references read_long_tool_output usage. A UI cancellation (Ctrl+C)
                 # that already recorded an explicit decision is respected.
-                try:
-                    parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
-                    _emit_auto_output_approval(
-                        self.db,
-                        self.thread_id,
-                        tc.tool_call_id,
-                        full_result,
-                        tool_name=tc.name,
-                        tool_args=tc.arguments,
-                        finished_reason=finish_reason,
-                        origin=ra.kind,
-                        user_tool_call=bool(ra.kind == 'RA3_tools_user'),
-                        tool_metadata={
-                            'ra_kind': ra.kind,
-                            'parent_msg_id': tc.parent_msg_id,
-                            'parent_role': tc.parent_role,
-                            'parent_no_api': parent_no_api,
-                            'tool_index': tc.index,
-                        },
-                        original_char_count=original_output_char_count,
-                        output_capped=output_was_capped,
-                        writer=self._owned_writer(invoke_id),
-                    )
-                except LeaseLost:
-                    raise
-                except Exception:
-                    pass
+                parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
+                _finalize_auto_tool_output(
+                    self.db,
+                    self.thread_id,
+                    tc.tool_call_id,
+                    full_result,
+                    tool_name=tc.name,
+                    tool_args=tc.arguments,
+                    finished_reason=finish_reason,
+                    origin=ra.kind,
+                    user_tool_call=bool(ra.kind == 'RA3_tools_user'),
+                    tool_metadata={
+                        'ra_kind': ra.kind,
+                        'parent_msg_id': tc.parent_msg_id,
+                        'parent_role': tc.parent_role,
+                        'parent_no_api': parent_no_api,
+                        'tool_index': tc.index,
+                    },
+                    original_char_count=original_output_char_count,
+                    output_capped=output_was_capped,
+                    expected_event_seq=finished_seq,
+                    writer=self._owned_writer(invoke_id),
+                )
 
             # Output approval done (TC5) -> publish final tool message based on
             # the last tool_call.output_approval payload.

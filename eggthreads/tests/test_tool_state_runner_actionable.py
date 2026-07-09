@@ -120,12 +120,10 @@ def test_tool_interrupt_without_finished_recovers_as_interrupted(tmp_path):
     states = eggthreads.build_tool_call_states(db, tid)
     tc = states["tcA"]
     assert tc.finished_reason == "interrupted"
-    assert tc.output_decision == "whole"
-    assert tc.state == "TC5"
+    assert tc.output_decision is None
+    assert tc.state == "TC4"
 
-    ra = eggthreads.discover_runner_actionable(db, tid)
-    assert ra is not None
-    assert ra.kind == "RA2_tools_assistant"
+    assert eggthreads.discover_runner_actionable(db, tid) is None
 
 
 def test_continue_from_tool_parent_retries_parent_tool_call(tmp_path):
@@ -1219,7 +1217,7 @@ def test_reducer_cache_incrementally_applies_summary_tail_after_active_tool(tmp_
     after_tool_stream_close = _reduce_thread_events(db, tid)
 
     assert full_rebuild_calls == 0
-    assert after_tool_stream_close.tool_call_states["tc_active"].state == "TC5"
+    assert after_tool_stream_close.tool_call_states["tc_active"].state == "TC4"
     assert after_tool_stream_close.tool_call_states["tc_active"].finished_reason == "interrupted"
     assert after_second_summary.tool_call_states["tc_active"].state == "TC3"
     assert after_tool_stream_close.tool_call_states["tc_active"] is not after_second_summary.tool_call_states["tc_active"]
@@ -1496,9 +1494,9 @@ def test_reducer_cache_incrementally_applies_tool_interrupt_tail(tmp_path, monke
     after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
 
     tc = after.tool_call_states["tc_lifecycle"]
-    assert tc.state == "TC5"
+    assert tc.state == "TC4"
     assert tc.finished_reason == "interrupted"
-    assert tc.output_decision == "whole"
+    assert tc.output_decision is None
     assert "interrupted before the tool reported a result" in (tc.finished_output or "")
     assert before.tool_call_states["tc_lifecycle"].state == "TC3"
     assert tc is not before.tool_call_states["tc_lifecycle"]
@@ -1527,9 +1525,9 @@ def test_reducer_cache_incrementally_applies_tool_stream_close_tail(tmp_path, mo
     after = _assert_incremental_tail_without_full_rebuild(db, tid, monkeypatch)
 
     tc = after.tool_call_states["tc_lifecycle"]
-    assert tc.state == "TC5"
+    assert tc.state == "TC4"
     assert tc.finished_reason == "interrupted"
-    assert tc.output_decision == "whole"
+    assert tc.output_decision is None
     assert "stream closed before the tool reported a result" in (tc.finished_output or "")
     assert before.tool_call_states["tc_lifecycle"].state == "TC3"
     assert tc is not before.tool_call_states["tc_lifecycle"]
