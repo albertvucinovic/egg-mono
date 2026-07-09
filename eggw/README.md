@@ -44,9 +44,7 @@ Frontend:
 ```bash
 cd /path/to/egg-mono/eggw/frontend
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 \
-NEXT_PUBLIC_EGGW_API_TOKEN="$EGGW_API_TOKEN" \
-npm run dev -- -p 3000
+NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev -- -p 3000
 ```
 
 Then open `http://localhost:3000`.
@@ -57,15 +55,18 @@ connection limits that make multiple active thread views awkward under HTTP/1.1.
 ### Security and network configuration
 
 `eggw.sh` is secure by default: it binds the backend to `127.0.0.1`, generates a
-fresh high-entropy API token when `EGGW_API_TOKEN` is unset, passes that token to
-the backend and browser build without printing it, and permits only the launched
-local frontend origin. Health checks at `/health` remain public; every other
-REST endpoint plus SSE and WebSocket connections require the token.
+fresh high-entropy API token when `EGGW_API_TOKEN` is unset, provisions it at
+runtime only to its loopback frontend without printing or bundling it, and
+permits only the launched local frontend origin. Health checks at `/health`
+remain public; every other REST endpoint plus SSE and WebSocket connections
+require the token.
 
 Configuration variables:
 
 - `EGGW_API_TOKEN`: explicit API token (at least 32 non-whitespace characters).
-  Omit it when using `eggw.sh` to generate a new token for that launch.
+  Loopback-only `eggw.sh` launches generate one when omitted. Public mode
+  requires an operator-provided token and never exposes it through frontend
+  build-time variables or private bootstrap.
 - `EGGW_ALLOWED_ORIGINS`: comma-separated exact `http://` or `https://` browser
   origins. Wildcards are rejected. The launcher defaults this to the local
   frontend on `EGGW_FRONTEND_PORT`.
@@ -76,9 +77,22 @@ Configuration variables:
   access controls in front of EggW; the bearer token is an API capability, not
   a replacement for encrypted transport.
 
-The token is sent in the `Authorization` header for REST/SSE and in a WebSocket
-subprotocol for browser WebSockets. It is never placed in query strings or
-logged by EggW. Manual non-browser callers use `Authorization: Bearer <token>`.
+### Browser credential threat model
+
+A public frontend is available to untrusted visitors, so any `NEXT_PUBLIC_*`
+value is public and cannot protect its API. EggW never embeds the bearer token
+in browser-delivered JavaScript. The loopback launcher may serve its generated
+token from a same-origin, no-store runtime bootstrap endpoint because both the
+frontend and backend are bound to the local machine. Public and manual frontend
+deployments disable that bootstrap; each authorized user enters the operator-
+provided token into the connection screen. The browser keeps this token only in
+memory and tab-scoped `sessionStorage` (not `localStorage`, cookies, or a URL).
+Closing the tab ends that browser session.
+
+The runtime token is sent in the `Authorization` header for REST/fetch-SSE and
+in a WebSocket subprotocol for browser WebSockets. It is never placed in query
+strings or logged by EggW. Manual non-browser callers use
+`Authorization: Bearer <token>`.
 
 ## Configuration
 

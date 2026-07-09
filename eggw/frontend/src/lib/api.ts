@@ -1,14 +1,14 @@
 import type { AttachmentUploadResponse, ContentPart, EggMessageContent } from "./contentParts";
 import { AuthenticatedEventSource } from "./sse";
+import { clearApiToken, getApiToken } from "./apiToken";
 export type { AuthenticatedEventSource } from "./sse";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const API_TOKEN = process.env.NEXT_PUBLIC_EGGW_API_TOKEN || "";
 const AUTH_WEBSOCKET_PROTOCOL_PREFIX = "eggw.auth.";
 
-function authenticatedHeaders(headers?: HeadersInit): Headers {
+function authenticatedHeaders(headers?: HeadersInit, token = getApiToken()): Headers {
   const authenticated = new Headers(headers);
-  if (API_TOKEN) authenticated.set("Authorization", `Bearer ${API_TOKEN}`);
+  if (token) authenticated.set("Authorization", `Bearer ${token}`);
   return authenticated;
 }
 
@@ -18,7 +18,16 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   if (new URL(url, API_BASE).origin !== apiOrigin) {
     throw new Error("Refusing to send EggW API credentials to a different origin");
   }
-  return fetch(input, { ...init, headers: authenticatedHeaders(init.headers) });
+  const response = await fetch(input, { ...init, headers: authenticatedHeaders(init.headers) });
+  if (response.status === 401 && getApiToken()) clearApiToken();
+  return response;
+}
+
+export async function verifyApiToken(token: string): Promise<boolean> {
+  const response = await fetch(`${API_BASE}/api/threads`, {
+    headers: authenticatedHeaders(undefined, token),
+  });
+  return response.ok;
 }
 
 async function readErrorDetail(res: Response, fallback: string): Promise<string> {
@@ -382,7 +391,8 @@ export function createWebSocket(threadId: string) {
   const wsBase = API_BASE.replace(/^http/, "ws");
   // Browser WebSocket cannot set Authorization. Carry the token in a
   // credential-bearing subprotocol and have the server echo only "eggw".
-  const protocols = API_TOKEN ? ["eggw", `${AUTH_WEBSOCKET_PROTOCOL_PREFIX}${API_TOKEN}`] : ["eggw"];
+  const token = getApiToken();
+  const protocols = token ? ["eggw", `${AUTH_WEBSOCKET_PROTOCOL_PREFIX}${token}`] : ["eggw"];
   return new WebSocket(`${wsBase}/ws/${threadId}`, protocols);
 }
 

@@ -195,7 +195,9 @@ def _run_launcher(tmp_path: Path, **environment: str) -> subprocess.CompletedPro
     _write_executable(
         fake_bin / "fake-npm",
         'printf "%s\\n" "$@" > "$EGGW_TEST_CAPTURE/frontend-args"\n'
-        'printf "%s" "$NEXT_PUBLIC_EGGW_API_TOKEN" > "$EGGW_TEST_CAPTURE/frontend-token"\n'
+        'printf "%s" "${EGGW_API_TOKEN:-}" > "$EGGW_TEST_CAPTURE/frontend-server-api-token"\n'
+        'printf "%s" "${EGGW_PRIVATE_BOOTSTRAP_TOKEN:-}" > "$EGGW_TEST_CAPTURE/frontend-bootstrap-token"\n'
+        'printf "%s" "${NEXT_PUBLIC_EGGW_API_TOKEN:-}" > "$EGGW_TEST_CAPTURE/frontend-public-token"\n'
         'sleep 3',
     )
     env = {
@@ -228,8 +230,10 @@ def test_launcher_generates_shared_high_entropy_token_and_binds_loopback(tmp_pat
     assert result.returncode == 0, result.stdout + result.stderr
     capture = tmp_path / "capture"
     backend_token = (capture / "backend-token").read_text()
-    frontend_token = (capture / "frontend-token").read_text()
+    frontend_token = (capture / "frontend-bootstrap-token").read_text()
     assert backend_token == frontend_token
+    assert (capture / "frontend-public-token").read_text() == ""
+    assert (capture / "frontend-server-api-token").read_text() == ""
     assert len(backend_token) >= 64
     assert backend_token not in result.stdout
     assert backend_token not in result.stderr
@@ -238,10 +242,60 @@ def test_launcher_generates_shared_high_entropy_token_and_binds_loopback(tmp_pat
     assert (capture / "origins").read_text() == "http://localhost:18124,http://127.0.0.1:18124"
 
 
+@pytest.mark.skipif(not (Path(__file__).resolve().parents[1] / "frontend" / "node_modules").is_dir(), reason="frontend dependencies not installed")
+def test_production_browser_bundle_does_not_contain_server_token():
+    repo_root = Path(__file__).resolve().parents[2]
+    frontend_root = repo_root / "eggw" / "frontend"
+    token = "bundle-secret-token-" + "q" * 48
+    env = {
+        **os.environ,
+        "NEXT_PUBLIC_API_URL": "http://localhost:8000",
+        "EGGW_API_TOKEN": token,
+        "EGGW_PRIVATE_BOOTSTRAP_TOKEN": token,
+        "NEXT_TELEMETRY_DISABLED": "1",
+    }
+    result = subprocess.run(
+        ["npm", "run", "build"],
+        cwd=frontend_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    browser_assets = frontend_root / ".next" / "static"
+    assert browser_assets.is_dir()
+    assert not any(
+        token.encode() in path.read_bytes()
+        for path in browser_assets.rglob("*")
+        if path.is_file()
+    )
+
+
+def test_frontend_token_source_is_runtime_only_and_not_persisted_in_local_storage():
+    frontend_root = Path(__file__).resolve().parents[1] / "frontend"
+    api_source = (frontend_root / "src" / "lib" / "api.ts").read_text()
+    token_source = (frontend_root / "src" / "lib" / "apiToken.ts").read_text()
+    bootstrap_source = (frontend_root / "src" / "app" / "api" / "eggw-bootstrap" / "route.ts").read_text()
+
+    assert "NEXT_PUBLIC_EGGW_API_TOKEN" not in api_source
+    assert "NEXT_PUBLIC_EGGW_API_TOKEN" not in token_source
+    assert "NEXT_PUBLIC_EGGW_API_TOKEN" not in bootstrap_source
+    assert "localStorage" not in token_source
+    assert "sessionStorage" in token_source
+    assert "EGGW_PRIVATE_BOOTSTRAP_TOKEN" in bootstrap_source
+    assert 'Cache-Control": "no-store' in bootstrap_source
+
+
 def test_launcher_requires_explicit_public_override_for_non_loopback(tmp_path: Path):
     denied = _run_launcher(tmp_path / "denied", EGGW_BIND_HOST="0.0.0.0")
     assert denied.returncode != 0
     assert "requires explicit EGGW_PUBLIC=1" in denied.stderr
+
+    missing_token = _run_launcher(tmp_path / "missing-token", EGGW_PUBLIC="1")
+    assert missing_token.returncode != 0
+    assert "requires an explicit EGGW_API_TOKEN" in missing_token.stderr
 
     allowed = _run_launcher(
         tmp_path / "allowed",
@@ -251,5 +305,10 @@ def test_launcher_requires_explicit_public_override_for_non_loopback(tmp_path: P
         EGGW_ALLOWED_ORIGINS="https://eggw.example",
     )
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
-    args = (tmp_path / "allowed" / "capture" / "backend-args").read_text().splitlines()
+    capture = tmp_path / "allowed" / "capture"
+    args = (capture / "backend-args").read_text().splitlines()
     assert args[-2:] == ["--bind", "0.0.0.0:18123"]
+    assert (capture / "frontend-bootstrap-token").read_text() == ""
+    assert (capture / "frontend-public-token").read_text() == ""
+    assert (capture / "frontend-server-api-token").read_text() == ""
+    assert TEST_TOKEN not in (capture / "frontend-args").read_text()

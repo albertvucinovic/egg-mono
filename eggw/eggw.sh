@@ -220,19 +220,21 @@ elif [ -f "$MONO_ROOT/.env" ]; then
     set -a && source "$MONO_ROOT/.env" && set +a
 fi
 
-# Secure launch defaults. The token is passed to both processes but is never
-# printed or placed in a URL. Generate a fresh high-entropy capability for this
-# launch when the caller did not configure one.
-if [ -z "${EGGW_API_TOKEN:-}" ]; then
-    EGGW_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-fi
-export EGGW_API_TOKEN
-
+# Secure launch defaults. Public mode must use an operator-provided token;
+# loopback-only mode may provision a fresh capability automatically.
 PUBLIC_LISTEN="${EGGW_PUBLIC:-0}"
 if [ "$PUBLIC_LISTEN" != "0" ] && [ "$PUBLIC_LISTEN" != "1" ]; then
     echo "Error: EGGW_PUBLIC must be 0 or 1" >&2
     exit 1
 fi
+if [ "$PUBLIC_LISTEN" = "1" ] && [ -z "${EGGW_API_TOKEN:-}" ]; then
+    echo "Error: EGGW_PUBLIC=1 requires an explicit EGGW_API_TOKEN" >&2
+    exit 1
+fi
+if [ -z "${EGGW_API_TOKEN:-}" ]; then
+    EGGW_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+fi
+export EGGW_API_TOKEN
 if [ -n "${EGGW_BIND_HOST:-}" ]; then
     BACKEND_HOST="$EGGW_BIND_HOST"
 elif [ "$PUBLIC_LISTEN" = "1" ]; then
@@ -290,9 +292,13 @@ if [ ! -d "node_modules" ] || [ "package.json" -nt "node_modules" ]; then
 fi
 
 # Run from the actual frontend directory to keep Next's project layout simple.
-start_prefixed frontend env \
+FRONTEND_BOOTSTRAP_TOKEN=""
+if [ "$PUBLIC_LISTEN" = "0" ]; then
+    FRONTEND_BOOTSTRAP_TOKEN="$EGGW_API_TOKEN"
+fi
+start_prefixed frontend env -u EGGW_API_TOKEN \
     NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" \
-    NEXT_PUBLIC_EGGW_API_TOKEN="$EGGW_API_TOKEN" \
+    EGGW_PRIVATE_BOOTSTRAP_TOKEN="$FRONTEND_BOOTSTRAP_TOKEN" \
     "${EGGW_NPM_BIN:-npm}" run dev -- -p "$FRONTEND_PORT"
 FRONTEND_PID="$STARTED_PID"
 

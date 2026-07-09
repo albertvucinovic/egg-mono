@@ -41,7 +41,7 @@ export default defineConfig({
       timeout: 30000,
     },
     {
-      command: `NEXT_PUBLIC_API_URL=http://localhost:${TEST_BACKEND_PORT} NEXT_PUBLIC_EGGW_API_TOKEN="${TEST_API_TOKEN}" npm run dev -- -p ${TEST_FRONTEND_PORT}`,
+      command: `NEXT_PUBLIC_API_URL=http://localhost:${TEST_BACKEND_PORT} EGGW_PRIVATE_BOOTSTRAP_TOKEN="${TEST_API_TOKEN}" npm run dev -- -p ${TEST_FRONTEND_PORT}`,
       url: `http://localhost:${TEST_FRONTEND_PORT}`,
       reuseExistingServer: false, // Always start fresh for tests
       timeout: 60000,
