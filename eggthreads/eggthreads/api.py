@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
 from .db import ThreadsDB, ThreadRow
-from .snapshot import SnapshotBuilder
 
 try:
     from eggllm.config import load_models_config
@@ -3185,115 +3184,122 @@ def delete_message(db: ThreadsDB, thread_id: str, msg_id: str) -> None:
     db.append_event(event_id=_ulid_like(), thread_id=thread_id, type_='msg.delete', payload={"reason": "user"}, msg_id=msg_id)
 
 
-_SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES = {
-    'stream.open',
-    'stream.delta',
-    'stream.close',
-    'tool_call.approval',
-    'tool_call.execution_started',
-    'provider_request.started',
-    'user_command.started',
-    'user_command.status',
-    'user_command.finished',
-    'tool_call.summary',
-    'tool_call.finished',
-    'tool_call.output_approval',
-    'control.interrupt',
-    'thread.compaction',
-    'thread.compaction_context_length',
-    'thread.compaction_summary_in_progress',
-    'thread.recovery',
-    'thread.child_created',
-    'model.switch',
-    'runtime.config',
-    'sandbox.config',
-    'thread.scheduling',
-}
+def _snapshot_from_projection(projection) -> Dict[str, Any]:
+    """Build compatibility snapshot JSON plus isolated derived metadata."""
 
-
-def _snapshot_message_from_create_event(ev) -> Dict[str, Any]:
+    snap = projection.to_snapshot_dict()
     try:
-        payload = json.loads(ev["payload_json"]) if isinstance(ev["payload_json"], str) else (ev["payload_json"] or {})
-    except Exception:
-        payload = {}
-    msg = dict(payload) if isinstance(payload, dict) else {}
-    msg["msg_id"] = ev["msg_id"]
-    msg["role"] = msg.get("role")
-    ts_val = ev["ts"]
-    if ts_val is not None:
-        msg["ts"] = ts_val
-    event_seq_val = ev["event_seq"]
-    if event_seq_val is not None:
-        try:
-            msg["event_seq"] = int(event_seq_val)
-        except Exception:
-            msg["event_seq"] = event_seq_val
-    return msg
+        from .token_count import extend_snapshot_token_stats, snapshot_token_stats
 
-
-def create_snapshot(db: ThreadsDB, thread_id: str) -> str:
-    """Rebuild and persist the thread snapshot from events.
-
-    Processes all events for the thread and constructs a snapshot
-    representing the current conversation state. The snapshot is
-    stored in the threads table for fast access.
-
-    Args:
-        db: ThreadsDB instance for database operations.
-        thread_id: ID of the thread to snapshot.
-
-    Returns:
-        The snapshot JSON string.
-    """
-    th = db.get_thread(thread_id)
-    if th and th.snapshot_json and th.snapshot_last_event_seq >= 0:
-        try:
-            snap = json.loads(th.snapshot_json)
-            messages = snap.get("messages")
-            if not isinstance(snap, dict) or not isinstance(messages, list):
-                raise ValueError("invalid snapshot")
-            cur = db.conn.execute(
-                "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
-                (thread_id, int(th.snapshot_last_event_seq)),
+        base_snapshot = projection.base_snapshot
+        projected_messages = projection.message_dicts()
+        base_messages_for_shape = base_snapshot.get('messages') if isinstance(base_snapshot, Mapping) else None
+        tail_is_append_only = (
+            isinstance(base_messages_for_shape, list)
+            and len(projected_messages) >= len(base_messages_for_shape)
+            and all(
+                event_type == 'msg.create' or event_type in {
+                'stream.open', 'stream.delta', 'stream.close',
+                'tool_call.approval', 'tool_call.execution_started',
+                'provider_request.started', 'user_command.started',
+                'user_command.status', 'user_command.finished',
+                'tool_call.summary', 'tool_call.finished',
+                'tool_call.output_approval',
+                'thread.compaction', 'thread.compaction_context_length',
+                'thread.compaction_summary_in_progress', 'thread.recovery',
+                'thread.child_created', 'model.switch', 'runtime.config',
+                'sandbox.config', 'thread.scheduling',
+                }
+                for event_type in projection.tail_event_types
             )
-            tail = cur.fetchall()
-            if not tail:
-                return snap
-            if tail and all(
-                row["type"] == "msg.create" or row["type"] in _SNAPSHOT_INCREMENTAL_IGNORED_EVENT_TYPES
-                for row in tail
-            ):
-                messages = list(messages)
-                tail_messages = []
-                for ev in tail:
-                    if ev["type"] != "msg.create":
-                        continue
-                    msg = _snapshot_message_from_create_event(ev)
-                    messages.append(msg)
-                    tail_messages.append(msg)
-                snap["messages"] = messages
+        )
+        if isinstance(base_snapshot, Mapping) and tail_is_append_only:
+            base_messages = base_snapshot.get('messages')
+            base_token_stats = base_snapshot.get('token_stats')
+            if isinstance(base_messages, list) and isinstance(base_token_stats, dict):
+                tail_messages = projected_messages[len(base_messages):]
                 if tail_messages:
-                    try:
-                        from .token_count import extend_snapshot_token_stats  # type: ignore
-
-                        snap["token_stats"] = extend_snapshot_token_stats(snap, tail_messages)
-                    except Exception:
-                        pass
-                last_seq = tail[-1]["event_seq"]
-                db.conn.execute("UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?",
-                                (json.dumps(snap), last_seq, thread_id))
-                return snap
-        except Exception:
-            pass
-
-    cur = db.conn.execute("SELECT * FROM events WHERE thread_id=? ORDER BY event_seq ASC", (thread_id,))
-    evs = cur.fetchall()
-    builder = SnapshotBuilder()
-    snap = builder.build(evs)
-    last_seq = evs[-1]["event_seq"] if evs else -1
-    db.conn.execute("UPDATE threads SET snapshot_json=?, snapshot_last_event_seq=? WHERE thread_id=?",
-                    (json.dumps(snap), last_seq, thread_id))
+                    token_input = dict(base_snapshot)
+                    token_input['messages'] = projected_messages
+                    snap['token_stats'] = extend_snapshot_token_stats(token_input, tail_messages)
+                else:
+                    snap['token_stats'] = dict(base_token_stats)
+            else:
+                snap['token_stats'] = snapshot_token_stats(snap)
+        else:
+            snap['token_stats'] = snapshot_token_stats(snap)
+    except Exception:
+        # Projection semantics never depend on derived token metadata.
+        pass
     return snap
+
+
+def create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
+    """Build through a fixed watermark and publish monotonically.
+
+    Snapshot acceleration is optional. The canonical projection can replay from
+    events alone, while a coherent versioned snapshot may seed the same reducer.
+    Publication uses a conditional monotonic update; a builder that loses to a
+    newer watermark reloads and returns the newer persisted snapshot.
+    """
+
+    from .projection import load_thread_projection
+
+    target_event_seq = db.max_event_seq(thread_id)
+    projection = load_thread_projection(db, thread_id, target_event_seq)
+    snap = _snapshot_from_projection(projection)
+    encoded = json.dumps(snap)
+    published = db.conn.execute(
+        """
+        UPDATE threads
+           SET snapshot_json=?, snapshot_last_event_seq=?
+         WHERE thread_id=? AND snapshot_last_event_seq<?
+        """,
+        (encoded, target_event_seq, thread_id, target_event_seq),
+    )
+    if published.rowcount == 1:
+        return snap
+
+    # Equal watermark means this builder may be repairing/replacing a legacy or
+    # invalid snapshot. Compare the exact old JSON value so concurrent equal-
+    # watermark repairers cannot overwrite one another.
+    row = db.get_thread(thread_id)
+    if row is None:
+        raise ValueError(f"Thread not found: {thread_id}")
+    if int(row.snapshot_last_event_seq) == target_event_seq:
+        current = load_thread_projection(db, thread_id, target_event_seq)
+        if current.base_snapshot is None:
+            if row.snapshot_json is None:
+                repaired = db.conn.execute(
+                    """
+                    UPDATE threads SET snapshot_json=?
+                     WHERE thread_id=? AND snapshot_last_event_seq=? AND snapshot_json IS NULL
+                    """,
+                    (encoded, thread_id, target_event_seq),
+                )
+            else:
+                repaired = db.conn.execute(
+                    """
+                    UPDATE threads SET snapshot_json=?
+                     WHERE thread_id=? AND snapshot_last_event_seq=? AND snapshot_json=?
+                    """,
+                    (encoded, thread_id, target_event_seq, row.snapshot_json),
+                )
+            if repaired.rowcount == 1:
+                return snap
+
+    # A newer/equal coherent writer won. Return its published cache rather than
+    # regressing or returning the stale build.
+    row = db.get_thread(thread_id)
+    if row is None or not row.snapshot_json:
+        raise ValueError(f"Snapshot unavailable for thread: {thread_id}")
+    try:
+        newer = json.loads(row.snapshot_json)
+    except Exception as exc:
+        raise ValueError(f"Persisted snapshot is invalid for thread: {thread_id}") from exc
+    if not isinstance(newer, dict) or not isinstance(newer.get('messages'), list):
+        raise ValueError(f"Persisted snapshot is invalid for thread: {thread_id}")
+    return newer
 
 
 def delete_thread(db: ThreadsDB, thread_id: str) -> None:

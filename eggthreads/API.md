@@ -327,20 +327,24 @@ Args:
     thread_id: ID of the thread containing the message.
     msg_id: ID of the message to delete.
 
-### `create_snapshot(db: 'ThreadsDB', thread_id: 'str') -> 'str'`
+### `load_thread_projection(db: ThreadsDB, thread_id: str, through_event_seq: int, *, use_snapshot: bool = True) -> ThreadProjection`
 
-Rebuild and persist the thread snapshot from events.
+Return the canonical typed message projection through exactly the requested
+event watermark. ``ThreadProjection.message_states`` retains effective and
+skipped/deleted messages with full provider payloads plus create/update event
+IDs, timestamps, and sequence metadata; ``messages`` exposes only effective
+messages. A coherent versioned snapshot may seed tail replay, but missing,
+stale, malformed, newer, or legacy snapshots fall back to full event replay
+with identical semantics. Raw SQLite rows and ``payload_json`` stay internal to
+the projection/event-store layer.
 
-Processes all events for the thread and constructs a snapshot
-representing the current conversation state. The snapshot is
-stored in the threads table for fast access.
+### `create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]`
 
-Args:
-    db: ThreadsDB instance for database operations.
-    thread_id: ID of the thread to snapshot.
-
-Returns:
-    The snapshot JSON string.
+Build a canonical projection through a captured event watermark, attach derived
+token statistics, and conditionally publish the compatibility snapshot. The
+update is monotonic: a builder at event N cannot overwrite N+1. A losing writer
+reloads and returns the newer published snapshot. Snapshot state is optional
+acceleration, not a semantic prerequisite, and the stable schema is unchanged.
 
 ---
 
