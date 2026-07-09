@@ -117,16 +117,28 @@ def _clean_tool_names(value: Any, *, field_name: str, thread_id: str) -> Set[str
     return names
 
 
-def _read_local_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
-    """Read one thread's local events, raising on any ambiguous policy state."""
+def _read_local_tools_config(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    through_event_seq: Optional[int] = None,
+) -> ToolsConfig:
+    """Read one thread's local events through an optional fixed watermark."""
 
     import json as _json
 
     try:
-        cursor = db.conn.execute(
-            "SELECT payload_json FROM events WHERE thread_id=? AND type='tools.config' ORDER BY event_seq ASC",
-            (thread_id,),
-        )
+        if through_event_seq is None:
+            cursor = db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type='tools.config' ORDER BY event_seq ASC",
+                (thread_id,),
+            )
+        else:
+            cursor = db.conn.execute(
+                "SELECT payload_json FROM events WHERE thread_id=? AND type='tools.config' "
+                "AND event_seq<=? ORDER BY event_seq ASC",
+                (thread_id, int(through_event_seq)),
+            )
         rows = cursor.fetchall()
     except Exception as exc:
         raise ToolPolicyReadError("db_read", thread_id, f"{type(exc).__name__}: {exc}") from exc
@@ -262,7 +274,12 @@ def _emit_policy_error_diagnostic(db: ThreadsDB, target_thread_id: str, error: T
         pass
 
 
-def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
+def get_thread_tools_config(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    through_event_seq: Optional[int] = None,
+) -> ToolsConfig:
     """Return fail-closed effective policy intersected across all ancestors.
 
     A missing ``tools.config`` event is not an error and retains usable defaults.
@@ -276,7 +293,9 @@ def get_thread_tools_config(db: ThreadsDB, thread_id: str) -> ToolsConfig:
         # has allow_raw_tool_output=False, so a policy-free root stays masked.
         effective = ToolsConfig(allow_raw_tool_output=True)
         for source_thread_id in ancestry:
-            local = _read_local_tools_config(db, source_thread_id)
+            local = _read_local_tools_config(
+                db, source_thread_id, through_event_seq=through_event_seq
+            )
             effective.llm_tools_enabled = effective.llm_tools_enabled and local.llm_tools_enabled
             effective.allow_raw_tool_output = effective.allow_raw_tool_output and local.allow_raw_tool_output
             # A local "enable" only edits that local reducer. Unioning each
@@ -348,14 +367,21 @@ def clear_thread_tool_allowlist(db: ThreadsDB, thread_id: str) -> None:
     _append_tools_config_event(db, thread_id, {"allow_only": None})
 
 
-def inherited_tools_config_payload(db: ThreadsDB, parent_thread_id: str) -> dict[str, Any]:
-    """Build the mandatory policy payload for an ordinary new child."""
+def effective_tools_config_payload(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    through_event_seq: Optional[int] = None,
+) -> dict[str, Any]:
+    """Return a self-contained effective policy through an optional watermark."""
 
-    cfg = get_thread_tools_config(db, parent_thread_id)
+    cfg = get_thread_tools_config(
+        db, thread_id, through_event_seq=through_event_seq
+    )
     if cfg.policy_error:
         raise ToolPolicyReadError(
             cfg.policy_error_kind or "policy_read",
-            cfg.policy_error_source_thread_id or parent_thread_id,
+            cfg.policy_error_source_thread_id or thread_id,
             cfg.policy_error,
         )
     return {
@@ -364,6 +390,12 @@ def inherited_tools_config_payload(db: ThreadsDB, parent_thread_id: str) -> dict
         "allow_only": None if cfg.allowed_tools is None else sorted(cfg.allowed_tools),
         "disable": sorted(cfg.disabled_tools),
     }
+
+
+def inherited_tools_config_payload(db: ThreadsDB, parent_thread_id: str) -> dict[str, Any]:
+    """Build the mandatory policy payload for an ordinary new child."""
+
+    return effective_tools_config_payload(db, parent_thread_id)
 
 
 def inherit_tools_config_for_child(db: ThreadsDB, parent_thread_id: str, child_thread_id: str) -> None:

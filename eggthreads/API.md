@@ -154,37 +154,19 @@ Removes the thread from threads; ON DELETE CASCADE removes
 
 ### `duplicate_thread(db: 'ThreadsDB', source_thread_id: 'str', name: 'Optional[str]' = None) -> 'str'`
 
-Duplicate a thread's event log into a new root thread.
+Duplicate effective messages/config into a clean independent root.
 
-This creates a new *root* thread whose events and snapshot are a
-copy of ``source_thread_id`` at the time of invocation. The new
-thread shares no open stream with the original (no rows are added
-to ``open_streams``) but otherwise has identical history: all
-``msg.create``, ``stream.*``, and ``tool_call.*`` events are
-replayed with fresh event_ids, preserving msg_id and invoke_id so
-that runner/actionable semantics (RA1/RA2/RA3, tool states, etc.)
-behave as if the thread had been executed separately.
-
-The duplicate is intended as a "checkpoint" copy: a frozen backup
-of the conversation that can be inspected or resumed independently
-of the original.
+The source watermark is captured before destination writes. Canonical projection
+semantics apply edits, deletes, and continue skips; snapshots are optional
+acceleration. Stream, control, and stale tool-lifecycle events are not copied.
+A completed transcript receives a clean close boundary, while an effective
+assistant tool declaration remains newly actionable from its message payload.
 
 ### `duplicate_thread_up_to(db: 'ThreadsDB', source_thread_id: 'str', up_to_msg_id: 'str', name: 'Optional[str]' = None) -> 'str'`
 
-Duplicate a thread's event log up to a specific message.
-
-Like duplicate_thread, but only copies events up to and including the
-message with the given msg_id. This is useful for creating a checkpoint
-at a specific point in the conversation.
-
-Args:
-    db: ThreadsDB instance
-    source_thread_id: Thread to duplicate
-    up_to_msg_id: Message ID to stop at (inclusive)
-    name: Optional name for the new thread
-
-Returns:
-    The new thread's ID
+Duplicate canonical effective state through the selected message's create-event
+watermark. Later edits, deletes, messages, and configuration do not affect the
+checkpoint.
 
 ---
 
@@ -337,6 +319,12 @@ messages. A coherent versioned snapshot may seed tail replay, but missing,
 stale, malformed, newer, or legacy snapshots fall back to full event replay
 with identical semantics. Raw SQLite rows and ``payload_json`` stay internal to
 the projection/event-store layer.
+RA1 captures one watermark after acquiring its lease, validates the actionable
+trigger against that projection, and derives the complete provider context from
+it. The trigger determines why work runs rather than acting as a snapshot tail
+fallback; compaction, context-only/system messages, attachments, tools protocol,
+provider fields, and usage sanitization continue through the existing provider
+boundary.
 
 ### `create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]`
 
@@ -651,7 +639,9 @@ Attributes:
 
 ### `get_thread_tools_config(db: 'ThreadsDB', thread_id: 'str') -> 'ToolsConfig'`
 
-Return the effective ToolsConfig for a thread.
+Return the effective ToolsConfig for a thread. Internal fixed-watermark
+consumers may pass ``through_event_seq=...`` so provider/duplication policy is
+resolved at the same boundary as message projection.
 
 This validates ``tools.config`` events and intersects policy across the
 complete live ancestry. Missing policy uses safe usable defaults; DB/decode

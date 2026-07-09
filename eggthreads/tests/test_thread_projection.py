@@ -209,3 +209,396 @@ def test_snapshot_publication_cas_does_not_regress_newer_two_connection_writer(t
     persisted = json.loads(row.snapshot_json)
     assert persisted == newer
     assert [message["msg_id"] for message in persisted["messages"]] == [first, second]
+
+
+class _CapturingLLM:
+    current_model_key = "projection-test-model"
+
+    def __init__(self) -> None:
+        self.seen_messages: list[list[dict]] = []
+
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
+        self.seen_messages.append([dict(message) for message in messages])
+        yield {"type": "done", "message": {"role": "assistant", "content": "done"}}
+
+
+def _provider_signature(messages):
+    return [
+        (
+            message.get("role"),
+            message.get("content"),
+            message.get("msg_id"),
+            message.get("event_seq"),
+            message.get("reasoning_content"),
+            message.get("thought_signature"),
+            message.get("tool_call_id"),
+        )
+        for message in messages
+    ]
+
+
+def _run_ra1_and_capture(db: ts.ThreadsDB, thread_id: str) -> list[dict]:
+    import asyncio
+
+    llm = _CapturingLLM()
+    runner = ts.ThreadRunner(db, thread_id, llm=llm)
+    runner._model_thinking_options = lambda _model: {
+        "thinking_content_policy": "send all encrypted gemini",
+        "thinking_content_key": "reasoning_content",
+    }
+    assert asyncio.run(runner.run_once()) is True
+    assert len(llm.seen_messages) == 1
+    return llm.seen_messages[0]
+
+
+def test_ra1_provider_context_matches_with_no_stale_and_current_snapshot(tmp_path) -> None:
+    """Snapshots change only the replay start, never RA1 provider semantics."""
+
+    def build_case(name: str, snapshot_mode: str) -> list[dict]:
+        db = _make_db(tmp_path, f"{name}.sqlite")
+        thread_id = ts.create_root_thread(db, name=name)
+        system_id = ts.append_message(db, thread_id, "system", "standing rules")
+        old_user_id = ts.append_message(db, thread_id, "user", "old question")
+        assistant_id = ts.append_message(
+            db,
+            thread_id,
+            "assistant",
+            "old answer",
+            extra={
+                "reasoning_content": {"opaque": "thought"},
+                "thought_signature": "provider-signature",
+                "api_usage": {"input_tokens": 4},
+                "provider_usage": {"prompt_tokens": 4},
+            },
+        )
+        if snapshot_mode == "stale":
+            ts.create_snapshot(db, thread_id)
+        ts.edit_message(db, thread_id, assistant_id, "edited answer")
+        deleted_id = ts.append_message(db, thread_id, "assistant", "deleted answer")
+        ts.delete_message(db, thread_id, deleted_id)
+        ts.append_message(db, thread_id, "user", "queued one")
+        trigger_id = ts.append_message(db, thread_id, "user", "queued two")
+        if snapshot_mode == "current":
+            ts.create_snapshot(db, thread_id)
+        messages = _run_ra1_and_capture(db, thread_id)
+        assert [message.get("msg_id") for message in messages] == [
+            system_id,
+            old_user_id,
+            assistant_id,
+            next(
+                message.msg_id
+                for message in ts.load_thread_projection(
+                    db, thread_id, db.max_event_seq(thread_id), use_snapshot=False
+                ).messages
+                if message.payload.get("content") == "queued one"
+            ),
+            trigger_id,
+        ]
+        assert all("api_usage" not in message for message in messages)
+        assert all("provider_usage" not in message for message in messages)
+        return messages
+
+    without_snapshot = build_case("no-snapshot", "none")
+    stale_snapshot = build_case("stale-snapshot", "stale")
+    current_snapshot = build_case("current-snapshot", "current")
+
+    expected_content = [
+        "standing rules",
+        "old question",
+        "edited answer",
+        "queued one",
+        "queued two",
+    ]
+    assert [message.get("content") for message in without_snapshot] == expected_content
+    assert [message.get("content") for message in stale_snapshot] == expected_content
+    assert [message.get("content") for message in current_snapshot] == expected_content
+    # IDs/event sequences are thread-local; all provider-bearing values match.
+    assert [item[:2] + item[4:] for item in _provider_signature(without_snapshot)] == [
+        item[:2] + item[4:] for item in _provider_signature(stale_snapshot)
+    ] == [item[:2] + item[4:] for item in _provider_signature(current_snapshot)]
+
+
+def test_ra1_provider_context_stays_at_captured_projection_watermark(tmp_path, monkeypatch) -> None:
+    db = _make_db(tmp_path, "ra1-watermark.sqlite")
+    thread_id = ts.create_root_thread(db, name="ra1-watermark")
+    trigger = ts.append_message(db, thread_id, "user", "captured trigger")
+    runner = ts.ThreadRunner(db, thread_id, llm=_CapturingLLM())
+    projection = ts.load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+
+    def load_then_append():
+        ts.append_message(db, thread_id, "user", "after capture")
+        return projection
+
+    monkeypatch.setattr(runner, "_load_ra1_provider_projection", load_then_append)
+    assert __import__("asyncio").run(runner.run_once()) is True
+
+    messages = runner.llm.seen_messages[0]
+    assert [message.get("msg_id") for message in messages] == [trigger]
+    assert [message.get("content") for message in messages] == ["captured trigger"]
+
+
+def test_ra1_projection_preserves_compaction_context_only_and_tool_protocol(tmp_path) -> None:
+    db = _make_db(tmp_path, "ra1-compaction.sqlite")
+    thread_id = ts.create_root_thread(db, name="ra1-compaction")
+    system_id = ts.append_message(db, thread_id, "system", "standing rules")
+    old_id = ts.append_message(db, thread_id, "user", "old context")
+    summary_id = ts.append_message(db, thread_id, "assistant", "compact summary")
+    ts.commit_thread_compaction(db, thread_id, summary_id, created_by="test")
+    hidden_id = ts.append_message(
+        db, thread_id, "user", "local only", extra={"no_api": True}
+    )
+    context_only_id = ts.append_message(
+        db,
+        thread_id,
+        "user",
+        "manager context",
+        extra={"keep_user_turn": True},
+    )
+    assistant_tool_id = ts.append_message(
+        db,
+        thread_id,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": "call-projection",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                }
+            ]
+        },
+    )
+    tool_id = ts.append_message(
+        db,
+        thread_id,
+        "tool",
+        "tool result",
+        extra={"tool_call_id": "call-projection"},
+    )
+    trigger_id = ts.append_message(db, thread_id, "user", "next question")
+
+    messages = _run_ra1_and_capture(db, thread_id)
+
+    ids = [message.get("msg_id") for message in messages]
+    assert ids == [system_id, summary_id, context_only_id, assistant_tool_id, tool_id, trigger_id]
+    assert old_id not in ids
+    assert hidden_id not in ids
+    assistant_index = ids.index(assistant_tool_id)
+    assert messages[assistant_index]["tool_calls"][0]["id"] == "call-projection"
+    assert messages[assistant_index + 1]["role"] == "tool"
+    assert messages[assistant_index + 1]["tool_call_id"] == "call-projection"
+
+
+
+def _event_types(db: ts.ThreadsDB, thread_id: str) -> list[str]:
+    return [
+        str(row[0])
+        for row in db.conn.execute(
+            "SELECT type FROM events WHERE thread_id=? ORDER BY event_seq ASC",
+            (thread_id,),
+        ).fetchall()
+    ]
+
+
+def _projected_payloads(db: ts.ThreadsDB, thread_id: str) -> list[dict]:
+    projection = ts.load_thread_projection(db, thread_id, db.max_event_seq(thread_id))
+    return [dict(message.payload) for message in projection.messages]
+
+
+def test_duplicate_thread_emits_canonical_messages_without_stale_lifecycle(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path, "duplicate.sqlite")
+    source = ts.create_root_thread(db, name="source")
+    first = ts.append_message(
+        db,
+        source,
+        "assistant",
+        "before edit",
+        extra={"provider_specific": {"signature": "opaque"}},
+    )
+    ts.edit_message(db, source, first, "after edit", extra={"edited_field": 7})
+    deleted = ts.append_message(db, source, "assistant", "delete me")
+    ts.delete_message(db, source, deleted)
+    continue_from = ts.append_message(db, source, "user", "continue here")
+    skipped = ts.append_message(db, source, "assistant", "skip me")
+    db.append_event(
+        "duplicate-continue",
+        source,
+        "control.interrupt",
+        {"purpose": "continue", "continue_from_msg_id": continue_from},
+    )
+    pending = ts.append_message(
+        db,
+        source,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": "call-pending",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                }
+            ]
+        },
+    )
+    db.append_event(
+        "pending-started",
+        source,
+        "tool_call.execution_started",
+        {"tool_call_id": "call-pending"},
+        invoke_id="old-invocation",
+    )
+    db.append_event(
+        "stale-open",
+        source,
+        "stream.open",
+        {"stream_kind": "llm"},
+        msg_id="stale-stream-message",
+        invoke_id="old-invocation",
+    )
+    ts.set_thread_working_directory(db, source, str(tmp_path / "work"))
+    ts.set_thread_sandbox_config(
+        db,
+        source,
+        enabled=True,
+        provider="srt",
+        settings={"provider": "srt", "filesystem": {"denyRead": []}},
+        reason="test",
+    )
+    ts.set_thread_model(
+        db,
+        source,
+        "copy-model",
+        concrete_model_info={
+            "providers": {
+                "test": {
+                    "models": {"copy-model": {"model_kind": "chat"}}
+                }
+            }
+        },
+    )
+    ts.set_thread_tools_enabled(db, source, False)
+    watermark = db.max_event_seq(source)
+    expected = [dict(message.payload) for message in ts.load_thread_projection(db, source, watermark).messages]
+
+    duplicate = ts.duplicate_thread(db, source, name="copy")
+
+    assert _projected_payloads(db, duplicate) == expected
+    assert [payload["content"] for payload in expected if payload.get("content")] == [
+        "after edit",
+        "continue here",
+    ]
+    assert skipped not in [message.msg_id for message in ts.load_thread_projection(db, source, watermark).messages]
+    assert pending in [message.msg_id for message in ts.load_thread_projection(db, duplicate, db.max_event_seq(duplicate)).messages]
+    types = _event_types(db, duplicate)
+    assert "stream.open" not in types
+    assert "stream.close" not in types
+    assert "control.interrupt" not in types
+    assert not any(event_type.startswith("tool_call.") for event_type in types)
+    assert ts.build_tool_call_states(db, duplicate)["call-pending"].state == "TC1"
+    assert ts.current_thread_model(db, duplicate) == "copy-model"
+    assert ts.get_thread_working_directory(db, duplicate) == (tmp_path / "work").resolve()
+    assert ts.get_thread_sandbox_config(db, duplicate).enabled is True
+    assert ts.get_thread_tools_config(db, duplicate).llm_tools_enabled is False
+
+
+def test_duplicate_completed_history_gets_clean_idle_boundary(tmp_path) -> None:
+    db = _make_db(tmp_path, "duplicate-idle.sqlite")
+    source = ts.create_root_thread(db, name="source")
+    ts.append_message(db, source, "user", "question")
+    ts.append_message(db, source, "assistant", "answer")
+
+    duplicate = ts.duplicate_thread(db, source)
+
+    assert _event_types(db, duplicate).count("stream.close") == 1
+    assert ts.discover_runner_actionable(db, duplicate) is None
+
+
+def test_duplicate_child_freezes_inherited_effective_configuration(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path, "duplicate-inherited-config.sqlite")
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_working_directory(db, parent, str(tmp_path / "parent-work"))
+    ts.set_thread_sandbox_config(
+        db,
+        parent,
+        enabled=True,
+        provider="srt",
+        settings={"provider": "srt", "filesystem": {"allowWrite": ["out"]}},
+        reason="test",
+    )
+    ts.set_thread_model(
+        db,
+        parent,
+        "parent-model",
+        concrete_model_info={
+            "providers": {
+                "test": {
+                    "models": {"parent-model": {"model_kind": "chat"}}
+                }
+            }
+        },
+    )
+    ts.set_thread_tools_enabled(db, parent, False)
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.append_message(db, child, "user", "child message")
+
+    duplicate = ts.duplicate_thread(db, child)
+
+    assert ts.get_parent(db, duplicate) is None
+    assert ts.get_thread_working_directory(db, duplicate) == (tmp_path / "parent-work").resolve()
+    assert ts.get_thread_sandbox_config(db, duplicate).enabled is True
+    assert ts.current_thread_model(db, duplicate) == "parent-model"
+    assert ts.get_thread_tools_config(db, duplicate).llm_tools_enabled is False
+
+
+def test_duplicate_thread_up_to_uses_target_message_watermark_for_state_and_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path, "duplicate-up-to.sqlite")
+    source = ts.create_root_thread(db, name="source")
+    first = ts.append_message(db, source, "user", "before")
+    target = ts.append_message(db, source, "assistant", "target")
+    ts.edit_message(db, source, first, "edited before target")
+    ts.set_thread_model(
+        db,
+        source,
+        "before-model",
+        concrete_model_info={
+            "providers": {
+                "test": {
+                    "models": {"before-model": {"model_kind": "chat"}}
+                }
+            }
+        },
+    )
+    target_two = ts.append_message(db, source, "user", "target two")
+    ts.edit_message(db, source, first, "edit after target two")
+    ts.delete_message(db, source, target)
+    ts.set_thread_model(
+        db,
+        source,
+        "after-model",
+        concrete_model_info={
+            "providers": {
+                "test": {
+                    "models": {"after-model": {"model_kind": "chat"}}
+                }
+            }
+        },
+    )
+    ts.set_thread_tools_enabled(db, source, False)
+
+    duplicate = ts.duplicate_thread_up_to(db, source, target_two, name="checkpoint")
+
+    assert [payload.get("content") for payload in _projected_payloads(db, duplicate)] == [
+        "edited before target",
+        "target",
+        "target two",
+    ]
+    assert ts.current_thread_model(db, duplicate) == "before-model"
+    # The post-target policy event is outside the selected watermark.
+    assert ts.get_thread_tools_config(db, duplicate).llm_tools_enabled is True
+    assert "msg.edit" not in _event_types(db, duplicate)
+    assert "msg.delete" not in _event_types(db, duplicate)

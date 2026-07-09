@@ -1448,7 +1448,7 @@ class ThreadRunner:
                         print(f"Warning: context limit check failed: {e}")
 
                 # ---------------- RA1: LLM call ----------------
-                ra1_emitted_assistant_tool_calls = await self._run_ra1_llm(invoke_id, current_model)
+                ra1_emitted_assistant_tool_calls = await self._run_ra1_llm(invoke_id, current_model, ra)
 
             elif ra.kind in ('RA2_tools_assistant', 'RA3_tools_user'):
                 # ---------------- RA2/RA3: tool calls ----------------
@@ -1727,322 +1727,284 @@ class ThreadRunner:
             raise asyncio.CancelledError
         return True
 
-    async def _run_ra1_llm(self, invoke_id: str, current_model: Optional[str]) -> bool:
+    def _load_ra1_provider_projection(self):
+        """Capture and load the one canonical message view for an RA1 turn."""
+
+        from .projection import load_thread_projection
+
+        watermark = self.db.max_event_seq(self.thread_id)
+        return load_thread_projection(self.db, self.thread_id, watermark)
+
+    async def _run_ra1_llm(
+        self,
+        invoke_id: str,
+        current_model: Optional[str],
+        ra: RunnerActionable,
+    ) -> bool:
         """Handle RA1: perform a single LLM call, streaming deltas,
         and append the final assistant message with optional tool_calls.
 
         Returns True when the persisted assistant message declared tool_calls
         that should be handled by a follow-up RA2 turn.
         """
-        from .tool_state import _last_stream_close_seq, _iter_messages_after
+        from .api import filter_projection_for_compaction_provider_context
 
-        # Re-discover the triggering message (first RA1-eligible message)
-        last_close = _last_stream_close_seq(self.db, self.thread_id)
-        trigger = None
-        for ev in _iter_messages_after(self.db, self.thread_id, last_close):
-            try:
-                payload = json.loads(ev['payload_json']) if isinstance(ev['payload_json'], str) else (ev['payload_json'] or {})
-            except Exception:
-                payload = {}
-            role = payload.get('role')
-            keep_user_turn = bool(payload.get('keep_user_turn'))
-            tool_calls = payload.get('tool_calls') or []
-            if role == 'user' and not tool_calls and not keep_user_turn:
-                trigger = (ev, payload)
-                break
-            if role == 'tool' and not keep_user_turn and not bool(payload.get('no_api')):
-                trigger = (ev, payload)
-                break
-        if not trigger:
+        # Capture one semantic input boundary after lease acquisition. The RA1
+        # trigger answers why this invocation runs; the canonical projection
+        # supplies every effective message visible at that exact boundary.
+        projection = self._load_ra1_provider_projection()
+        provider_context_watermark = projection.through_event_seq
+        trigger = next(
+            (
+                message
+                for message in projection.messages
+                if message.msg_id == str(ra.msg_id or "")
+                and message.created_event_seq == int(ra.triggering_event_seq)
+            ),
+            None,
+        )
+        if trigger is None:
             return False
+        # Keep the discovery reducer authoritative for why RA1 was selected.
+        # A newly appended edit after discovery may legitimately change the
+        # projected payload, but must not make this already leased turn vanish;
+        # deletion/continue does, because the trigger is then absent entirely.
+        ev: Dict[str, Any] = {
+            "event_seq": trigger.created_event_seq,
+            "msg_id": None if trigger.msg_id.startswith("event:") else trigger.msg_id,
+        }
 
-        ev, payload = trigger
-        role = payload.get('role')
-        user_content = payload.get('content', '')
-
-        # Build base_messages from snapshot, respecting no_api and
-        # applying per-model thinking-content policy/options.
-        th = self.db.get_thread(self.thread_id)
         base_messages: List[Dict[str, Any]] = []
         thinking_policy: Optional[str] = None
         thinking_key: Optional[str] = None
-        # Some providers (e.g. Gemini 3) require that we round-trip
-        # encrypted thought/signature blobs exactly as received.  These
-        # blobs are carried under a provider-defined key configured via
-        # thinking_content_key.
-        # 'send all' | 'last assistant turn'
+        # Some providers (e.g. Gemini 3) require exact opaque thinking blobs.
         encrypted_thinking_mode: Optional[str] = None
-        # Resolve per-model options from the registry if possible.
         try:
             opts = self._model_thinking_options(current_model)
-            tp = opts.get('thinking_content_policy')
+            tp = opts.get("thinking_content_policy")
             if isinstance(tp, str) and tp.strip():
                 thinking_policy = tp.strip().lower()
-            tk = opts.get('thinking_content_key')
+            tk = opts.get("thinking_content_key")
             if isinstance(tk, str) and tk.strip():
                 thinking_key = tk.strip()
         except Exception:
             thinking_policy = None
             thinking_key = None
 
-        if th and th.snapshot_json:
-            try:
-                snap = json.loads(th.snapshot_json)
-                msgs = snap.get('messages', []) or []
+        msgs = filter_projection_for_compaction_provider_context(
+            self.db, projection
+        )
+
+        # Recognize encrypted-Gemini thinking policies.
+        if thinking_policy in ('send all encrypted gemini', 'send_all_encrypted_gemini'):
+            encrypted_thinking_mode = 'send all'
+        elif thinking_policy in ('last assistant turn encrypted gemini', 'last_assistant_turn_encrypted_gemini'):
+            encrypted_thinking_mode = 'last assistant turn'
+
+        # If the model wants only the last assistant turn's
+        # thinking, identify the index of the last user message
+        # so we can treat messages after that as the "tail".
+        last_user_idx = -1
+        if thinking_policy == 'last assistant turn' or encrypted_thinking_mode == 'last assistant turn':
+            for i, m in enumerate(msgs):
                 try:
-                    from .api import filter_messages_for_compaction_provider_context
-
-                    msgs = filter_messages_for_compaction_provider_context(
-                        self.db,
-                        self.thread_id,
-                        msgs,
-                    )
+                    if m.get('role') == 'user':
+                        last_user_idx = i
                 except Exception:
-                    pass
+                    continue
 
-                # Recognize encrypted-Gemini thinking policies.
-                if thinking_policy in ('send all encrypted gemini', 'send_all_encrypted_gemini'):
-                    encrypted_thinking_mode = 'send all'
-                elif thinking_policy in ('last assistant turn encrypted gemini', 'last_assistant_turn_encrypted_gemini'):
-                    encrypted_thinking_mode = 'last assistant turn'
+        def _maybe_include_reasoning(m: Dict[str, Any], idx: int) -> Optional[str]:
+            """Return reasoning text to send for this message, or None.
 
-                # If the model wants only the last assistant turn's
-                # thinking, identify the index of the last user message
-                # so we can treat messages after that as the "tail".
-                last_user_idx = -1
-                if thinking_policy == 'last assistant turn' or encrypted_thinking_mode == 'last assistant turn':
-                    for i, m in enumerate(msgs):
-                        try:
-                            if m.get('role') == 'user':
-                                last_user_idx = i
-                        except Exception:
-                            continue
-
-                def _maybe_include_reasoning(m: Dict[str, Any], idx: int) -> Optional[str]:
-                    """Return reasoning text to send for this message, or None.
-
-                    The snapshot uses ``reasoning`` to store thinking.
-                    The provider may expect it under a different key,
-                    configured via thinking_content_key.  We return the
-                    thinking string here and let the caller attach it
-                    under the appropriate key on the outbound message.
-                    """
-                    raw = m.get('reasoning') or m.get('reasoning_content')
-                    if not isinstance(raw, str) or not raw:
-                        return None
-                    # Encrypted-Gemini modes do not send plaintext reasoning
-                    # derived from the provider stream; instead they round-trip
-                    # a provider-supplied opaque field under
-                    # thinking_content_key.
-                    if encrypted_thinking_mode is not None:
-                        return None
-                    if thinking_policy == 'send all':
-                        return raw
-                    if thinking_policy == 'last assistant turn':
-                        # Only include thinking for messages in the
-                        # "tail" after the last user content.
-                        if last_user_idx == -1 or idx <= last_user_idx:
-                            return None
-                        return raw
-                    # Default / "strip all": never send.
+            The snapshot uses ``reasoning`` to store thinking.
+            The provider may expect it under a different key,
+            configured via thinking_content_key.  We return the
+            thinking string here and let the caller attach it
+            under the appropriate key on the outbound message.
+            """
+            raw = m.get('reasoning') or m.get('reasoning_content')
+            if not isinstance(raw, str) or not raw:
+                return None
+            # Encrypted-Gemini modes do not send plaintext reasoning
+            # derived from the provider stream; instead they round-trip
+            # a provider-supplied opaque field under
+            # thinking_content_key.
+            if encrypted_thinking_mode is not None:
+                return None
+            if thinking_policy == 'send all':
+                return raw
+            if thinking_policy == 'last assistant turn':
+                # Only include thinking for messages in the
+                # "tail" after the last user content.
+                if last_user_idx == -1 or idx <= last_user_idx:
                     return None
+                return raw
+            # Default / "strip all": never send.
+            return None
 
-                def _maybe_include_encrypted_thinking(m: Dict[str, Any], idx: int) -> Optional[Any]:
-                    """Return opaque provider thinking/signature content to round-trip.
+        def _maybe_include_encrypted_thinking(m: Dict[str, Any], idx: int) -> Optional[Any]:
+            """Return opaque provider thinking/signature content to round-trip.
 
-                    The returned value is attached under the configured
-                    thinking_content_key without any interpretation.
-                    """
-                    if encrypted_thinking_mode is None:
-                        return None
-                    out_thinking_key = thinking_key or 'reasoning_content'
-                    if out_thinking_key not in m:
-                        return None
-                    val = m.get(out_thinking_key)
-                    if val is None:
-                        return None
-                    if encrypted_thinking_mode == 'send all':
-                        return val
-                    if encrypted_thinking_mode == 'last assistant turn':
-                        if last_user_idx == -1 or idx <= last_user_idx:
-                            return None
-                        return val
+            The returned value is attached under the configured
+            thinking_content_key without any interpretation.
+            """
+            if encrypted_thinking_mode is None:
+                return None
+            out_thinking_key = thinking_key or 'reasoning_content'
+            if out_thinking_key not in m:
+                return None
+            val = m.get(out_thinking_key)
+            if val is None:
+                return None
+            if encrypted_thinking_mode == 'send all':
+                return val
+            if encrypted_thinking_mode == 'last assistant turn':
+                if last_user_idx == -1 or idx <= last_user_idx:
                     return None
+                return val
+            return None
 
-                def _should_include_reasoning_field(idx: int) -> bool:
-                    """Return True if this message index should have reasoning field (even if empty).
+        def _should_include_reasoning_field(idx: int) -> bool:
+            """Return True if this message index should have reasoning field (even if empty).
 
-                    This applies when a plaintext thinking policy is active that would send
-                    reasoning for this message. Providers like DeepSeek require the field to
-                    be present even when empty.
+            This applies when a plaintext thinking policy is active that would send
+            reasoning for this message. Providers like DeepSeek require the field to
+            be present even when empty.
 
-                    NOTE: This does NOT apply to encrypted thinking modes (e.g., Gemini),
-                    which use structured objects, not strings. Adding an empty string ""
-                    would cause "Value is not a struct" errors from those providers.
-                    """
-                    # Only for plaintext reasoning mode (e.g., DeepSeek)
-                    # Encrypted modes (Gemini) use structured objects and don't need this fallback
-                    if encrypted_thinking_mode is not None:
-                        return False
-                    if thinking_policy == 'send all':
-                        return True
-                    if thinking_policy == 'last assistant turn':
-                        return last_user_idx != -1 and idx > last_user_idx
-                    return False
+            NOTE: This does NOT apply to encrypted thinking modes (e.g., Gemini),
+            which use structured objects, not strings. Adding an empty string ""
+            would cause "Value is not a struct" errors from those providers.
+            """
+            # Only for plaintext reasoning mode (e.g., DeepSeek)
+            # Encrypted modes (Gemini) use structured objects and don't need this fallback
+            if encrypted_thinking_mode is not None:
+                return False
+            if thinking_policy == 'send all':
+                return True
+            if thinking_policy == 'last assistant turn':
+                return last_user_idx != -1 and idx > last_user_idx
+            return False
 
-                def _passthrough_provider_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
-                    """Copy provider-specific fields from a snapshot message.
+        def _passthrough_provider_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
+            """Copy provider-specific fields from a snapshot message.
 
-                    For "encrypted gemini" modes we must be able to
-                    round-trip provider-returned blobs (e.g.
-                    thought_signature / extra_content) exactly as
-                    received.
+            For "encrypted gemini" modes we must be able to
+            round-trip provider-returned blobs (e.g.
+            thought_signature / extra_content) exactly as
+            received.
 
-                    We copy only keys that are *not* eggthreads
-                    bookkeeping fields.
-                    """
-                    if encrypted_thinking_mode is None:
-                        return
-                    if not isinstance(src, dict) or not isinstance(dst, dict):
-                        return
-                    ignore = {
-                        # OpenAI message protocol keys we always set explicitly
-                        'role', 'content', 'tool_calls',
-                        # eggthreads snapshot/DB metadata
-                        'msg_id', 'ts',
-                        # eggthreads-only flags
-                        'no_api', 'keep_user_turn',
-                        # eggthreads local annotations
-                        'model_key', 'reasoning',
-                    }
-                    for k, v in src.items():
-                        if k in ignore:
-                            continue
-                        if k in dst:
-                            continue
-                        if v is None:
-                            continue
-                        dst[k] = v
+            We copy only keys that are *not* eggthreads
+            bookkeeping fields.
+            """
+            if encrypted_thinking_mode is None:
+                return
+            if not isinstance(src, dict) or not isinstance(dst, dict):
+                return
+            ignore = {
+                # OpenAI message protocol keys we always set explicitly
+                'role', 'content', 'tool_calls',
+                # eggthreads snapshot/DB metadata
+                'msg_id', 'ts',
+                # eggthreads-only flags
+                'no_api', 'keep_user_turn',
+                # eggthreads local annotations
+                'model_key', 'reasoning',
+            }
+            for k, v in src.items():
+                if k in ignore:
+                    continue
+                if k in dst:
+                    continue
+                if v is None:
+                    continue
+                dst[k] = v
 
-                for idx, m in enumerate(msgs):
-                    if m.get('no_api'):
-                        continue
-                    if m.get('answer_user_preserve_turn'):
-                        continue
-                    r = m.get('role')
-                    content = m.get('content', '')
-                    tool_content_text = content_to_plain_text(content)
-                    # Compute optional thinking text according to policy
-                    thinking_text = _maybe_include_reasoning(m, idx)
-                    encrypted_thinking_val = _maybe_include_encrypted_thinking(m, idx)
-                    # Determine the outbound thinking key, defaulting
-                    # to the provider's native "reasoning_content" if
-                    # no explicit key was configured.
-                    out_thinking_key = thinking_key or 'reasoning_content'
+        for idx, m in enumerate(msgs):
+            if m.get('no_api'):
+                continue
+            if m.get('answer_user_preserve_turn'):
+                continue
+            r = m.get('role')
+            content = m.get('content', '')
+            tool_content_text = content_to_plain_text(content)
+            # Compute optional thinking text according to policy
+            thinking_text = _maybe_include_reasoning(m, idx)
+            encrypted_thinking_val = _maybe_include_encrypted_thinking(m, idx)
+            # Determine the outbound thinking key, defaulting
+            # to the provider's native "reasoning_content" if
+            # no explicit key was configured.
+            out_thinking_key = thinking_key or 'reasoning_content'
 
-                    tcs = m.get('tool_calls') or []
+            tcs = m.get('tool_calls') or []
 
-                    if r == 'assistant' and isinstance(tcs, list) and tcs:
-                        # Assistant messages with tool_calls may also
-                        # carry thinking. We forward tool_calls plus any
-                        # allowed thinking under the configured key.
-                        # NOTE: content field is required by some providers
-                        # (e.g., StepFun) even when empty.
-                        msg_out: Dict[str, Any] = {
-                            'role': 'assistant',
-                            'content': content,
-                            'tool_calls': tcs,
-                        }
-                        if m.get('msg_id'):
-                            msg_out['msg_id'] = m.get('msg_id')
-                        if m.get('event_seq') is not None:
-                            msg_out['event_seq'] = m.get('event_seq')
-                        if thinking_text is not None:
-                            msg_out[out_thinking_key] = thinking_text
-                        elif encrypted_thinking_val is not None:
-                            msg_out[out_thinking_key] = encrypted_thinking_val
-                        elif _should_include_reasoning_field(idx):
-                            # Provider requires reasoning field even when empty
-                            msg_out[out_thinking_key] = ""
-                        _passthrough_provider_fields(m, msg_out)
-                        base_messages.append(msg_out)
-                    elif r == 'tool':
-                        # Preserve structured attachment-producing tool
-                        # outputs until expand_tool_attachment_messages_for_provider()
-                        # can add a synthetic user-role visual/file input.
-                        # Other structured tool outputs (for example generated
-                        # provider artifact cards) should still reach providers
-                        # as plain text, because tool-role messages cannot carry
-                        # native multimodal blocks portably.
-                        tool_provider_content = (
-                            content
-                            if isinstance(content, list) and content_has_attachments(content, validate=False)
-                            else tool_content_text
-                        )
-                        obj = {'role': 'tool', 'content': tool_provider_content}
-                        if m.get('msg_id'):
-                            obj['msg_id'] = m.get('msg_id')
-                        if m.get('event_seq') is not None:
-                            obj['event_seq'] = m.get('event_seq')
-                        if m.get('name'):
-                            obj['name'] = m.get('name')
-                        if m.get('tool_call_id'):
-                            obj['tool_call_id'] = m.get('tool_call_id')
-                        # Preserve user_tool_call so that RA3 user commands
-                        # can be rewritten to user-role messages before
-                        # hitting the provider API.
-                        if m.get('user_tool_call'):
-                            obj['user_tool_call'] = m.get('user_tool_call')
-                        base_messages.append(obj)
-                    elif r in ('system', 'user', 'assistant'):
-                        msg_out: Dict[str, Any] = {'role': r, 'content': content}
-                        if m.get('msg_id'):
-                            msg_out['msg_id'] = m.get('msg_id')
-                        if m.get('event_seq') is not None:
-                            msg_out['event_seq'] = m.get('event_seq')
-                        if r == 'assistant' and thinking_text is not None:
-                            msg_out[out_thinking_key] = thinking_text
-                        elif r == 'assistant' and encrypted_thinking_val is not None:
-                            msg_out[out_thinking_key] = encrypted_thinking_val
-                        elif r == 'assistant' and _should_include_reasoning_field(idx):
-                            # Provider requires reasoning field even when empty
-                            msg_out[out_thinking_key] = ""
-                        if r == 'assistant':
-                            _passthrough_provider_fields(m, msg_out)
-                        base_messages.append(msg_out)
-            except Exception:
-                pass
-
-        # Avoid duplicating trigger if already in snapshot
-        try:
-            last_seq = int(ev['event_seq'])
-            snap_has_last = bool(th and isinstance(th.snapshot_last_event_seq, int) and th.snapshot_last_event_seq >= last_seq)
-        except Exception:
-            snap_has_last = False
-        if not snap_has_last:
-            if not payload.get('no_api'):
-                if role == 'tool':
-                    tool_provider_content = (
-                        user_content
-                        if isinstance(user_content, list) and content_has_attachments(user_content, validate=False)
-                        else content_to_plain_text(user_content)
-                    )
-                    obj = {'role': 'tool', 'content': tool_provider_content}
-                    if payload.get('name'):
-                        obj['name'] = payload.get('name')
-                    if payload.get('tool_call_id'):
-                        obj['tool_call_id'] = payload.get('tool_call_id')
-                    if payload.get('user_tool_call'):
-                        obj['user_tool_call'] = payload.get('user_tool_call')
-                    base_messages.append(obj)
-                else:
-                    msg_out = {'role': 'user', 'content': user_content}
-                    if ev.get('msg_id'):
-                        msg_out['msg_id'] = ev.get('msg_id')
-                    if ev.get('event_seq') is not None:
-                        msg_out['event_seq'] = ev.get('event_seq')
-                    base_messages.append(msg_out)
-
+            if r == 'assistant' and isinstance(tcs, list) and tcs:
+                # Assistant messages with tool_calls may also
+                # carry thinking. We forward tool_calls plus any
+                # allowed thinking under the configured key.
+                # NOTE: content field is required by some providers
+                # (e.g., StepFun) even when empty.
+                msg_out: Dict[str, Any] = {
+                    'role': 'assistant',
+                    'content': content,
+                    'tool_calls': tcs,
+                }
+                if m.get('msg_id'):
+                    msg_out['msg_id'] = m.get('msg_id')
+                if m.get('event_seq') is not None:
+                    msg_out['event_seq'] = m.get('event_seq')
+                if thinking_text is not None:
+                    msg_out[out_thinking_key] = thinking_text
+                elif encrypted_thinking_val is not None:
+                    msg_out[out_thinking_key] = encrypted_thinking_val
+                elif _should_include_reasoning_field(idx):
+                    # Provider requires reasoning field even when empty
+                    msg_out[out_thinking_key] = ""
+                _passthrough_provider_fields(m, msg_out)
+                base_messages.append(msg_out)
+            elif r == 'tool':
+                # Preserve structured attachment-producing tool
+                # outputs until expand_tool_attachment_messages_for_provider()
+                # can add a synthetic user-role visual/file input.
+                # Other structured tool outputs (for example generated
+                # provider artifact cards) should still reach providers
+                # as plain text, because tool-role messages cannot carry
+                # native multimodal blocks portably.
+                tool_provider_content = (
+                    content
+                    if isinstance(content, list) and content_has_attachments(content, validate=False)
+                    else tool_content_text
+                )
+                obj = {'role': 'tool', 'content': tool_provider_content}
+                if m.get('msg_id'):
+                    obj['msg_id'] = m.get('msg_id')
+                if m.get('event_seq') is not None:
+                    obj['event_seq'] = m.get('event_seq')
+                if m.get('name'):
+                    obj['name'] = m.get('name')
+                if m.get('tool_call_id'):
+                    obj['tool_call_id'] = m.get('tool_call_id')
+                # Preserve user_tool_call so that RA3 user commands
+                # can be rewritten to user-role messages before
+                # hitting the provider API.
+                if m.get('user_tool_call'):
+                    obj['user_tool_call'] = m.get('user_tool_call')
+                base_messages.append(obj)
+            elif r in ('system', 'user', 'assistant'):
+                msg_out: Dict[str, Any] = {'role': r, 'content': content}
+                if m.get('msg_id'):
+                    msg_out['msg_id'] = m.get('msg_id')
+                if m.get('event_seq') is not None:
+                    msg_out['event_seq'] = m.get('event_seq')
+                if r == 'assistant' and thinking_text is not None:
+                    msg_out[out_thinking_key] = thinking_text
+                elif r == 'assistant' and encrypted_thinking_val is not None:
+                    msg_out[out_thinking_key] = encrypted_thinking_val
+                elif r == 'assistant' and _should_include_reasoning_field(idx):
+                    # Provider requires reasoning field even when empty
+                    msg_out[out_thinking_key] = ""
+                if r == 'assistant':
+                    _passthrough_provider_fields(m, msg_out)
+                base_messages.append(msg_out)
 
         assistant_text_parts: List[str] = []
         reasoning_parts: List[str] = []
@@ -2116,13 +2078,21 @@ class ThreadRunner:
         # user messages never carry "tool_calls" fields and that tool
         # exposure honours any per-thread tools configuration (e.g.
         # thread-wide tool disable, per-tool blacklists).
-        base_messages = self._sanitize_messages_for_api(base_messages, model_key=current_model)
+        tools_cfg = get_thread_tools_config(
+            self.db,
+            self.thread_id,
+            through_event_seq=provider_context_watermark,
+        )
+        base_messages = self._sanitize_messages_for_api(
+            base_messages,
+            model_key=current_model,
+            tools_cfg=tools_cfg,
+        )
 
         # Apply per-thread tools configuration: this governs which tools
         # the LLM is allowed to see in this thread. User-initiated tools
         # (RA3) are still modelled as tool calls but are handled elsewhere
         # when executed.
-        tools_cfg = get_thread_tools_config(self.db, self.thread_id)
         tools_spec = self.tools.tools_spec() or None
         if tools_spec is not None:
             # Filter out disabled tool names from the spec before
@@ -2561,7 +2531,13 @@ class ThreadRunner:
         )
 
 
-    def _sanitize_messages_for_api(self, messages: List[Dict[str, Any]], model_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _sanitize_messages_for_api(
+        self,
+        messages: List[Dict[str, Any]],
+        model_key: Optional[str] = None,
+        *,
+        tools_cfg: Any = None,
+    ) -> List[Dict[str, Any]]:
         """Return a sanitized copy of messages for provider API.
 
         Responsibilities that belong specifically to eggthreads (and not
@@ -2585,8 +2561,12 @@ class ThreadRunner:
         # control characters to keep providers and downstream tooling
         # robust.
         try:
-            tools_cfg = get_thread_tools_config(self.db, self.thread_id)
-            allow_raw = bool(getattr(tools_cfg, 'allow_raw_tool_output', False))
+            effective_tools_cfg = tools_cfg or get_thread_tools_config(
+                self.db, self.thread_id
+            )
+            allow_raw = bool(
+                getattr(effective_tools_cfg, 'allow_raw_tool_output', False)
+            )
         except Exception:
             allow_raw = False
 

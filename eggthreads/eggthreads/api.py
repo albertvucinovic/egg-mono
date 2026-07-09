@@ -434,273 +434,216 @@ def create_child_thread(db: ThreadsDB, parent_id: str, name: Optional[str] = Non
     return tid
 
 
+def _event_payload_at_watermark(
+    db: ThreadsDB,
+    thread_id: str,
+    event_type: str,
+    through_event_seq: int,
+) -> Optional[Dict[str, Any]]:
+    """Return the latest object payload of ``event_type`` through a watermark."""
+
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type=? "
+        "AND event_seq<=? ORDER BY event_seq DESC LIMIT 1",
+        (thread_id, event_type, int(through_event_seq)),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+    except Exception as exc:
+        raise ValueError(
+            f"Invalid {event_type} payload for thread {thread_id} at watermark {through_event_seq}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Invalid {event_type} payload for thread {thread_id} at watermark {through_event_seq}"
+        )
+    return dict(payload)
+
+
+def _nearest_event_payload_at_watermark(
+    db: ThreadsDB,
+    thread_id: str,
+    event_type: str,
+    through_event_seq: int,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the nearest self/ancestor configuration through a watermark."""
+
+    current: Optional[str] = thread_id
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        payload = _event_payload_at_watermark(
+            db, current, event_type, through_event_seq
+        )
+        if payload is not None:
+            return payload
+        parent = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=? LIMIT 1", (current,)
+        ).fetchone()
+        current = str(parent[0]) if parent and parent[0] else None
+    return None
+
+
+def _duplicate_configuration_at_watermark(
+    db: ThreadsDB,
+    source_thread_id: str,
+    through_event_seq: int,
+) -> tuple[Dict[str, Any], List[tuple[str, Dict[str, Any]]]]:
+    """Capture effective root configuration without copying lifecycle events."""
+
+    from .tools_config import ToolPolicyReadError, effective_tools_config_payload
+
+    tools_payload = effective_tools_config_payload(
+        db,
+        source_thread_id,
+        through_event_seq=through_event_seq,
+    )
+    if not isinstance(tools_payload, dict):
+        raise ToolPolicyReadError(
+            "invalid_payload", source_thread_id, "effective tools policy is not an object"
+        )
+
+    events: List[tuple[str, Dict[str, Any]]] = []
+    for event_type in ("thread.config", "sandbox.config", "model.switch"):
+        payload = _nearest_event_payload_at_watermark(
+            db,
+            source_thread_id,
+            event_type,
+            through_event_seq,
+        )
+        if payload is not None:
+            events.append((event_type, payload))
+    return tools_payload, events
+
+
+def _duplicate_thread_at_watermark(
+    db: ThreadsDB,
+    source_thread_id: str,
+    *,
+    through_event_seq: int,
+    name: Optional[str],
+) -> str:
+    """Emit a clean root history from canonical effective state at a watermark."""
+
+    from .projection import load_thread_projection
+
+    source = db.get_thread(source_thread_id)
+    if source is None:
+        raise ValueError(f"Source thread not found: {source_thread_id}")
+
+    base_name = source.name or source.short_recap or "Thread"
+    new_thread_id = _ulid_like()
+
+    savepoint = f"duplicate_thread_{new_thread_id}"
+    db.conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        projection = load_thread_projection(
+            db, source_thread_id, int(through_event_seq)
+        )
+        tools_payload, config_events = _duplicate_configuration_at_watermark(
+            db, source_thread_id, int(through_event_seq)
+        )
+        db.create_thread(
+            thread_id=new_thread_id,
+            name=name or f"{base_name} [copy]",
+            parent_id=None,
+            initial_model_key=source.initial_model_key,
+            depth=0,
+            initial_events=(("tools.config", tools_payload),),
+        )
+        for message in projection.messages:
+            db.append_event(
+                event_id=_ulid_like(),
+                thread_id=new_thread_id,
+                type_="msg.create",
+                payload=dict(message.payload),
+                msg_id=None if message.msg_id.startswith("event:") else message.msg_id,
+            )
+
+        # A clean projected transcript intentionally omits stale stream/control
+        # boundaries. When it ends in an ordinary assistant reply, add one new
+        # close boundary so imported/duplicated history is idle rather than
+        # re-triggering an old user turn. Tool-call assistants remain actionable
+        # from their declarations and therefore receive no synthetic boundary.
+        if projection.messages:
+            last_message = projection.messages[-1]
+            last_payload = last_message.payload
+            if (
+                last_payload.get("role") == "assistant"
+                and not last_payload.get("no_api")
+                and not last_payload.get("tool_calls")
+            ):
+                boundary_invoke_id = _ulid_like()
+                db.append_event(
+                    event_id=_ulid_like(),
+                    thread_id=new_thread_id,
+                    type_="stream.close",
+                    payload={"reason": "duplicated_projected_boundary"},
+                    invoke_id=boundary_invoke_id,
+                )
+        for event_type, payload in config_events:
+            db.append_event(
+                event_id=_ulid_like(),
+                thread_id=new_thread_id,
+                type_=event_type,
+                payload=payload,
+            )
+        create_snapshot(db, new_thread_id)
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        db.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        db.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    return new_thread_id
+
+
 def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] = None) -> str:
-    """Duplicate a thread's event log into a new root thread.
+    """Duplicate effective messages/config into a clean independent root.
 
-    This creates a new *root* thread whose events and snapshot are a
-    copy of ``source_thread_id`` at the time of invocation. The new
-    thread shares no open stream with the original (no rows are added
-    to ``open_streams``) but otherwise has identical history: all
-    ``msg.create``, ``stream.*``, and ``tool_call.*`` events are
-    replayed with fresh event_ids, preserving msg_id and invoke_id so
-    that runner/actionable semantics (RA1/RA2/RA3, tool states, etc.)
-    behave as if the thread had been executed separately.
-
-    The duplicate also preserves the source thread's effective configuration:
-    - **Working directory**: Copies the ``thread.config`` event (inherited
-      or explicit) so the duplicate uses the same working directory.
-    - **Sandbox settings**: Copies the ``sandbox.config`` event (inherited
-      or explicit) so the duplicate runs in the same sandbox environment.
-    - **Active model**: Copies the ``model.switch`` event (inherited or
-      explicit) so the duplicate uses the same LLM model.
-
-    The duplicate is intended as a "checkpoint" copy: a frozen backup
-    of the conversation that can be inspected or resumed independently
-    of the original.
+    The source watermark is captured before any destination writes. Canonical
+    projection semantics apply edits, deletes, and continue skips. Snapshots may
+    accelerate the projection but never define it. Stream, control, and tool
+    lifecycle events are intentionally not copied; the clean message history is
+    sufficient to reconstruct any still-effective tools protocol state.
     """
 
-    # Look up source metadata to derive a sensible name and model.
-    src = db.get_thread(source_thread_id)
-    if not src:
+    source = db.get_thread(source_thread_id)
+    if source is None:
         raise ValueError(f"Source thread not found: {source_thread_id}")
-
-    base_name = src.name or src.short_recap or "Thread"
-    new_name = name or f"{base_name} [copy]"
-
-    # Always create the duplicate as a new root thread so it is
-    # independent from any existing parent/children relationships.
-    new_tid = _ulid_like()
-    db.create_thread(
-        thread_id=new_tid,
-        name=new_name,
-        parent_id=None,
-        initial_model_key=src.initial_model_key,
-        depth=0,
+    return _duplicate_thread_at_watermark(
+        db,
+        source_thread_id,
+        through_event_seq=db.max_event_seq(source_thread_id),
+        name=name,
     )
 
-    # Replay msg.create and tool_call.* events from the source thread.
-    # Skip streaming events, control events, and edit events to get a
-    # clean conversation copy without RA1 boundary markers or skip flags.
-    import json as _json
 
-    # First, collect msg_ids that have been marked as skipped via msg.edit events
-    # (skipped_on_continue is stored in msg.edit, not msg.create)
-    skipped_msg_ids: set = set()
-    cur_edit = db.conn.execute(
-        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
-        (source_thread_id,),
-    )
-    for row in cur_edit.fetchall():
-        edit_msg_id = row[0]
-        try:
-            edit_payload = _json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
-        except Exception:
-            edit_payload = {}
-        if edit_payload.get('skipped_on_continue'):
-            skipped_msg_ids.add(edit_msg_id)
+def duplicate_thread_up_to(
+    db: ThreadsDB,
+    source_thread_id: str,
+    up_to_msg_id: str,
+    name: Optional[str] = None,
+) -> str:
+    """Duplicate canonical effective state through one message's create event."""
 
-    cur = db.conn.execute(
-        "SELECT type, msg_id, invoke_id, chunk_seq, payload_json FROM events WHERE thread_id=? ORDER BY event_seq ASC",
-        (source_thread_id,),
-    )
-    rows = cur.fetchall()
-    for ev_type, msg_id, invoke_id, chunk_seq, pj in rows:
-        # Only copy message and tool_call events for a clean duplicate
-        if not (ev_type == 'msg.create' or ev_type.startswith('tool_call.')):
-            continue
-        # Don't copy messages marked as skipped in the source
-        if ev_type == 'msg.create' and msg_id in skipped_msg_ids:
-            continue
-        try:
-            payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
-        except Exception:
-            payload = {}
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_=ev_type,
-            payload=payload,
-            msg_id=msg_id,
-            invoke_id=invoke_id,
-            chunk_seq=chunk_seq,
-        )
-
-    # Copy working directory configuration from the source thread or its
-    # ancestors. Since the duplicate is a root thread (no parent), it won't
-    # inherit settings, so we must copy the effective config explicitly.
-    wd_payload = _nearest_working_dir_payload(db, source_thread_id)
-    if wd_payload:
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_='thread.config',
-            payload=wd_payload,
-        )
-
-    # Copy sandbox configuration from the source thread or its ancestors.
-    # This preserves the effective sandbox settings (enabled state, provider,
-    # settings) so the duplicate runs in the same sandbox environment.
-    from .sandbox import _nearest_sandbox_event_payload
-    sandbox_payload = _nearest_sandbox_event_payload(db, source_thread_id)
-    if sandbox_payload:
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_='sandbox.config',
-            payload=sandbox_payload,
-        )
-
-    # Copy the active model configuration from the source thread or its
-    # ancestors. This preserves model.switch events so the duplicate uses
-    # the same model (including any concrete_model_info for ephemeral models).
-    model_payload = _nearest_model_switch_payload(db, source_thread_id)
-    if model_payload:
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_='model.switch',
-            payload=model_payload,
-        )
-
-    # Build a fresh snapshot for the duplicate so UIs and runners see a
-    # consistent cached view of messages.
-    create_snapshot(db, new_tid)
-    return new_tid
-
-
-def duplicate_thread_up_to(db: ThreadsDB, source_thread_id: str, up_to_msg_id: str, name: Optional[str] = None) -> str:
-    """Duplicate a thread's event log up to a specific message.
-
-    Like duplicate_thread, but only copies events up to and including the
-    message with the given msg_id. This is useful for creating a checkpoint
-    at a specific point in the conversation.
-
-    The duplicate also preserves the source thread's effective configuration
-    (working directory, sandbox settings, and active model), same as duplicate_thread.
-
-    Args:
-        db: ThreadsDB instance
-        source_thread_id: Thread to duplicate
-        up_to_msg_id: Message ID to stop at (inclusive)
-        name: Optional name for the new thread
-
-    Returns:
-        The new thread's ID
-    """
-    src = db.get_thread(source_thread_id)
-    if not src:
+    source = db.get_thread(source_thread_id)
+    if source is None:
         raise ValueError(f"Source thread not found: {source_thread_id}")
-
-    # Find the event_seq of the target message
-    cur = db.conn.execute(
-        "SELECT event_seq FROM events WHERE thread_id=? AND msg_id=? ORDER BY event_seq ASC LIMIT 1",
+    row = db.conn.execute(
+        "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' "
+        "AND msg_id=? ORDER BY event_seq ASC LIMIT 1",
         (source_thread_id, up_to_msg_id),
-    )
-    row = cur.fetchone()
-    if not row:
+    ).fetchone()
+    if row is None:
         raise ValueError(f"Message not found: {up_to_msg_id}")
-    up_to_seq = row[0]
-
-    base_name = src.name or src.short_recap or "Thread"
-    new_name = name or f"{base_name} [copy]"
-
-    new_tid = _ulid_like()
-    db.create_thread(
-        thread_id=new_tid,
-        name=new_name,
-        parent_id=None,
-        initial_model_key=src.initial_model_key,
-        depth=0,
+    return _duplicate_thread_at_watermark(
+        db,
+        source_thread_id,
+        through_event_seq=int(row[0]),
+        name=name,
     )
-
-    import json as _json
-
-    # Only copy msg.create and tool_call.* events to get a clean conversation.
-    # Skip streaming events, control events, and edit events to avoid
-    # carrying over RA1 boundary markers or skip flags from the source.
-
-    # First, collect msg_ids that have been marked as skipped via msg.edit events
-    # (skipped_on_continue is stored in msg.edit, not msg.create)
-    skipped_msg_ids: set = set()
-    cur_edit = db.conn.execute(
-        "SELECT msg_id, payload_json FROM events WHERE thread_id=? AND type='msg.edit'",
-        (source_thread_id,),
-    )
-    for row in cur_edit.fetchall():
-        edit_msg_id = row[0]
-        try:
-            edit_payload = _json.loads(row[1]) if isinstance(row[1], str) else (row[1] or {})
-        except Exception:
-            edit_payload = {}
-        if edit_payload.get('skipped_on_continue'):
-            skipped_msg_ids.add(edit_msg_id)
-
-    cur = db.conn.execute(
-        "SELECT type, msg_id, invoke_id, chunk_seq, payload_json FROM events "
-        "WHERE thread_id=? AND event_seq <= ? ORDER BY event_seq ASC",
-        (source_thread_id, up_to_seq),
-    )
-    rows = cur.fetchall()
-    for ev_type, msg_id, invoke_id, chunk_seq, pj in rows:
-        # Only copy message and tool_call events for a clean duplicate
-        if not (ev_type == 'msg.create' or ev_type.startswith('tool_call.')):
-            continue
-        # Don't copy messages marked as skipped in the source
-        if ev_type == 'msg.create' and msg_id in skipped_msg_ids:
-            continue
-        try:
-            payload = _json.loads(pj) if isinstance(pj, str) else (pj or {})
-        except Exception:
-            payload = {}
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_=ev_type,
-            payload=payload,
-            msg_id=msg_id,
-            invoke_id=invoke_id,
-            chunk_seq=chunk_seq,
-        )
-
-    # Copy working directory configuration from the source thread or its
-    # ancestors. Since the duplicate is a root thread (no parent), it won't
-    # inherit settings, so we must copy the effective config explicitly.
-    wd_payload = _nearest_working_dir_payload(db, source_thread_id)
-    if wd_payload:
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_='thread.config',
-            payload=wd_payload,
-        )
-
-    # Copy sandbox configuration from the source thread or its ancestors.
-    # This preserves the effective sandbox settings (enabled state, provider,
-    # settings) so the duplicate runs in the same sandbox environment.
-    from .sandbox import _nearest_sandbox_event_payload
-    sandbox_payload = _nearest_sandbox_event_payload(db, source_thread_id)
-    if sandbox_payload:
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_='sandbox.config',
-            payload=sandbox_payload,
-        )
-
-    # Copy the active model configuration from the source thread or its
-    # ancestors. This preserves model.switch events so the duplicate uses
-    # the same model (including any concrete_model_info for ephemeral models).
-    model_payload = _nearest_model_switch_payload(db, source_thread_id)
-    if model_payload:
-        db.append_event(
-            event_id=_ulid_like(),
-            thread_id=new_tid,
-            type_='model.switch',
-            payload=model_payload,
-        )
-
-    create_snapshot(db, new_tid)
-    return new_tid
 
 
 # --------- Continue Thread API ------------------------------------------------
@@ -1571,6 +1514,50 @@ def current_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optiona
         return None
 
 
+def _effective_compaction_start_from_projection(
+    db: ThreadsDB,
+    thread_id: str,
+    through_event_seq: int,
+    projection,
+) -> Optional[int]:
+    """Resolve compaction against the already-loaded canonical projection."""
+
+    target = int(through_event_seq)
+    states_by_id = {message.msg_id: message for message in projection.message_states}
+    continue_rows = db.conn.execute(
+        "SELECT event_seq, payload_json FROM events WHERE thread_id=? "
+        "AND type='control.interrupt' AND event_seq<=? ORDER BY event_seq ASC",
+        (thread_id, target),
+    ).fetchall()
+    erased_ranges: List[tuple[int, int]] = []
+    for event_seq, payload_json in continue_rows:
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+        except Exception:
+            payload = {}
+        continue_from = payload.get('continue_from_msg_id') if isinstance(payload, dict) else None
+        state = states_by_id.get(str(continue_from)) if continue_from else None
+        if isinstance(payload, dict) and payload.get('purpose') == 'continue' and state is not None:
+            erased_ranges.append((state.created_event_seq, int(event_seq)))
+
+    for compaction in reversed(list_thread_compactions(db, thread_id)):
+        try:
+            compaction_seq = int(compaction.get('event_seq'))
+        except Exception:
+            continue
+        if compaction_seq > target or _event_erased_by_continue(compaction_seq, erased_ranges):
+            continue
+        start_msg_id = compaction.get('start_msg_id')
+        state = states_by_id.get(str(start_msg_id)) if isinstance(start_msg_id, str) else None
+        if state is None or not state.is_effective:
+            continue
+        try:
+            return int(compaction.get('start_event_seq'))
+        except Exception:
+            return None
+    return None
+
+
 def current_effective_compaction_start_event_seq(db: ThreadsDB, thread_id: str) -> Optional[int]:
     """Return the current effective provider-context start event_seq, if any."""
 
@@ -1635,6 +1622,36 @@ def filter_messages_for_compaction_provider_context(
         if seq_int >= int(start_seq):
             filtered.append(m)
     return filtered
+
+
+def filter_projection_for_compaction_provider_context(
+    db: ThreadsDB,
+    projection,
+) -> List[Dict[str, Any]]:
+    """Filter one fixed canonical projection without loading it a second time."""
+
+    messages = [
+        message
+        for message in projection.message_dicts()
+        if not message.get('answer_user_preserve_turn')
+    ]
+    start_seq = _effective_compaction_start_from_projection(
+        db,
+        projection.thread_id,
+        projection.through_event_seq,
+        projection,
+    )
+    if start_seq is None:
+        return messages
+    return [
+        message
+        for message in messages
+        if message.get('role') == 'system'
+        or (
+            message.get('event_seq') is not None
+            and int(message['event_seq']) >= int(start_seq)
+        )
+    ]
 
 
 def _normalize_compaction_selector(selector: Optional[str]) -> str:
