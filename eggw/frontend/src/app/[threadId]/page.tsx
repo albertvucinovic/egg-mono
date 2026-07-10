@@ -19,6 +19,7 @@ import { formatTokenCount } from "@/lib/tps";
 import { transcriptQueryKey } from "@/lib/transcript";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { createClientOperationId } from "@/lib/messageOperations";
+import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
 
 export default function ThreadPage() {
   const params = useParams();
@@ -31,7 +32,7 @@ export default function ThreadPage() {
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
   const streamingKind = useAppStore((state) => state.streamingByThread[threadId]?.streamingKind || null);
-  const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
+  const interruptThreadStreaming = useAppStore((state) => state.interruptThreadStreaming);
   const panelVisibility = useAppStore((state) => state.panelVisibility);
   const togglePanel = useAppStore((state) => state.togglePanel);
   const showBorders = useAppStore((state) => state.showBorders);
@@ -175,8 +176,9 @@ export default function ThreadPage() {
       if (isStreaming && threadId) {
         e.preventDefault();
         interruptThread(threadId).then(() => {
-          resetThreadStreaming(threadId);
+          interruptThreadStreaming(threadId);
           streamingBufferForThread(threadId).clear();
+          clearLiveToolsForThread(threadId);
           // Refetch messages to get the saved partial content from backend
           queryClient.invalidateQueries({ queryKey: transcriptQueryKey(threadId) });
           queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
@@ -278,7 +280,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router, interruptThreadStreaming]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);

@@ -1264,6 +1264,86 @@ test.describe('Live Tool Streaming', () => {
   });
 });
 
+test.describe('Atomic Live Tool Continuity', () => {
+  test('keeps the canonical tool card through immediate close and a stale refetch at every verbosity', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'tool-continuity-thread';
+    const toolCallId = 'call-continuity';
+    let messageRequests = 0;
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'user-before-tool', role: 'user', content: 'run tool', content_text: 'run tool' }],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      messageRequests += 1;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          // Every response deliberately lags the consumed msg.create. The
+          // event-installed card must survive these stale HTTP snapshots.
+          items: [{ id: 'user-before-tool', role: 'user', content: 'run tool', content_text: 'run tool' }],
+          snapshot_cursor: messageRequests === 1 ? 0 : 2,
+          next_before: null,
+        },
+      });
+    });
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const ts = new Date().toISOString();
+      const envelope = (event_seq: number, type: string, payload: Record<string, unknown>, msg_id: string | null = null) => JSON.stringify({
+        event_id: `continuity-${event_seq}`,
+        event_seq,
+        type,
+        ts,
+        msg_id,
+        invoke_id: 'invoke-continuity',
+        chunk_seq: type === 'stream.delta' ? event_seq : null,
+        payload,
+      });
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          'id: 1', 'event: stream.open', `data: ${envelope(1, 'stream.open', { stream_kind: 'tool' })}`, '',
+          'id: 2', 'event: stream.delta', `data: ${envelope(2, 'stream.delta', { tool_call: { id: toolCallId, name: 'bash', arguments_delta: '{"script":"echo continuity"}' } })}`, '',
+          'id: 3', 'event: msg.create', `data: ${envelope(3, 'msg.create', { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, name: 'bash', arguments: '{"script":"echo continuity"}' }] }, 'assistant-continuity')}`, '',
+          'id: 4', 'event: stream.close', `data: ${envelope(4, 'stream.close', {})}`, '', '',
+        ].join('\n'),
+      });
+    });
+
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route, request) => {
+      const command = String((request.postDataJSON() as { command?: string }).command || "");
+      const verbosity = command.split(/\s+/).at(-1);
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: `Display verbosity set to ${verbosity}`,
+          command_id: `verbosity-${verbosity}`,
+          command_name: "displayVerbosity",
+          data: { action: "set_display_verbosity", display_verbosity: verbosity },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    const chat = page.getByTestId('chat-panel');
+    for (const verbosity of ['max', 'medium', 'min'] as const) {
+      await input.fill(`/displayVerbosity ${verbosity}`);
+      await input.press('Enter');
+      await expect(chat).toContainText(verbosity === 'min' ? 'Executed 1 tool' : 'bash', { timeout: 5000 });
+      await expect(chat).not.toContainText('No messages yet');
+    }
+    expect(messageRequests).toBeGreaterThan(1);
+  });
+});
+
 test.describe('Settings and Controls', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

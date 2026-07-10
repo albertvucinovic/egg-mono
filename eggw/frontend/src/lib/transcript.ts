@@ -39,13 +39,17 @@ export function reconcileTranscriptTail(
 ): TranscriptPage {
   if (!previous) return fetched;
   const fetchedIds = new Set(fetched.items.map((message) => message.id).filter(Boolean));
-  const clientOwned = previous.items.filter((message) => {
+  const preserved = previous.items.filter((message) => {
     if (fetchedIds.has(message.id)) return false;
     if (message.client_operation_id && message.client_only === "optimistic") return true;
-    return isCommandClientMessage(message);
+    if (isCommandClientMessage(message)) return true;
+    // A delayed HTTP snapshot must not erase a msg.create already consumed
+    // from the ordered live feed. Once its cursor covers the event, absence is
+    // authoritative and the retained envelope can be discarded.
+    return Number.isSafeInteger(message.event_seq) && message.event_seq! > fetched.snapshot_cursor;
   });
-  if (!clientOwned.length) return fetched;
-  return { ...fetched, items: [...fetched.items, ...clientOwned] };
+  if (!preserved.length) return fetched;
+  return { ...fetched, items: [...fetched.items, ...preserved] };
 }
 
 export function transcriptInfiniteQueryOptions(threadId: string, queryClient: QueryClient) {
@@ -112,6 +116,39 @@ function updateTranscript(
     transcriptQueryKey(threadId),
     (current) => update(current || emptyTranscriptData()),
   );
+}
+
+/**
+ * Install one canonical msg.create in the newest transcript page. The newest
+ * page owns authoritative overlap, while older pages, pagination cursors,
+ * pageParams, and unrelated optimistic/client entries remain intact.
+ */
+export function upsertTranscriptTailMessage(
+  queryClient: QueryClient,
+  threadId: string,
+  message: Message,
+): void {
+  if (!message.id) return;
+  updateTranscript(queryClient, threadId, (data) => {
+    const pages = data.pages.length ? [...data.pages] : emptyTranscriptData().pages;
+    const tail = pages[0];
+    const tailIndex = tail.items.findIndex((candidate) => candidate.id === message.id);
+    pages[0] = {
+      ...tail,
+      items: tailIndex >= 0
+        ? tail.items.map((candidate, index) => index === tailIndex ? message : candidate)
+        : [...tail.items, message],
+    };
+    for (let index = 1; index < pages.length; index += 1) {
+      const page = pages[index];
+      if (!page.items.some((candidate) => candidate.id === message.id)) continue;
+      pages[index] = {
+        ...page,
+        items: page.items.filter((candidate) => candidate.id !== message.id),
+      };
+    }
+    return { ...data, pages };
+  });
 }
 
 export function appendClientTranscriptMessage(

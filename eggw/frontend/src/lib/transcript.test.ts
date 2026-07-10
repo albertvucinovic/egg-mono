@@ -8,6 +8,7 @@ import {
   removeClientTranscriptMessage,
   replaceClientTranscriptMessage,
   transcriptQueryKey,
+  upsertTranscriptTailMessage,
   type TranscriptData,
   type TranscriptPage,
 } from "./transcript";
@@ -123,5 +124,78 @@ describe("thread-keyed transcript cache", () => {
 
     expect(flattenTranscript(client.getQueryData<TranscriptData>(transcriptQueryKey("thread-a"))).map((message) => message.id))
       .toEqual(["before", "command", "after"]);
+  });
+
+  it("upserts a canonical live message into the authoritative tail without disturbing pagination", () => {
+    const client = new QueryClient();
+    const transcript = data([
+      page(["overlap", "newest"], 20, "older-cursor"),
+      page(["oldest", "overlap"], 10),
+    ]);
+    transcript.pages[0].items.push({
+      id: "pending",
+      role: "user",
+      content: "pending",
+      client_only: "optimistic",
+      client_operation_id: "operation-pending",
+    });
+    client.setQueryData(transcriptQueryKey("thread-a"), transcript);
+
+    upsertTranscriptTailMessage(client, "thread-a", {
+      id: "overlap",
+      role: "assistant",
+      content: "canonical event value",
+      event_seq: 21,
+    });
+
+    const updated = client.getQueryData<TranscriptData>(transcriptQueryKey("thread-a"))!;
+    expect(updated.pageParams).toEqual([null, "before-1"]);
+    expect(updated.pages[0].next_before).toBe("older-cursor");
+    expect(updated.pages[0].items.map((message) => message.id)).toEqual(["overlap", "newest", "pending"]);
+    expect(updated.pages[0].items[0].content).toBe("canonical event value");
+    expect(updated.pages[1].items.map((message) => message.id)).toEqual(["oldest"]);
+  });
+
+  it("installs msg.create synchronously before a delayed HTTP response resolves", async () => {
+    const client = new QueryClient();
+    client.setQueryData(transcriptQueryKey("thread-a"), data([page(["before"], 10)]));
+    let resolveFetch!: (value: TranscriptPage) => void;
+    const delayedFetch = new Promise<TranscriptPage>((resolve) => { resolveFetch = resolve; });
+
+    upsertTranscriptTailMessage(client, "thread-a", {
+      id: "assistant-tool-call",
+      role: "assistant",
+      tool_calls: [{ id: "call-a", name: "bash", arguments: "{}" }],
+      event_seq: 11,
+    });
+    expect(flattenTranscript(client.getQueryData<TranscriptData>(transcriptQueryKey("thread-a")))
+      .map((message) => message.id)).toContain("assistant-tool-call");
+
+    resolveFetch(page(["before"], 10));
+    const stale = await delayedFetch;
+    const current = client.getQueryData<TranscriptData>(transcriptQueryKey("thread-a"))!;
+    const reconciled = reconcileTranscriptTail(stale, current.pages[0]);
+    expect(reconciled.items.map((message) => message.id)).toEqual(["before", "assistant-tool-call"]);
+  });
+
+  it("retains a consumed msg.create across stale refetch and deduplicates once covered", () => {
+    const eventMessage: Message = {
+      id: "event-message",
+      role: "assistant",
+      content: "durable tool call",
+      event_seq: 12,
+      tool_calls: [{ id: "call-a", name: "bash", arguments: "{}" }],
+    };
+    const previous = page(["before"], 10);
+    previous.items.push(eventMessage);
+
+    const stale = reconcileTranscriptTail(page(["before"], 11), previous);
+    expect(stale.items.map((message) => message.id)).toEqual(["before", "event-message"]);
+
+    const covered = page(["before", "event-message"], 12);
+    covered.items[1].content = "normalized server value";
+    const reconciled = reconcileTranscriptTail(covered, stale);
+    expect(reconciled.items.map((message) => message.id)).toEqual(["before", "event-message"]);
+    expect(reconciled.items[1].content).toBe("normalized server value");
   });
 });

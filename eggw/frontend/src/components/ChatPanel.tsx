@@ -1321,6 +1321,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
   const visibleStreamingToolCalls = streamingToolCalls || {};
   const visibleStreamingToolOutputs = streamingToolOutputs || {};
+  const hasLiveTools = Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0;
+  const showLiveCard = isStreaming || hasLiveTools;
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const hasActiveToolTiming = Object.values(visibleStreamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
   const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
@@ -1664,9 +1666,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     };
   }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleInitialStreamingFlush, scheduleStreamingToolFlush, threadId]);
 
-  // Reset DOM state when streaming stops
+  // Reset DOM state only after assistant and retained tool state are both gone.
   useEffect(() => {
-    if (!isStreaming) {
+    if (!showLiveCard) {
       lastContentIndexRef.current = 0;
       lastReasoningIndexRef.current = 0;
       lastReasoningSummaryIndexRef.current = 0;
@@ -1692,7 +1694,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         if (el) el.textContent = '';
       });
     }
-  }, [isStreaming]);
+  }, [showLiveCard]);
 
   const { isLoading, isError, refetch } = transcriptQuery;
 
@@ -1820,7 +1822,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
               />
 
               {/* Streaming content */}
-              {isStreaming && (
+              {showLiveCard && (
                 <div
                   className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
                   style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
@@ -1830,7 +1832,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                     {streamingModelKey && (
                       <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
                     )}
-                    <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                    {isStreaming && (
+                      <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                    )}
                     {providerTimeText && (
                       <span className="ml-2" style={{ color: "var(--accent)" }}>{providerTimeText}</span>
                     )}

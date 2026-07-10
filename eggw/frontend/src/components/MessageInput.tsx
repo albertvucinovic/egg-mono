@@ -8,6 +8,8 @@ import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocompl
 import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
 import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, isImageContentPart, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore } from "@/lib/store";
+import { streamingBufferForThread } from "@/lib/streamingBuffer";
+import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
 import { appendClientTranscriptMessage, transcriptQueryKey } from "@/lib/transcript";
 import { beginOptimisticSend, completeOptimisticSend, createClientOperationId, rollbackOptimisticSend, type SendMessageOperation } from "@/lib/messageOperations";
 import { ProtectedImage } from "@/components/ProtectedFileLink";
@@ -104,7 +106,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   }, [currentThreadId, setComposerDraft]);
   const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
   const activeUserCommand = useAppStore((state) => state.streamingByThread[threadId]?.activeUserCommand || null);
-  const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
+  const interruptThreadStreaming = useAppStore((state) => state.interruptThreadStreaming);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const setTheme = useAppStore((state) => state.setTheme);
   const togglePanel = useAppStore((state) => state.togglePanel);
@@ -219,7 +221,9 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const cancelMutation = useMutation({
     mutationFn: ({ threadId: sourceThreadId }: { threadId: string; operationId: string }) => interruptThread(sourceThreadId),
     onSuccess: (_response, operation) => {
-      resetThreadStreaming(operation.threadId);
+      interruptThreadStreaming(operation.threadId);
+      streamingBufferForThread(operation.threadId).clear();
+      clearLiveToolsForThread(operation.threadId);
       // Refetch messages to get the saved partial content from backend
       queryClient.invalidateQueries({ queryKey: transcriptQueryKey(operation.threadId) });
       queryClient.invalidateQueries({ queryKey: ["threadState", operation.threadId] });

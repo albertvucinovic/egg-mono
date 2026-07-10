@@ -127,6 +127,23 @@ export class StreamingBuffer {
     return metadataChanged;
   }
 
+  clearAssistantText() {
+    this.contentChunks = [];
+    this.reasoningChunks = [];
+    this.reasoningSummaryChunks = [];
+  }
+
+  removeToolCall(toolCallId: string) {
+    this.toolCalls.delete(toolCallId);
+  }
+
+  removeTool(toolCallId: string) {
+    this.removeToolCall(toolCallId);
+    this.toolOutputChunks.delete(toolCallId);
+    this.seenToolOutputs.delete(toolCallId);
+    this.suppressedToolOutputs.delete(toolCallId);
+  }
+
   clear() {
     this.contentChunks = [];
     this.reasoningChunks = [];

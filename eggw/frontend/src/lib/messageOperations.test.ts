@@ -88,4 +88,30 @@ describe("thread-scoped ephemeral state", () => {
     expect(state.connectionByThread["thread-a"]).toEqual({ status: "reconnecting" });
     expect(state.currentThreadId).toBe("thread-b");
   });
+  it("clears assistant state at close while retaining tools until interruption", () => {
+    useAppStore.setState({ streamingByThread: {}, connectionByThread: {} });
+    const store = useAppStore.getState();
+    store.patchThreadStreaming("thread-a", {
+      isStreaming: true,
+      invokeId: "invoke-a",
+      streamingKind: "tool",
+      streamingToolCalls: { "call-a": { name: "bash" } },
+      streamingToolOutputs: {
+        "call-a": { id: "call-a", name: "bash", suppressed: false, suppressedFrames: 0 },
+      },
+    });
+
+    store.clearThreadStreamingAssistant("thread-a");
+    expect(useAppStore.getState().streamingByThread["thread-a"]).toMatchObject({
+      isStreaming: false,
+      invokeId: null,
+      streamingToolCalls: { "call-a": { name: "bash" } },
+      streamingToolOutputs: { "call-a": { id: "call-a" } },
+    });
+
+    store.interruptThreadStreaming("thread-a");
+    expect(useAppStore.getState().streamingByThread["thread-a"].streamingToolCalls).toEqual({});
+    expect(useAppStore.getState().streamingByThread["thread-a"].streamingToolOutputs).toEqual({});
+  });
+
 });

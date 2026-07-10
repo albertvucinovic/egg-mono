@@ -38,6 +38,8 @@ export interface Message {
   command_data?: Record<string, any>;
   client_only?: "optimistic" | "command";
   client_operation_id?: string;
+  /** Canonical msg.create sequence retained until an HTTP snapshot covers it. */
+  event_seq?: number;
 }
 
 export interface ToolCall {
@@ -187,6 +189,10 @@ interface AppState {
   upsertThreadStreamingToolOutput: (threadId: string, id: string, name: string, suppressed?: boolean, summary?: string) => void;
   markThreadStreamingToolStarted: (threadId: string, id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => void;
   clearThreadStreamingToolTimeout: (threadId: string, id: string) => void;
+  removeThreadStreamingToolCall: (threadId: string, id: string) => void;
+  removeThreadStreamingTool: (threadId: string, id: string) => void;
+  clearThreadStreamingAssistant: (threadId: string) => void;
+  interruptThreadStreaming: (threadId: string) => void;
 
   // Tool calls
   pendingTools: ToolCall[];
@@ -396,6 +402,58 @@ export const useAppStore = create<AppState>((set) => ({
         },
       };
     }),
+
+  removeThreadStreamingToolCall: (threadId, id) =>
+    set((state) => {
+      const streaming = state.streamingByThread[threadId];
+      if (!streaming?.streamingToolCalls[id]) return state;
+      const streamingToolCalls = { ...streaming.streamingToolCalls };
+      delete streamingToolCalls[id];
+      return {
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: { ...streaming, streamingToolCalls },
+        },
+      };
+    }),
+  removeThreadStreamingTool: (threadId, id) =>
+    set((state) => {
+      const streaming = state.streamingByThread[threadId];
+      if (!streaming || (!streaming.streamingToolCalls[id] && !streaming.streamingToolOutputs[id])) return state;
+      const streamingToolCalls = { ...streaming.streamingToolCalls };
+      const streamingToolOutputs = { ...streaming.streamingToolOutputs };
+      delete streamingToolCalls[id];
+      delete streamingToolOutputs[id];
+      return {
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: { ...streaming, streamingToolCalls, streamingToolOutputs },
+        },
+      };
+    }),
+  clearThreadStreamingAssistant: (threadId) =>
+    set((state) => {
+      const streaming = state.streamingByThread[threadId];
+      if (!streaming) return state;
+      return {
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: {
+            ...streaming,
+            isStreaming: false,
+            invokeId: null,
+            streamingModelKey: null,
+            streamingKind: null,
+            streamingStartedAtMs: null,
+            streamingProviderRequest: null,
+          },
+        },
+      };
+    }),
+  interruptThreadStreaming: (threadId) =>
+    set((state) => ({
+      streamingByThread: { ...state.streamingByThread, [threadId]: emptyThreadStreamingState() },
+    })),
 
   // Tool calls
   pendingTools: [],
