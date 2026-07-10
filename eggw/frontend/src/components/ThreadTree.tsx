@@ -23,6 +23,7 @@ import {
   renameThread,
 } from "@/lib/api";
 import { useAppStore, Thread } from "@/lib/store";
+import { createClientOperationId } from "@/lib/messageOperations";
 import clsx from "clsx";
 
 interface TreeNodeProps {
@@ -47,11 +48,11 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteThread(thread.id),
-    onSuccess: () => {
+    mutationFn: ({ threadId }: { threadId: string; operationId: string }) => deleteThread(threadId),
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
-      addSystemLog(`Deleted thread ${thread.id.slice(-8)}`, "success");
+      addSystemLog(`Deleted thread ${variables.threadId.slice(-8)}`, "success");
     },
     onError: () => {
       addSystemLog(`Failed to delete thread`, "error");
@@ -59,7 +60,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   });
 
   const duplicateMutation = useMutation({
-    mutationFn: () => duplicateThread(thread.id),
+    mutationFn: ({ threadId }: { threadId: string; operationId: string }) => duplicateThread(threadId),
     onSuccess: (newThread) => {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
@@ -68,12 +69,12 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   });
 
   const renameMutation = useMutation({
-    mutationFn: (name: string) => renameThread(thread.id, name),
-    onSuccess: () => {
+    mutationFn: ({ threadId, name }: { threadId: string; operationId: string; name: string }) => renameThread(threadId, name),
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
-      queryClient.invalidateQueries({ queryKey: ["thread", thread.id] });
-      addSystemLog(`Renamed thread to "${editName}"`, "success");
+      queryClient.invalidateQueries({ queryKey: ["thread", variables.threadId] });
+      addSystemLog(`Renamed thread to "${variables.name}"`, "success");
       setIsEditing(false);
     },
     onError: () => {
@@ -93,7 +94,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   const handleSaveEdit = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (editName.trim()) {
-      renameMutation.mutate(editName.trim());
+      renameMutation.mutate({ threadId: thread.id, operationId: createClientOperationId("rename"), name: editName.trim() });
     } else {
       setIsEditing(false);
     }
@@ -108,7 +109,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       if (editName.trim()) {
-        renameMutation.mutate(editName.trim());
+        renameMutation.mutate({ threadId: thread.id, operationId: createClientOperationId("rename"), name: editName.trim() });
       } else {
         setIsEditing(false);
       }
@@ -206,7 +207,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  duplicateMutation.mutate();
+                  duplicateMutation.mutate({ threadId: thread.id, operationId: createClientOperationId("duplicate") });
                 }}
                 className="p-1 rounded"
                 title="Duplicate"
@@ -217,7 +218,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
                 onClick={(e) => {
                   e.stopPropagation();
                   if (confirm("Delete this thread?")) {
-                    deleteMutation.mutate();
+                    deleteMutation.mutate({ threadId: thread.id, operationId: createClientOperationId("delete") });
                   }
                 }}
                 className="p-1 rounded"
@@ -255,7 +256,7 @@ export function ThreadTree() {
   });
 
   const createMutation = useMutation({
-    mutationFn: () => createThread({}),
+    mutationFn: ({ operationId: _operationId }: { operationId: string }) => createThread({}),
     onSuccess: (newThread) => {
       queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
       router.push(`/${newThread.id}`);
@@ -278,7 +279,7 @@ export function ThreadTree() {
       <div className="p-2 border-b border-[var(--panel-border)] flex items-center justify-between">
         <span className="text-sm font-medium">Threads</span>
         <button
-          onClick={() => createMutation.mutate()}
+          onClick={() => createMutation.mutate({ operationId: createClientOperationId("create-thread") })}
           className="p-1 rounded"
           title="New thread"
           data-testid="new-thread-btn"
@@ -295,7 +296,7 @@ export function ThreadTree() {
           <div className="p-4 text-center" style={{ color: "var(--muted)" }}>
             <p>No threads yet</p>
             <button
-              onClick={() => createMutation.mutate()}
+              onClick={() => createMutation.mutate({ operationId: createClientOperationId("create-thread") })}
               className="mt-2 px-3 py-1 rounded text-sm"
               style={{ background: "var(--accent)", color: "var(--background)" }}
             >

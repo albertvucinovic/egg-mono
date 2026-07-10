@@ -95,6 +95,13 @@ export class AuthenticatedEventSource {
     this.listeners.get(type)?.delete(listener);
   }
 
+  /** Advance to an authoritative snapshot cursor after reconciliation. */
+  advanceCursor(cursor: number): void {
+    if (!Number.isSafeInteger(cursor) || cursor < -1) return;
+    const current = Number(this.lastEventId);
+    if (!Number.isSafeInteger(current) || cursor > current) this.lastEventId = String(cursor);
+  }
+
   close(): void {
     this.closed = true;
     this.controller?.abort();
@@ -117,7 +124,7 @@ export class AuthenticatedEventSource {
       if (this.closed || controller.signal.aborted) return;
       this.hasConnected = true;
       this.reconnectDelayMs = 1000;
-      this.onopen?.(new Event("open"));
+      this.onopen?.(new CustomEvent("open", { detail: { reconnect } }));
       await consumeSSE(response, ({ event, data, id }) => {
         if (!id) return;
         const next = Number(id);

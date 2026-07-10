@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
-import { createEventSource, fetchMessages, type AuthenticatedEventSource } from "@/lib/api";
+import { createEventSource, fetchThreadState, type AuthenticatedEventSource } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
-import { streamingBuffer } from "@/lib/streamingBuffer";
+import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { useQueryClient } from "@tanstack/react-query";
+import { createThreadEventSyncState, reconcileThreadEventCursor, reduceThreadEvent, type ThreadEventSyncState } from "@/lib/eventSync";
+import { transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor } from "@/lib/transcript";
+import { emptyThreadStreamingState } from "@/lib/store";
 
 const TOOL_TIMEOUT_KEYS = [
   "timeout",
@@ -64,21 +67,50 @@ function eventStartedAtMs(value: unknown): number {
 export function useSSE(threadId: string | null) {
   const eventSourceRef = useRef<AuthenticatedEventSource | null>(null);
   const messageRefreshTimeoutRef = useRef<number | null>(null);
+  const syncStateRef = useRef<ThreadEventSyncState | null>(null);
   const queryClient = useQueryClient();
-  const setStreamingToolCalls = useAppStore((state) => state.setStreamingToolCalls);
-  const setStreamingToolOutputs = useAppStore((state) => state.setStreamingToolOutputs);
-  const upsertStreamingToolOutput = useAppStore((state) => state.upsertStreamingToolOutput);
-  const markStreamingToolStarted = useAppStore((state) => state.markStreamingToolStarted);
-  const clearStreamingToolTimeout = useAppStore((state) => state.clearStreamingToolTimeout);
-  const upsertStreamingToolCall = useAppStore((state) => state.upsertStreamingToolCall);
-  const appendToolCallArguments = useAppStore((state) => state.appendToolCallArguments);
-  const setIsStreaming = useAppStore((state) => state.setIsStreaming);
-  const setStreamingModelKey = useAppStore((state) => state.setStreamingModelKey);
-  const setStreamingKind = useAppStore((state) => state.setStreamingKind);
-  const setStreamingStartedAtMs = useAppStore((state) => state.setStreamingStartedAtMs);
-  const setStreamingProviderRequest = useAppStore((state) => state.setStreamingProviderRequest);
-  const setActiveUserCommand = useAppStore((state) => state.setActiveUserCommand);
+  const setThreadStreamingToolCalls = useAppStore((state) => state.setThreadStreamingToolCalls);
+  const setThreadStreamingToolOutputs = useAppStore((state) => state.setThreadStreamingToolOutputs);
+  const upsertThreadStreamingToolOutput = useAppStore((state) => state.upsertThreadStreamingToolOutput);
+  const markThreadStreamingToolStarted = useAppStore((state) => state.markThreadStreamingToolStarted);
+  const clearThreadStreamingToolTimeout = useAppStore((state) => state.clearThreadStreamingToolTimeout);
+  const upsertThreadStreamingToolCall = useAppStore((state) => state.upsertThreadStreamingToolCall);
+  const appendThreadToolCallArguments = useAppStore((state) => state.appendThreadToolCallArguments);
+  const patchThreadStreaming = useAppStore((state) => state.patchThreadStreaming);
+  const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
+  const setThreadConnection = useAppStore((state) => state.setThreadConnection);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
+
+  const setStreamingToolCalls = useCallback((calls: Record<string, { name: string; arguments: string }>) => {
+    if (threadId) setThreadStreamingToolCalls(threadId, calls);
+  }, [setThreadStreamingToolCalls, threadId]);
+  const setStreamingToolOutputs = useCallback((outputs: Record<string, import("@/lib/store").StreamingToolOutput>) => {
+    if (threadId) setThreadStreamingToolOutputs(threadId, outputs);
+  }, [setThreadStreamingToolOutputs, threadId]);
+  const upsertStreamingToolOutput = useCallback((id: string, name: string, suppressed = false, summary?: string) => {
+    if (threadId) upsertThreadStreamingToolOutput(threadId, id, name, suppressed, summary);
+  }, [threadId, upsertThreadStreamingToolOutput]);
+  const markStreamingToolStarted = useCallback((id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => {
+    if (threadId) markThreadStreamingToolStarted(threadId, id, name, startedAtMs, timeoutSec);
+  }, [markThreadStreamingToolStarted, threadId]);
+  const clearStreamingToolTimeout = useCallback((id: string) => {
+    if (threadId) clearThreadStreamingToolTimeout(threadId, id);
+  }, [clearThreadStreamingToolTimeout, threadId]);
+  const upsertStreamingToolCall = useCallback((id: string, name: string, args: string) => {
+    if (threadId) upsertThreadStreamingToolCall(threadId, id, name, args);
+  }, [threadId, upsertThreadStreamingToolCall]);
+  const appendToolCallArguments = useCallback((id: string, name: string, delta: string) => {
+    if (threadId) appendThreadToolCallArguments(threadId, id, name, delta);
+  }, [appendThreadToolCallArguments, threadId]);
+  const patchStreaming = useCallback((patch: Partial<import("@/lib/store").ThreadStreamingState>) => {
+    if (threadId) patchThreadStreaming(threadId, patch);
+  }, [patchThreadStreaming, threadId]);
+  const setIsStreaming = useCallback((isStreaming: boolean) => patchStreaming({ isStreaming }), [patchStreaming]);
+  const setStreamingModelKey = useCallback((streamingModelKey: string | null) => patchStreaming({ streamingModelKey }), [patchStreaming]);
+  const setStreamingKind = useCallback((streamingKind: string | null) => patchStreaming({ streamingKind }), [patchStreaming]);
+  const setStreamingStartedAtMs = useCallback((streamingStartedAtMs: number | null) => patchStreaming({ streamingStartedAtMs }), [patchStreaming]);
+  const setStreamingProviderRequest = useCallback((streamingProviderRequest: import("@/lib/store").StreamingProviderRequest | null) => patchStreaming({ streamingProviderRequest }), [patchStreaming]);
+  const setActiveUserCommand = useCallback((activeUserCommand: import("@/lib/store").ActiveUserCommand | null) => patchStreaming({ activeUserCommand }), [patchStreaming]);
 
   const clearScheduledMessageRefresh = useCallback(() => {
     if (messageRefreshTimeoutRef.current !== null) {
@@ -89,7 +121,7 @@ export function useSSE(threadId: string | null) {
 
   const refreshMessagesNow = useCallback(() => {
     if (!threadId) return;
-    queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+    queryClient.invalidateQueries({ queryKey: transcriptQueryKey(threadId) });
   }, [queryClient, threadId]);
 
   const scheduleMessageRefresh = useCallback((delayMs = 750) => {
@@ -113,44 +145,106 @@ export function useSSE(threadId: string | null) {
     // Establish the transcript/cursor first. React Query deduplicates this with
     // ChatPanel's initial request. Events committed after that exact snapshot
     // are then replayed from snapshot_cursor, closing the snapshot-to-live gap.
-    let snapshot: { snapshot_cursor?: number };
+    let snapshotCursor = -1;
+    let activeInvokeId: string | null = null;
     try {
-      snapshot = await queryClient.ensureQueryData({
-        queryKey: ["messages", threadId],
-        queryFn: () => fetchMessages(threadId, { limit: 300 }),
-      });
+      const [snapshot, threadState] = await Promise.all([
+        queryClient.ensureInfiniteQueryData(transcriptInfiniteQueryOptions(threadId, queryClient)),
+        fetchThreadState(threadId),
+      ]);
+      snapshotCursor = transcriptSnapshotCursor(snapshot);
+      activeInvokeId = typeof threadState.streaming_invoke_id === "string"
+        ? threadState.streaming_invoke_id
+        : null;
+      const previousStreaming = useAppStore.getState().streamingByThread[threadId];
+      if (!activeInvokeId || (previousStreaming?.invokeId && previousStreaming.invokeId !== activeInvokeId)) {
+        streamingBufferForThread(threadId).clear();
+        resetThreadStreaming(threadId);
+      }
+      if (activeInvokeId) {
+        patchThreadStreaming(threadId, {
+          isStreaming: true,
+          invokeId: activeInvokeId,
+          streamingKind: typeof threadState.streaming_kind === "string" ? threadState.streaming_kind : null,
+        });
+      }
+      syncStateRef.current = createThreadEventSyncState(threadId, snapshotCursor, activeInvokeId);
+      setThreadConnection(threadId, { status: "connecting", lastEventSeq: snapshotCursor });
     } catch (error) {
       addSystemLog("Unable to establish message synchronization cursor", "error");
+      setThreadConnection(threadId, { status: "disconnected", lastEventSeq: snapshotCursor });
       return null;
     }
-    // Initial synchronization owns the baseline streaming reset. Transport
-    // reconnects stay inside AuthenticatedEventSource and never clear durable
-    // stream state merely because the network dropped.
-    streamingBuffer.clear();
-    setStreamingToolCalls({});
-    setStreamingToolOutputs({});
-    setStreamingKind(null);
-    setStreamingStartedAtMs(null);
-    setStreamingProviderRequest(null);
-    setActiveUserCommand(null);
-    setIsStreaming(false);
-
-    const snapshotCursor = Number.isSafeInteger(snapshot.snapshot_cursor)
-      ? Number(snapshot.snapshot_cursor)
-      : -1;
     const es = createEventSource(threadId, snapshotCursor);
     eventSourceRef.current = es;
 
-    es.onopen = () => {
+    es.onopen = (openEvent) => {
+      const baseline = syncStateRef.current?.lastEventSeq ?? snapshotCursor;
+      setThreadConnection(threadId, { status: "connected", lastEventSeq: baseline });
       addSystemLog("SSE connected", "info");
+      const isReconnect = openEvent instanceof CustomEvent && Boolean(openEvent.detail?.reconnect);
+      if (!isReconnect) return;
+      // First refresh the authoritative transcript at its own exact cursor,
+      // then reconcile run state against that cursor. Events after it continue
+      // to arrive on the resumable feed and are sequence-deduplicated below.
+      void queryClient.refetchQueries({ queryKey: transcriptQueryKey(threadId), type: "active" })
+        .then(() => {
+          const transcript = queryClient.getQueryData<import("@/lib/transcript").TranscriptData>(transcriptQueryKey(threadId));
+          const authoritativeCursor = transcriptSnapshotCursor(transcript);
+          const current = syncStateRef.current;
+          if (!current) return null;
+          syncStateRef.current = reconcileThreadEventCursor(current, authoritativeCursor, current.activeInvokeId);
+          es.advanceCursor(authoritativeCursor);
+          return fetchThreadState(threadId).then((threadState) => ({ authoritativeCursor, threadState }));
+        })
+        .then((result) => {
+          if (!result) return;
+          const current = syncStateRef.current;
+          if (!current || current.lastEventSeq !== result.authoritativeCursor) return;
+          const invokeId = typeof result.threadState.streaming_invoke_id === "string"
+            ? result.threadState.streaming_invoke_id
+            : null;
+          if (invokeId && current.activeInvokeId && current.activeInvokeId !== invokeId) {
+            resetThreadStreaming(threadId);
+            streamingBufferForThread(threadId).clear();
+          }
+          syncStateRef.current = reconcileThreadEventCursor(current, result.authoritativeCursor, invokeId);
+          if (invokeId) {
+            patchThreadStreaming(threadId, {
+              isStreaming: true,
+              invokeId,
+              streamingKind: typeof result.threadState.streaming_kind === "string"
+                ? result.threadState.streaming_kind
+                : null,
+            });
+          } else {
+            resetThreadStreaming(threadId);
+            streamingBufferForThread(threadId).clear();
+          }
+        })
+        .catch(() => undefined);
     };
 
     es.onerror = () => {
+      const lastEventSeq = syncStateRef.current?.lastEventSeq ?? snapshotCursor;
+      setThreadConnection(threadId, { status: "reconnecting", lastEventSeq });
       addSystemLog("SSE connection error; reconnecting from cursor", "error");
     };
 
+    const addThreadEventListener = (type: string, listener: (event: MessageEvent<string>) => void) => {
+      es.addEventListener(type, (event) => {
+        const current = syncStateRef.current || createThreadEventSyncState(threadId, snapshotCursor, activeInvokeId);
+        const reduced = reduceThreadEvent(current, event.data, type);
+        if (!reduced.accepted) return;
+        syncStateRef.current = reduced.state;
+        setThreadConnection(threadId, { status: "connected", lastEventSeq: reduced.state.lastEventSeq });
+        patchThreadStreaming(threadId, { invokeId: reduced.state.activeInvokeId });
+        listener(event);
+      });
+    };
+
     // Handle stream.open - streaming started
-    es.addEventListener("stream.open", (e) => {
+    addThreadEventListener("stream.open", (e) => {
       try {
         // Parse event data to get model_key
         let modelKey: string | null = null;
@@ -164,7 +258,7 @@ export function useSSE(threadId: string | null) {
           // Data might not be JSON, ignore
         }
 
-        streamingBuffer.clear();
+        streamingBufferForThread(threadId).clear();
         clearScheduledMessageRefresh();
         setStreamingToolCalls({});
         setStreamingToolOutputs({});
@@ -193,22 +287,22 @@ export function useSSE(threadId: string | null) {
 
     // Handle stream.delta - streaming content/reasoning/tool_call chunks
     // Direct buffer updates - O(1) per chunk, no React re-render
-    es.addEventListener("stream.delta", (e) => {
+    addThreadEventListener("stream.delta", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
 
         // Direct buffer append - O(1), bypasses React entirely
         if (payload.reason) {
-          streamingBuffer.appendReasoning(payload.reason);
+          streamingBufferForThread(threadId).appendReasoning(payload.reason);
         }
 
         if (typeof payload.reasoning_summary === "string" && payload.reasoning_summary) {
-          streamingBuffer.appendReasoningSummary(payload.reasoning_summary);
+          streamingBufferForThread(threadId).appendReasoningSummary(payload.reasoning_summary);
         }
 
         if (payload.text) {
-          streamingBuffer.appendContent(payload.text);
+          streamingBufferForThread(threadId).appendContent(payload.text);
         }
 
         if (payload.tool) {
@@ -216,7 +310,7 @@ export function useSSE(threadId: string | null) {
           const toolId = tool.id || tool.name || "tool";
           const toolName = tool.name || "tool";
           if (toolId) {
-            const streamingState = useAppStore.getState();
+            const streamingState = useAppStore.getState().streamingByThread[threadId] || emptyThreadStreamingState();
             if (!streamingState.isStreaming) {
               setIsStreaming(true);
             }
@@ -224,13 +318,13 @@ export function useSSE(threadId: string | null) {
               setStreamingKind("tool");
             }
             if (tool.text) {
-              streamingBuffer.appendToolOutput(toolId, tool.text);
+              streamingBufferForThread(threadId).appendToolOutput(toolId, tool.text);
             }
             // Only update React state when a tool output block first appears,
             // or when the preview limiter emits a suppressed indicator. Text
             // chunks go directly to streamingBuffer/DOM to avoid re-rendering
             // the whole chat for every output line.
-            const existingOutput = useAppStore.getState().streamingToolOutputs[toolId];
+            const existingOutput = (useAppStore.getState().streamingByThread[threadId] || emptyThreadStreamingState()).streamingToolOutputs[toolId];
             if (!existingOutput || tool.suppressed) {
               upsertStreamingToolOutput(toolId, toolName, !!tool.suppressed);
             }
@@ -253,9 +347,9 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle stream.close - streaming finished
-    es.addEventListener("stream.close", () => {
+    addThreadEventListener("stream.close", () => {
       try {
-        streamingBuffer.clear();
+        streamingBufferForThread(threadId).clear();
         setStreamingToolCalls({});
         setStreamingToolOutputs({});
         setStreamingModelKey(null);
@@ -274,22 +368,16 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle msg.create - new message created
-    es.addEventListener("msg.create", (e) => {
+    addThreadEventListener("msg.create", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const role = payload.role || "unknown";
         addSystemLog(`Message created: ${role}`, "info");
-        if (role === "user") {
-          // User messages can be produced by another client (terminal Egg) just
-          // before stream.open.  stream.open intentionally clears delayed
-          // transcript refreshes, so fetch user turns immediately instead of
-          // relying only on the debounced refresh.  This keeps EggW's transcript
-          // synchronized while provider streaming is already visible.
-          refreshMessagesNow();
-        } else {
-          scheduleMessageRefresh(750);
-        }
+        // This event is an authoritative persistence boundary. Refetch the
+        // thread-keyed tail immediately so a successful optimistic message is
+        // replaced by the complete server record (timestamp/metadata included).
+        refreshMessagesNow();
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
@@ -297,7 +385,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool_call.execution_started
-    es.addEventListener("tool_call.execution_started", (e) => {
+    addThreadEventListener("tool_call.execution_started", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -323,7 +411,7 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    es.addEventListener("provider_request.started", (e) => {
+    addThreadEventListener("provider_request.started", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -343,7 +431,7 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    es.addEventListener("user_command.started", (e) => {
+    addThreadEventListener("user_command.started", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -362,7 +450,7 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    es.addEventListener("user_command.finished", (e) => {
+    addThreadEventListener("user_command.finished", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -375,14 +463,14 @@ export function useSSE(threadId: string | null) {
       }
     });
 
-    es.addEventListener("user_command.status", (e) => {
+    addThreadEventListener("user_command.status", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const message = typeof payload.message === "string" ? payload.message : "";
         const timeoutSec = timeoutFromPayload(payload);
         if (payload.command_name === "imageGenerate" && timeoutSec !== null) {
-          const streamingState = useAppStore.getState();
+          const streamingState = useAppStore.getState().streamingByThread[threadId] || emptyThreadStreamingState();
           if (streamingState.activeUserCommand) {
             setActiveUserCommand({
               ...streamingState.activeUserCommand,
@@ -399,7 +487,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool status summaries (for example timeout countdowns).
-    es.addEventListener("tool_call.summary", (e) => {
+    addThreadEventListener("tool_call.summary", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -416,7 +504,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool_call.finished
-    es.addEventListener("tool_call.finished", (e) => {
+    addThreadEventListener("tool_call.finished", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -434,7 +522,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool_call.approval
-    es.addEventListener("tool_call.approval", () => {
+    addThreadEventListener("tool_call.approval", () => {
       try {
         addSystemLog("Tool approval processed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -445,7 +533,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle tool_call.output_approval
-    es.addEventListener("tool_call.output_approval", () => {
+    addThreadEventListener("tool_call.output_approval", () => {
       try {
         addSystemLog("Tool output approval needed", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -456,7 +544,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle sandbox.config events
-    es.addEventListener("sandbox.config", () => {
+    addThreadEventListener("sandbox.config", () => {
       try {
         addSystemLog("Sandbox config changed", "info");
         queryClient.invalidateQueries({ queryKey: ["sandbox", threadId] });
@@ -469,7 +557,7 @@ export function useSSE(threadId: string | null) {
     // runtime.config event on the parent. Refresh child/root thread queries so
     // @runtime:* entries appear in the Children panel and tree without a page
     // reload after /pythonRepl or /bashRepl starts them.
-    es.addEventListener("runtime.config", () => {
+    addThreadEventListener("runtime.config", () => {
       try {
         addSystemLog("Runtime thread linked", "info");
         queryClient.invalidateQueries({ queryKey: ["threadChildren", threadId] });
@@ -484,7 +572,7 @@ export function useSSE(threadId: string | null) {
     // setup, or another Egg frontend.  The parent receives a lightweight
     // thread.child_created event; refresh active tree/children queries so the
     // Children panel and thread tree update without a page reload.
-    es.addEventListener("thread.child_created", (e) => {
+    addThreadEventListener("thread.child_created", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -501,7 +589,7 @@ export function useSSE(threadId: string | null) {
     });
 
     // Handle control.interrupt events (e.g., from delayed /continue)
-    es.addEventListener("control.interrupt", (e) => {
+    addThreadEventListener("control.interrupt", (e) => {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
@@ -536,6 +624,9 @@ export function useSSE(threadId: string | null) {
     setStreamingStartedAtMs,
     setStreamingProviderRequest,
     setActiveUserCommand,
+    patchThreadStreaming,
+    resetThreadStreaming,
+    setThreadConnection,
     addSystemLog,
     queryClient,
   ]);
@@ -546,7 +637,11 @@ export function useSSE(threadId: string | null) {
       eventSourceRef.current = null;
     }
     clearScheduledMessageRefresh();
-  }, [clearScheduledMessageRefresh]);
+    if (threadId) {
+      const lastEventSeq = syncStateRef.current?.lastEventSeq ?? -1;
+      setThreadConnection(threadId, { status: "disconnected", lastEventSeq });
+    }
+  }, [clearScheduledMessageRefresh, setThreadConnection, threadId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -562,8 +657,12 @@ export function useSSE(threadId: string | null) {
       cancelled = true;
       clearScheduledMessageRefresh();
       es?.close();
+      if (threadId) {
+        const lastEventSeq = syncStateRef.current?.lastEventSeq ?? -1;
+        setThreadConnection(threadId, { status: "disconnected", lastEventSeq });
+      }
     };
-  }, [clearScheduledMessageRefresh, connect]);
+  }, [clearScheduledMessageRefresh, connect, setThreadConnection, threadId]);
 
   return { connect, disconnect };
 }

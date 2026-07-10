@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode, type WheelEvent } from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -11,7 +11,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
-import { attachmentUrl, createEditAnswerDraft, fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
+import { attachmentUrl, createEditAnswerDraft, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
 import { ProtectedFileLink, ProtectedImage } from "@/components/ProtectedFileLink";
 import {
@@ -30,6 +30,8 @@ import {
   type ContentPart,
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
+import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcript";
+import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import clsx from "clsx";
 
 const STICKY_BOTTOM_THRESHOLD_PX = 4;
@@ -441,124 +443,6 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
       )}
     </div>
   );
-}
-
-function messageIdentity(message: Message | undefined): string | null {
-  const id = typeof message?.id === "string" ? message.id : "";
-  return id ? id : null;
-}
-
-function isLocalOnlyTranscriptMessage(message: Message): boolean {
-  const id = messageIdentity(message) || "";
-  return id.startsWith("cmd-") || id.startsWith("temp-");
-}
-
-function shouldPreserveLocalTranscriptMessage(message: Message): boolean {
-  const id = messageIdentity(message) || "";
-  return id.startsWith("cmd-") && Boolean(message.command_name);
-}
-
-function messageTimestampMs(message: Message): number | null {
-  const timestamp = typeof message.timestamp === "string" ? message.timestamp : "";
-  if (!timestamp) return null;
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function mergeLocalOnlyMessagesByTimestamp(base: Message[], localOnly: Message[]): Message[] {
-  if (!localOnly.length) return base;
-
-  const merged = [...base];
-  const localWithOriginalIndex = localOnly.map((message, index) => ({ message, index }));
-  localWithOriginalIndex.sort((left, right) => {
-    const leftMs = messageTimestampMs(left.message);
-    const rightMs = messageTimestampMs(right.message);
-    if (leftMs !== null && rightMs !== null && leftMs !== rightMs) return leftMs - rightMs;
-    if (leftMs !== null && rightMs === null) return -1;
-    if (leftMs === null && rightMs !== null) return 1;
-    return left.index - right.index;
-  });
-
-  for (const { message } of localWithOriginalIndex) {
-    const localMs = messageTimestampMs(message);
-    if (localMs === null) {
-      merged.push(message);
-      continue;
-    }
-
-    const insertAt = merged.findIndex((candidate) => {
-      const candidateMs = messageTimestampMs(candidate);
-      return candidateMs !== null && candidateMs > localMs;
-    });
-    if (insertAt === -1) {
-      merged.push(message);
-    } else {
-      merged.splice(insertAt, 0, message);
-    }
-  }
-
-  return merged;
-}
-
-function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[]): { messages: Message[]; preservedLoadedScrollback: boolean } {
-  if (!existing.length) {
-    return { messages: fetched, preservedLoadedScrollback: false };
-  }
-
-  const existingLocalOnlyMessages = existing.filter((message) => shouldPreserveLocalTranscriptMessage(message));
-  if (!fetched.length) {
-    return {
-      messages: mergeLocalOnlyMessagesByTimestamp([], existingLocalOnlyMessages),
-      preservedLoadedScrollback: false,
-    };
-  }
-
-  const fetchedIds = new Set(fetched.map(messageIdentity).filter((id): id is string => Boolean(id)));
-  const existingIndexById = new Map<string, number>();
-  existing.forEach((message, index) => {
-    const id = messageIdentity(message);
-    if (id && !existingIndexById.has(id)) existingIndexById.set(id, index);
-  });
-
-  let firstOverlapIndex = Number.POSITIVE_INFINITY;
-  for (const message of fetched) {
-    const id = messageIdentity(message);
-    if (!id) continue;
-    const index = existingIndexById.get(id);
-    if (index !== undefined && index < firstOverlapIndex) {
-      firstOverlapIndex = index;
-    }
-  }
-
-  // If there is no overlap, this is likely a thread change or a cache reset;
-  // replace with the fetched tail rather than accidentally carrying messages
-  // from another thread forward.
-  if (!Number.isFinite(firstOverlapIndex)) {
-    return {
-      messages: mergeLocalOnlyMessagesByTimestamp(fetched, existingLocalOnlyMessages),
-      preservedLoadedScrollback: false,
-    };
-  }
-
-  const olderPrefix = existing
-    .slice(0, firstOverlapIndex)
-    .filter((message) => {
-      const id = messageIdentity(message);
-      return (!id || !fetchedIds.has(id)) && (!isLocalOnlyTranscriptMessage(message) || shouldPreserveLocalTranscriptMessage(message));
-    });
-  const localOnlyMessagesAfterOverlap = existing
-    .slice(firstOverlapIndex)
-    .filter((message) => {
-      const id = messageIdentity(message);
-      return shouldPreserveLocalTranscriptMessage(message) && (!id || !fetchedIds.has(id));
-    });
-
-  const mergedMessages = mergeLocalOnlyMessagesByTimestamp([...olderPrefix, ...fetched], localOnlyMessagesAfterOverlap);
-
-  return {
-    messages: mergedMessages,
-    preservedLoadedScrollback: olderPrefix.some((message) => !isLocalOnlyTranscriptMessage(message)),
-  };
 }
 
 function uniqueThreadSuffixMap(threadIds: unknown): Map<string, string> {
@@ -1396,12 +1280,13 @@ const StaticTranscript = memo(function StaticTranscript({
 });
 
 interface ChatPanelProps {
+  threadId: string;
   showBorders?: boolean;
   streamingTps?: number | null;
   onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }
 
-export function ChatPanel({ showBorders = true, streamingTps = null, onStageAttachment }: ChatPanelProps) {
+export function ChatPanel({ threadId, showBorders = true, streamingTps = null, onStageAttachment }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
@@ -1417,19 +1302,28 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   const loadingOlderRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  const [hasOlderMessages, setHasOlderMessages] = useState(false);
 
-  const currentThreadId = useAppStore((state) => state.currentThreadId);
-  const messages = useAppStore((state) => state.messages);
-  const setMessages = useAppStore((state) => state.setMessages);
-  const streamingToolCalls = useAppStore((state) => state.streamingToolCalls);
-  const streamingToolOutputs = useAppStore((state) => state.streamingToolOutputs);
-  const streamingModelKey = useAppStore((state) => state.streamingModelKey);
-  const streamingKind = useAppStore((state) => state.streamingKind);
-  const streamingStartedAtMs = useAppStore((state) => state.streamingStartedAtMs);
-  const streamingProviderRequest = useAppStore((state) => state.streamingProviderRequest);
-  const isStreaming = useAppStore((state) => state.isStreaming);
-  const scrollTrigger = useAppStore((state) => state.scrollTrigger);
+  const currentThreadId = threadId;
+  const queryClient = useQueryClient();
+  const transcriptQuery = useInfiniteQuery(transcriptInfiniteQueryOptions(threadId, queryClient));
+  const messages = flattenTranscript(transcriptQuery.data);
+  const {
+    streamingToolCalls,
+    streamingToolOutputs,
+    streamingModelKey,
+    streamingKind,
+    streamingStartedAtMs,
+    streamingProviderRequest,
+    isStreaming,
+  } = useAppStore((state) => state.streamingByThread[threadId] || {
+    streamingToolCalls: {},
+    streamingToolOutputs: {},
+    streamingModelKey: null,
+    streamingKind: null,
+    streamingStartedAtMs: null,
+    streamingProviderRequest: null,
+    isStreaming: false,
+  });
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const hasActiveToolTiming = Object.values(streamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
   const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
@@ -1497,47 +1391,19 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   }, [finishAutoScrollSoon]);
 
   const loadOlderMessages = useCallback(async () => {
-    if (!currentThreadId || loadingOlderRef.current || isLoadingOlder || !hasOlderMessages) return;
+    if (loadingOlderRef.current || isLoadingOlder || !transcriptQuery.hasNextPage) return;
     const el = scrollRef.current;
-    const currentMessages = useAppStore.getState().messages;
-    const firstId = currentMessages[0]?.id;
-    if (!firstId) {
-      setHasOlderMessages(false);
-      return;
-    }
-
     const previousScrollHeight = el?.scrollHeight ?? 0;
     const previousScrollTop = el?.scrollTop ?? 0;
     loadingOlderRef.current = true;
     setIsLoadingOlder(true);
+    stickToBottomRef.current = false;
     try {
-      const olderSnapshot = await fetchMessages(currentThreadId, {
-        limit: INITIAL_TRANSCRIPT_MESSAGE_LIMIT,
-        beforeId: firstId,
-      });
-      const older = olderSnapshot.items as unknown as Message[];
-      if (older.length === 0) {
-        setHasOlderMessages(false);
-        return;
-      }
-
-      const latestMessages = useAppStore.getState().messages;
-      const existingIds = new Set(latestMessages.map((message) => message.id).filter(Boolean));
-      const uniqueOlder = older.filter((message: Message) => !existingIds.has(message.id));
-      if (uniqueOlder.length === 0) {
-        setHasOlderMessages(older.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
-        return;
-      }
-
-      stickToBottomRef.current = false;
-      setMessages([...uniqueOlder, ...latestMessages]);
-      setHasOlderMessages(older.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
-
+      await transcriptQuery.fetchNextPage();
       requestAnimationFrame(() => {
         const currentEl = scrollRef.current;
         if (!currentEl) return;
-        const delta = currentEl.scrollHeight - previousScrollHeight;
-        currentEl.scrollTop = previousScrollTop + delta;
+        currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
       });
     } catch (error) {
       console.error("Failed to load older messages:", error);
@@ -1545,10 +1411,8 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       loadingOlderRef.current = false;
       setIsLoadingOlder(false);
     }
-  }, [currentThreadId, hasOlderMessages, isLoadingOlder, setMessages]);
+  }, [isLoadingOlder, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
 
-  // Handle user scroll - scrolling up disables sticky mode; scrolling back to
-  // the bottom reenables it.  Programmatic scroll events should not disable it.
   const handleScroll = useCallback(() => {
     if (isAutoScrollingRef.current) return;
     stickToBottomRef.current = isAtBottom();
@@ -1618,8 +1482,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   }, [distanceFromBottom, scrollToBottomNow]);
 
   const flushStreamingText = useCallback(() => {
-    // Import here to avoid SSR issues
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    const streamingBuffer = streamingBufferForThread(threadId);
     let appended = false;
 
     if (streamingContentRef.current) {
@@ -1649,10 +1512,10 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     }
 
     if (appended) scrollToBottom();
-  }, [scrollToBottom]);
+  }, [scrollToBottom, threadId]);
 
   const flushStreamingToolOutput = useCallback(() => {
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    const streamingBuffer = streamingBufferForThread(threadId);
     let appended = false;
 
     streamingBuffer.toolOutputChunks.forEach((chunks, toolId) => {
@@ -1667,7 +1530,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     });
 
     if (appended) scrollToBottom();
-  }, [scrollToBottom]);
+  }, [scrollToBottom, threadId]);
 
   const scheduleStreamingTextFlush = useCallback(() => {
     if (streamingTextFlushRafRef.current !== null) return;
@@ -1696,7 +1559,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   // This is O(1) per chunk with direct DOM manipulation
   // Re-runs when isStreaming changes to catch up with buffered content when refs become available
   useEffect(() => {
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    const streamingBuffer = streamingBufferForThread(threadId);
 
     const unsubContent = streamingBuffer.subscribeContent(scheduleStreamingTextFlush);
     const unsubReasoning = streamingBuffer.subscribeReasoning(scheduleStreamingTextFlush);
@@ -1718,13 +1581,13 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         rafIdRef.current = null;
       }
     };
-  }, [isStreaming, flushStreamingText, scheduleInitialStreamingFlush, scheduleStreamingTextFlush]);
+  }, [isStreaming, flushStreamingText, scheduleInitialStreamingFlush, scheduleStreamingTextFlush, threadId]);
 
   // Subscribe to streaming tool-output preview updates. Like text streaming,
   // this writes chunks directly to DOM so large/fast tool output does not
   // trigger a React render per chunk.
   useEffect(() => {
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    const streamingBuffer = streamingBufferForThread(threadId);
 
     const unsubToolOutput = streamingBuffer.subscribeToolOutput(scheduleStreamingToolFlush);
     const timeoutId = isStreaming ? scheduleInitialStreamingFlush(flushStreamingToolOutput) : null;
@@ -1737,7 +1600,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         streamingToolFlushRafRef.current = null;
       }
     };
-  }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleInitialStreamingFlush, scheduleStreamingToolFlush]);
+  }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleInitialStreamingFlush, scheduleStreamingToolFlush, threadId]);
 
   // Reset DOM state when streaming stops
   useEffect(() => {
@@ -1761,48 +1624,12 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     }
   }, [isStreaming]);
 
-  const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ["messages", currentThreadId],
-    queryFn: () => fetchMessages(currentThreadId!, { limit: INITIAL_TRANSCRIPT_MESSAGE_LIMIT }),
-    enabled: !!currentThreadId,
-    retry: 3,
-    retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 5000),
-  });
-
-  // Sync fetched messages to store and scroll to bottom if we were sticky
-  useEffect(() => {
-    if (data) {
-      // Capture sticky state BEFORE DOM update.  Do not derive this from the
-      // current distance here: replacing the streaming block with the final
-      // message can shrink content and make an intentionally scrolled-up view
-      // look "at bottom" for one render.
-      const wasSticky = stickToBottomRef.current;
-      const fetchedMessages = (data.items || []) as unknown as Message[];
-      const currentMessages = useAppStore.getState().messages;
-      const merged = mergeFetchedTranscriptMessages(currentMessages, fetchedMessages);
-      setMessages(merged.messages);
-      setHasOlderMessages((previous) => (
-        merged.preservedLoadedScrollback
-          ? previous
-          : fetchedMessages.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT
-      ));
-      // Scroll to bottom after DOM update if we were at bottom before
-      if (wasSticky) {
-        // Double RAF: first waits for React render, second waits for paint
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            scrollToBottomNow();
-          });
-        });
-      }
-    }
-  }, [data, scrollToBottomNow, setMessages]);
+  const { isLoading, isError, refetch } = transcriptQuery;
 
   // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
     stickToBottomRef.current = true;
     loadingOlderRef.current = false;
-    setHasOlderMessages(false);
     setIsLoadingOlder(false);
     requestAnimationFrame(() => {
       scrollToBottomNow();
@@ -1830,15 +1657,6 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       });
     }
   }, [scrollToBottomNow, streamingToolCalls, streamingToolOutputs]);
-
-  // Scroll to bottom when UI-only messages are added (e.g., /cost, /help)
-  useEffect(() => {
-    if (scrollTrigger > 0 && stickToBottomRef.current) {
-      requestAnimationFrame(() => {
-        scrollToBottomNow();
-      });
-    }
-  }, [scrollToBottomNow, scrollTrigger]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -1876,7 +1694,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className={`eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
         <span>
-              Chat Messages · {messages.length.toLocaleString()} loaded{hasOlderMessages ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
+              Chat Messages · {messages.length.toLocaleString()} loaded{transcriptQuery.hasNextPage ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
           {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
           {isStreaming && !providerTimeText && genericStreamingTimeText ? ` | ${genericStreamingTimeText}` : ""}
         </span>
@@ -1910,7 +1728,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
             </div>
           ) : (
             <>
-              {messages.length > 0 && hasOlderMessages && (
+              {messages.length > 0 && transcriptQuery.hasNextPage && (
                 <div className="mb-4 flex justify-center">
                   <button
                     type="button"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, type Dispatch, type SetStateAction } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Paperclip, Send, Loader2, Terminal, StopCircle, X, ImageIcon } from "lucide-react";
@@ -8,6 +8,8 @@ import { sendMessage, executeCommand, isCommand, interruptThread, fetchAutocompl
 import type { AutocompleteSuggestion, ImageGenerationRequest } from "@/lib/api";
 import { attachmentFilename, attachmentPlaceholder, buildMessageContentWithAttachments, formatBytes, isImageContentPart, type AttachmentContentPart, type EggMessageContent } from "@/lib/contentParts";
 import { useAppStore } from "@/lib/store";
+import { appendClientTranscriptMessage, transcriptQueryKey } from "@/lib/transcript";
+import { beginOptimisticSend, completeOptimisticSend, createClientOperationId, rollbackOptimisticSend, type SendMessageOperation } from "@/lib/messageOperations";
 import { ProtectedImage } from "@/components/ProtectedFileLink";
 import clsx from "clsx";
 
@@ -26,9 +28,8 @@ function commandNameFromText(command: string): string {
 }
 
 interface MessageInputProps {
+  threadId: string;
   showBorders?: boolean;
-  stagedAttachments: AttachmentContentPart[];
-  setStagedAttachments: Dispatch<SetStateAction<AttachmentContentPart[]>>;
 }
 
 function dataTransferHasFiles(dataTransfer: DataTransfer | null): boolean {
@@ -68,7 +69,7 @@ function filesFromDataTransfer(dataTransfer: DataTransfer | null): File[] {
   return files.map((file, index) => ensureFileName(file, index));
 }
 
-export function MessageInput({ showBorders = true, stagedAttachments, setStagedAttachments }: MessageInputProps) {
+export function MessageInput({ threadId, showBorders = true }: MessageInputProps) {
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -87,32 +88,30 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const suggestionsRef = useRef<HTMLDivElement>(null);
   const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const dragDepthRef = useRef(0);
+  const pendingCommandOpsRef = useRef(new Map<string, number>());
+  const pendingImageOpsRef = useRef(new Map<string, number>());
   const router = useRouter();
   const queryClient = useQueryClient();
-  const currentThreadId = useAppStore((state) => state.currentThreadId);
-  const input = useAppStore((state) => (currentThreadId ? state.composerDraftByThread[currentThreadId] || "" : ""));
+  const currentThreadId = threadId;
+  const input = useAppStore((state) => state.composerDraftByThread[threadId] || "");
   const setComposerDraft = useAppStore((state) => state.setComposerDraft);
+  const stagedAttachments = useAppStore((state) => state.stagedAttachmentsByThread[threadId] || []);
+  const setStagedAttachments = useAppStore((state) => state.setStagedAttachments);
+  const appendStagedAttachments = useAppStore((state) => state.appendStagedAttachments);
   const openEditAnswerModal = useAppStore((state) => state.openEditAnswerModal);
   const setInput = useCallback((value: string) => {
     if (currentThreadId) setComposerDraft(currentThreadId, value);
   }, [currentThreadId, setComposerDraft]);
-  const isStreaming = useAppStore((state) => state.isStreaming);
-  const setIsStreaming = useAppStore((state) => state.setIsStreaming);
-  const setStreamingContent = useAppStore((state) => state.setStreamingContent);
-  const setStreamingReasoning = useAppStore((state) => state.setStreamingReasoning);
-  const setStreamingToolCalls = useAppStore((state) => state.setStreamingToolCalls);
-  const setStreamingToolOutputs = useAppStore((state) => state.setStreamingToolOutputs);
-  const setStreamingKind = useAppStore((state) => state.setStreamingKind);
-  const setStreamingStartedAtMs = useAppStore((state) => state.setStreamingStartedAtMs);
-  const setStreamingProviderRequest = useAppStore((state) => state.setStreamingProviderRequest);
+  const streamState = useAppStore((state) => state.streamingByThread[threadId]);
+  const isStreaming = streamState?.isStreaming || false;
+  const activeUserCommand = streamState?.activeUserCommand || null;
+  const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
-  const addMessage = useAppStore((state) => state.addMessage);
   const setTheme = useAppStore((state) => state.setTheme);
   const togglePanel = useAppStore((state) => state.togglePanel);
   const toggleBorders = useAppStore((state) => state.toggleBorders);
   const setEnterMode = useAppStore((state) => state.setEnterMode);
   const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
-  const activeUserCommand = useAppStore((state) => state.activeUserCommand);
   const enterMode = useAppStore((state) => state.enterMode);
 
   const { data: threadState } = useQuery({
@@ -131,42 +130,37 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   const imageModelOptions = imageModelsData?.models || [];
   const imageDefaultModel = imageModelsData?.default_model || "";
 
-  // Regular message mutation
+  // Regular messages are optimistic in the source thread's query cache.
   const messageMutation = useMutation({
-    mutationFn: (content: EggMessageContent) => sendMessage(currentThreadId!, content),
-    onMutate: (content: EggMessageContent) => {
-      // Immediately add message to store for instant display
-      addMessage({
-        id: `temp-${Date.now()}`,
-        role: "user",
-        content: content,
-        content_text: typeof content === "string" ? content : undefined,
-      });
-      setInput("");
+    mutationFn: ({ threadId: sourceThreadId, content }: SendMessageOperation) =>
+      sendMessage(sourceThreadId, content),
+    onMutate: (operation: SendMessageOperation) => {
+      beginOptimisticSend(queryClient, operation);
       setSuggestions([]);
       setShowSuggestions(false);
-      // Focus input after sending
       textareaRef.current?.focus();
     },
-    onSuccess: () => {
-      setStagedAttachments([]);
-      queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
+    onSuccess: (response, operation) => {
+      completeOptimisticSend(queryClient, operation, response.message_id);
+      queryClient.invalidateQueries({ queryKey: ["threadState", operation.threadId] });
       addSystemLog("Message sent", "success");
     },
-    onError: () => {
+    onError: (_error, operation) => {
+      rollbackOptimisticSend(queryClient, operation);
       addSystemLog("Failed to send message", "error");
     },
   });
 
   const uploadMutation = useMutation({
-    mutationFn: async (files: File[]) => {
-      if (!currentThreadId) throw new Error("No thread selected");
-      return Promise.all(files.map((file) => uploadAttachment(currentThreadId, file)));
-    },
-    onSuccess: (uploads) => {
-      setStagedAttachments((prev) => [...prev, ...uploads.map((upload) => upload.content_part)]);
+    mutationFn: async ({ threadId: sourceThreadId, files }: { threadId: string; operationId: string; files: File[] }) =>
+      Promise.all(files.map((file) => uploadAttachment(sourceThreadId, file))),
+    onSuccess: (uploads, operation) => {
+      appendStagedAttachments(
+        operation.threadId,
+        uploads.map((upload) => upload.content_part),
+      );
       addSystemLog(`Attached ${uploads.length} file${uploads.length === 1 ? "" : "s"}`, "success");
-      textareaRef.current?.focus();
+      if (operation.threadId === currentThreadId) textareaRef.current?.focus();
     },
     onError: (error) => {
       addSystemLog(error instanceof Error ? error.message : "Failed to upload attachment", "error");
@@ -175,29 +169,30 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
 
   const uploadFiles = (files: File[]) => {
     if (!files.length) return;
-    if (!currentThreadId) {
-      addSystemLog("Select a thread before attaching files", "error");
-      return;
-    }
-    uploadMutation.mutate(files);
+    uploadMutation.mutate({ threadId: currentThreadId, operationId: createClientOperationId("upload"), files });
   };
 
   const imageGenerationMutation = useMutation({
-    mutationFn: async ({ threadId, request }: { threadId: string; request: ImageGenerationRequest }) => {
+    mutationFn: async ({ threadId, request }: { threadId: string; operationId: string; request: ImageGenerationRequest }) => {
       const response = await generateThreadImage(threadId, request);
       return {
         artifactCount: response.content_parts.filter((part) => part.type === "artifact").length,
       };
     },
     onMutate: (variables) => {
-      setImagePendingStartedAtMs(Date.now());
+      const startedAt = Date.now();
+      pendingImageOpsRef.current.set(variables.operationId, startedAt);
+      setImagePendingStartedAtMs(startedAt);
       const label = variables.request.model || variables.request.backend || imageDefaultModel || "default image model";
       const prompt = variables.request.prompt.length > 120 ? `${variables.request.prompt.slice(0, 117).trimEnd()}...` : variables.request.prompt;
       addSystemLog(`Generating image with ${label}: ${prompt}`, "info");
     },
     onSuccess: (result, variables) => {
-      setImagePendingStartedAtMs(null);
+      pendingImageOpsRef.current.delete(variables.operationId);
       if (variables.threadId === currentThreadId) {
+        setImagePendingStartedAtMs(
+          pendingImageOpsRef.current.values().next().value ?? null,
+        );
         setImagePrompt("");
         setImageModel("");
         setImageCount("");
@@ -205,39 +200,35 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         setShowImageForm(false);
         queryClient.invalidateQueries({ queryKey: ["threadState", variables.threadId] });
       }
-      queryClient.invalidateQueries({ queryKey: ["messages", variables.threadId] });
+      queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
       const count = result.artifactCount;
       addSystemLog(
         `Generated ${count || "image"} artifact${count === 1 ? "" : "s"}; appended result to transcript`,
         "success",
       );
     },
-    onError: (error) => {
-      setImagePendingStartedAtMs(null);
+    onError: (error, variables) => {
+      pendingImageOpsRef.current.delete(variables.operationId);
+      if (variables.threadId === currentThreadId) {
+        setImagePendingStartedAtMs(pendingImageOpsRef.current.values().next().value ?? null);
+      }
       addSystemLog(error instanceof Error ? error.message : "Failed to generate image", "error");
     },
   });
 
   // Cancel/interrupt mutation
   const cancelMutation = useMutation({
-    mutationFn: () => interruptThread(currentThreadId!),
-    onSuccess: () => {
-      setStreamingContent("");
-      setStreamingReasoning("");
-      setStreamingToolCalls({});
-      setStreamingToolOutputs({});
-      setStreamingKind(null);
-      setStreamingStartedAtMs(null);
-      setStreamingProviderRequest(null);
-      setIsStreaming(false);
+    mutationFn: ({ threadId: sourceThreadId }: { threadId: string; operationId: string }) => interruptThread(sourceThreadId),
+    onSuccess: (_response, operation) => {
+      resetThreadStreaming(operation.threadId);
       // Refetch messages to get the saved partial content from backend
-      queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
-      queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
-      queryClient.invalidateQueries({ queryKey: ["threadSettings", currentThreadId] });
-      queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+      queryClient.invalidateQueries({ queryKey: transcriptQueryKey(operation.threadId) });
+      queryClient.invalidateQueries({ queryKey: ["threadState", operation.threadId] });
+      queryClient.invalidateQueries({ queryKey: ["threadSettings", operation.threadId] });
+      queryClient.invalidateQueries({ queryKey: ["toolCalls", operation.threadId] });
       addSystemLog("Streaming cancelled", "info");
-      // Set flag to focus after state update
-      setShouldFocusAfterCancel(true);
+      // Focus only if the user is still viewing the operation's source.
+      if (operation.threadId === currentThreadId) setShouldFocusAfterCancel(true);
     },
     onError: () => {
       addSystemLog("Failed to cancel streaming", "error");
@@ -246,10 +237,12 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
 
   // Command mutation
   const commandMutation = useMutation({
-    mutationFn: ({ command, staged }: { command: string; staged: AttachmentContentPart[] }) => executeCommand(currentThreadId!, command, staged),
-    onMutate: ({ command }: { command: string; staged: AttachmentContentPart[] }) => {
-      setCommandPendingStartedAtMs(Date.now());
-      setInput("");
+    mutationFn: ({ threadId: sourceThreadId, command, staged }: { threadId: string; operationId: string; command: string; staged: AttachmentContentPart[] }) => executeCommand(sourceThreadId, command, staged),
+    onMutate: ({ threadId: sourceThreadId, operationId: commandOperationId, command }: { threadId: string; operationId: string; command: string; staged: AttachmentContentPart[] }) => {
+      const startedAt = Date.now();
+      pendingCommandOpsRef.current.set(commandOperationId, startedAt);
+      setCommandPendingStartedAtMs(startedAt);
+      setComposerDraft(sourceThreadId, "");
       setSuggestions([]);
       setShowSuggestions(false);
       // Focus input after sending
@@ -257,30 +250,37 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       // For shell commands, show them in the chat
       if (command.startsWith('$')) {
         const nowIso = new Date().toISOString();
-        addMessage({
+        appendClientTranscriptMessage(queryClient, sourceThreadId, {
           id: `temp-${Date.now()}`,
           role: "user",
           content: command,
           timestamp: nowIso,
+          client_only: "command",
+          client_operation_id: commandOperationId,
         });
       }
       if (command.startsWith('/imageGenerate')) {
         const nowIso = new Date().toISOString();
-        addMessage({
+        appendClientTranscriptMessage(queryClient, sourceThreadId, {
           id: `cmd-start-${Date.now()}`,
           role: "system",
           content: "Starting /imageGenerate — generating image artifact and appending it to the transcript...",
           timestamp: nowIso,
+          client_only: "command",
+          client_operation_id: commandOperationId,
         });
       }
     },
     onSuccess: (response, variables) => {
-      setCommandPendingStartedAtMs(null);
+      pendingCommandOpsRef.current.delete(variables.operationId);
+      if (variables.threadId === currentThreadId) {
+        setCommandPendingStartedAtMs(pendingCommandOpsRef.current.values().next().value ?? null);
+      }
       if (response.success) {
         const isEditAnswerModalAction = response.data?.action === "open_edit_answer_modal";
-        if (isEditAnswerModalAction && currentThreadId) {
+        if (isEditAnswerModalAction && variables.threadId === currentThreadId) {
           openEditAnswerModal({
-            threadId: currentThreadId,
+            threadId: variables.threadId,
             draft: typeof response.data?.draft === "string" ? response.data.draft : "",
             sourceMsgId: typeof response.data?.source_msg_id === "string" ? response.data.source_msg_id : "",
             sourceKind: response.data?.source_kind === "assistant_note"
@@ -302,13 +302,15 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         // transcript area consistently (like /help).
         if (response.message && !response.data?.suppress_transcript) {
           const timestamp = response.finished_at || new Date().toISOString();
-          addMessage({
+          appendClientTranscriptMessage(queryClient, variables.threadId, {
             id: `cmd-${response.command_id || Date.now()}`,
             role: "system",
             content: response.message,
             command_name: response.command_name || commandNameFromText(variables.command),
             command_data: response.data,
             timestamp,
+            client_only: "command",
+            client_operation_id: variables.operationId,
           });
         }
         if (isEditAnswerModalAction) {
@@ -332,10 +334,11 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
           // Don't navigate to child - stay on parent
         } else if (response.data?.thread_id) {
-          // Thread created/switched/duplicated - refresh and navigate
+          // Thread created/switched/duplicated - refresh and navigate only if
+          // this command's source is still the visible composer.
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
           queryClient.invalidateQueries({ queryKey: ["threadChildren"] });
-          router.push(`/${response.data.thread_id}`);
+          if (variables.threadId === currentThreadId) router.push(`/${response.data.thread_id}`);
         } else if (response.data?.deleted_id) {
           // Thread deleted - refresh lists
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
@@ -345,50 +348,48 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
         // Model changed - always refresh settings so dropdown updates
         if (response.data?.model_key) {
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
-          queryClient.invalidateQueries({ queryKey: ["threadSettings", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
         }
 
         if (response.data?.action === "stage_attachment" && response.data?.content_part) {
-          setStagedAttachments((prev) => [...prev, response.data!.content_part as AttachmentContentPart]);
+          appendStagedAttachments(variables.threadId, [response.data!.content_part as AttachmentContentPart]);
         } else if (response.data?.action === "clear_staged_attachments") {
-          setStagedAttachments([]);
+          setStagedAttachments(variables.threadId, []);
         } else if (response.data?.action === "image_generation") {
-          queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
-          queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
+          queryClient.invalidateQueries({ queryKey: ["threadState", variables.threadId] });
         }
 
         if (response.data?.reload) {
           // Command requests a full refresh (e.g., /continue)
-          queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
-          queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
+          queryClient.invalidateQueries({ queryKey: ["toolCalls", variables.threadId] });
         }
 
         if (response.data?.tool_call_id) {
           // Shell command - refresh messages and tools
-          queryClient.invalidateQueries({ queryKey: ["messages", currentThreadId] });
-          queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(variables.threadId) });
+          queryClient.invalidateQueries({ queryKey: ["toolCalls", variables.threadId] });
         } else if (response.data?.name !== undefined) {
           // Thread renamed - refresh thread data
-          queryClient.invalidateQueries({ queryKey: ["thread", currentThreadId] });
+          queryClient.invalidateQueries({ queryKey: ["thread", variables.threadId] });
           queryClient.invalidateQueries({ queryKey: ["rootThreads"] });
         } else if (response.data?.action === "set_theme" && response.data?.theme) {
-          // Theme changed - apply it
-          setTheme(response.data.theme);
+          if (variables.threadId === currentThreadId) setTheme(response.data.theme);
         } else if (response.data?.action === "toggle" && response.data?.panel) {
-          // Toggle panel visibility
           const panel = response.data.panel as "chat" | "children" | "system";
-          togglePanel(panel);
+          if (variables.threadId === currentThreadId) togglePanel(panel);
         } else if (response.data?.action === "toggle_borders") {
-          // Toggle panel borders
-          toggleBorders();
+          if (variables.threadId === currentThreadId) toggleBorders();
         } else if (response.data?.action === "set_display_verbosity" && response.data?.display_verbosity) {
-          // Set transcript display verbosity
-          setDisplayVerbosity(response.data.display_verbosity as "max" | "medium" | "min");
+          if (variables.threadId === currentThreadId) {
+            setDisplayVerbosity(response.data.display_verbosity as "max" | "medium" | "min");
+          }
         } else if (response.data?.enter_mode) {
-          // Set Enter key mode
-          setEnterMode(response.data.enter_mode as "send" | "newline");
-        } else if (response.data?.action === "paste") {
-          // Paste from clipboard
+          if (variables.threadId === currentThreadId) {
+            setEnterMode(response.data.enter_mode as "send" | "newline");
+          }
+        } else if (response.data?.action === "paste" && variables.threadId === currentThreadId) {
           navigator.clipboard.readText().then((text) => {
             if (text && textareaRef.current) {
               const textarea = textareaRef.current;
@@ -410,19 +411,24 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       } else {
         // Show errors in chat for better visibility
         const timestamp = response.finished_at || new Date().toISOString();
-        addMessage({
+        appendClientTranscriptMessage(queryClient, variables.threadId, {
           id: `cmd-err-${response.command_id || Date.now()}`,
           role: "system",
           content: `Error: ${response.message}`,
           command_name: response.command_name || commandNameFromText(variables.command),
           command_data: response.data,
           timestamp,
+          client_only: "command",
+          client_operation_id: variables.operationId,
         });
         addSystemLog(response.message, "error");
       }
     },
-    onError: () => {
-      setCommandPendingStartedAtMs(null);
+    onError: (_error, variables) => {
+      pendingCommandOpsRef.current.delete(variables.operationId);
+      if (variables.threadId === currentThreadId) {
+        setCommandPendingStartedAtMs(pendingCommandOpsRef.current.values().next().value ?? null);
+      }
       addSystemLog("Failed to execute command", "error");
     },
   });
@@ -564,7 +570,10 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
   }, [currentThreadId, isStreaming, activeGetUserWait]);
 
   useEffect(() => {
-    setStagedAttachments([]);
+    // Mutation observers are component-global, but pending indicators are view
+    // state. Never carry thread A's spinner into thread B.
+    setCommandPendingStartedAtMs(null);
+    setImagePendingStartedAtMs(null);
     setShowImageForm(false);
     setImagePrompt("");
     setImageModel("");
@@ -628,9 +637,25 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
     if ((!trimmed && !hasAttachments) || !currentThreadId) return;
 
     if (isCommand(trimmed)) {
-      commandMutation.mutate({ command: trimmed, staged: stagedAttachments });
+      const commandOperationId = createClientOperationId("cmd");
+      setStagedAttachments(currentThreadId, []);
+      commandMutation.mutate(
+        { threadId: currentThreadId, operationId: commandOperationId, command: trimmed, staged: stagedAttachments },
+        {
+          onError: () => {
+            setComposerDraft(currentThreadId, input);
+            setStagedAttachments(currentThreadId, stagedAttachments);
+          },
+        },
+      );
     } else {
-      messageMutation.mutate(buildMessageContentWithAttachments(trimmed, stagedAttachments));
+      messageMutation.mutate({
+        threadId: currentThreadId,
+        operationId: createClientOperationId("temp"),
+        content: buildMessageContentWithAttachments(trimmed, stagedAttachments),
+        draft: input,
+        attachments: [...stagedAttachments],
+      });
     }
   };
 
@@ -698,7 +723,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
       ...(imageCount ? { n: Number(imageCount) } : {}),
       ...(imageSize.trim() ? { size: imageSize.trim() } : {}),
     };
-    imageGenerationMutation.mutate({ threadId: currentThreadId, request });
+    imageGenerationMutation.mutate({ threadId: currentThreadId, operationId: createClientOperationId("image"), request });
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -867,7 +892,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
                 </div>
                 <button
                   type="button"
-                  onClick={() => setStagedAttachments((prev) => prev.filter((_, i) => i !== index))}
+                  onClick={() => setStagedAttachments(currentThreadId, stagedAttachments.filter((_, i) => i !== index))}
                   className="ml-1 rounded p-1 hover:bg-red-500/20"
                   title="Remove attachment"
                   aria-label={`Remove attachment ${attachmentFilename(attachment)}`}
@@ -1073,7 +1098,7 @@ export function MessageInput({ showBorders = true, stagedAttachments, setStagedA
           )}
           {isStreaming && (
             <button
-              onClick={() => cancelMutation.mutate()}
+              onClick={() => cancelMutation.mutate({ threadId: currentThreadId, operationId: createClientOperationId("interrupt") })}
               disabled={cancelMutation.isPending}
               className="eggw-composer-action eggw-composer-action-danger"
               title="Cancel streaming (Escape)"

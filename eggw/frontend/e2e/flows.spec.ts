@@ -952,6 +952,76 @@ test.describe('Streaming', () => {
   });
 });
 
+test.describe('Per-thread transcript state', () => {
+  test('preserves paginated thread A while navigating to thread B and back', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadA = 'pagination-thread-a';
+    const threadB = 'pagination-thread-b';
+    const routes = async (threadId: string) => {
+      await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), (route) => route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: '',
+      }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { state: 'waiting_user', streaming_invoke_id: null, active_get_user_wait: false } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [] }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { enabled: false, effective: false, available: false, user_control_enabled: true } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: false } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, (route) => route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: threadId === threadA ? [{ id: threadB, name: threadB, has_children: false }] : [],
+      }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { context_tokens: 0, cost_usd: 0 } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}`, (route) => route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { id: threadId, name: threadId, has_children: threadId === threadA, ...(threadId === threadB ? { parent_id: threadA } : {}) },
+      }));
+    };
+    await routes(threadA);
+    await routes(threadB);
+    await page.route(`${TEST_API_BASE}/api/models`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { models: [] } }));
+    await page.route(`${TEST_API_BASE}/api/image-models`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { models: [] } }));
+    await page.route(`${TEST_API_BASE}/api/threads/roots`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [
+      { id: threadA, name: threadA, has_children: false },
+      { id: threadB, name: threadB, has_children: false },
+    ] }));
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [] }));
+    await page.route(new RegExp(`/api/threads/${threadA}/messages(?:\\?.*)?$`), async (route, request) => {
+      const url = new URL(request.url());
+      const beforeId = url.searchParams.get('before_id');
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: beforeId
+        ? { items: [{ id: 'a-old', role: 'user', content: 'thread a old' }], snapshot_cursor: 7, next_before: null }
+        : { items: [{ id: 'a-new', role: 'user', content: 'thread a new' }], snapshot_cursor: 7, next_before: 'a-new' } });
+    });
+    await page.route(new RegExp(`/api/threads/${threadB}/messages(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { items: [{ id: 'b-new', role: 'user', content: 'thread b only' }], snapshot_cursor: 9, next_before: null },
+    }));
+
+    await page.goto(`/${threadA}`);
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
+    await page.getByTestId('load-older-messages').click();
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
+
+    await page.getByRole('button', { name: new RegExp(threadB) }).click();
+    await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
+    await expect(page.getByTestId('chat-panel')).toContainText('thread b only');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('thread a old');
+
+    await page.getByRole('button', { name: /Parent/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/${threadA}$`));
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('thread b only');
+  });
+});
+
 test.describe('Live Tool Streaming', () => {
   test('keeps tool arguments visible while the tool is running', async ({ page }) => {
     await page.addInitScript(() => {
@@ -969,16 +1039,26 @@ test.describe('Live Tool Streaming', () => {
           'id: 1',
           'event: stream.open',
           `data: ${JSON.stringify({
+            event_id: 'event-stream-open',
+            event_seq: 1,
             type: 'stream.open',
             ts: startedAt,
+            msg_id: null,
+            invoke_id: 'invoke-running-tool',
+            chunk_seq: null,
             payload: { stream_kind: 'tool' },
           })}`,
           '',
           'id: 2',
           'event: tool_call.execution_started',
           `data: ${JSON.stringify({
+            event_id: 'event-tool-started',
+            event_seq: 2,
             type: 'tool_call.execution_started',
             ts: startedAt,
+            msg_id: null,
+            invoke_id: 'invoke-running-tool',
+            chunk_seq: null,
             payload: {
               tool_call_id: toolCallId,
               name: 'bash',
@@ -1032,7 +1112,7 @@ test.describe('Live Tool Streaming', () => {
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: { state: 'running', active_get_user_wait: false },
+        json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-running-tool', active_get_user_wait: false },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {

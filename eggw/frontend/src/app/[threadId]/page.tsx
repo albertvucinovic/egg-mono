@@ -12,11 +12,13 @@ import { EditAnswerModal } from "@/components/EditAnswerModal";
 import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
 import { createThread, openThread, interruptThread, fetchThread, executeCommand, fetchSandboxStatus, SandboxStatus, fetchModels, fetchThreadSettings, setThreadModel, setAutoApproval, fetchTokenStats } from "@/lib/api";
-import type { AttachmentContentPart } from "@/lib/contentParts";
 import { useMutation } from "@tanstack/react-query";
 import { PanelRight } from "lucide-react";
 import clsx from "clsx";
 import { formatTokenCount } from "@/lib/tps";
+import { transcriptQueryKey } from "@/lib/transcript";
+import { streamingBufferForThread } from "@/lib/streamingBuffer";
+import { createClientOperationId } from "@/lib/messageOperations";
 
 export default function ThreadPage() {
   const params = useParams();
@@ -27,16 +29,10 @@ export default function ThreadPage() {
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const setCurrentThreadId = useAppStore((state) => state.setCurrentThreadId);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
-  const isStreaming = useAppStore((state) => state.isStreaming);
-  const streamingKind = useAppStore((state) => state.streamingKind);
-  const setIsStreaming = useAppStore((state) => state.setIsStreaming);
-  const setStreamingContent = useAppStore((state) => state.setStreamingContent);
-  const setStreamingReasoning = useAppStore((state) => state.setStreamingReasoning);
-  const setStreamingToolCalls = useAppStore((state) => state.setStreamingToolCalls);
-  const setStreamingToolOutputs = useAppStore((state) => state.setStreamingToolOutputs);
-  const setStreamingKind = useAppStore((state) => state.setStreamingKind);
-  const setStreamingStartedAtMs = useAppStore((state) => state.setStreamingStartedAtMs);
-  const setStreamingProviderRequest = useAppStore((state) => state.setStreamingProviderRequest);
+  const streamState = useAppStore((state) => state.streamingByThread[threadId]);
+  const isStreaming = streamState?.isStreaming || false;
+  const streamingKind = streamState?.streamingKind || null;
+  const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
   const panelVisibility = useAppStore((state) => state.panelVisibility);
   const togglePanel = useAppStore((state) => state.togglePanel);
   const showBorders = useAppStore((state) => state.showBorders);
@@ -47,10 +43,10 @@ export default function ThreadPage() {
   const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
   const setComposerDraft = useAppStore((state) => state.setComposerDraft);
   const [showHelp, setShowHelp] = useState(false);
-  const [stagedAttachments, setStagedAttachments] = useState<AttachmentContentPart[]>([]);
-  const stageAttachment = useCallback((attachment: AttachmentContentPart) => {
-    setStagedAttachments((prev) => [...prev, attachment]);
-  }, []);
+  const appendStagedAttachments = useAppStore((state) => state.appendStagedAttachments);
+  const stageAttachment = useCallback((attachment: import("@/lib/contentParts").AttachmentContentPart) => {
+    appendStagedAttachments(threadId, [attachment]);
+  }, [appendStagedAttachments, threadId]);
 
   // Sync URL thread ID to store on mount and when URL changes
   useEffect(() => {
@@ -97,7 +93,7 @@ export default function ThreadPage() {
   });
 
   // Fetch thread settings for model and auto-approval
-  const { data: threadSettings, refetch: refetchSettings } = useQuery({
+  const { data: threadSettings } = useQuery({
     queryKey: ["threadSettings", threadId],
     queryFn: () => fetchThreadSettings(threadId),
     enabled: !!threadId,
@@ -106,45 +102,47 @@ export default function ThreadPage() {
 
   // Model change mutation
   const modelMutation = useMutation({
-    mutationFn: ({ threadId, modelKey }: { threadId: string; modelKey: string }) =>
+    mutationFn: ({ threadId, modelKey }: { threadId: string; operationId: string; modelKey: string }) =>
       setThreadModel(threadId, modelKey),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       addSystemLog("Model changed", "success");
-      refetchSettings();
+      queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
     },
-    onError: () => {
+    onError: (_error, variables) => {
       addSystemLog("Failed to change model", "error");
-      refetchSettings();
+      queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
     },
   });
 
   // Auto-approval toggle mutation
   const autoApprovalMutation = useMutation({
-    mutationFn: (enabled: boolean) => setAutoApproval(threadId, enabled),
-    onSuccess: (data) => {
+    mutationFn: ({ threadId: sourceThreadId, enabled }: { threadId: string; operationId: string; enabled: boolean }) => setAutoApproval(sourceThreadId, enabled),
+    onSuccess: (data, variables) => {
       addSystemLog(
         `Auto-approval ${data.auto_approval ? "enabled" : "disabled"}`,
         "success"
       );
-      refetchSettings();
+      queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
     },
-    onError: () => {
+    onError: (_error, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
       addSystemLog("Failed to toggle auto-approval", "error");
     },
   });
 
   // Sandbox toggle mutation
   const sandboxMutation = useMutation({
-    mutationFn: () => executeCommand(threadId, "/toggleSandboxing"),
-    onSuccess: (result) => {
+    mutationFn: ({ threadId: sourceThreadId }: { threadId: string; operationId: string }) => executeCommand(sourceThreadId, "/toggleSandboxing"),
+    onSuccess: (result, variables) => {
       if (result.success) {
         addSystemLog(result.message, "success");
       } else {
         addSystemLog(result.message, "error");
       }
-      queryClient.invalidateQueries({ queryKey: ["sandbox", threadId] });
+      queryClient.invalidateQueries({ queryKey: ["sandbox", variables.threadId] });
     },
-    onError: () => {
+    onError: (_error, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["sandbox", variables.threadId] });
       addSystemLog("Failed to toggle sandboxing", "error");
     },
   });
@@ -178,16 +176,10 @@ export default function ThreadPage() {
       if (isStreaming && threadId) {
         e.preventDefault();
         interruptThread(threadId).then(() => {
-          setStreamingContent("");
-          setStreamingReasoning("");
-          setStreamingToolCalls({});
-          setStreamingToolOutputs({});
-          setStreamingKind(null);
-          setStreamingStartedAtMs(null);
-          setStreamingProviderRequest(null);
-          setIsStreaming(false);
+          resetThreadStreaming(threadId);
+          streamingBufferForThread(threadId).clear();
           // Refetch messages to get the saved partial content from backend
-          queryClient.invalidateQueries({ queryKey: ["messages", threadId] });
+          queryClient.invalidateQueries({ queryKey: transcriptQueryKey(threadId) });
           queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
           queryClient.invalidateQueries({ queryKey: ["threadSettings", threadId] });
           queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -287,7 +279,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, setIsStreaming, setStreamingContent, setStreamingReasoning, setStreamingToolCalls, setStreamingToolOutputs, setStreamingKind, setStreamingStartedAtMs, setStreamingProviderRequest, router]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
@@ -436,7 +428,7 @@ export default function ThreadPage() {
                 value={currentModelKey}
                 onChange={(e) => {
                   if (threadId && e.target.value) {
-                    modelMutation.mutate({ threadId: threadId, modelKey: e.target.value });
+                    modelMutation.mutate({ threadId, operationId: createClientOperationId("model"), modelKey: e.target.value });
                   }
                 }}
                 disabled={modelMutation.isPending}
@@ -467,7 +459,7 @@ export default function ThreadPage() {
             <div className="flex items-center gap-1.5">
               <span style={{ color: "var(--muted)" }}>Auto:</span>
               <button
-                onClick={() => autoApprovalMutation.mutate(!threadSettings?.auto_approval)}
+                onClick={() => autoApprovalMutation.mutate({ threadId, operationId: createClientOperationId("auto-approval"), enabled: !threadSettings?.auto_approval })}
                 disabled={autoApprovalMutation.isPending}
                 title={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"}
                 className={clsx(
@@ -508,7 +500,7 @@ export default function ThreadPage() {
                 Sandbox[{sandboxStatus.effective ? "ON" : sandboxStatus.enabled ? "!" : "OFF"}]
               </span>
               <button
-                onClick={() => sandboxMutation.mutate()}
+                onClick={() => sandboxMutation.mutate({ threadId, operationId: createClientOperationId("sandbox") })}
                 disabled={sandboxMutation.isPending || sandboxStatus?.user_control_enabled === false}
                 title={sandboxStatus?.user_control_enabled === false ? "User sandbox control is disabled" : "Toggle sandboxing"}
                 className={clsx(
@@ -564,17 +556,14 @@ export default function ThreadPage() {
           {panelVisibility.children && <ChildrenPanel showBorders={showBorders} />}
           {panelVisibility.chat && (
             <ChatPanel
+              threadId={threadId}
               showBorders={showBorders}
               streamingTps={tokenStats?.streaming_tps ?? null}
               onStageAttachment={stageAttachment}
             />
           )}
-          <ApprovalPanel showBorders={showBorders} />
-          <MessageInput
-            showBorders={showBorders}
-            stagedAttachments={stagedAttachments}
-            setStagedAttachments={setStagedAttachments}
-          />
+          <ApprovalPanel threadId={threadId} showBorders={showBorders} />
+          <MessageInput threadId={threadId} showBorders={showBorders} />
         </div>
 
         {/* Right sidebar - System log */}

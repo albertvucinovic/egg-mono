@@ -4,53 +4,57 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, X, AlertTriangle, CheckCheck, FileText } from "lucide-react";
 import { fetchToolCalls, approveTool } from "@/lib/api";
 import { useAppStore, ToolCall } from "@/lib/store";
+import { createClientOperationId } from "@/lib/messageOperations";
 
 interface ApprovalPanelProps {
+  threadId: string;
   showBorders?: boolean;
 }
 
-export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
+export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelProps) {
   const queryClient = useQueryClient();
-  const currentThreadId = useAppStore((state) => state.currentThreadId);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
 
   // Tool calls are updated via SSE events - no polling needed
   // SSE uses db.path to ensure cross-process events (e.g., TUI approvals) are seen
   const { data: toolCalls } = useQuery({
-    queryKey: ["toolCalls", currentThreadId],
-    queryFn: () => fetchToolCalls(currentThreadId!),
-    enabled: !!currentThreadId,
+    queryKey: ["toolCalls", threadId],
+    queryFn: () => fetchToolCalls(threadId),
+    enabled: !!threadId,
   });
 
   const approveMutation = useMutation({
     mutationFn: ({
+      threadId: sourceThreadId,
       toolCallId,
       approved,
       outputDecision,
       decision,
     }: {
+      threadId: string;
+      operationId: string;
       toolCallId: string;
       approved: boolean;
       outputDecision?: string;
       decision?: string;
-    }) => approveTool(currentThreadId!, toolCallId, approved, outputDecision, decision),
+    }) => approveTool(sourceThreadId, toolCallId, approved, outputDecision, decision),
     // Optimistic update - remove from list immediately on click
-    onMutate: async ({ toolCallId }) => {
-      await queryClient.cancelQueries({ queryKey: ["toolCalls", currentThreadId] });
-      const previous = queryClient.getQueryData(["toolCalls", currentThreadId]);
-      queryClient.setQueryData(["toolCalls", currentThreadId], (old: ToolCall[] | undefined) =>
+    onMutate: async ({ threadId: sourceThreadId, toolCallId }) => {
+      await queryClient.cancelQueries({ queryKey: ["toolCalls", sourceThreadId] });
+      const previous = queryClient.getQueryData(["toolCalls", sourceThreadId]);
+      queryClient.setQueryData(["toolCalls", sourceThreadId], (old: ToolCall[] | undefined) =>
         old?.filter((tc) => tc.id !== toolCallId) ?? []
       );
-      return { previous };
+      return { previous, threadId: sourceThreadId };
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["toolCalls", currentThreadId] });
-      queryClient.invalidateQueries({ queryKey: ["threadState", currentThreadId] });
+    onSuccess: (_response, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["toolCalls", variables.threadId] });
+      queryClient.invalidateQueries({ queryKey: ["threadState", variables.threadId] });
       addSystemLog("Tool approval updated", "success");
     },
     onError: (_err, _vars, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(["toolCalls", currentThreadId], context.previous);
+        queryClient.setQueryData(["toolCalls", context.threadId], context.previous);
       }
       addSystemLog("Failed to approve tool", "error");
     },
@@ -144,7 +148,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                 <>
                   <button
                     onClick={() =>
-                      approveMutation.mutate({ toolCallId: tc.id, approved: true })
+                      approveMutation.mutate({ threadId, operationId: createClientOperationId("approval"), toolCallId: tc.id, approved: true })
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
                     style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--tool-msg-border))" }}
@@ -154,7 +158,7 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                   </button>
                   <button
                     onClick={() =>
-                      approveMutation.mutate({ toolCallId: tc.id, approved: false })
+                      approveMutation.mutate({ threadId, operationId: createClientOperationId("approval"), toolCallId: tc.id, approved: false })
                     }
                     className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
                     style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--user-msg-border))" }}
@@ -165,6 +169,8 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                   <button
                     onClick={() =>
                       approveMutation.mutate({
+                        threadId,
+                        operationId: createClientOperationId("approval"),
                         toolCallId: tc.id,
                         approved: true,
                         decision: "all-in-turn",
@@ -182,6 +188,8 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                   <button
                     onClick={() =>
                       approveMutation.mutate({
+                        threadId,
+                        operationId: createClientOperationId("approval"),
                         toolCallId: tc.id,
                         approved: true,
                         outputDecision: "whole",
@@ -196,6 +204,8 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                   <button
                     onClick={() =>
                       approveMutation.mutate({
+                        threadId,
+                        operationId: createClientOperationId("approval"),
                         toolCallId: tc.id,
                         approved: true,
                         outputDecision: "partial",
@@ -210,6 +220,8 @@ export function ApprovalPanel({ showBorders = true }: ApprovalPanelProps) {
                   <button
                     onClick={() =>
                       approveMutation.mutate({
+                        threadId,
+                        operationId: createClientOperationId("approval"),
                         toolCallId: tc.id,
                         approved: false,
                         outputDecision: "omit",

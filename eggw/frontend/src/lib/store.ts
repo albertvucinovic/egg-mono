@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { EggMessageContent } from "./contentParts";
+import type { AttachmentContentPart, EggMessageContent } from "./contentParts";
 
 export interface Thread {
   id: string;
@@ -36,24 +36,8 @@ export interface Message {
   recovery_notice?: boolean;
   command_name?: string;
   command_data?: Record<string, any>;
-}
-
-function messageTimestampMs(message: Pick<Message, "timestamp">): number | null {
-  if (typeof message.timestamp !== "string" || !message.timestamp) return null;
-  const parsed = Date.parse(message.timestamp);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function insertMessageByTimestamp(messages: Message[], message: Message): Message[] {
-  const messageMs = messageTimestampMs(message);
-  if (messageMs === null) return [...messages, message];
-
-  const insertAt = messages.findIndex((candidate) => {
-    const candidateMs = messageTimestampMs(candidate);
-    return candidateMs !== null && candidateMs > messageMs;
-  });
-  if (insertAt === -1) return [...messages, message];
-  return [...messages.slice(0, insertAt), message, ...messages.slice(insertAt)];
+  client_only?: "optimistic" | "command";
+  client_operation_id?: string;
 }
 
 export interface ToolCall {
@@ -96,6 +80,41 @@ export interface ActiveUserCommand {
   command: string;
   startedAtMs: number;
   timeoutSec?: number;
+}
+
+export type SSEConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting";
+
+export interface ThreadStreamingState {
+  isStreaming: boolean;
+  invokeId: string | null;
+  streamingModelKey: string | null;
+  streamingKind: string | null;
+  streamingStartedAtMs: number | null;
+  streamingProviderRequest: StreamingProviderRequest | null;
+  activeUserCommand: ActiveUserCommand | null;
+  streamingToolCalls: Record<string, { name: string; arguments: string }>;
+  streamingToolOutputs: Record<string, StreamingToolOutput>;
+}
+
+export interface ThreadConnectionState {
+  status: SSEConnectionStatus;
+  lastEventSeq: number;
+}
+
+const EMPTY_THREAD_STREAMING_STATE: ThreadStreamingState = {
+  isStreaming: false,
+  invokeId: null,
+  streamingModelKey: null,
+  streamingKind: null,
+  streamingStartedAtMs: null,
+  streamingProviderRequest: null,
+  activeUserCommand: null,
+  streamingToolCalls: {},
+  streamingToolOutputs: {},
+};
+
+export function emptyThreadStreamingState(): ThreadStreamingState {
+  return { ...EMPTY_THREAD_STREAMING_STATE };
 }
 
 export interface SystemLog {
@@ -141,15 +160,15 @@ interface AppState {
   threads: Thread[];
   setThreads: (threads: Thread[]) => void;
 
-  // Messages
-  messages: Message[];
-  setMessages: (messages: Message[]) => void;
-  addMessage: (message: Message) => void;
-
   // Thread-scoped composer drafts
   composerDraftByThread: Record<string, string>;
   setComposerDraft: (threadId: string, text: string) => void;
   appendComposerDraft: (threadId: string, text: string) => void;
+
+  // Thread-scoped staged inputs survive navigation and async completion.
+  stagedAttachmentsByThread: Record<string, AttachmentContentPart[]>;
+  setStagedAttachments: (threadId: string, attachments: AttachmentContentPart[]) => void;
+  appendStagedAttachments: (threadId: string, attachments: AttachmentContentPart[]) => void;
 
   // Edit-answer modal
   editAnswerModal: EditAnswerModalState;
@@ -157,30 +176,19 @@ interface AppState {
   closeEditAnswerModal: () => void;
   setEditAnswerDraft: (text: string) => void;
 
-  // Streaming content - stored as array of chunks for O(1) append
-  streamingContent: string;
-  streamingContentChunks: string[];
-  setStreamingContent: (content: string) => void;
-  appendStreamingContent: (chunk: string) => void;
-
-  // Streaming reasoning - stored as array of chunks for O(1) append
-  streamingReasoning: string;
-  streamingReasoningChunks: string[];
-  setStreamingReasoning: (content: string) => void;
-  appendStreamingReasoning: (chunk: string) => void;
-
-  // Streaming tool calls (tool_call_id -> {name, arguments})
-  streamingToolCalls: Record<string, { name: string; arguments: string }>;
-  setStreamingToolCalls: (tcs: Record<string, { name: string; arguments: string }>) => void;
-  upsertStreamingToolCall: (tcId: string, name: string, args: string) => void;
-  appendToolCallArguments: (tcId: string, name: string, argsDelta: string) => void;
-
-  // Streaming tool output previews (tool_call_id -> metadata; text lives in streamingBuffer)
-  streamingToolOutputs: Record<string, StreamingToolOutput>;
-  setStreamingToolOutputs: (outputs: Record<string, StreamingToolOutput>) => void;
-  upsertStreamingToolOutput: (id: string, name: string, suppressed?: boolean, summary?: string) => void;
-  markStreamingToolStarted: (id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => void;
-  clearStreamingToolTimeout: (id: string) => void;
+  // Thread-scoped ephemeral run state. Persisted messages live in React Query.
+  streamingByThread: Record<string, ThreadStreamingState>;
+  connectionByThread: Record<string, ThreadConnectionState>;
+  patchThreadStreaming: (threadId: string, patch: Partial<ThreadStreamingState>) => void;
+  resetThreadStreaming: (threadId: string) => void;
+  setThreadConnection: (threadId: string, connection: ThreadConnectionState) => void;
+  setThreadStreamingToolCalls: (threadId: string, calls: Record<string, { name: string; arguments: string }>) => void;
+  upsertThreadStreamingToolCall: (threadId: string, tcId: string, name: string, args: string) => void;
+  appendThreadToolCallArguments: (threadId: string, tcId: string, name: string, argsDelta: string) => void;
+  setThreadStreamingToolOutputs: (threadId: string, outputs: Record<string, StreamingToolOutput>) => void;
+  upsertThreadStreamingToolOutput: (threadId: string, id: string, name: string, suppressed?: boolean, summary?: string) => void;
+  markThreadStreamingToolStarted: (threadId: string, id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => void;
+  clearThreadStreamingToolTimeout: (threadId: string, id: string) => void;
 
   // Tool calls
   pendingTools: ToolCall[];
@@ -194,20 +202,6 @@ interface AppState {
   // Models
   models: { key: string; provider: string; model_id: string }[];
   setModels: (models: { key: string; provider: string; model_id: string }[]) => void;
-
-  // UI state
-  isStreaming: boolean;
-  setIsStreaming: (streaming: boolean) => void;
-  streamingModelKey: string | null;
-  setStreamingModelKey: (key: string | null) => void;
-  streamingKind: string | null;
-  setStreamingKind: (kind: string | null) => void;
-  streamingStartedAtMs: number | null;
-  setStreamingStartedAtMs: (startedAtMs: number | null) => void;
-  streamingProviderRequest: StreamingProviderRequest | null;
-  setStreamingProviderRequest: (request: StreamingProviderRequest | null) => void;
-  activeUserCommand: ActiveUserCommand | null;
-  setActiveUserCommand: (command: ActiveUserCommand | null) => void;
 
   // Panel visibility
   panelVisibility: { chat: boolean; children: boolean; system: boolean };
@@ -224,45 +218,16 @@ interface AppState {
   // Theme
   theme: string;
   setTheme: (theme: string) => void;
-
-  // Scroll trigger - incremented when UI-only messages are added
-  scrollTrigger: number;
-  triggerScroll: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
   // Current thread
   currentThreadId: null,
-  setCurrentThreadId: (id) => set({
-    currentThreadId: id,
-    // Clear messages immediately for instant UI feedback when switching threads
-    messages: [],
-    streamingContent: "",
-    streamingContentChunks: [],
-    streamingReasoning: "",
-    streamingReasoningChunks: [],
-    streamingToolCalls: {},
-    streamingToolOutputs: {},
-    streamingModelKey: null,
-    streamingKind: null,
-    streamingStartedAtMs: null,
-    streamingProviderRequest: null,
-    activeUserCommand: null,
-    isStreaming: false,
-  }),
+  setCurrentThreadId: (id) => set({ currentThreadId: id }),
 
   // Threads
   threads: [],
   setThreads: (threads) => set({ threads }),
-
-  // Messages
-  messages: [],
-  setMessages: (messages) => set({ messages }),
-  addMessage: (message) =>
-    set((state) => ({
-      messages: insertMessageByTimestamp(state.messages, message),
-      scrollTrigger: state.scrollTrigger + 1,  // Trigger scroll when UI-only message added
-    })),
 
   // Thread-scoped composer drafts
   composerDraftByThread: {},
@@ -285,6 +250,19 @@ export const useAppStore = create<AppState>((set) => ({
       };
     }),
 
+  stagedAttachmentsByThread: {},
+  setStagedAttachments: (threadId, attachments) =>
+    set((state) => ({
+      stagedAttachmentsByThread: { ...state.stagedAttachmentsByThread, [threadId]: attachments },
+    })),
+  appendStagedAttachments: (threadId, attachments) =>
+    set((state) => ({
+      stagedAttachmentsByThread: {
+        ...state.stagedAttachmentsByThread,
+        [threadId]: [...(state.stagedAttachmentsByThread[threadId] || []), ...attachments],
+      },
+    })),
+
   // Edit-answer modal
   editAnswerModal: CLOSED_EDIT_ANSWER_MODAL,
   openEditAnswerModal: (payload) =>
@@ -302,120 +280,129 @@ export const useAppStore = create<AppState>((set) => ({
         : state.editAnswerModal,
     })),
 
-  // Streaming content - use chunks array for O(1) append
-  // Components should use streamingContentChunks.join("") for display (memoized)
-  streamingContent: "",  // Kept for backwards compat, set on clear only
-  streamingContentChunks: [],
-  setStreamingContent: (content) => set({
-    streamingContent: content,
-    streamingContentChunks: content ? [content] : [],
-  }),
-  appendStreamingContent: (chunk) =>
+  // Thread-scoped run and transport state
+  streamingByThread: {},
+  connectionByThread: {},
+  patchThreadStreaming: (threadId, patch) =>
     set((state) => ({
-      // O(1) array spread - no join here, components memoize the join
-      streamingContentChunks: [...state.streamingContentChunks, chunk],
+      streamingByThread: {
+        ...state.streamingByThread,
+        [threadId]: { ...(state.streamingByThread[threadId] || emptyThreadStreamingState()), ...patch },
+      },
     })),
-
-  // Streaming reasoning - use chunks array for O(1) append
-  streamingReasoning: "",  // Kept for backwards compat, set on clear only
-  streamingReasoningChunks: [],
-  setStreamingReasoning: (content) => set({
-    streamingReasoning: content,
-    streamingReasoningChunks: content ? [content] : [],
-  }),
-  appendStreamingReasoning: (chunk) =>
+  resetThreadStreaming: (threadId) =>
     set((state) => ({
-      streamingReasoningChunks: [...state.streamingReasoningChunks, chunk],
+      streamingByThread: { ...state.streamingByThread, [threadId]: emptyThreadStreamingState() },
     })),
-
-  // Streaming tool calls
-  streamingToolCalls: {},
-  setStreamingToolCalls: (tcs) => set({ streamingToolCalls: tcs }),
-  upsertStreamingToolCall: (tcId, name, args) =>
+  setThreadConnection: (threadId, connection) =>
+    set((state) => ({ connectionByThread: { ...state.connectionByThread, [threadId]: connection } })),
+  setThreadStreamingToolCalls: (threadId, calls) =>
+    set((state) => ({
+      streamingByThread: {
+        ...state.streamingByThread,
+        [threadId]: { ...(state.streamingByThread[threadId] || emptyThreadStreamingState()), streamingToolCalls: calls },
+      },
+    })),
+  upsertThreadStreamingToolCall: (threadId, tcId, name, args) =>
     set((state) => {
-      const existing = state.streamingToolCalls[tcId] || { name: "", arguments: "" };
+      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
+      const existing = streaming.streamingToolCalls[tcId] || { name: "", arguments: "" };
       const nextArgs = args && args.length >= existing.arguments.length ? args : existing.arguments;
       return {
-        streamingToolCalls: {
-          ...state.streamingToolCalls,
-          [tcId]: {
-            name: name || existing.name,
-            arguments: nextArgs,
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: {
+            ...streaming,
+            streamingToolCalls: {
+              ...streaming.streamingToolCalls,
+              [tcId]: { name: name || existing.name, arguments: nextArgs },
+            },
           },
         },
       };
     }),
-  appendToolCallArguments: (tcId, name, argsDelta) =>
+  appendThreadToolCallArguments: (threadId, tcId, name, argsDelta) =>
     set((state) => {
-      const existing = state.streamingToolCalls[tcId] || { name: "", arguments: "" };
+      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
+      const existing = streaming.streamingToolCalls[tcId] || { name: "", arguments: "" };
       return {
-        streamingToolCalls: {
-          ...state.streamingToolCalls,
-          [tcId]: {
-            name: name || existing.name,
-            arguments: existing.arguments + argsDelta,
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: {
+            ...streaming,
+            streamingToolCalls: {
+              ...streaming.streamingToolCalls,
+              [tcId]: { name: name || existing.name, arguments: existing.arguments + argsDelta },
+            },
           },
         },
       };
     }),
-
-  // Streaming tool output previews
-  streamingToolOutputs: {},
-  setStreamingToolOutputs: (outputs) => set({ streamingToolOutputs: outputs }),
-  upsertStreamingToolOutput: (id, name, suppressed = false, summary) =>
+  setThreadStreamingToolOutputs: (threadId, outputs) =>
     set((state) => {
-      const existing = state.streamingToolOutputs[id] || {
-        id,
-        name: "",
-        suppressed: false,
-        suppressedFrames: 0,
-        summary: undefined,
-      };
+      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
       return {
-        streamingToolOutputs: {
-          ...state.streamingToolOutputs,
-          [id]: {
-            id,
-            name: name || existing.name,
-            suppressed: existing.suppressed || suppressed,
-            suppressedFrames: existing.suppressedFrames + (suppressed ? 1 : 0),
-            summary: summary !== undefined ? summary : existing.summary,
-            startedAtMs: existing.startedAtMs,
-            timeout: existing.timeout,
-          },
-        },
+        streamingByThread: { ...state.streamingByThread, [threadId]: { ...streaming, streamingToolOutputs: outputs } },
       };
     }),
-  markStreamingToolStarted: (id, name, startedAtMs, timeoutSec = null) =>
+  upsertThreadStreamingToolOutput: (threadId, id, name, suppressed = false, summary) =>
     set((state) => {
-      const existing = state.streamingToolOutputs[id] || {
-        id,
-        name: "",
-        suppressed: false,
-        suppressedFrames: 0,
-        summary: undefined,
-      };
+      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
+      const existing = streaming.streamingToolOutputs[id] || { id, name, suppressed: false, suppressedFrames: 0 };
       return {
-        streamingToolOutputs: {
-          ...state.streamingToolOutputs,
-          [id]: {
-            ...existing,
-            name: name || existing.name,
-            startedAtMs,
-            ...(timeoutSec && timeoutSec > 0 ? { timeout: { startedAtMs, timeoutSec } } : {}),
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: {
+            ...streaming,
+            streamingToolOutputs: {
+              ...streaming.streamingToolOutputs,
+              [id]: {
+                ...existing,
+                name: name || existing.name,
+                suppressed: existing.suppressed || suppressed,
+                suppressedFrames: suppressed ? existing.suppressedFrames + 1 : existing.suppressedFrames,
+                summary: summary || existing.summary,
+              },
+            },
           },
         },
       };
     }),
-  clearStreamingToolTimeout: (id) =>
+  markThreadStreamingToolStarted: (threadId, id, name, startedAtMs, timeoutSec = null) =>
     set((state) => {
-      const existing = state.streamingToolOutputs[id];
-      if (!existing || !existing.timeout) return {};
+      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
+      const existing = streaming.streamingToolOutputs[id] || { id, name, suppressed: false, suppressedFrames: 0 };
+      return {
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: {
+            ...streaming,
+            streamingToolOutputs: {
+              ...streaming.streamingToolOutputs,
+              [id]: {
+                ...existing,
+                name: name || existing.name,
+                startedAtMs,
+                ...(timeoutSec && timeoutSec > 0 ? { timeout: { startedAtMs, timeoutSec } } : {}),
+              },
+            },
+          },
+        },
+      };
+    }),
+  clearThreadStreamingToolTimeout: (threadId, id) =>
+    set((state) => {
+      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
+      const existing = streaming.streamingToolOutputs[id];
+      if (!existing?.timeout) return {};
       const { timeout: _timeout, ...withoutTimeout } = existing;
       return {
-        streamingToolOutputs: {
-          ...state.streamingToolOutputs,
-          [id]: withoutTimeout,
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: {
+            ...streaming,
+            streamingToolOutputs: { ...streaming.streamingToolOutputs, [id]: withoutTimeout },
+          },
         },
       };
     }),
@@ -438,20 +425,6 @@ export const useAppStore = create<AppState>((set) => ({
   // Models
   models: [],
   setModels: (models) => set({ models }),
-
-  // UI state
-  isStreaming: false,
-  setIsStreaming: (streaming) => set({ isStreaming: streaming }),
-  streamingModelKey: null,
-  setStreamingModelKey: (key) => set({ streamingModelKey: key }),
-  streamingKind: null,
-  setStreamingKind: (kind) => set({ streamingKind: kind }),
-  streamingStartedAtMs: null,
-  setStreamingStartedAtMs: (startedAtMs) => set({ streamingStartedAtMs: startedAtMs }),
-  streamingProviderRequest: null,
-  setStreamingProviderRequest: (request) => set({ streamingProviderRequest: request }),
-  activeUserCommand: null,
-  setActiveUserCommand: (command) => set({ activeUserCommand: command }),
 
   // Panel visibility (sidebar hidden by default to maximize screen space)
   panelVisibility: { chat: true, children: true, system: false },
@@ -482,10 +455,6 @@ export const useAppStore = create<AppState>((set) => ({
     }
     set({ theme });
   },
-
-  // Scroll trigger - incremented when UI-only messages are added
-  scrollTrigger: 0,
-  triggerScroll: () => set((state) => ({ scrollTrigger: state.scrollTrigger + 1 })),
 }));
 
 // Initialize theme from localStorage on client side
