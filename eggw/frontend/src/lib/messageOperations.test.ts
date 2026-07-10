@@ -80,12 +80,12 @@ describe("thread-scoped ephemeral state", () => {
     useAppStore.setState({ streamingByThread: {}, connectionByThread: {}, currentThreadId: "thread-a" });
     const store = useAppStore.getState();
     store.patchThreadStreaming("thread-a", { isStreaming: true, invokeId: "invoke-a" });
-    store.setThreadConnection("thread-a", { status: "reconnecting", lastEventSeq: 42 });
+    store.setThreadConnection("thread-a", "reconnecting");
     store.setCurrentThreadId("thread-b");
 
     const state = useAppStore.getState();
     expect(state.streamingByThread["thread-a"]).toMatchObject({ isStreaming: true, invokeId: "invoke-a" });
-    expect(state.connectionByThread["thread-a"]).toEqual({ status: "reconnecting", lastEventSeq: 42 });
+    expect(state.connectionByThread["thread-a"]).toEqual({ status: "reconnecting" });
     expect(state.currentThreadId).toBe("thread-b");
   });
 });

@@ -102,9 +102,8 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const setInput = useCallback((value: string) => {
     if (currentThreadId) setComposerDraft(currentThreadId, value);
   }, [currentThreadId, setComposerDraft]);
-  const streamState = useAppStore((state) => state.streamingByThread[threadId]);
-  const isStreaming = streamState?.isStreaming || false;
-  const activeUserCommand = streamState?.activeUserCommand || null;
+  const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
+  const activeUserCommand = useAppStore((state) => state.streamingByThread[threadId]?.activeUserCommand || null);
   const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const setTheme = useAppStore((state) => state.setTheme);

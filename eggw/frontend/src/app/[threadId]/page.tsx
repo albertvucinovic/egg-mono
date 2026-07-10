@@ -29,9 +29,8 @@ export default function ThreadPage() {
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const setCurrentThreadId = useAppStore((state) => state.setCurrentThreadId);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
-  const streamState = useAppStore((state) => state.streamingByThread[threadId]);
-  const isStreaming = streamState?.isStreaming || false;
-  const streamingKind = streamState?.streamingKind || null;
+  const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
+  const streamingKind = useAppStore((state) => state.streamingByThread[threadId]?.streamingKind || null);
   const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
   const panelVisibility = useAppStore((state) => state.panelVisibility);
   const togglePanel = useAppStore((state) => state.togglePanel);

@@ -92,13 +92,12 @@ export interface ThreadStreamingState {
   streamingStartedAtMs: number | null;
   streamingProviderRequest: StreamingProviderRequest | null;
   activeUserCommand: ActiveUserCommand | null;
-  streamingToolCalls: Record<string, { name: string; arguments: string }>;
+  streamingToolCalls: Record<string, { name: string }>;
   streamingToolOutputs: Record<string, StreamingToolOutput>;
 }
 
 export interface ThreadConnectionState {
   status: SSEConnectionStatus;
-  lastEventSeq: number;
 }
 
 const EMPTY_THREAD_STREAMING_STATE: ThreadStreamingState = {
@@ -181,10 +180,9 @@ interface AppState {
   connectionByThread: Record<string, ThreadConnectionState>;
   patchThreadStreaming: (threadId: string, patch: Partial<ThreadStreamingState>) => void;
   resetThreadStreaming: (threadId: string) => void;
-  setThreadConnection: (threadId: string, connection: ThreadConnectionState) => void;
-  setThreadStreamingToolCalls: (threadId: string, calls: Record<string, { name: string; arguments: string }>) => void;
-  upsertThreadStreamingToolCall: (threadId: string, tcId: string, name: string, args: string) => void;
-  appendThreadToolCallArguments: (threadId: string, tcId: string, name: string, argsDelta: string) => void;
+  setThreadConnection: (threadId: string, status: SSEConnectionStatus) => void;
+  setThreadStreamingToolCalls: (threadId: string, calls: Record<string, { name: string }>) => void;
+  upsertThreadStreamingToolCall: (threadId: string, tcId: string, name: string) => void;
   setThreadStreamingToolOutputs: (threadId: string, outputs: Record<string, StreamingToolOutput>) => void;
   upsertThreadStreamingToolOutput: (threadId: string, id: string, name: string, suppressed?: boolean, summary?: string) => void;
   markThreadStreamingToolStarted: (threadId: string, id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => void;
@@ -284,18 +282,27 @@ export const useAppStore = create<AppState>((set) => ({
   streamingByThread: {},
   connectionByThread: {},
   patchThreadStreaming: (threadId, patch) =>
-    set((state) => ({
-      streamingByThread: {
-        ...state.streamingByThread,
-        [threadId]: { ...(state.streamingByThread[threadId] || emptyThreadStreamingState()), ...patch },
-      },
-    })),
+    set((state) => {
+      const current = state.streamingByThread[threadId] || EMPTY_THREAD_STREAMING_STATE;
+      if (Object.entries(patch).every(([key, value]) => Object.is(current[key as keyof ThreadStreamingState], value))) {
+        return state;
+      }
+      return {
+        streamingByThread: {
+          ...state.streamingByThread,
+          [threadId]: { ...current, ...patch },
+        },
+      };
+    }),
   resetThreadStreaming: (threadId) =>
     set((state) => ({
       streamingByThread: { ...state.streamingByThread, [threadId]: emptyThreadStreamingState() },
     })),
-  setThreadConnection: (threadId, connection) =>
-    set((state) => ({ connectionByThread: { ...state.connectionByThread, [threadId]: connection } })),
+  setThreadConnection: (threadId, status) =>
+    set((state) => {
+      if (state.connectionByThread[threadId]?.status === status) return state;
+      return { connectionByThread: { ...state.connectionByThread, [threadId]: { status } } };
+    }),
   setThreadStreamingToolCalls: (threadId, calls) =>
     set((state) => ({
       streamingByThread: {
@@ -303,11 +310,11 @@ export const useAppStore = create<AppState>((set) => ({
         [threadId]: { ...(state.streamingByThread[threadId] || emptyThreadStreamingState()), streamingToolCalls: calls },
       },
     })),
-  upsertThreadStreamingToolCall: (threadId, tcId, name, args) =>
+  upsertThreadStreamingToolCall: (threadId, tcId, name) =>
     set((state) => {
       const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
-      const existing = streaming.streamingToolCalls[tcId] || { name: "", arguments: "" };
-      const nextArgs = args && args.length >= existing.arguments.length ? args : existing.arguments;
+      const existing = streaming.streamingToolCalls[tcId];
+      if (existing && (!name || existing.name === name)) return state;
       return {
         streamingByThread: {
           ...state.streamingByThread,
@@ -315,24 +322,7 @@ export const useAppStore = create<AppState>((set) => ({
             ...streaming,
             streamingToolCalls: {
               ...streaming.streamingToolCalls,
-              [tcId]: { name: name || existing.name, arguments: nextArgs },
-            },
-          },
-        },
-      };
-    }),
-  appendThreadToolCallArguments: (threadId, tcId, name, argsDelta) =>
-    set((state) => {
-      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
-      const existing = streaming.streamingToolCalls[tcId] || { name: "", arguments: "" };
-      return {
-        streamingByThread: {
-          ...state.streamingByThread,
-          [threadId]: {
-            ...streaming,
-            streamingToolCalls: {
-              ...streaming.streamingToolCalls,
-              [tcId]: { name: name || existing.name, arguments: existing.arguments + argsDelta },
+              [tcId]: { name: name || existing?.name || "" },
             },
           },
         },

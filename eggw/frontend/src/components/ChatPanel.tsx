@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState, type ReactNode, type WheelEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type WheelEvent } from "react";
 import Link from "next/link";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -31,7 +31,7 @@ import {
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcript";
-import { streamingBufferForThread } from "@/lib/streamingBuffer";
+import { AnimationFrameCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
 import clsx from "clsx";
 
 const STICKY_BOTTOM_THRESHOLD_PX = 4;
@@ -1293,12 +1293,17 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const streamingReasoningRef = useRef<HTMLDivElement>(null);
   const streamingReasoningSummaryRef = useRef<HTMLDivElement>(null);
   const streamingToolOutputRefs = useRef<Record<string, HTMLPreElement | null>>({});
+  const streamingToolCallArgRefs = useRef<Record<string, HTMLPreElement | null>>({});
+  const streamingToolCallPreviewRefs = useRef<Record<string, HTMLSpanElement | null>>({});
   const lastContentIndexRef = useRef(0);
   const lastReasoningIndexRef = useRef(0);
   const lastReasoningSummaryIndexRef = useRef(0);
   const lastToolOutputIndexRef = useRef<Record<string, number>>({});
+  const lastToolCallArgIndexRef = useRef<Record<string, number>>({});
+  const lastToolCallChunksRef = useRef<Record<string, string[]>>({});
   const streamingTextFlushRafRef = useRef<number | null>(null);
   const streamingToolFlushRafRef = useRef<number | null>(null);
+  const streamingToolCallFlushRef = useRef<AnimationFrameCoalescer | null>(null);
   const loadingOlderRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
@@ -1306,28 +1311,20 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const currentThreadId = threadId;
   const queryClient = useQueryClient();
   const transcriptQuery = useInfiniteQuery(transcriptInfiniteQueryOptions(threadId, queryClient));
-  const messages = flattenTranscript(transcriptQuery.data);
-  const {
-    streamingToolCalls,
-    streamingToolOutputs,
-    streamingModelKey,
-    streamingKind,
-    streamingStartedAtMs,
-    streamingProviderRequest,
-    isStreaming,
-  } = useAppStore((state) => state.streamingByThread[threadId] || {
-    streamingToolCalls: {},
-    streamingToolOutputs: {},
-    streamingModelKey: null,
-    streamingKind: null,
-    streamingStartedAtMs: null,
-    streamingProviderRequest: null,
-    isStreaming: false,
-  });
+  const messages = useMemo(() => flattenTranscript(transcriptQuery.data), [transcriptQuery.data]);
+  const streamingToolCalls = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolCalls);
+  const streamingToolOutputs = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolOutputs);
+  const streamingModelKey = useAppStore((state) => state.streamingByThread[threadId]?.streamingModelKey || null);
+  const streamingKind = useAppStore((state) => state.streamingByThread[threadId]?.streamingKind || null);
+  const streamingStartedAtMs = useAppStore((state) => state.streamingByThread[threadId]?.streamingStartedAtMs || null);
+  const streamingProviderRequest = useAppStore((state) => state.streamingByThread[threadId]?.streamingProviderRequest || null);
+  const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
+  const visibleStreamingToolCalls = streamingToolCalls || {};
+  const visibleStreamingToolOutputs = streamingToolOutputs || {};
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
-  const hasActiveToolTiming = Object.values(streamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
+  const hasActiveToolTiming = Object.values(visibleStreamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
   const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
-  const primaryToolTimeoutText = Object.values(streamingToolOutputs)
+  const primaryToolTimeoutText = Object.values(visibleStreamingToolOutputs)
     .map((tool) => toolTimeoutCountdown(tool.timeout, nowMs))
     .find((text): text is string => Boolean(text));
   const providerTimeText = streamingKind === "llm"
@@ -1532,6 +1529,49 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     if (appended) scrollToBottom();
   }, [scrollToBottom, threadId]);
 
+  const flushStreamingToolCalls = useCallback(() => {
+    const streamingBuffer = streamingBufferForThread(threadId);
+    streamingBuffer.toolCalls.forEach((toolCall, tcId) => {
+      const chunks = toolCall.argumentChunks;
+      const argsElement = streamingToolCallArgRefs.current[tcId];
+      if (argsElement) {
+        if (lastToolCallChunksRef.current[tcId] !== chunks) {
+          lastToolCallChunksRef.current[tcId] = chunks;
+          lastToolCallArgIndexRef.current[tcId] = 0;
+          argsElement.textContent = "";
+        }
+        let renderedAuthoritativeBash = false;
+        if (toolCall.name === "bash" && chunks.length === 1) {
+          try {
+            const parsed = JSON.parse(chunks[0]);
+            if (typeof parsed?.script === "string") {
+              argsElement.textContent = `$ ${parsed.script}`;
+              renderedAuthoritativeBash = true;
+            }
+          } catch {
+            // Streamed partial JSON is appended verbatim until complete.
+          }
+        }
+        if (!renderedAuthoritativeBash) {
+          const lastIndex = lastToolCallArgIndexRef.current[tcId] || 0;
+          appendBufferedTextChunks(argsElement, chunks, lastIndex);
+        }
+        lastToolCallArgIndexRef.current[tcId] = chunks.length;
+        if (!argsElement.textContent) argsElement.textContent = "...";
+      }
+
+      const previewElement = streamingToolCallPreviewRefs.current[tcId];
+      if (previewElement) {
+        // Preview work is bounded even when the full call contains megabytes.
+        // The expanded body above appends only the newly arrived chunks.
+        const argumentPrefix = streamingBuffer.getToolCallArgumentPrefix(tcId);
+        previewElement.textContent = oneLinePreview(
+          toolCall.name === "bash" ? argumentPrefix.replace(/^\s*\{?\s*"script"\s*:\s*"?/, "$ ") : argumentPrefix,
+        );
+      }
+    });
+  }, [threadId]);
+
   const scheduleStreamingTextFlush = useCallback(() => {
     if (streamingTextFlushRafRef.current !== null) return;
     streamingTextFlushRafRef.current = requestAnimationFrame(() => {
@@ -1583,6 +1623,28 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     };
   }, [isStreaming, flushStreamingText, scheduleInitialStreamingFlush, scheduleStreamingTextFlush, threadId]);
 
+  // Tool-call arguments use the same mutable/RAF architecture as text and
+  // tool output. A burst schedules one imperative preview flush per frame and
+  // never publishes its growing argument body through React or Zustand.
+  useEffect(() => {
+    const streamingBuffer = streamingBufferForThread(threadId);
+    const coalescer = new AnimationFrameCoalescer(
+      (callback) => window.requestAnimationFrame(callback),
+      (id) => window.cancelAnimationFrame(id),
+    );
+    streamingToolCallFlushRef.current = coalescer;
+    const schedule = () => coalescer.schedule(flushStreamingToolCalls);
+    const unsubscribe = streamingBuffer.subscribeToolCalls(schedule);
+    schedule();
+    return () => {
+      unsubscribe();
+      coalescer.cancel();
+      if (streamingToolCallFlushRef.current === coalescer) {
+        streamingToolCallFlushRef.current = null;
+      }
+    };
+  }, [flushStreamingToolCalls, streamingToolCalls, threadId]);
+
   // Subscribe to streaming tool-output preview updates. Like text streaming,
   // this writes chunks directly to DOM so large/fast tool output does not
   // trigger a React render per chunk.
@@ -1609,6 +1671,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       lastReasoningIndexRef.current = 0;
       lastReasoningSummaryIndexRef.current = 0;
       lastToolOutputIndexRef.current = {};
+      lastToolCallArgIndexRef.current = {};
+      lastToolCallChunksRef.current = {};
       if (streamingContentRef.current) {
         streamingContentRef.current.textContent = '';
       }
@@ -1619,6 +1683,12 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         streamingReasoningSummaryRef.current.textContent = '';
       }
       Object.values(streamingToolOutputRefs.current).forEach((el) => {
+        if (el) el.textContent = '';
+      });
+      Object.values(streamingToolCallArgRefs.current).forEach((el) => {
+        if (el) el.textContent = '';
+      });
+      Object.values(streamingToolCallPreviewRefs.current).forEach((el) => {
         if (el) el.textContent = '';
       });
     }
@@ -1649,7 +1719,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
 
   // Scroll to bottom when new streaming tool calls or tool outputs appear (tool headers)
   useEffect(() => {
-    if ((Object.keys(streamingToolCalls).length > 0 || Object.keys(streamingToolOutputs).length > 0) && stickToBottomRef.current) {
+    if ((Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0) && stickToBottomRef.current) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           scrollToBottomNow();
@@ -1821,19 +1891,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                       />
 
                       {/* Streaming tool calls */}
-                      {Object.keys(streamingToolCalls).length > 0 && (
+                      {Object.keys(visibleStreamingToolCalls).length > 0 && (
                       <div className="mt-2 space-y-2">
-                        {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
-                          const isBash = tc.name === "bash";
-                          let parsedArgs: any = tc.arguments;
-                          try {
-                            parsedArgs = JSON.parse(tc.arguments);
-                          } catch {
-                            // Keep as string
-                          }
-                          const script = isBash && parsedArgs?.script;
-                          const argsPreview = oneLinePreview(script ? `$ ${script}` : (tc.arguments || ""));
-
+                        {Object.entries(visibleStreamingToolCalls).map(([tcId, tc]) => {
                           return (
                             <details
                               key={`${displayVerbosity}-${tcId}`}
@@ -1847,10 +1907,12 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                   {tcId.slice(-8)}
                                 </span>
                                 <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
-                                {displayVerbosity === "medium" && argsPreview && (
-                                  <span className="text-xs font-mono" style={{ color: "var(--foreground)" }}>
-                                    {argsPreview}
-                                  </span>
+                                {displayVerbosity === "medium" && (
+                                  <span
+                                    ref={(element) => { streamingToolCallPreviewRefs.current[tcId] = element; }}
+                                    className="text-xs font-mono"
+                                    style={{ color: "var(--foreground)" }}
+                                  />
                                 )}
                                 {displayVerbosity === "medium" && (
                                   <span className="text-xs" style={{ color: "var(--muted)" }}>
@@ -1859,15 +1921,13 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 )}
                               </summary>
                               <div className="px-2 pb-2">
-                                {isBash && script ? (
-                                  <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-                                    $ {script}
-                                  </pre>
-                                ) : (
-                                  <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                                    {tc.arguments || "..."}
-                                  </pre>
-                                )}
+                                <pre
+                                  ref={(element) => { streamingToolCallArgRefs.current[tcId] = element; }}
+                                  className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all"
+                                  style={{ background: "var(--code-bg)", color: tc.name === "bash" ? "var(--accent)" : "var(--foreground)" }}
+                                >
+                                  ...
+                                </pre>
                               </div>
                             </details>
                           );
@@ -1876,9 +1936,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                       )}
 
                       {/* Streaming tool output preview */}
-                      {Object.keys(streamingToolOutputs).length > 0 && (
+                      {Object.keys(visibleStreamingToolOutputs).length > 0 && (
                       <div className="mt-2 space-y-2">
-                        {Object.entries(streamingToolOutputs).map(([toolId, tool]) => {
+                        {Object.entries(visibleStreamingToolOutputs).map(([toolId, tool]) => {
                           const timeoutText = toolTimeoutCountdown(tool.timeout, nowMs);
                           const elapsedText = tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
                           return (
