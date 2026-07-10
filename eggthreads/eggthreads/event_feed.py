@@ -64,6 +64,15 @@ class ActiveThreadLease:
 
 
 @dataclass(frozen=True)
+class ThreadReplayCursor:
+    """One coherent initial replay contract for transport and reducer."""
+
+    after_seq: int
+    active_invoke_id: Optional[str]
+    streaming_kind: Optional[str]
+
+
+@dataclass(frozen=True)
 class ThreadEventBatch:
     """Bounded events strictly after ``after_seq`` in canonical order."""
 
@@ -174,17 +183,10 @@ class ThreadEventFeed:
             owner=str(row["owner"]) if row["owner"] is not None else None,
         )
 
-    def active_replay_after_seq(self, thread_id: str) -> Optional[int]:
-        """Return cursor just before the live lease's stream.open, if present.
-
-        Historical unmatched opens are ignored. The current unexpired lease is
-        the sole active-work authority, and stream replay is scoped to its exact
-        ``invoke_id``.
-        """
-
+    def _active_replay(self, thread_id: str) -> tuple[Optional[ActiveThreadLease], Optional[int]]:
         lease = self.active_lease(thread_id)
         if lease is None:
-            return None
+            return None, None
         row = self.db.conn.execute(
             """
             SELECT event_seq FROM events
@@ -193,7 +195,33 @@ class ThreadEventFeed:
             """,
             (thread_id, lease.invoke_id),
         ).fetchone()
-        return int(row["event_seq"]) - 1 if row is not None else None
+        return lease, int(row["event_seq"]) - 1 if row is not None else None
+
+    def active_replay_after_seq(self, thread_id: str) -> Optional[int]:
+        """Return cursor just before the live lease's stream.open, if present."""
+
+        _lease, after_seq = self._active_replay(thread_id)
+        return after_seq
+
+    def replay_cursor(self, thread_id: str, idle_cursor: int) -> ThreadReplayCursor:
+        """Resolve active invocation replay or the caller's idle snapshot cursor.
+
+        The active lease and its exact stream.open are read through the same
+        feed boundary used by SSE. Missing active opens fail closed to the idle
+        cursor rather than replaying unrelated historical work.
+        """
+
+        cursor = parse_event_cursor(idle_cursor, source="idle_cursor")
+        if not self.thread_exists(thread_id):
+            raise ThreadEventFeedNotFound(f"Thread not found: {thread_id}")
+        lease, active_after_seq = self._active_replay(thread_id)
+        if lease is None:
+            return ThreadReplayCursor(cursor, None, None)
+        return ThreadReplayCursor(
+            active_after_seq if active_after_seq is not None else cursor,
+            lease.invoke_id,
+            lease.purpose,
+        )
 
     def current_cursor(self, thread_id: str) -> int:
         if not self.thread_exists(thread_id):
@@ -248,6 +276,7 @@ __all__ = [
     "ThreadEventFeed",
     "ThreadEventFeedError",
     "ThreadEventFeedNotFound",
+    "ThreadReplayCursor",
     "parse_event_cursor",
     "resolve_event_cursor",
 ]

@@ -95,13 +95,6 @@ export class AuthenticatedEventSource {
     this.listeners.get(type)?.delete(listener);
   }
 
-  /** Advance to an authoritative snapshot cursor after reconciliation. */
-  advanceCursor(cursor: number): void {
-    if (!Number.isSafeInteger(cursor) || cursor < -1) return;
-    const current = Number(this.lastEventId);
-    if (!Number.isSafeInteger(current) || cursor > current) this.lastEventId = String(cursor);
-  }
-
   close(): void {
     this.closed = true;
     this.controller?.abort();

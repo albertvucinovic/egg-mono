@@ -41,4 +41,35 @@ describe("AuthenticatedEventSource reconnect", () => {
     expect(opened.slice(0, 2)).toEqual([false, true]);
     source.close();
   });
+  it("does not fast-forward reconnect past queued response frames", async () => {
+    vi.useFakeTimers();
+    const cursors: string[] = [];
+    const delivered: string[] = [];
+    let attempt = 0;
+    let resolveFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const source = new AuthenticatedEventSource(async (_signal, cursor) => {
+      cursors.push(cursor);
+      attempt += 1;
+      if (attempt === 1) return firstResponse;
+      return response([
+        "id: 11", "event: stream.delta", 'data: {"event_seq":11}', "",
+        "id: 12", "event: stream.delta", 'data: {"event_seq":12}', "", "",
+      ].join("\n"));
+    }, 9);
+    source.addEventListener("stream.open", (event) => delivered.push(event.lastEventId));
+    source.addEventListener("stream.delta", (event) => delivered.push(event.lastEventId));
+    await vi.waitFor(() => expect(cursors).toEqual(["9"]));
+    resolveFirst(response([
+      "id: 10", "event: stream.open", 'data: {"event_seq":10}', "", "",
+    ].join("\n")));
+
+    await vi.waitFor(() => expect(delivered).toEqual(["10"]));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(delivered).toEqual(["10", "11", "12"]));
+
+    expect(cursors.slice(0, 2)).toEqual(["9", "10"]);
+    source.close();
+  });
+
 });

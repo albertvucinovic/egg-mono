@@ -376,10 +376,23 @@ export async function fetchThreadSettings(threadId: string) {
   return res.json();
 }
 
-export async function fetchThreadState(threadId: string) {
-  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/state`);
+export interface ThreadStateResponse {
+  state: string;
+  streaming_kind?: string | null;
+  streaming_invoke_id?: string | null;
+  live_replay_cursor?: number;
+  active_get_user_wait?: boolean;
+  get_user_waiting_note?: any;
+  scheduler_running?: boolean;
+}
+
+export async function fetchThreadState(threadId: string, snapshotCursor?: number) {
+  const params = Number.isSafeInteger(snapshotCursor)
+    ? `?snapshot_cursor=${encodeURIComponent(String(snapshotCursor))}`
+    : "";
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/state${params}`);
   if (!res.ok) throw new Error("Failed to fetch state");
-  return res.json();
+  return res.json() as Promise<ThreadStateResponse>;
 }
 
 export async function setAutoApproval(threadId: string, enabled: boolean) {

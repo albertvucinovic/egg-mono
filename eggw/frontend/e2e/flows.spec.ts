@@ -1102,11 +1102,25 @@ test.describe('SSE reconnect integration', () => {
         chunk_seq: type === 'stream.delta' ? 0 : null,
         payload,
       });
+      const nextInvokeId = connection === 1 ? invokeId : 'reconnect-invoke-new';
+      const frame = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `reconnect-${nextInvokeId}-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts: startedAt,
+        msg_id: null,
+        invoke_id: nextInvokeId,
+        chunk_seq: type === 'stream.delta' ? eventSeq : null,
+        payload,
+      });
       const frames = connection === 1
-        ? ['id: 1', 'event: stream.open', `data: ${envelope(1, 'stream.open', { stream_kind: 'llm' })}`, '', '']
+        ? ['id: 1', 'event: stream.open', `data: ${frame(1, 'stream.open', { stream_kind: 'llm' })}`, '', '']
         : [
+            // Replayed cursor frame is transport-deduplicated; the ordered new
+            // stream.open adopts the replacement invocation before its delta.
             'id: 1', 'event: stream.open', `data: ${envelope(1, 'stream.open', { stream_kind: 'llm' })}`, '',
-            'id: 2', 'event: stream.delta', `data: ${envelope(2, 'stream.delta', { text: 'resumed exactly once' })}`, '', '',
+            'id: 2', 'event: stream.open', `data: ${frame(2, 'stream.open', { stream_kind: 'llm' })}`, '',
+            'id: 3', 'event: stream.delta', `data: ${frame(3, 'stream.delta', { text: 'resumed exactly once' })}`, '', '',
           ];
       await route.fulfill({
         status: 200,
@@ -1115,14 +1129,14 @@ test.describe('SSE reconnect integration', () => {
       });
     });
     await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, (route) => route.fulfill({
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
       status: 200,
       headers: mockApiHeaders,
-      json: { state: 'running', streaming_kind: 'llm', streaming_invoke_id: invokeId, active_get_user_wait: false },
+      json: { state: 'running', streaming_kind: 'llm', streaming_invoke_id: invokeId, live_replay_cursor: 0, active_get_user_wait: false },
     }));
 
     await page.goto(`/${threadId}`);
-    await expect.poll(() => cursors.some((cursor, index) => index > 0 && Number(cursor) >= 1), { timeout: 8000 }).toBe(true);
+    await expect.poll(() => cursors.some((cursor, index) => index > 0 && Number(cursor) > 0), { timeout: 8000 }).toBe(true);
     await expect(page.getByTestId('chat-panel')).toContainText('resumed exactly once');
     await expect(page.getByTestId('chat-panel')).not.toContainText('resumed exactly onceresumed exactly once');
   });
@@ -1135,8 +1149,10 @@ test.describe('Live Tool Streaming', () => {
     });
     const threadId = 'running-tool-args-thread';
     const toolCallId = 'call-running-tool-args';
+    const cursors: string[] = [];
 
-    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route, request) => {
+      cursors.push(new URL(request.url()).searchParams.get('after_seq') || request.headers()['last-event-id'] || '');
       const startedAt = new Date().toISOString();
       await route.fulfill({
         status: 200,
@@ -1185,7 +1201,7 @@ test.describe('Live Tool Streaming', () => {
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: { items: [{ id: 'user-before-running-tool', role: 'user', content: 'run slow tool', content_text: 'run slow tool' }], snapshot_cursor: 0, next_before: null },
+        json: { items: [{ id: 'user-before-running-tool', role: 'user', content: 'run slow tool', content_text: 'run slow tool' }], snapshot_cursor: 10, next_before: null },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
@@ -1214,11 +1230,11 @@ test.describe('Live Tool Streaming', () => {
         json: { enabled: false, effective: false, available: false, user_control_enabled: true },
       });
     });
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, async (route) => {
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), async (route) => {
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-running-tool', active_get_user_wait: false },
+        json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-running-tool', live_replay_cursor: 0, active_get_user_wait: false },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
@@ -1257,6 +1273,10 @@ test.describe('Live Tool Streaming', () => {
 
     await page.goto(`/${threadId}`);
 
+    // The durable snapshot cursor is 10, but active replay starts immediately
+    // before stream.open so its tool lifecycle frames are consumed.
+    await expect.poll(() => cursors[0], { timeout: 5000 }).toBe("0");
+
     await expect(page.getByTestId('chat-panel')).toContainText('Tool', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('bash', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30', { timeout: 5000 });
@@ -1276,6 +1296,12 @@ test.describe('Atomic Live Tool Continuity', () => {
       messages: [{ id: 'user-before-tool', role: 'user', content: 'run tool', content_text: 'run tool' }],
     });
     await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-continuity', live_replay_cursor: 0, active_get_user_wait: false },
+    }));
     await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
     await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
       messageRequests += 1;

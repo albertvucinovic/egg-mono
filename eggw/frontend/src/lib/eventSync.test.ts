@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   createThreadEventSyncState,
-  reconcileThreadEventCursor,
   reduceThreadEvent,
 } from "./eventSync";
 
@@ -35,6 +34,23 @@ describe("thread event reconciliation", () => {
     });
   });
 
+  it("replays active frames exactly once from the shared cursor even when snapshot is later", () => {
+    const replayCursor = 4;
+    const snapshotCursor = 20;
+    let state = createThreadEventSyncState("thread-a", replayCursor, "invoke-a");
+    for (const [sequence, type] of [[5, "stream.open"], [6, "stream.delta"], [7, "tool_call.execution_started"]] as const) {
+      const reduced = reduceThreadEvent(state, event(sequence, type, "invoke-a"), type);
+      expect(reduced.accepted).toBe(true);
+      state = reduced.state;
+    }
+    expect(state.lastEventSeq).toBe(7);
+    expect(state.lastEventSeq).toBeLessThan(snapshotCursor);
+    expect(reduceThreadEvent(state, event(6, "stream.delta", "invoke-a"), "stream.delta")).toMatchObject({
+      accepted: false,
+      reason: "stale_sequence",
+    });
+  });
+
   it("lets a later lease-fenced stream.open replace the completed invocation view", () => {
     const state = createThreadEventSyncState("thread-a", 4, "invoke-a");
     const replaced = reduceThreadEvent(state, event(5, "stream.open", "invoke-b"), "stream.open");
@@ -42,14 +58,20 @@ describe("thread event reconciliation", () => {
     expect(replaced.state.activeInvokeId).toBe("invoke-b");
   });
 
-  it("rejects a late frame from the invocation replaced at the reconnect watermark", () => {
-    const beforeReconnect = createThreadEventSyncState("thread-a", 20, "old-invoke");
-    const reconciled = reconcileThreadEventCursor(beforeReconnect, 25, "new-invoke");
-    expect(reduceThreadEvent(reconciled, event(26, "stream.delta", "old-invoke"), "stream.delta")).toMatchObject({
+  it("adopts a disconnected replacement only from ordered stream.open and rejects old frames", () => {
+    const disconnected = createThreadEventSyncState("thread-a", 20, "old-invoke");
+    expect(reduceThreadEvent(disconnected, event(21, "stream.delta", "new-invoke"), "stream.delta")).toMatchObject({
       accepted: false,
       reason: "stale_invocation",
     });
-    expect(reduceThreadEvent(reconciled, event(27, "stream.delta", "new-invoke"), "stream.delta").accepted).toBe(true);
+    const opened = reduceThreadEvent(disconnected, event(22, "stream.open", "new-invoke"), "stream.open");
+    expect(opened.accepted).toBe(true);
+    expect(opened.state.activeInvokeId).toBe("new-invoke");
+    expect(reduceThreadEvent(opened.state, event(23, "stream.delta", "old-invoke"), "stream.delta")).toMatchObject({
+      accepted: false,
+      reason: "stale_invocation",
+    });
+    expect(reduceThreadEvent(opened.state, event(24, "stream.delta", "new-invoke"), "stream.delta").accepted).toBe(true);
   });
 
   it("tracks the stream invocation independently of connection status", () => {

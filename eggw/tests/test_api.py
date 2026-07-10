@@ -406,6 +406,42 @@ class TestThreadOperations:
         assert data["streaming_kind"] == "tool"
         assert data["streaming_invoke_id"] == invoke_id
 
+    def test_thread_state_returns_shared_active_or_idle_replay_cursor(self, client):
+        from datetime import datetime, timedelta, timezone
+
+        thread_id = client.post("/api/threads", json={"name": "Replay Contract"}).json()["id"]
+        snapshot_cursor = core_state.db.max_event_seq(thread_id)
+        idle = client.get(f"/api/threads/{thread_id}/state?snapshot_cursor={snapshot_cursor}").json()
+        assert idle["live_replay_cursor"] == snapshot_cursor
+        assert idle["streaming_invoke_id"] is None
+
+        lease_until = (datetime.now(timezone.utc) + timedelta(seconds=60)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        assert core_state.db.try_open_stream(
+            thread_id, "state-replay-invoke", lease_until, owner="test", purpose="tool"
+        )
+        writer = core_state.db.invocation_writer(thread_id, "state-replay-invoke")
+        open_seq = writer.append_event(
+            event_id="state-replay-open",
+            type_="stream.open",
+            msg_id="state-replay-message",
+            payload={"stream_kind": "tool"},
+        )
+        writer.append_event(
+            event_id="state-replay-delta",
+            type_="stream.delta",
+            chunk_seq=0,
+            payload={"text": "active"},
+        )
+
+        active = client.get(
+            f"/api/threads/{thread_id}/state?snapshot_cursor={core_state.db.max_event_seq(thread_id)}"
+        ).json()
+        assert active["live_replay_cursor"] == open_seq - 1
+        assert active["streaming_invoke_id"] == "state-replay-invoke"
+        assert active["streaming_kind"] == "tool"
+
     def test_get_user_wait_state_settings_and_normal_answer_submission(self, client):
         """EggW exposes active get-user waits and answers via normal messages."""
         from eggthreads import append_message, create_snapshot

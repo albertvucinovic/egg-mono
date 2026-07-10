@@ -8,7 +8,7 @@ import { applyStreamingDelta } from "@/lib/streamingDelta";
 import { messageFromCreateEvent } from "@/lib/messageEvents";
 import { cleanUpEvictedLiveTools, clearLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
 import { useQueryClient } from "@tanstack/react-query";
-import { createThreadEventSyncState, reconcileThreadEventCursor, reduceThreadEvent, type ThreadEventSyncState } from "@/lib/eventSync";
+import { createThreadEventSyncState, reduceThreadEvent, type ThreadEventSyncState } from "@/lib/eventSync";
 import { transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor, upsertTranscriptTailMessage } from "@/lib/transcript";
 import { emptyThreadStreamingState } from "@/lib/store";
 
@@ -146,25 +146,34 @@ export function useSSE(threadId: string | null) {
       eventSourceRef.current.close();
     }
 
-    // Establish the transcript/cursor first. React Query deduplicates this with
-    // ChatPanel's initial request. Events committed after that exact snapshot
-    // are then replayed from snapshot_cursor, closing the snapshot-to-live gap.
+    // Establish the durable transcript snapshot first. React Query deduplicates
+    // this with ChatPanel; /state then resolves a distinct live replay cursor
+    // from that exact snapshot cursor before transport initialization.
     let snapshotCursor = -1;
+    let replayCursor = -1;
     let activeInvokeId: string | null = null;
     try {
-      const [snapshot, threadState] = await Promise.all([
-        queryClient.ensureInfiniteQueryData(transcriptInfiniteQueryOptions(threadId, queryClient)),
-        fetchThreadState(threadId),
-      ]);
+      const snapshot = await queryClient.ensureInfiniteQueryData(
+        transcriptInfiniteQueryOptions(threadId, queryClient),
+      );
       snapshotCursor = transcriptSnapshotCursor(snapshot);
+      const threadState = await fetchThreadState(threadId, snapshotCursor);
+      replayCursor = Number.isSafeInteger(threadState.live_replay_cursor)
+        ? Number(threadState.live_replay_cursor)
+        : snapshotCursor;
       activeInvokeId = typeof threadState.streaming_invoke_id === "string"
         ? threadState.streaming_invoke_id
         : null;
       const previousStreaming = useAppStore.getState().streamingByThread[threadId];
-      if (!activeInvokeId || (previousStreaming?.invokeId && previousStreaming.invokeId !== activeInvokeId)) {
+      if (!activeInvokeId) {
         streamingBufferForThread(threadId).clear();
         clearRetainedTools();
         resetThreadStreaming(threadId);
+      } else if (previousStreaming?.invokeId && previousStreaming.invokeId !== activeInvokeId) {
+        // Invocation changes clear assistant text only. Phase 2 tool state may
+        // legitimately publish its result from this later runner invocation.
+        streamingBufferForThread(threadId).clearAssistantText();
+        clearThreadStreamingAssistant(threadId);
       }
       if (activeInvokeId) {
         patchThreadStreaming(threadId, {
@@ -173,14 +182,14 @@ export function useSSE(threadId: string | null) {
           streamingKind: typeof threadState.streaming_kind === "string" ? threadState.streaming_kind : null,
         });
       }
-      syncStateRef.current = createThreadEventSyncState(threadId, snapshotCursor, activeInvokeId);
+      syncStateRef.current = createThreadEventSyncState(threadId, replayCursor, activeInvokeId);
       setThreadConnection(threadId, "connecting");
     } catch (error) {
       addSystemLog("Unable to establish message synchronization cursor", "error");
       setThreadConnection(threadId, "disconnected");
       return null;
     }
-    const es = createEventSource(threadId, snapshotCursor);
+    const es = createEventSource(threadId, replayCursor);
     eventSourceRef.current = es;
 
     es.onopen = (openEvent) => {
@@ -188,47 +197,12 @@ export function useSSE(threadId: string | null) {
       addSystemLog("SSE connected", "info");
       const isReconnect = openEvent instanceof CustomEvent && Boolean(openEvent.detail?.reconnect);
       if (!isReconnect) return;
-      // First refresh the authoritative transcript at its own exact cursor,
-      // then reconcile run state against that cursor. Events after it continue
-      // to arrive on the resumable feed and are sequence-deduplicated below.
-      void queryClient.refetchQueries({ queryKey: transcriptQueryKey(threadId), type: "active" })
-        .then(() => {
-          const transcript = queryClient.getQueryData<import("@/lib/transcript").TranscriptData>(transcriptQueryKey(threadId));
-          const authoritativeCursor = transcriptSnapshotCursor(transcript);
-          const current = syncStateRef.current;
-          if (!current) return null;
-          syncStateRef.current = reconcileThreadEventCursor(current, authoritativeCursor, current.activeInvokeId);
-          es.advanceCursor(authoritativeCursor);
-          return fetchThreadState(threadId).then((threadState) => ({ authoritativeCursor, threadState }));
-        })
-        .then((result) => {
-          if (!result) return;
-          const current = syncStateRef.current;
-          if (!current || current.lastEventSeq !== result.authoritativeCursor) return;
-          const invokeId = typeof result.threadState.streaming_invoke_id === "string"
-            ? result.threadState.streaming_invoke_id
-            : null;
-          if (invokeId && current.activeInvokeId && current.activeInvokeId !== invokeId) {
-            resetThreadStreaming(threadId);
-            streamingBufferForThread(threadId).clear();
-            clearRetainedTools();
-          }
-          syncStateRef.current = reconcileThreadEventCursor(current, result.authoritativeCursor, invokeId);
-          if (invokeId) {
-            patchThreadStreaming(threadId, {
-              isStreaming: true,
-              invokeId,
-              streamingKind: typeof result.threadState.streaming_kind === "string"
-                ? result.threadState.streaming_kind
-                : null,
-            });
-          } else {
-            resetThreadStreaming(threadId);
-            streamingBufferForThread(threadId).clear();
-            clearRetainedTools();
-          }
-        })
-        .catch(() => undefined);
+      // Refresh durable messages independently. Neither their projection cursor
+      // nor /state may acknowledge queued transport frames; Last-Event-ID and
+      // reducer sequence advance only inside the ordered listener below.
+      void queryClient.refetchQueries({ queryKey: transcriptQueryKey(threadId), type: "active" });
+      // Invocation reconciliation also stays frame-ordered: a replacement is
+      // adopted only when its stream.open arrives through the listener below.
     };
 
     es.onerror = () => {
@@ -238,7 +212,7 @@ export function useSSE(threadId: string | null) {
 
     const addThreadEventListener = (type: string, listener: (event: MessageEvent<string>) => void) => {
       es.addEventListener(type, (event) => {
-        const current = syncStateRef.current || createThreadEventSyncState(threadId, snapshotCursor, activeInvokeId);
+        const current = syncStateRef.current || createThreadEventSyncState(threadId, replayCursor, activeInvokeId);
         const reduced = reduceThreadEvent(current, event.data, type);
         if (!reduced.accepted) return;
         syncStateRef.current = reduced.state;

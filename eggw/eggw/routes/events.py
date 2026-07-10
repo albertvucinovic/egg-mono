@@ -57,11 +57,12 @@ async def stream_events(
     """Stream canonical events after a durable cursor.
 
     Cursor precedence is ``after_seq`` > ``Last-Event-ID`` > connection-time
-    default. A caller that has a message snapshot must pass its
-    ``snapshot_cursor`` as ``after_seq``. Without a cursor, a live unexpired
-    lease replays its exact invocation from ``stream.open``; otherwise the feed
-    starts at the current cursor. Every event has ``id: event_seq`` so standard
-    SSE reconnect can resume without duplicates.
+    default. Initial callers resolve the explicit replay cursor through
+    ``/state?snapshot_cursor=...`` and pass it as ``after_seq``. Without an
+    explicit cursor, a live unexpired lease replays its exact invocation from
+    ``stream.open``; otherwise the feed starts at the current cursor. Every
+    event has ``id: event_seq`` so reconnect advances only through consumed
+    frames and resumes without duplicates.
     """
 
     if not core.db:
@@ -88,12 +89,8 @@ async def stream_events(
                 last_event_id=last_event_id,
             )
         else:
-            active_replay_cursor = feed.active_replay_after_seq(thread_id)
-            initial_cursor = (
-                active_replay_cursor
-                if active_replay_cursor is not None
-                else feed.current_cursor(thread_id)
-            )
+            idle_cursor = feed.current_cursor(thread_id)
+            initial_cursor = feed.replay_cursor(thread_id, idle_cursor).after_seq
     except ThreadEventCursorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except ThreadEventFeedNotFound:

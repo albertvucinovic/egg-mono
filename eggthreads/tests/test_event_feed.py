@@ -137,3 +137,43 @@ def test_event_feed_missing_thread_is_typed(tmp_path) -> None:
         feed.current_cursor("missing")
     with pytest.raises(ts.ThreadEventFeedNotFound):
         feed.read_after("missing", -1)
+
+
+def test_replay_cursor_uses_active_open_or_idle_snapshot(tmp_path) -> None:
+    db = _db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="replay-contract")
+    feed = ts.ThreadEventFeed(db)
+    idle_cursor = db.max_event_seq(thread_id)
+
+    idle = feed.replay_cursor(thread_id, idle_cursor)
+    assert idle.after_seq == idle_cursor
+    assert idle.active_invoke_id is None
+    assert idle.streaming_kind is None
+
+    assert db.try_open_stream(
+        thread_id, "active-invoke", _future(), owner="test", purpose="tool"
+    )
+    writer = db.invocation_writer(thread_id, "active-invoke")
+    open_seq = writer.append_event(
+        event_id="contract-open",
+        type_="stream.open",
+        msg_id="contract-message",
+        payload={"stream_kind": "tool"},
+    )
+    writer.append_event(
+        event_id="contract-delta",
+        type_="stream.delta",
+        chunk_seq=0,
+        payload={"tool_call": {"id": "call-contract", "arguments_delta": "{}"}},
+    )
+    # Simulate a message projection cursor later than the active frames.
+    later_snapshot_cursor = db.max_event_seq(thread_id)
+
+    active = feed.replay_cursor(thread_id, later_snapshot_cursor)
+    assert active.after_seq == open_seq - 1
+    assert active.active_invoke_id == "active-invoke"
+    assert active.streaming_kind == "tool"
+    assert [event.event_seq for event in feed.read_after(thread_id, active.after_seq).events][:2] == [
+        open_seq,
+        open_seq + 1,
+    ]

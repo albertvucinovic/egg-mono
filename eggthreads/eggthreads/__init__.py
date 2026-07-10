@@ -32,6 +32,7 @@ from .event_feed import (
     ThreadEventFeed,
     ThreadEventFeedError,
     ThreadEventFeedNotFound,
+    ThreadReplayCursor,
     parse_event_cursor,
     resolve_event_cursor,
 )
@@ -382,7 +383,7 @@ from .llm import create_llm_client
 __all__ = [
     'ActiveThreadLease', 'ThreadEventBatch', 'ThreadEventCursorError',
     'ThreadEventEnvelope', 'ThreadEventFeed', 'ThreadEventFeedError',
-    'ThreadEventFeedNotFound', 'parse_event_cursor', 'resolve_event_cursor',
+    'ThreadEventFeedNotFound', 'ThreadReplayCursor', 'parse_event_cursor', 'resolve_event_cursor',
     'ThreadsDB', 'InvocationEventWriter', 'LeaseLost', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
     'ProjectedMessage', 'ThreadProjection', 'ThreadProjectionError', 'load_thread_projection',
     'set_default_tool_timeout', 'get_default_tool_timeout',

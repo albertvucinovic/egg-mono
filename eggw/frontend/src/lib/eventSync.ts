@@ -113,15 +113,3 @@ export function reduceThreadEvent(
     state: { ...state, lastEventSeq: event.event_seq, lastEventId: event.event_id, activeInvokeId },
   };
 }
-
-export function reconcileThreadEventCursor(
-  state: ThreadEventSyncState,
-  snapshotCursor: number,
-  activeInvokeId: string | null,
-): ThreadEventSyncState {
-  return {
-    ...state,
-    lastEventSeq: Math.max(state.lastEventSeq, snapshotCursor),
-    activeInvokeId,
-  };
-}
