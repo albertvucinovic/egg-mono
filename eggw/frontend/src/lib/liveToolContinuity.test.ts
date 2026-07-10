@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_LIVE_TOOL_THREADS,
   LiveToolRegistry,
+  LiveToolRegistryOwner,
+  cleanUpEvictedLiveTools,
   clearLiveToolsForThread,
   durableToolCallIds,
   liveToolRegistryForThread,
 } from "./liveToolContinuity";
+import { useAppStore } from "./store";
+import { streamingBufferForThread } from "./streamingBuffer";
 
 function assistant(id: string) {
   return { id: `assistant-${id}`, role: "assistant", tool_calls: [{ id, name: "bash", arguments: "{}" }] };
@@ -66,12 +70,51 @@ describe("live tool continuity", () => {
     expect(registry.size).toBe(0);
   });
 
-  it("bounds thread registries and supports explicit interruption cleanup", () => {
-    for (let index = 0; index <= MAX_LIVE_TOOL_THREADS; index += 1) {
-      liveToolRegistryForThread(`thread-${index}`).observe(`call-${index}`);
+  it("cleans external state when more than 20 thread registries are LRU-bounded", () => {
+    const owner = new LiveToolRegistryOwner(MAX_LIVE_TOOL_THREADS);
+    useAppStore.setState({ streamingByThread: {} });
+    const access = (threadId: string) => {
+      const result = owner.forThread(threadId);
+      cleanUpEvictedLiveTools(result.evicted, (evictedThreadId, toolCallId) => {
+        streamingBufferForThread(evictedThreadId).removeTool(toolCallId);
+        useAppStore.getState().removeThreadStreamingTool(evictedThreadId, toolCallId);
+      });
+      return result.registry;
+    };
+    const seed = (threadId: string, toolCallId: string) => {
+      useAppStore.getState().patchThreadStreaming(threadId, {
+        streamingToolCalls: { [toolCallId]: { name: "bash" } },
+        streamingToolOutputs: {
+          [toolCallId]: { id: toolCallId, name: "bash", suppressed: false, suppressedFrames: 0 },
+        },
+      });
+      streamingBufferForThread(threadId).appendToolCallArgs(toolCallId, "bash", "{}");
+      streamingBufferForThread(threadId).appendToolOutput(toolCallId, "output");
+      access(threadId).observe(toolCallId, true);
+    };
+
+    for (let index = 0; index < MAX_LIVE_TOOL_THREADS; index += 1) {
+      seed(`eviction-thread-${index}`, `call-${index}`);
     }
-    expect(clearLiveToolsForThread("thread-0")).toEqual([]);
-    expect(clearLiveToolsForThread(`thread-${MAX_LIVE_TOOL_THREADS}`)).toEqual([`call-${MAX_LIVE_TOOL_THREADS}`]);
+    // Normal current-thread access remains unchanged and refreshes its LRU age.
+    expect(access("eviction-thread-0").has("call-0")).toBe(true);
+    seed(`eviction-thread-${MAX_LIVE_TOOL_THREADS}`, `call-${MAX_LIVE_TOOL_THREADS}`);
+
+    const evictedThreadId = "eviction-thread-1";
+    expect(useAppStore.getState().streamingByThread[evictedThreadId].streamingToolCalls).toEqual({});
+    expect(useAppStore.getState().streamingByThread[evictedThreadId].streamingToolOutputs).toEqual({});
+    expect(streamingBufferForThread(evictedThreadId).toolCalls.has("call-1")).toBe(false);
+    expect(streamingBufferForThread(evictedThreadId).toolOutputChunks.has("call-1")).toBe(false);
+    expect(useAppStore.getState().streamingByThread["eviction-thread-0"].streamingToolCalls).toHaveProperty("call-0");
+    expect(streamingBufferForThread("eviction-thread-0").toolCalls.has("call-0")).toBe(true);
+  });
+
+  it("keeps the singleton registry owner bounded and explicitly clearable", () => {
+    for (let index = 0; index <= MAX_LIVE_TOOL_THREADS; index += 1) {
+      liveToolRegistryForThread(`singleton-thread-${index}`).registry.observe(`singleton-call-${index}`);
+    }
+    expect(clearLiveToolsForThread(`singleton-thread-${MAX_LIVE_TOOL_THREADS}`))
+      .toEqual([`singleton-call-${MAX_LIVE_TOOL_THREADS}`]);
   });
 
   it("recognizes assistant calls and tool results by canonical IDs", () => {

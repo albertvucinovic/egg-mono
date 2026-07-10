@@ -108,31 +108,68 @@ export class LiveToolRegistry {
   }
 }
 
-const registries = new Map<string, LiveToolRegistry>();
+export interface EvictedLiveToolRegistry {
+  threadId: string;
+  toolCallIds: string[];
+}
 
-export function liveToolRegistryForThread(threadId: string): LiveToolRegistry {
-  const existing = registries.get(threadId);
-  if (existing) {
-    // Map insertion order doubles as a bounded least-recently-used list.
-    registries.delete(threadId);
-    registries.set(threadId, existing);
-    return existing;
+export interface LiveToolRegistryAccess {
+  registry: LiveToolRegistry;
+  evicted: EvictedLiveToolRegistry[];
+}
+
+export function cleanUpEvictedLiveTools(
+  evicted: EvictedLiveToolRegistry[],
+  removeTool: (threadId: string, toolCallId: string) => void,
+): void {
+  evicted.forEach((registry) => {
+    registry.toolCallIds.forEach((toolCallId) => removeTool(registry.threadId, toolCallId));
+  });
+}
+
+export class LiveToolRegistryOwner {
+  private registries = new Map<string, LiveToolRegistry>();
+
+  constructor(private readonly threadLimit = MAX_LIVE_TOOL_THREADS) {}
+
+  forThread(threadId: string): LiveToolRegistryAccess {
+    const existing = this.registries.get(threadId);
+    if (existing) {
+      // Map insertion order doubles as a bounded least-recently-used list.
+      this.registries.delete(threadId);
+      this.registries.set(threadId, existing);
+      return { registry: existing, evicted: [] };
+    }
+
+    const registry = new LiveToolRegistry();
+    this.registries.set(threadId, registry);
+    const evicted: EvictedLiveToolRegistry[] = [];
+    while (this.registries.size > this.threadLimit) {
+      const oldestThreadId = this.registries.keys().next().value;
+      if (!oldestThreadId) break;
+      const oldest = this.registries.get(oldestThreadId);
+      this.registries.delete(oldestThreadId);
+      evicted.push({ threadId: oldestThreadId, toolCallIds: oldest?.clear() || [] });
+    }
+    return { registry, evicted };
   }
-  const created = new LiveToolRegistry();
-  registries.set(threadId, created);
-  while (registries.size > MAX_LIVE_TOOL_THREADS) {
-    const oldestThreadId = registries.keys().next().value;
-    if (!oldestThreadId) break;
-    registries.delete(oldestThreadId);
+
+  clearThread(threadId: string): string[] {
+    const registry = this.registries.get(threadId);
+    if (!registry) return [];
+    this.registries.delete(threadId);
+    return registry.clear();
   }
-  return created;
+}
+
+const registryOwner = new LiveToolRegistryOwner();
+
+export function liveToolRegistryForThread(threadId: string): LiveToolRegistryAccess {
+  return registryOwner.forThread(threadId);
 }
 
 export function clearLiveToolsForThread(threadId: string): string[] {
-  const registry = registries.get(threadId);
-  if (!registry) return [];
-  registries.delete(threadId);
-  return registry.clear();
+  return registryOwner.clearThread(threadId);
 }
 
 export function durableToolCallIds(message: Message): { callIds: string[]; resultIds: string[] } {

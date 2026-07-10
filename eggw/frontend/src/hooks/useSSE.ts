@@ -6,7 +6,7 @@ import { useAppStore } from "@/lib/store";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { applyStreamingDelta } from "@/lib/streamingDelta";
 import { messageFromCreateEvent } from "@/lib/messageEvents";
-import { clearLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
+import { cleanUpEvictedLiveTools, clearLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
 import { useQueryClient } from "@tanstack/react-query";
 import { createThreadEventSyncState, reconcileThreadEventCursor, reduceThreadEvent, type ThreadEventSyncState } from "@/lib/eventSync";
 import { transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor, upsertTranscriptTailMessage } from "@/lib/transcript";
@@ -97,6 +97,14 @@ export function useSSE(threadId: string | null) {
     streamingBufferForThread(threadId).removeTool(id);
     removeThreadStreamingTool(threadId, id);
   }, [removeThreadStreamingTool, threadId]);
+  const liveToolsForThread = useCallback((sourceThreadId: string) => {
+    const access = liveToolRegistryForThread(sourceThreadId);
+    cleanUpEvictedLiveTools(access.evicted, (evictedThreadId, toolCallId) => {
+      streamingBufferForThread(evictedThreadId).removeTool(toolCallId);
+      removeThreadStreamingTool(evictedThreadId, toolCallId);
+    });
+    return access.registry;
+  }, [removeThreadStreamingTool]);
   const hideStreamingToolCall = useCallback((id: string) => {
     if (!threadId) return;
     streamingBufferForThread(threadId).removeToolCall(id);
@@ -108,10 +116,10 @@ export function useSSE(threadId: string | null) {
   }, [removeStreamingTool, threadId]);
   const reconcileDurableToolMessage = useCallback((message: import("@/lib/store").Message) => {
     if (!threadId) return;
-    const reconciliation = liveToolRegistryForThread(threadId).reconcileMessage(message);
+    const reconciliation = liveToolsForThread(threadId).reconcileMessage(message);
     reconciliation.hideCalls.forEach(hideStreamingToolCall);
     reconciliation.removeTools.forEach(removeStreamingTool);
-  }, [hideStreamingToolCall, removeStreamingTool, threadId]);
+  }, [hideStreamingToolCall, liveToolsForThread, removeStreamingTool, threadId]);
   const upsertStreamingToolCall = useCallback((id: string, name: string) => {
     if (threadId) upsertThreadStreamingToolCall(threadId, id, name);
   }, [threadId, upsertThreadStreamingToolCall]);
@@ -290,13 +298,13 @@ export function useSSE(threadId: string | null) {
         const notifications = applyStreamingDelta(streamingBufferForThread(threadId), payload);
         if (notifications.toolOutput) {
           const { id, name, suppressed } = notifications.toolOutput;
-          liveToolRegistryForThread(threadId).observe(id, true).forEach(removeStreamingTool);
+          liveToolsForThread(threadId).observe(id, true).forEach(removeStreamingTool);
           setIsStreaming(true);
           setStreamingKind("tool");
           upsertStreamingToolOutput(id, name, suppressed);
         }
         if (notifications.toolCall) {
-          liveToolRegistryForThread(threadId).observe(notifications.toolCall.id).forEach(removeStreamingTool);
+          liveToolsForThread(threadId).observe(notifications.toolCall.id).forEach(removeStreamingTool);
           upsertStreamingToolCall(notifications.toolCall.id, notifications.toolCall.name);
         }
       } catch (err) {
@@ -352,7 +360,7 @@ export function useSSE(threadId: string | null) {
         if (toolId) {
           const toolIdText = String(toolId);
           const toolNameText = String(toolName || "tool");
-          liveToolRegistryForThread(threadId).observe(toolIdText).forEach(removeStreamingTool);
+          liveToolsForThread(threadId).observe(toolIdText).forEach(removeStreamingTool);
           const args = toolCallArgumentsFromPayload(payload);
           markStreamingToolStarted(toolIdText, toolNameText, eventStartedAtMs(data.ts), timeoutSec);
           if (args) {
@@ -569,6 +577,7 @@ export function useSSE(threadId: string | null) {
     markStreamingToolStarted,
     clearStreamingToolTimeout,
     removeStreamingTool,
+    liveToolsForThread,
     clearRetainedTools,
     hideStreamingToolCall,
     reconcileDurableToolMessage,
