@@ -14,6 +14,24 @@ function isCommandClientMessage(message: Message): boolean {
   return message.client_only === "command";
 }
 
+function messageTimestampMs(message: Pick<Message, "timestamp">): number | null {
+  if (typeof message.timestamp !== "string" || !message.timestamp) return null;
+  const parsed = Date.parse(message.timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function insertMessageByTimestamp(messages: Message[], message: Message): Message[] {
+  const messageMs = messageTimestampMs(message);
+  if (messageMs === null) return [...messages, message];
+  const insertAt = messages.findIndex((candidate) => {
+    const candidateMs = messageTimestampMs(candidate);
+    return candidateMs !== null && candidateMs > messageMs;
+  });
+  return insertAt === -1
+    ? [...messages, message]
+    : [...messages.slice(0, insertAt), message, ...messages.slice(insertAt)];
+}
+
 /** Keep only explicit client-owned entries when an authoritative tail arrives. */
 export function reconcileTranscriptTail(
   fetched: TranscriptPage,
@@ -104,7 +122,12 @@ export function appendClientTranscriptMessage(
   updateTranscript(queryClient, threadId, (data) => {
     const pages = [...data.pages];
     const tail = pages[0] || emptyTranscriptData().pages[0];
-    pages[0] = { ...tail, items: [...tail.items, message] };
+    pages[0] = {
+      ...tail,
+      items: isCommandClientMessage(message)
+        ? insertMessageByTimestamp(tail.items, message)
+        : [...tail.items, message],
+    };
     return { ...data, pages };
   });
 }

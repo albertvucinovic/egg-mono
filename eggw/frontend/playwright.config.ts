@@ -35,7 +35,7 @@ export default defineConfig({
   webServer: [
     {
       // Enable test mode for mock LLM responses
-      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && cd .. && PYTHONPATH=.. EGG_TEST_MODE=true EGG_DB_PATH="${TEST_DB_PATH}" EGGW_API_TOKEN="${TEST_API_TOKEN}" EGGW_ALLOWED_ORIGINS="http://localhost:${TEST_FRONTEND_PORT}" python -m hypercorn eggw.main:app --bind 0.0.0.0:${TEST_BACKEND_PORT}`,
+      command: `mkdir -p "${path.dirname(TEST_DB_PATH)}" && rm -f "${TEST_DB_PATH}" "${TEST_DB_PATH}-wal" "${TEST_DB_PATH}-shm" && cd .. && PYTHONPATH=.. EGG_TEST_MODE=true EGG_DB_PATH="${TEST_DB_PATH}" EGGW_API_TOKEN="${TEST_API_TOKEN}" EGGW_ALLOWED_ORIGINS="http://localhost:${TEST_FRONTEND_PORT}" python -m hypercorn eggw.main:app --bind 0.0.0.0:${TEST_BACKEND_PORT}`,
       url: `http://localhost:${TEST_BACKEND_PORT}/health`,
       reuseExistingServer: false, // Always start fresh for tests
       timeout: 30000,

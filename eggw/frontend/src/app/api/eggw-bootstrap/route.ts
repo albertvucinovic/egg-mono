@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
 
 export const dynamic = "force-dynamic";
 
@@ -9,13 +8,12 @@ export const dynamic = "force-dynamic";
  * eggw.sh sets this server-side variable only when both servers bind loopback.
  * Public/manual deployments never expose a token through this route.
  */
-export async function GET(request: NextRequest) {
+export async function GET() {
   const token = process.env.EGGW_PRIVATE_BOOTSTRAP_TOKEN || "";
-  // Defense in depth: private bootstrap is launcher-only and local clients
-  // only. Forwarded addresses are intentionally not trusted here.
-  const remoteAddress = request.ip || "";
-  const localClient = remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
-  if (!token || !localClient) {
+  // eggw.sh supplies this server-only value only in private mode and binds the
+  // entire Next server explicitly to loopback. Do not authorize from forwarded
+  // headers: clients can spoof them unless a trusted proxy strips them.
+  if (!token) {
     return NextResponse.json(
       { detail: "Private token bootstrap is disabled" },
       { status: 404, headers: { "Cache-Control": "no-store" } },

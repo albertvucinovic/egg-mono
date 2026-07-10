@@ -206,6 +206,7 @@ def _run_launcher(tmp_path: Path, **environment: str) -> subprocess.CompletedPro
         'printf "%s" "${EGGW_API_TOKEN:-}" > "$EGGW_TEST_CAPTURE/frontend-server-api-token"\n'
         'printf "%s" "${EGGW_PRIVATE_BOOTSTRAP_TOKEN:-}" > "$EGGW_TEST_CAPTURE/frontend-bootstrap-token"\n'
         'printf "%s" "${NEXT_PUBLIC_EGGW_API_TOKEN:-}" > "$EGGW_TEST_CAPTURE/frontend-public-token"\n'
+        'printf "%s" "${NEXT_PUBLIC_API_URL:-}" > "$EGGW_TEST_CAPTURE/frontend-api-url"\n'
         'sleep 3',
     )
     env = {
@@ -220,7 +221,14 @@ def _run_launcher(tmp_path: Path, **environment: str) -> subprocess.CompletedPro
         "EGGW_TEST_CAPTURE": str(capture),
         **environment,
     }
-    for key in ("EGGW_API_TOKEN", "EGGW_ALLOWED_ORIGINS", "EGGW_BIND_HOST", "EGGW_PUBLIC"):
+    for key in (
+        "EGGW_API_TOKEN",
+        "EGGW_ALLOWED_ORIGINS",
+        "EGGW_BIND_HOST",
+        "EGGW_FRONTEND_BIND_HOST",
+        "EGGW_PUBLIC",
+        "NEXT_PUBLIC_API_URL",
+    ):
         if key not in environment:
             env.pop(key, None)
     return subprocess.run(
@@ -247,6 +255,9 @@ def test_launcher_generates_shared_high_entropy_token_and_binds_loopback(tmp_pat
     assert backend_token not in result.stderr
     backend_args = (capture / "backend-args").read_text().splitlines()
     assert backend_args[-2:] == ["--bind", "127.0.0.1:18123"]
+    frontend_args = (capture / "frontend-args").read_text().splitlines()
+    assert frontend_args[-4:] == ["-H", "127.0.0.1", "-p", "18124"]
+    assert (capture / "frontend-api-url").read_text() == "http://localhost:18123"
     assert (capture / "origins").read_text() == "http://localhost:18124,http://127.0.0.1:18124"
 
 
@@ -293,6 +304,7 @@ def test_frontend_token_source_is_runtime_only_and_not_persisted_in_local_storag
     assert "localStorage" not in token_source
     assert "sessionStorage" in token_source
     assert "EGGW_PRIVATE_BOOTSTRAP_TOKEN" in bootstrap_source
+    assert "x-forwarded-for" not in bootstrap_source.lower()
     assert 'Cache-Control": "no-store' in bootstrap_source
 
 
@@ -305,18 +317,51 @@ def test_launcher_requires_explicit_public_override_for_non_loopback(tmp_path: P
     assert missing_token.returncode != 0
     assert "requires an explicit EGGW_API_TOKEN" in missing_token.stderr
 
-    allowed = _run_launcher(
-        tmp_path / "allowed",
-        EGGW_BIND_HOST="0.0.0.0",
+    missing_origins = _run_launcher(
+        tmp_path / "missing-origins",
+        EGGW_PUBLIC="1",
+        EGGW_API_TOKEN=TEST_TOKEN,
+        NEXT_PUBLIC_API_URL="https://api.eggw.example",
+    )
+    assert missing_origins.returncode != 0
+    assert "requires explicit EGGW_ALLOWED_ORIGINS" in missing_origins.stderr
+
+    missing_api_url = _run_launcher(
+        tmp_path / "missing-api-url",
         EGGW_PUBLIC="1",
         EGGW_API_TOKEN=TEST_TOKEN,
         EGGW_ALLOWED_ORIGINS="https://eggw.example",
+    )
+    assert missing_api_url.returncode != 0
+    assert "requires explicit NEXT_PUBLIC_API_URL" in missing_api_url.stderr
+
+    insecure_api_url = _run_launcher(
+        tmp_path / "insecure-api-url",
+        EGGW_PUBLIC="1",
+        EGGW_API_TOKEN=TEST_TOKEN,
+        EGGW_ALLOWED_ORIGINS="https://eggw.example",
+        NEXT_PUBLIC_API_URL="http://api.eggw.example",
+    )
+    assert insecure_api_url.returncode != 0
+    assert "must use https://" in insecure_api_url.stderr
+
+    allowed = _run_launcher(
+        tmp_path / "allowed",
+        EGGW_BIND_HOST="0.0.0.0",
+        EGGW_FRONTEND_BIND_HOST="0.0.0.0",
+        EGGW_PUBLIC="1",
+        EGGW_API_TOKEN=TEST_TOKEN,
+        EGGW_ALLOWED_ORIGINS="https://eggw.example",
+        NEXT_PUBLIC_API_URL="https://api.eggw.example",
     )
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
     capture = tmp_path / "allowed" / "capture"
     args = (capture / "backend-args").read_text().splitlines()
     assert args[-2:] == ["--bind", "0.0.0.0:18123"]
+    frontend_args = (capture / "frontend-args").read_text().splitlines()
+    assert frontend_args[-4:] == ["-H", "0.0.0.0", "-p", "18124"]
     assert (capture / "frontend-bootstrap-token").read_text() == ""
     assert (capture / "frontend-public-token").read_text() == ""
     assert (capture / "frontend-server-api-token").read_text() == ""
+    assert (capture / "frontend-api-url").read_text() == "https://api.eggw.example"
     assert TEST_TOKEN not in (capture / "frontend-args").read_text()

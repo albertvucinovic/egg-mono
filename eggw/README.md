@@ -71,11 +71,17 @@ Configuration variables:
   origins. Wildcards are rejected. The launcher defaults this to the local
   frontend on `EGGW_FRONTEND_PORT`.
 - `EGGW_BIND_HOST`: backend bind address. Loopback values work by default.
+- `EGGW_FRONTEND_BIND_HOST`: frontend bind address. It defaults to loopback in
+  every mode. A non-loopback value additionally requires `EGGW_PUBLIC=1`.
+- `NEXT_PUBLIC_API_URL`: browser-facing API origin. Public launcher mode
+  requires an explicit `https://` URL because a listener address cannot be
+  inferred safely for a remote browser.
 - `EGGW_PUBLIC=1`: mandatory explicit acknowledgement for any non-loopback bind.
   For example, use `EGGW_PUBLIC=1 EGGW_BIND_HOST=0.0.0.0` together with an
-  explicit token and the real public frontend origin. Put TLS and normal network
-  access controls in front of EggW; the bearer token is an API capability, not
-  a replacement for encrypted transport.
+  explicit token, `NEXT_PUBLIC_API_URL`, and the real public frontend origin.
+  Public mode fails closed if either browser-facing URL setting is omitted. Put
+  TLS and normal network access controls in front of EggW; the bearer token is
+  an API capability, not a replacement for encrypted transport.
 
 ### Browser credential threat model
 
@@ -83,8 +89,11 @@ A public frontend is available to untrusted visitors, so any `NEXT_PUBLIC_*`
 value is public and cannot protect its API. EggW never embeds the bearer token
 in browser-delivered JavaScript. The loopback launcher may serve its generated
 token from a same-origin, no-store runtime bootstrap endpoint because both the
-frontend and backend are bound to the local machine. Public and manual frontend
-deployments disable that bootstrap; each authorized user enters the operator-
+frontend and backend are bound to the local machine. This assumes a trusted
+local host: loopback is host-local, not isolated from other local OS users or
+processes, and private bootstrap must not be published through a reverse proxy.
+Public and manual frontend deployments disable that bootstrap; each authorized
+user enters the operator-
 provided token into the connection screen. The browser keeps this token only in
 memory and tab-scoped `sessionStorage` (not `localStorage`, cookies, or a URL).
 Closing the tab ends that browser session.
@@ -93,6 +102,30 @@ The runtime token is sent in the `Authorization` header for REST/fetch-SSE and
 in a WebSocket subprotocol for browser WebSockets. It is never placed in query
 strings or logged by EggW. Manual non-browser callers use
 `Authorization: Bearer <token>`.
+
+Operational requirements for a public deployment:
+
+- terminate TLS at a trusted reverse proxy and forward only to EggW's private
+  frontend and backend listeners; never send the bearer capability over
+  plaintext networks. Both listeners remain loopback by default, including in
+  public mode; set their bind-host variables explicitly only when the network
+  topology requires non-loopback upstream sockets;
+- set `EGGW_PUBLIC=1`, an explicit `EGGW_API_TOKEN`, browser-facing HTTPS API
+  origin in `NEXT_PUBLIC_API_URL`, and the exact HTTPS frontend origin in
+  `EGGW_ALLOWED_ORIGINS`;
+- keep frontend and API origins stable. `eggw.sh` passes the explicit public
+  `NEXT_PUBLIC_API_URL` to Next, but never put credentials in any
+  `NEXT_PUBLIC_*` value;
+- rotate a compromised token by restarting the backend with a new
+  `EGGW_API_TOKEN`; browser tabs holding the old token will receive `401`, clear
+  their tab-scoped credential, and return to the connection screen; and
+- do not expose the private `/api/eggw-bootstrap` route in public/manual
+  deployments. It is enabled only when the launcher supplies a private
+  loopback bootstrap token.
+
+`EGGW_ALLOWED_ORIGINS` is an exact browser-origin allowlist, not an
+authentication mechanism. Non-browser clients still need the bearer token, and
+operators should also apply ordinary firewall, proxy, and access controls.
 
 ## Configuration
 
@@ -135,9 +168,31 @@ Streaming endpoints:
   `stream.open` events do not imply active work. Missing threads return `404`.
 - `WS /ws/{id}` — bidirectional websocket channel where enabled
 
+### Synchronization and frontend ownership
+
+The browser treats persisted transcript pages as an infinite React Query value
+keyed by thread ID. Drafts, staged attachments, live invocation/tool metadata,
+stream buffers, and connection status are also thread-scoped, so an async
+completion or pagination request for thread A cannot mutate thread B after
+navigation. Optimistic sends are identified by a client operation ID: success
+replaces that exact temporary message with the backend `message_id`; failure
+removes only that operation and restores its original draft and attachments.
+
+For a gap-free live view, first request the message envelope, then connect SSE
+with its `snapshot_cursor`. The frontend resumes transport with `Last-Event-ID`,
+rejects duplicate/out-of-order canonical event sequences before UI mutation,
+and on reconnect refreshes the authoritative transcript watermark plus
+`/api/threads/{id}/state`. Connection state (`connecting`, `connected`, or
+`reconnecting`) is separate from lease-backed run state: a dropped network
+connection does not mean the thread stopped, and only an unexpired backend lease
+identifies active work.
+
 ## Development checks
 
 ```bash
 PYTHONPATH=eggw:eggconfig:eggthreads:eggllm pytest -q eggw/tests
+cd eggw/frontend && npm run test:unit
 cd eggw/frontend && npx tsc --noEmit --pretty false
+cd eggw/frontend && npm run build
+cd eggw/frontend && npm test
 ```

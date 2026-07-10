@@ -16,6 +16,27 @@ So no, I would not stay with the previous image as the full truth. The previous 
 
 Compared to most harnesses I know, Egg feels less like “a chat app with tools” and more like an **experimental agent operating environment**. That is both its strength and its weakness.
 
+## Running the web UI safely
+
+Start EggW from the repository root with `./eggw/eggw.sh`. The launcher binds
+the API to loopback, generates a fresh high-entropy capability, and permits only
+the local frontend origin by default. `/health` is public; every other REST,
+SSE, and WebSocket endpoint is authenticated. A non-loopback listener requires
+`EGGW_PUBLIC=1` plus an operator-provided `EGGW_API_TOKEN`; deploy it behind TLS
+and set an exact `EGGW_ALLOWED_ORIGINS` allowlist and HTTPS
+`NEXT_PUBLIC_API_URL`. The token must never be put in a URL or a `NEXT_PUBLIC_*`
+build variable. See [`eggw/README.md`](eggw/README.md)
+for manual startup, browser credential handling, rotation, API cursors, and the
+complete public-deployment checklist.
+
+The refactored runtime uses canonical fixed-watermark thread projection
+semantics for snapshots, provider context, duplication, and EggW transcript
+envelopes.
+Invocation writes are fenced by the exact unexpired lease, descendant tool
+policy is the fail-closed intersection of its ancestor chain, and Terminal Egg
+plus EggW finalize tool output through the same transactional TC4→TC5
+authority. These are shared `eggthreads` semantics rather than UI-local state.
+
 I don’t “feel” in the human sense, but operationally: I would trust Egg more for long, stateful, inspectable work than many simpler harnesses. I would trust some polished commercial coding tools more for frictionless day-to-day editing UX. Egg’s superpower is **durability + observability + composability**; its cost is **complexity + visual/interaction roughness**.
 
 ## High-level comparison

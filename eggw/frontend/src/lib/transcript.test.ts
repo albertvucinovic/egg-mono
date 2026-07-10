@@ -104,4 +104,24 @@ describe("thread-keyed transcript cache", () => {
     const reconciled = reconcileTranscriptTail(page(["persisted"], 5), previous);
     expect(reconciled.items.map((message) => message.id)).toEqual(["persisted", "pending"]);
   });
+
+  it("inserts local command output at its response timestamp", () => {
+    const client = new QueryClient();
+    const tail = page(["before", "after"], 2);
+    tail.items[0].timestamp = "2026-01-01T00:00:00.000Z";
+    tail.items[1].timestamp = "2026-01-01T00:00:02.000Z";
+    client.setQueryData(transcriptQueryKey("thread-a"), data([tail]));
+
+    appendClientTranscriptMessage(client, "thread-a", {
+      id: "command",
+      role: "system",
+      content: "command",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      client_only: "command",
+      client_operation_id: "command-operation",
+    });
+
+    expect(flattenTranscript(client.getQueryData<TranscriptData>(transcriptQueryKey("thread-a"))).map((message) => message.id))
+      .toEqual(["before", "command", "after"]);
+  });
 });

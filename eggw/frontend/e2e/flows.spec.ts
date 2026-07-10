@@ -12,29 +12,47 @@ import { test, expect, Page } from '@playwright/test';
  * Run with: npx playwright test
  */
 
-// Helper to wait for page to be fully loaded
+test.describe('Browser authentication', () => {
+  test('public/manual mode gates API access until the operator token is verified', async ({ page }) => {
+    await page.route('**/api/eggw-bootstrap', (route) => route.fulfill({ status: 404, json: { detail: 'disabled' } }));
+    const apiRequests: Array<{ authorization: string | undefined; url: string }> = [];
+    await page.route(`${TEST_API_BASE}/api/threads`, async (route, request) => {
+      apiRequests.push({ authorization: request.headers()['authorization'], url: request.url() });
+      const authorized = request.headers()['authorization'] === 'Bearer ' + 'm'.repeat(48);
+      await route.fulfill({
+        status: authorized ? 200 : 401,
+        headers: mockApiHeaders,
+        json: authorized ? [] : { detail: 'Invalid or missing API token' },
+      });
+    });
+
+    await page.goto('/');
+    const tokenInput = page.getByTestId('api-token-input');
+    await expect(tokenInput).toBeVisible();
+    await tokenInput.fill('m'.repeat(48));
+    await page.getByRole('button', { name: 'Connect' }).click();
+
+    await expect.poll(() => apiRequests.length).toBeGreaterThan(0);
+    expect(apiRequests[0].authorization).toBe('Bearer ' + 'm'.repeat(48));
+    expect(apiRequests[0].url).not.toContain('m'.repeat(48));
+    await expect(tokenInput).not.toBeVisible();
+  });
+});
+
+// Wait for the authenticated shell and its auto-created thread composer.
 async function waitForPageLoad(page: Page) {
-  // Wait for the page to have the header
   await page.waitForSelector('h1:has-text("eggw")', { timeout: 15000 });
-  // Wait for a thread to be auto-selected (current UI auto-selects most recent thread)
-  await page.waitForTimeout(2000);
+  await expect(page.getByTestId('message-input')).toBeVisible({ timeout: 15000 });
 }
 
-// Helper to ensure we have a thread (creates one if none exists)
 async function ensureThread(page: Page): Promise<void> {
-  // Wait for page to load
   await waitForPageLoad(page);
+}
 
-  // Check if thread info panel is visible (indicates a thread is selected)
-  const threadInfo = page.locator('text=Thread Info');
-  try {
-    await expect(threadInfo).toBeVisible({ timeout: 3000 });
-  } catch {
-    // No thread selected - create one via Ctrl+N
-    await page.keyboard.press('Control+n');
-    await page.waitForTimeout(1000);
-    await expect(threadInfo).toBeVisible({ timeout: 5000 });
-  }
+async function showSystemPanel(page: Page): Promise<void> {
+  if (await page.getByText('System Log', { exact: true }).isVisible()) return;
+  await page.getByRole('button', { name: 'Show sidebar' }).click();
+  await expect(page.getByText('System Log', { exact: true })).toBeVisible();
 }
 
 // Helper to send a message
@@ -100,7 +118,11 @@ async function replaceMonacoDraft(page: Page, value: string) {
   await expect(draft.locator('.view-lines')).toContainText(value.replace(/^>\s*/, ''), { timeout: 10000 });
 }
 
-async function mockThreadShell(page: Page, threadId: string, options: { messages?: unknown[] } = {}) {
+async function mockThreadShell(
+  page: Page,
+  threadId: string,
+  options: { messages?: unknown[]; tools?: unknown[]; onApprove?: (payload: Record<string, unknown>) => void } = {},
+) {
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
     await route.fulfill({
       status: 200,
@@ -131,7 +153,11 @@ async function mockThreadShell(page: Page, threadId: string, options: { messages
     });
   });
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, async (route) => {
-    await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: options.tools || [] });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools/approve`, async (route, request) => {
+    options.onApprove?.(request.postDataJSON() as Record<string, unknown>);
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'ok' } });
   });
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, async (route) => {
     await route.fulfill({
@@ -215,8 +241,8 @@ test.describe('Basic Operations', () => {
     await expect(page.locator('h1:has-text("eggw")')).toBeVisible();
   });
 
-  test('can see system log panel', async ({ page }) => {
-    await expect(page.locator('text=System Log')).toBeVisible({ timeout: 5000 });
+  test('can open the system log panel', async ({ page }) => {
+    await showSystemPanel(page);
   });
 });
 
@@ -230,11 +256,13 @@ test.describe('Thread Operations', () => {
     // Use /newThread command to create a new thread
     const input = page.locator('[data-testid="message-input"]');
     await expect(input).toBeVisible({ timeout: 5000 });
+    const sourcePath = new URL(page.url()).pathname;
     await input.fill('/newThread');
     await input.press('Enter');
 
-    // Should see system log about created thread (text is "Created new thread: XXXX")
-    await expect(page.locator('text=Created new thread')).toBeVisible({ timeout: 5000 });
+    // A successful command selects the newly-created thread.
+    await expect(page).toHaveURL((url) => url.pathname !== sourcePath);
+    await expect(page.getByTestId('message-input')).toBeVisible();
   });
 
   test('can send a message', async ({ page }) => {
@@ -249,8 +277,8 @@ test.describe('Thread Operations', () => {
     await input.fill('Hello, this is a test message');
     await input.press('Enter');
 
-    // Should see "Message sent" in system log
-    await expect(page.locator('text=Message sent')).toBeVisible({ timeout: 5000 });
+    // The persisted user turn is the authoritative send result.
+    await expect(page.getByTestId('chat-panel')).toContainText('Hello, this is a test message', { timeout: 5000 });
   });
 
   test('can upload, stage, and send an attachment', async ({ page }) => {
@@ -269,10 +297,11 @@ test.describe('Thread Operations', () => {
     await input.fill('See attached');
     await input.press('Enter');
 
-    await expect(page.locator('text=Message sent')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('[data-testid="staged-attachments"]')).not.toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Attachment')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=note.txt')).toBeVisible({ timeout: 5000 });
+    const chat = page.getByTestId('chat-panel');
+    await expect(chat).toContainText('See attached', { timeout: 5000 });
+    await expect(page.getByTestId('staged-attachments')).not.toBeVisible({ timeout: 5000 });
+    await expect(chat).toContainText('Attachment');
+    await expect(chat).toContainText('note.txt');
   });
 
 });
@@ -281,6 +310,7 @@ test.describe('Attachment Composer UX', () => {
   test('can drag and drop an image attachment into staging with mocked backend', async ({ page }) => {
     const threadId = 'drop-thread-1';
     let uploadCalled = false;
+    let previewRequested = false;
 
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
       await route.fulfill({
@@ -328,6 +358,7 @@ test.describe('Attachment Composer UX', () => {
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/attachments/drop1234`, async (route) => {
+      previewRequested = true;
       await route.fulfill({
         status: 200,
         headers: { ...mockApiHeaders, 'content-type': 'image/png' },
@@ -417,7 +448,9 @@ test.describe('Attachment Composer UX', () => {
     await expect.poll(() => uploadCalled).toBe(true);
     await expect(page.getByTestId('staged-attachments')).toContainText('drop-egg.png', { timeout: 5000 });
     const stagedPreview = page.getByTestId('staged-attachment-preview');
-    await expect(stagedPreview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/attachments/drop1234`);
+    await expect(stagedPreview).toBeVisible();
+    await expect.poll(() => previewRequested).toBe(true);
+    await expect(stagedPreview).toHaveAttribute('src', /^blob:/);
     await expect(stagedPreview).toHaveAttribute('loading', 'lazy');
   });
 });
@@ -595,15 +628,15 @@ test.describe('Image Generation UI', () => {
     await expect.poll(() => messagesRequests.length).toBeGreaterThanOrEqual(1);
     await expect.poll(() => messagesRequestsAfterGeneration.length).toBeGreaterThanOrEqual(1);
     await expect(page.locator('text=Generated 1 artifact; appended result to transcript')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Provider artifact')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=generated-egg.png')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('Provider artifact', { exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('generated-egg.png', { exact: true })).toBeVisible({ timeout: 5000 });
     const preview = page.getByTestId('provider-artifact-preview');
     await expect(preview).toBeVisible({ timeout: 5000 });
-    await expect(preview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/provider-output/abc12345`);
+    await expect(preview).toHaveAttribute('src', /^blob:/);
     await expect(preview).toHaveAttribute('loading', 'lazy');
     const attachmentPreview = page.getByTestId('attachment-preview');
     await expect(attachmentPreview).toBeVisible({ timeout: 5000 });
-    await expect(attachmentPreview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/attachments/input123`);
+    await expect(attachmentPreview).toHaveAttribute('src', /^blob:/);
     await expect(attachmentPreview).toHaveAttribute('loading', 'lazy');
   });
 });
@@ -928,27 +961,18 @@ test.describe('Streaming', () => {
   });
 
   test('shows SSE connected after thread selection', async ({ page }) => {
-    // Should see "SSE connected" in system log
-    await expect(page.locator('text=SSE connected')).toBeVisible({ timeout: 5000 });
+    await showSystemPanel(page);
+    await expect(page.getByText(/SSE connected/).last()).toBeVisible({ timeout: 5000 });
   });
 
-  test('shows streaming when receiving response', async ({ page }) => {
+  test('persists a message even when streaming completes before it can be observed', async ({ page }) => {
     const input = page.locator('[data-testid="message-input"]');
     await expect(input).toBeVisible({ timeout: 5000 });
     await input.fill('Say "Hello World"');
     await input.press('Enter');
 
-    // Should see streaming indicator or "Streaming" log
-    // This depends on LLM being available
-    const streamingIndicator = page.locator('text=Streaming').or(page.locator('text=Running'));
-
-    // Wait up to 10 seconds for streaming to start (may not happen without real LLM)
-    try {
-      await expect(streamingIndicator).toBeVisible({ timeout: 10000 });
-    } catch {
-      // If no streaming, check that message was at least sent
-      await expect(page.locator('text=Message sent')).toBeVisible();
-    }
+    // Streaming can finish between browser frames; the persisted user turn is stable.
+    await expect(page.getByTestId('chat-panel')).toContainText('Say "Hello World"', { timeout: 5000 });
   });
 });
 
@@ -1019,6 +1043,88 @@ test.describe('Per-thread transcript state', () => {
     await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
     await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
     await expect(page.getByTestId('chat-panel')).not.toContainText('thread b only');
+  });
+});
+
+test.describe('Tool approval integration', () => {
+  test('submits a TC4 output decision through the shared approval endpoint', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'approval-thread';
+    let approval: Record<string, unknown> | undefined;
+    await mockThreadShell(page, threadId, {
+      tools: [{
+        id: 'approval-tool-call',
+        name: 'bash',
+        arguments: { script: 'echo approved' },
+        state: 'TC4',
+        output: 'inspectable output',
+      }],
+      onApprove: (payload) => { approval = payload; },
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.getByText('Pending Approvals', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Whole' }).click();
+    await expect.poll(() => approval).toMatchObject({
+      tool_call_id: 'approval-tool-call',
+      approved: true,
+      output_decision: 'whole',
+    });
+  });
+});
+
+test.describe('SSE reconnect integration', () => {
+  test('resumes with Last-Event-ID and renders a replayed delta once', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'reconnect-thread';
+    const invokeId = 'reconnect-invoke';
+    const cursors: string[] = [];
+    let connection = 0;
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'reconnect-user', role: 'user', content: 'resume stream' }],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route, request) => {
+      connection += 1;
+      cursors.push(request.headers()['last-event-id'] || new URL(request.url()).searchParams.get('after_seq') || '');
+      const startedAt = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `reconnect-event-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts: startedAt,
+        msg_id: null,
+        invoke_id: invokeId,
+        chunk_seq: type === 'stream.delta' ? 0 : null,
+        payload,
+      });
+      const frames = connection === 1
+        ? ['id: 1', 'event: stream.open', `data: ${envelope(1, 'stream.open', { stream_kind: 'llm' })}`, '', '']
+        : [
+            'id: 1', 'event: stream.open', `data: ${envelope(1, 'stream.open', { stream_kind: 'llm' })}`, '',
+            'id: 2', 'event: stream.delta', `data: ${envelope(2, 'stream.delta', { text: 'resumed exactly once' })}`, '', '',
+          ];
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: frames.join('\n'),
+      });
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'llm', streaming_invoke_id: invokeId, active_get_user_wait: false },
+    }));
+
+    await page.goto(`/${threadId}`);
+    await expect.poll(() => cursors.some((cursor, index) => index > 0 && Number(cursor) >= 1), { timeout: 8000 }).toBe(true);
+    await expect(page.getByTestId('chat-panel')).toContainText('resumed exactly once');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('resumed exactly onceresumed exactly once');
   });
 });
 
@@ -1162,17 +1268,17 @@ test.describe('Settings and Controls', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await ensureThread(page);
+    await showSystemPanel(page);
   });
 
   test('shows thread info in system panel', async ({ page }) => {
     await expect(page.locator('text=Thread Info')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=ID:')).toBeVisible();
+    await expect(page.getByText('ID:', { exact: true })).toBeVisible();
   });
 
   test('shows model selector', async ({ page }) => {
     await expect(page.locator('text=Model:')).toBeVisible({ timeout: 5000 });
-    // Should have a select dropdown
-    await expect(page.locator('select')).toBeVisible();
+    await expect(page.getByText('Model:', { exact: true }).locator('..').getByRole('combobox')).toBeVisible();
   });
 
   test('shows token stats', async ({ page }) => {
@@ -1182,17 +1288,14 @@ test.describe('Settings and Controls', () => {
   });
 
   test('can toggle auto-approval', async ({ page }) => {
-    await expect(page.locator('text=Auto-approve:')).toBeVisible({ timeout: 5000 });
-
-    // Find toggle button and click it
-    const toggleButtons = page.locator('button.rounded-full');
-    const autoApproveToggle = toggleButtons.first();
-
-    // Click to toggle
-    await autoApproveToggle.click();
-
-    // Should see confirmation in system log
-    await expect(page.locator('text=Auto-approval')).toBeVisible({ timeout: 3000 });
+    const autoApprovalToggle = page.getByTitle(/Auto-approval (?:ON|OFF)/);
+    await expect(autoApprovalToggle).toBeVisible({ timeout: 5000 });
+    const initialTitle = await autoApprovalToggle.getAttribute('title');
+    await autoApprovalToggle.click();
+    await expect(autoApprovalToggle).toHaveAttribute(
+      'title',
+      initialTitle === 'Auto-approval ON' ? 'Auto-approval OFF' : 'Auto-approval ON',
+    );
   });
 });
 
@@ -1203,18 +1306,16 @@ test.describe('Keyboard Shortcuts', () => {
   });
 
   test('help modal opens via button click', async ({ page }) => {
-    // Click the "Press ? for help" button to open help modal
-    await page.click('text=Press ? for help');
-    await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible({ timeout: 3000 });
+    await page.getByTitle('Help (?)').click();
+    await expect(page.getByRole('heading', { name: 'Keyboard Shortcuts' })).toBeVisible();
   });
 
   test('help modal closes with Close button', async ({ page }) => {
-    // Click the "Press ? for help" button to open help modal
-    await page.click('text=Press ? for help');
-    await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible({ timeout: 3000 });
-    // Click the Close button
-    await page.click('button:has-text("Close")');
-    await expect(page.locator('text=Keyboard Shortcuts')).not.toBeVisible({ timeout: 2000 });
+    await page.getByTitle('Help (?)').click();
+    const heading = page.getByRole('heading', { name: 'Keyboard Shortcuts' });
+    await expect(heading).toBeVisible();
+    await page.getByRole('button', { name: 'Close', exact: true }).last().evaluate((button: HTMLButtonElement) => button.click());
+    await expect(heading).not.toBeVisible();
   });
 
   test('i focuses input', async ({ page }) => {
@@ -1240,8 +1341,8 @@ test.describe('Commands', () => {
     // Type /
     await input.fill('/');
 
-    // Should see autocomplete suggestions
-    await expect(page.locator('[data-testid="autocomplete"]').or(page.locator('text=/newThread'))).toBeVisible({ timeout: 2000 });
+    // /help is the first visible suggestion; /newThread may be below the popup scrollport.
+    await expect(page.getByText('/help', { exact: true })).toBeVisible();
   });
 
   test('/help command works', async ({ page }) => {
@@ -1341,9 +1442,7 @@ test.describe('Mock LLM Tool Calls', () => {
     await input.press('Enter');
 
     // Should see Pending Approvals or Approve button
-    await expect(
-      page.locator('text=Pending Approvals').or(page.locator('text=Approve'))
-    ).toBeVisible({ timeout: 20000 });
+    await expect(page.getByText('Pending Approvals', { exact: true })).toBeVisible({ timeout: 20000 });
   });
 
   test('tool execution with auto-approve shows result', async ({ page }) => {

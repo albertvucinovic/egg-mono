@@ -237,8 +237,6 @@ fi
 export EGGW_API_TOKEN
 if [ -n "${EGGW_BIND_HOST:-}" ]; then
     BACKEND_HOST="$EGGW_BIND_HOST"
-elif [ "$PUBLIC_LISTEN" = "1" ]; then
-    BACKEND_HOST="0.0.0.0"
 else
     BACKEND_HOST="127.0.0.1"
 fi
@@ -252,11 +250,54 @@ case "$BACKEND_HOST" in
         ;;
 esac
 
+# The private browser bootstrap is safe only when the frontend listener itself
+# is loopback-only. Public mode never receives a bootstrap token; its listener
+# also stays loopback unless the operator explicitly selects a remote bind.
+if [ -n "${EGGW_FRONTEND_BIND_HOST:-}" ]; then
+    FRONTEND_HOST="$EGGW_FRONTEND_BIND_HOST"
+else
+    FRONTEND_HOST="127.0.0.1"
+fi
+case "$FRONTEND_HOST" in
+    localhost|127.*|::1|\[::1\]) ;;
+    *)
+        if [ "$PUBLIC_LISTEN" != "1" ]; then
+            echo "Error: non-loopback EGGW_FRONTEND_BIND_HOST requires explicit EGGW_PUBLIC=1" >&2
+            exit 1
+        fi
+        ;;
+esac
+
 # The launcher-owned frontend is the default browser origin. Deployments may
 # set EGGW_ALLOWED_ORIGINS to a comma-separated explicit allowlist.
 export EGGW_FRONTEND_PORT="$FRONTEND_PORT"
+if [ "$PUBLIC_LISTEN" = "1" ] && [ -z "${EGGW_ALLOWED_ORIGINS:-}" ]; then
+    echo "Error: EGGW_PUBLIC=1 requires explicit EGGW_ALLOWED_ORIGINS" >&2
+    exit 1
+fi
 if [ -z "${EGGW_ALLOWED_ORIGINS:-}" ]; then
     export EGGW_ALLOWED_ORIGINS="http://localhost:$FRONTEND_PORT,http://127.0.0.1:$FRONTEND_PORT"
+fi
+
+# Listener addresses are not browser addresses: localhost in browser code
+# refers to the user's machine. Public mode therefore requires the operator to
+# provide the externally reachable HTTPS API URL instead of guessing one from
+# a bind host.
+if [ "$PUBLIC_LISTEN" = "1" ]; then
+    if [ -z "${NEXT_PUBLIC_API_URL:-}" ]; then
+        echo "Error: EGGW_PUBLIC=1 requires explicit NEXT_PUBLIC_API_URL" >&2
+        exit 1
+    fi
+    case "$NEXT_PUBLIC_API_URL" in
+        https://*) ;;
+        *)
+            echo "Error: public NEXT_PUBLIC_API_URL must use https://" >&2
+            exit 1
+            ;;
+    esac
+    BROWSER_API_URL="$NEXT_PUBLIC_API_URL"
+else
+    BROWSER_API_URL="http://localhost:$BACKEND_PORT"
 fi
 
 # Check if .egg directory exists, create if needed
@@ -297,9 +338,9 @@ if [ "$PUBLIC_LISTEN" = "0" ]; then
     FRONTEND_BOOTSTRAP_TOKEN="$EGGW_API_TOKEN"
 fi
 start_prefixed frontend env -u EGGW_API_TOKEN \
-    NEXT_PUBLIC_API_URL="http://localhost:$BACKEND_PORT" \
+    NEXT_PUBLIC_API_URL="$BROWSER_API_URL" \
     EGGW_PRIVATE_BOOTSTRAP_TOKEN="$FRONTEND_BOOTSTRAP_TOKEN" \
-    "${EGGW_NPM_BIN:-npm}" run dev -- -p "$FRONTEND_PORT"
+    "${EGGW_NPM_BIN:-npm}" run dev -- -H "$FRONTEND_HOST" -p "$FRONTEND_PORT"
 FRONTEND_PID="$STARTED_PID"
 
 if [ "${EGGW_SKIP_FRONTEND_WARMUP:-}" != "1" ]; then

@@ -22,3 +22,7 @@ node_modules/
 .test*
 .venv*
 plans/
+
+# Frontend test runners generate these locally.
+**/playwright-report/
+**/test-results/
