@@ -3,6 +3,7 @@ import {
   MAX_LIVE_TOOL_THREADS,
   LiveToolRegistry,
   LiveToolRegistryOwner,
+  hasRetainedLiveToolsForThread,
   cleanUpEvictedLiveTools,
   clearLiveToolsForThread,
   durableToolCallIds,
@@ -115,6 +116,15 @@ describe("live tool continuity", () => {
     }
     expect(clearLiveToolsForThread(`singleton-thread-${MAX_LIVE_TOOL_THREADS}`))
       .toEqual([`singleton-call-${MAX_LIVE_TOOL_THREADS}`]);
+  });
+
+  it("reports retained ownership only when a singleton registry has tool entries", () => {
+    const threadId = "retained-presence-thread";
+    expect(hasRetainedLiveToolsForThread(threadId)).toBe(false);
+    liveToolRegistryForThread(threadId).registry.observe("call-a");
+    expect(hasRetainedLiveToolsForThread(threadId)).toBe(true);
+    clearLiveToolsForThread(threadId);
+    expect(hasRetainedLiveToolsForThread(threadId)).toBe(false);
   });
 
   it("recognizes assistant calls and tool results by canonical IDs", () => {

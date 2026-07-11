@@ -198,3 +198,19 @@ export function streamingBufferForThread(threadId: string): StreamingBuffer {
   buffers.set(threadId, created);
   return created;
 }
+
+/** Remove only an explicitly inactive thread; callers own the safety policy. */
+export function evictStreamingBufferForThread(threadId: string): boolean {
+  const buffer = buffers.get(threadId);
+  if (!buffer) return false;
+  buffer.clear();
+  return buffers.delete(threadId);
+}
+
+export function hasStreamingBufferForThread(threadId: string): boolean {
+  return buffers.has(threadId);
+}
+
+export function streamingBufferThreadIds(): string[] {
+  return Array.from(buffers.keys());
+}

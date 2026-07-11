@@ -726,6 +726,122 @@ test.describe('Command Transcript Ordering', () => {
   });
 });
 
+test.describe('Composer draft and autocomplete ownership', () => {
+  test('keeps rapid edits local, persists navigation drafts, and restores an async failed send', async ({ page }) => {
+    const threadA = 'composer-thread-a';
+    const threadB = 'composer-thread-b';
+    for (const threadId of [threadA, threadB]) await mockThreadShell(page, threadId);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadA}/children`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [{ id: threadB, name: threadB, parent_id: threadA, has_children: false }],
+    }));
+    await page.route(`${TEST_API_BASE}/api/threads/${threadA}`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { id: threadA, name: threadA, has_children: true },
+    }));
+
+    let resolveFailedSend!: () => void;
+    const failedSend = new Promise<void>((resolve) => { resolveFailedSend = resolve; });
+    await page.unroute(new RegExp(`/api/threads/${threadA}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadA}/messages(?:\\?.*)?$`), async (route, request) => {
+      if (request.method() === 'POST') {
+        await failedSend;
+        await route.fulfill({ status: 500, headers: mockApiHeaders, json: { detail: 'failed' } });
+        return;
+      }
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: [], snapshot_cursor: 0, next_before: null } });
+    });
+
+    await page.goto(`/${threadA}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible();
+    await input.fill('a'.repeat(200));
+    await page.getByRole('button', { name: new RegExp(threadB) }).click();
+    await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
+    await page.getByTestId('message-input').fill('thread b draft');
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/${threadA}$`));
+    await expect(page.getByTestId('message-input')).toHaveValue('a'.repeat(200));
+
+    await page.getByTestId('message-input').fill('failed send');
+    await page.getByTestId('message-input').press('Enter');
+    await page.getByTestId('message-input').fill('newer local draft');
+    resolveFailedSend();
+    await expect(page.getByTestId('message-input')).toHaveValue('failed send\n\nnewer local draft');
+  });
+
+  test('does not poll settings and refreshes them after a command mutation', async ({ page }) => {
+    const threadId = 'settings-invalidation-thread';
+    await mockThreadShell(page, threadId);
+    let settingsRequests = 0;
+    let autoApproval = false;
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/settings`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+      settingsRequests += 1;
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: autoApproval } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      autoApproval = true;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Auto-approval enabled',
+          command_id: 'settings-command',
+          command_name: 'toggleAutoApproval',
+          finished_at: '2026-01-01T00:00:00Z',
+          data: { auto_approval: true, suppress_transcript: true },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.getByTitle('Auto-approval OFF')).toBeVisible();
+    await page.waitForTimeout(1200);
+    expect(settingsRequests).toBe(1);
+    await page.getByTestId('message-input').fill('/toggleAutoApproval');
+    await page.getByTestId('message-input').press('Enter');
+    await expect(page.getByTitle('Auto-approval ON')).toBeVisible();
+    expect(settingsRequests).toBe(2);
+  });
+
+  test('gates ordinary prose and renders only the latest autocomplete response', async ({ page }) => {
+    const threadId = 'autocomplete-owner-thread';
+    await mockThreadShell(page, threadId);
+    const autocompleteLines: string[] = [];
+    await page.route(`${TEST_API_BASE}/api/autocomplete**`, async (route, request) => {
+      const line = new URL(request.url()).searchParams.get('line') || '';
+      autocompleteLines.push(line);
+      if (line === '/h') {
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          await route.fulfill({ status: 200, headers: mockApiHeaders, json: { suggestions: [{ display: '/history', insert: '/history' }] } });
+        } catch {
+          // Browser cancellation may reject the route fulfillment.
+        }
+        return;
+      }
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { suggestions: [{ display: '/help latest', insert: '/help' }] } });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await input.fill('ordinary prose');
+    await page.waitForTimeout(200);
+    expect(autocompleteLines).toEqual([]);
+
+    await input.fill('/h');
+    await page.waitForTimeout(150);
+    await input.fill('/he');
+    await expect(page.getByText('/help latest', { exact: true })).toBeVisible();
+    await expect(page.getByText('/history', { exact: true })).not.toBeVisible();
+    expect(autocompleteLines).toEqual(['/h', '/he']);
+  });
+});
+
 test.describe('Output Optimizer Observability', () => {
   test('shows optimizer badge only on optimized tool outputs', async ({ page }) => {
     const threadId = 'optimizer-observability-thread-1';
@@ -901,7 +1017,7 @@ test.describe('Edit Answer Modal', () => {
 
     await expect(page.getByTestId('edit-answer-modal')).not.toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: Selector 'SAME' matched multiple messages; use a longer msg_id.");
-    await expect(input).toHaveValue('');
+    await expect(input).toHaveValue('/editAnswer SAME');
   });
 });
 

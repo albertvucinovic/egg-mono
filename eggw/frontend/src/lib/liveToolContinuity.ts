@@ -154,6 +154,11 @@ export class LiveToolRegistryOwner {
     return { registry, evicted };
   }
 
+
+  hasRetainedTools(threadId: string): boolean {
+    return (this.registries.get(threadId)?.size || 0) > 0;
+  }
+
   clearThread(threadId: string): string[] {
     const registry = this.registries.get(threadId);
     if (!registry) return [];
@@ -170,6 +175,10 @@ export function liveToolRegistryForThread(threadId: string): LiveToolRegistryAcc
 
 export function clearLiveToolsForThread(threadId: string): string[] {
   return registryOwner.clearThread(threadId);
+}
+
+export function hasRetainedLiveToolsForThread(threadId: string): boolean {
+  return registryOwner.hasRetainedTools(threadId);
 }
 
 export function durableToolCallIds(message: Message): { callIds: string[]; resultIds: string[] } {

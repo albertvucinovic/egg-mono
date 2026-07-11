@@ -59,6 +59,18 @@ describe("optimistic send lifecycle", () => {
     expect(useAppStore.getState().composerDraftByThread["thread-b"]).toBe("keep b");
   });
 
+  it("restores a merged async-failure draft without changing another thread", () => {
+    const client = new QueryClient();
+    const send = operation();
+    beginOptimisticSend(client, send);
+    useAppStore.getState().setComposerDraft("thread-b", "thread b draft");
+
+    rollbackOptimisticSend(client, send, "draft text\n\nnewer local text");
+
+    expect(useAppStore.getState().composerDraftByThread[send.threadId]).toBe("draft text\n\nnewer local text");
+    expect(useAppStore.getState().composerDraftByThread["thread-b"]).toBe("thread b draft");
+  });
+
   it("removes only the failed operation and restores its source draft and attachments after navigation", () => {
     const client = new QueryClient();
     const send = operation();

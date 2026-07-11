@@ -193,6 +193,7 @@ interface AppState {
   removeThreadStreamingTool: (threadId: string, id: string) => void;
   clearThreadStreamingAssistant: (threadId: string) => void;
   interruptThreadStreaming: (threadId: string) => void;
+  evictThreadEphemeralState: (threadId: string) => void;
 
   // Tool calls
   pendingTools: ToolCall[];
@@ -454,6 +455,15 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({
       streamingByThread: { ...state.streamingByThread, [threadId]: emptyThreadStreamingState() },
     })),
+  evictThreadEphemeralState: (threadId) =>
+    set((state) => {
+      if (!state.streamingByThread[threadId] && !state.connectionByThread[threadId]) return state;
+      const streamingByThread = { ...state.streamingByThread };
+      const connectionByThread = { ...state.connectionByThread };
+      delete streamingByThread[threadId];
+      delete connectionByThread[threadId];
+      return { streamingByThread, connectionByThread };
+    }),
 
   // Tool calls
   pendingTools: [],

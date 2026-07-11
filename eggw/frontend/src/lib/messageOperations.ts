@@ -22,7 +22,11 @@ export interface SendMessageOperation {
   attachments: AttachmentContentPart[];
 }
 
-export function beginOptimisticSend(queryClient: QueryClient, operation: SendMessageOperation): void {
+export function beginOptimisticSend(
+  queryClient: QueryClient,
+  operation: SendMessageOperation,
+  clearStoredInputs = true,
+): void {
   const optimistic: Message = {
     id: operation.operationId,
     role: "user",
@@ -33,9 +37,11 @@ export function beginOptimisticSend(queryClient: QueryClient, operation: SendMes
     client_operation_id: operation.operationId,
   };
   appendClientTranscriptMessage(queryClient, operation.threadId, optimistic);
-  const store = useAppStore.getState();
-  store.setComposerDraft(operation.threadId, "");
-  store.setStagedAttachments(operation.threadId, []);
+  if (clearStoredInputs) {
+    const store = useAppStore.getState();
+    store.setComposerDraft(operation.threadId, "");
+    store.setStagedAttachments(operation.threadId, []);
+  }
 }
 
 export function completeOptimisticSend(
@@ -46,9 +52,13 @@ export function completeOptimisticSend(
   replaceClientTranscriptMessage(queryClient, operation.threadId, operation.operationId, messageId);
 }
 
-export function rollbackOptimisticSend(queryClient: QueryClient, operation: SendMessageOperation): void {
+export function rollbackOptimisticSend(
+  queryClient: QueryClient,
+  operation: SendMessageOperation,
+  restoredDraft = operation.draft,
+): void {
   removeClientTranscriptMessage(queryClient, operation.threadId, operation.operationId);
   const store = useAppStore.getState();
-  store.setComposerDraft(operation.threadId, operation.draft);
+  store.setComposerDraft(operation.threadId, restoredDraft);
   store.setStagedAttachments(operation.threadId, operation.attachments);
 }

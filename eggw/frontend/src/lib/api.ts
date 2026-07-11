@@ -449,7 +449,8 @@ export interface AutocompleteSuggestion {
 export async function fetchAutocomplete(
   line: string,
   cursor: number,
-  threadId?: string
+  threadId?: string,
+  signal?: AbortSignal,
 ): Promise<AutocompleteSuggestion[]> {
   const params = new URLSearchParams({
     line,
@@ -458,7 +459,7 @@ export async function fetchAutocomplete(
   if (threadId) {
     params.set("thread_id", threadId);
   }
-  const res = await apiFetch(`${API_BASE}/api/autocomplete?${params}`);
+  const res = await apiFetch(`${API_BASE}/api/autocomplete?${params}`, { signal });
   if (!res.ok) return [];
   const data = await res.json();
   return data.suggestions || [];

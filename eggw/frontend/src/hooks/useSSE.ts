@@ -3,14 +3,15 @@
 import { useEffect, useRef, useCallback } from "react";
 import { createEventSource, fetchThreadState, type AuthenticatedEventSource } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
-import { streamingBufferForThread } from "@/lib/streamingBuffer";
+import { evictStreamingBufferForThread, streamingBufferForThread, streamingBufferThreadIds } from "@/lib/streamingBuffer";
 import { applyStreamingDelta } from "@/lib/streamingDelta";
 import { messageFromCreateEvent } from "@/lib/messageEvents";
-import { cleanUpEvictedLiveTools, clearLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
+import { cleanUpEvictedLiveTools, clearLiveToolsForThread, hasRetainedLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
 import { useQueryClient } from "@tanstack/react-query";
 import { createThreadEventSyncState, reduceThreadEvent, type ThreadEventSyncState } from "@/lib/eventSync";
 import { transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor, upsertTranscriptTailMessage } from "@/lib/transcript";
 import { emptyThreadStreamingState } from "@/lib/store";
+import { canEvictThreadEphemeralState } from "@/lib/threadEphemeral";
 
 const TOOL_TIMEOUT_KEYS = [
   "timeout",
@@ -81,6 +82,7 @@ export function useSSE(threadId: string | null) {
   const patchThreadStreaming = useAppStore((state) => state.patchThreadStreaming);
   const resetThreadStreaming = useAppStore((state) => state.resetThreadStreaming);
   const setThreadConnection = useAppStore((state) => state.setThreadConnection);
+  const evictThreadEphemeralState = useAppStore((state) => state.evictThreadEphemeralState);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
 
   const upsertStreamingToolOutput = useCallback((id: string, name: string, suppressed = false, summary?: string) => {
@@ -138,8 +140,29 @@ export function useSSE(threadId: string | null) {
     queryClient.invalidateQueries({ queryKey: transcriptQueryKey(threadId) });
   }, [queryClient, threadId]);
 
+  const evictInactiveThreadState = useCallback((protectedThreadId: string | null = threadId) => {
+    const state = useAppStore.getState();
+    const candidates = new Set([
+      ...streamingBufferThreadIds(),
+      ...Object.keys(state.streamingByThread),
+      ...Object.keys(state.connectionByThread),
+    ]);
+    candidates.forEach((candidateThreadId) => {
+      const streaming = state.streamingByThread[candidateThreadId];
+      if (!canEvictThreadEphemeralState({
+        isCurrent: candidateThreadId === protectedThreadId || state.currentThreadId === candidateThreadId,
+        isStreaming: Boolean(streaming?.isStreaming),
+        connectionStatus: state.connectionByThread[candidateThreadId]?.status,
+        hasRetainedTools: hasRetainedLiveToolsForThread(candidateThreadId),
+      })) return;
+      evictStreamingBufferForThread(candidateThreadId);
+      evictThreadEphemeralState(candidateThreadId);
+    });
+  }, [evictThreadEphemeralState, threadId]);
+
   const connect = useCallback(async () => {
     if (!threadId) return null;
+    evictInactiveThreadState(threadId);
 
     // Close existing connection
     if (eventSourceRef.current) {
@@ -395,6 +418,7 @@ export function useSSE(threadId: string | null) {
         const elapsed = typeof payload.elapsed_sec === "number" ? ` in ${payload.elapsed_sec.toFixed(1)}s` : "";
         const commandName = String(payload.command_name || "command");
         setActiveUserCommand(null);
+        queryClient.invalidateQueries({ queryKey: ["threadSettings", threadId] });
         addSystemLog(`Command finished: ${commandName.startsWith("$") ? commandName : `/${commandName}`}${elapsed}`, payload.success === false ? "error" : "success");
       } catch (err) {
         console.error("Failed to parse user_command.finished:", err);
@@ -546,6 +570,7 @@ export function useSSE(threadId: string | null) {
     return es;
   }, [
     threadId,
+    evictInactiveThreadState,
     refreshMessagesNow,
     upsertStreamingToolOutput,
     markStreamingToolStarted,
@@ -595,9 +620,21 @@ export function useSSE(threadId: string | null) {
       es?.close();
       if (threadId) {
         setThreadConnection(threadId, "disconnected");
+        queueMicrotask(() => {
+          const state = useAppStore.getState();
+          const streaming = state.streamingByThread[threadId];
+          if (!canEvictThreadEphemeralState({
+            isCurrent: state.currentThreadId === threadId,
+            isStreaming: Boolean(streaming?.isStreaming),
+            connectionStatus: state.connectionByThread[threadId]?.status,
+            hasRetainedTools: hasRetainedLiveToolsForThread(threadId),
+          })) return;
+          evictStreamingBufferForThread(threadId);
+          evictThreadEphemeralState(threadId);
+        });
       }
     };
-  }, [connect, setThreadConnection, threadId]);
+  }, [connect, evictThreadEphemeralState, setThreadConnection, threadId]);
 
   return { connect, disconnect };
 }

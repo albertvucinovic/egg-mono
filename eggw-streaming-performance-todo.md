@@ -1,6 +1,6 @@
 # EggW Streaming Continuity, Chronology, and Performance TODO
 
-Last updated: 2026-07-11 00:10 UTC
+Last updated: 2026-07-11 00:38 UTC
 Branch: `refactor20260709`
 Baseline commit: `5a6a629` (`Complete semantic refactor integration`)
 
@@ -152,7 +152,7 @@ Acceptance tests:
 
 ### Phase 5 — Isolate composer and autocomplete hot state
 
-Status: [ ] not started
+Status: [x] complete (2026-07-11)
 
 Deliverables:
 
@@ -170,6 +170,8 @@ Acceptance tests:
 - Navigation, blur, send success, and send failure preserve/restore the correct thread draft.
 - Delayed autocomplete responses returned in reverse order cannot overwrite current suggestions.
 - Normal prose does not generate filesystem/transcript autocomplete work unless explicitly eligible.
+
+- 2026-07-11 00:38 UTC — Phase 5 complete. Files: `eggw/frontend/src/components/MessageInput.tsx` now owns immediate textarea state locally and uses `lib/composerDraft.ts` as the single thread-keyed synchronization seam for hydration plus blur/send/thread-switch/unmount/500 ms idle flushes; external shortcut/edit-answer/paste/rollback writes hydrate local state and race-safe flushes never overwrite a newer external draft. Optimistic message and command callbacks keep source-thread ownership, successful operations clear their source, and failures merge submitted text ahead of any newer local draft while restoring source attachments. `lib/autocomplete.ts` gates requests to slash, shell, and explicit `./`/`../`/`~/` path contexts; `api.ts` threads `AbortSignal` through `apiFetch`; one coordinator aborts the prior request and applies a sequence fence, with the existing 100 ms debounce bounding request rate. `app/[threadId]/page.tsx` removes the one-second settings poll; local settings mutations, command completion, and SSE `user_command.finished` now invalidate the shared settings query. `lib/streamingBuffer.ts`, `lib/threadEphemeral.ts`, `lib/store.ts`, and `lib/liveToolContinuity.ts` add explicit inactive-thread eviction: connect sweeps all known buffer/store owners and disconnect removes only non-current, non-streaming, disconnected state with no retained Phase 2 tools; active/current/connecting/connected/reconnecting/tool-retained owners are fenced. Tests: new composer/autocomplete/ephemeral unit suites prove 200 edits cause zero global publications until flush, thread switch hydration, external-write races, latest-wins cancellation, ordinary-prose gating, and real container/store eviction; message-operation and live-tool tests cover async merged rollback and retained-tool ownership; browser coverage exercises 200-character navigation/back, reverse-order autocomplete, async send failure with a newer draft, command-error restoration, and settings invalidation without polling. Decisions/caveats: an explicit 500 ms coalesced draft flush bounds crash-loss exposure while safe boundaries flush immediately; ordinary prose no longer receives conversation-word autocomplete, and filesystem completion is intentionally explicit-path-only. Inactive eviction runs on transport ownership transitions rather than timers and preserves all resume-critical states. Verification: final full frontend unit suite (54 passed); TypeScript (passed); focused composer/edit-answer/navigation/live-tool browser suite (7 passed); final full frontend Playwright (41 passed); `git diff --check` (passed). No backend API behavior changed, so backend tests were not run. `review-20260709.md` remains untouched and untracked. Exact next task: Phase 6 — profile the completed Phases 1–5 first, then add deterministic integration/performance gates and introduce transcript windowing only if measurements prove it necessary.
 
 ### Phase 6 — Large transcript rendering and integration/performance gates
 

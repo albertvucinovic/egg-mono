@@ -11,6 +11,8 @@ import { useAppStore } from "@/lib/store";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
 import { appendClientTranscriptMessage, transcriptQueryKey } from "@/lib/transcript";
+import { AutocompleteRequestCoordinator, isAutocompleteEligible } from "@/lib/autocomplete";
+import { ComposerDraftBuffer, restoreFailedDraft } from "@/lib/composerDraft";
 import { beginOptimisticSend, completeOptimisticSend, createClientOperationId, rollbackOptimisticSend, type SendMessageOperation } from "@/lib/messageOperations";
 import { ProtectedImage } from "@/components/ProtectedFileLink";
 import clsx from "clsx";
@@ -73,6 +75,7 @@ function filesFromDataTransfer(dataTransfer: DataTransfer | null): File[] {
 
 export function MessageInput({ threadId, showBorders = true }: MessageInputProps) {
   const [shouldFocusAfterCancel, setShouldFocusAfterCancel] = useState(false);
+  const [input, setLocalInput] = useState(() => useAppStore.getState().composerDraftByThread[threadId] || "");
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -89,21 +92,45 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
   const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const draftFlushTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const autocompleteRef = useRef<AutocompleteRequestCoordinator | null>(null);
   const dragDepthRef = useRef(0);
   const pendingCommandOpsRef = useRef(new Map<string, number>());
   const pendingImageOpsRef = useRef(new Map<string, number>());
   const router = useRouter();
   const queryClient = useQueryClient();
   const currentThreadId = threadId;
-  const input = useAppStore((state) => state.composerDraftByThread[threadId] || "");
+  const storedInput = useAppStore((state) => state.composerDraftByThread[threadId] || "");
   const setComposerDraft = useAppStore((state) => state.setComposerDraft);
   const stagedAttachments = useAppStore((state) => state.stagedAttachmentsByThread[threadId] || []);
   const setStagedAttachments = useAppStore((state) => state.setStagedAttachments);
   const appendStagedAttachments = useAppStore((state) => state.appendStagedAttachments);
   const openEditAnswerModal = useAppStore((state) => state.openEditAnswerModal);
+  const draftBufferRef = useRef<ComposerDraftBuffer | null>(null);
+  if (!draftBufferRef.current) {
+    draftBufferRef.current = new ComposerDraftBuffer(
+      currentThreadId,
+      (sourceThreadId) => useAppStore.getState().composerDraftByThread[sourceThreadId] || "",
+      (sourceThreadId, value) => useAppStore.getState().setComposerDraft(sourceThreadId, value),
+    );
+  }
+  if (!autocompleteRef.current) {
+    autocompleteRef.current = new AutocompleteRequestCoordinator(
+      (line, cursor, sourceThreadId, signal) => fetchAutocomplete(line, cursor, sourceThreadId, signal),
+    );
+  }
   const setInput = useCallback((value: string) => {
-    if (currentThreadId) setComposerDraft(currentThreadId, value);
-  }, [currentThreadId, setComposerDraft]);
+    draftBufferRef.current!.update(value);
+    setLocalInput(value);
+  }, []);
+  const flushDraft = useCallback((): string | null => {
+    const external = draftBufferRef.current?.flush();
+    if (external !== null && external !== undefined) {
+      setLocalInput(external);
+      return external;
+    }
+    return null;
+  }, []);
   const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
   const activeUserCommand = useAppStore((state) => state.streamingByThread[threadId]?.activeUserCommand || null);
   const interruptThreadStreaming = useAppStore((state) => state.interruptThreadStreaming);
@@ -136,7 +163,10 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     mutationFn: ({ threadId: sourceThreadId, content }: SendMessageOperation) =>
       sendMessage(sourceThreadId, content),
     onMutate: (operation: SendMessageOperation) => {
-      beginOptimisticSend(queryClient, operation);
+      beginOptimisticSend(queryClient, operation, false);
+      setComposerDraft(operation.threadId, "");
+      setStagedAttachments(operation.threadId, []);
+      if (draftBufferRef.current?.currentThreadId === operation.threadId) setInput("");
       setSuggestions([]);
       setShowSuggestions(false);
       textareaRef.current?.focus();
@@ -147,7 +177,12 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       addSystemLog("Message sent", "success");
     },
     onError: (_error, operation) => {
-      rollbackOptimisticSend(queryClient, operation);
+      const currentDraft = draftBufferRef.current?.currentThreadId === operation.threadId
+        ? draftBufferRef.current.currentValue
+        : useAppStore.getState().composerDraftByThread[operation.threadId] || "";
+      const restoredDraft = restoreFailedDraft(operation.draft, currentDraft);
+      rollbackOptimisticSend(queryClient, operation, restoredDraft);
+      if (draftBufferRef.current?.currentThreadId === operation.threadId) setInput(restoredDraft);
       addSystemLog("Failed to send message", "error");
     },
   });
@@ -238,14 +273,29 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     },
   });
 
+  const restoreCommandInputs = useCallback((
+    sourceThreadId: string,
+    submittedDraft: string,
+    submittedAttachments: AttachmentContentPart[],
+  ) => {
+    const currentDraft = draftBufferRef.current?.currentThreadId === sourceThreadId
+      ? draftBufferRef.current.currentValue
+      : useAppStore.getState().composerDraftByThread[sourceThreadId] || "";
+    const restoredDraft = restoreFailedDraft(submittedDraft, currentDraft);
+    setComposerDraft(sourceThreadId, restoredDraft);
+    setStagedAttachments(sourceThreadId, submittedAttachments);
+    if (draftBufferRef.current?.currentThreadId === sourceThreadId) setInput(restoredDraft);
+  }, [setComposerDraft, setInput, setStagedAttachments]);
+
   // Command mutation
   const commandMutation = useMutation({
-    mutationFn: ({ threadId: sourceThreadId, command, staged }: { threadId: string; operationId: string; command: string; staged: AttachmentContentPart[] }) => executeCommand(sourceThreadId, command, staged),
-    onMutate: ({ threadId: sourceThreadId, operationId: commandOperationId, command }: { threadId: string; operationId: string; command: string; staged: AttachmentContentPart[] }) => {
+    mutationFn: ({ threadId: sourceThreadId, command, staged }: { threadId: string; operationId: string; command: string; draft: string; staged: AttachmentContentPart[] }) => executeCommand(sourceThreadId, command, staged),
+    onMutate: ({ threadId: sourceThreadId, operationId: commandOperationId, command }: { threadId: string; operationId: string; command: string; draft: string; staged: AttachmentContentPart[] }) => {
       const startedAt = Date.now();
       pendingCommandOpsRef.current.set(commandOperationId, startedAt);
       setCommandPendingStartedAtMs(startedAt);
       setComposerDraft(sourceThreadId, "");
+      if (draftBufferRef.current?.currentThreadId === sourceThreadId) setInput("");
       setSuggestions([]);
       setShowSuggestions(false);
       // Focus input after sending
@@ -280,6 +330,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         setCommandPendingStartedAtMs(pendingCommandOpsRef.current.values().next().value ?? null);
       }
       if (response.success) {
+        queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
         const isEditAnswerModalAction = response.data?.action === "open_edit_answer_modal";
         if (isEditAnswerModalAction && variables.threadId === currentThreadId) {
           openEditAnswerModal({
@@ -425,6 +476,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
           client_operation_id: variables.operationId,
         });
         addSystemLog(response.message, "error");
+        restoreCommandInputs(variables.threadId, variables.draft, variables.staged);
       }
     },
     onError: (_error, variables) => {
@@ -432,6 +484,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       if (variables.threadId === currentThreadId) {
         setCommandPendingStartedAtMs(pendingCommandOpsRef.current.values().next().value ?? null);
       }
+      restoreCommandInputs(variables.threadId, variables.draft, variables.staged);
       addSystemLog("Failed to execute command", "error");
     },
   });
@@ -444,42 +497,36 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     return () => window.clearInterval(intervalId);
   }, [commandMutation.isPending, imageGenerationMutation.isPending, activeUserCommand]);
 
-  // Fetch autocomplete suggestions
-  const fetchSuggestions = useCallback(async (value: string, cursorPos: number) => {
-    if (!value || !currentThreadId) {
+  // Eligibility is checked before scheduling any backend work. Each edit
+  // aborts the prior request; the coordinator also fences cancellation races.
+  useEffect(() => {
+    if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
+    autocompleteRef.current?.cancel();
+    const cursorPos = textareaRef.current?.selectionStart ?? input.length;
+    if (!currentThreadId || !isAutocompleteEligible(input, cursorPos)) {
       setSuggestions([]);
       setShowSuggestions(false);
       return;
     }
 
-    try {
-      const results = await fetchAutocomplete(value, cursorPos, currentThreadId);
-      setSuggestions(results);
-      setSelectedIndex(0);
-      setShowSuggestions(results.length > 0);
-    } catch {
-      setSuggestions([]);
-      setShowSuggestions(false);
-    }
-  }, [currentThreadId]);
-
-  // Debounced fetch on input change
-  useEffect(() => {
-    if (fetchTimeoutRef.current) {
-      clearTimeout(fetchTimeoutRef.current);
-    }
-
-    fetchTimeoutRef.current = setTimeout(() => {
-      const cursorPos = textareaRef.current?.selectionStart ?? input.length;
-      fetchSuggestions(input, cursorPos);
-    }, 100); // 100ms debounce
+    fetchTimeoutRef.current = setTimeout(async () => {
+      try {
+        const results = await autocompleteRef.current!.request(input, cursorPos, currentThreadId);
+        if (results === null) return;
+        setSuggestions(results);
+        setSelectedIndex(0);
+        setShowSuggestions(results.length > 0);
+      } catch {
+        setSuggestions([]);
+        setShowSuggestions(false);
+      }
+    }, 100);
 
     return () => {
-      if (fetchTimeoutRef.current) {
-        clearTimeout(fetchTimeoutRef.current);
-      }
+      if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
+      autocompleteRef.current?.cancel();
     };
-  }, [input, fetchSuggestions]);
+  }, [input, currentThreadId]);
 
   // Apply suggestion - use replace value to determine how much to delete
   const applySuggestion = useCallback((suggestion: AutocompleteSuggestion) => {
@@ -548,6 +595,32 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       textarea.focus();
     }, 0);
   }, [input]);
+
+  // Persist edits only at coalesced/safe boundaries. Store publications from
+  // external owners hydrate local state without being written back over them.
+  useEffect(() => {
+    const next = draftBufferRef.current!.switchThread(currentThreadId);
+    setLocalInput(next);
+  }, [currentThreadId]);
+
+  useEffect(() => {
+    const external = draftBufferRef.current!.acceptExternal(currentThreadId, storedInput);
+    if (external !== null) setLocalInput(external);
+  }, [currentThreadId, storedInput]);
+
+  useEffect(() => {
+    if (draftFlushTimeoutRef.current) clearTimeout(draftFlushTimeoutRef.current);
+    draftFlushTimeoutRef.current = setTimeout(flushDraft, 500);
+    return () => {
+      if (draftFlushTimeoutRef.current) clearTimeout(draftFlushTimeoutRef.current);
+    };
+  }, [input, flushDraft]);
+
+  useEffect(() => () => {
+    if (draftFlushTimeoutRef.current) clearTimeout(draftFlushTimeoutRef.current);
+    autocompleteRef.current?.cancel();
+    draftBufferRef.current?.flush();
+  }, []);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -639,18 +712,19 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     const hasAttachments = stagedAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || !currentThreadId) return;
 
+    // If an external insertion raced the click/key event, hydrate it and let
+    // the operator review it instead of sending and clearing a stale snapshot.
+    if (flushDraft() !== null) return;
     if (isCommand(trimmed)) {
       const commandOperationId = createClientOperationId("cmd");
       setStagedAttachments(currentThreadId, []);
-      commandMutation.mutate(
-        { threadId: currentThreadId, operationId: commandOperationId, command: trimmed, staged: stagedAttachments },
-        {
-          onError: () => {
-            setComposerDraft(currentThreadId, input);
-            setStagedAttachments(currentThreadId, stagedAttachments);
-          },
-        },
-      );
+      commandMutation.mutate({
+        threadId: currentThreadId,
+        operationId: commandOperationId,
+        command: trimmed,
+        draft: input,
+        staged: stagedAttachments,
+      });
     } else {
       messageMutation.mutate({
         threadId: currentThreadId,
@@ -1048,6 +1122,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onBlur={flushDraft}
           onPaste={handlePaste}
           onKeyDown={handleKeyDown}
           placeholder={
