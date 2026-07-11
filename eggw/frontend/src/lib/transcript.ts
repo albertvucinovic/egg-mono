@@ -20,16 +20,76 @@ function messageTimestampMs(message: Pick<Message, "timestamp">): number | null 
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function insertMessageByTimestamp(messages: Message[], message: Message): Message[] {
-  const messageMs = messageTimestampMs(message);
-  if (messageMs === null) return [...messages, message];
-  const insertAt = messages.findIndex((candidate) => {
-    const candidateMs = messageTimestampMs(candidate);
-    return candidateMs !== null && candidateMs > messageMs;
+function operationDedupKey(message: Message): string | null {
+  if (!message.client_operation_id) return null;
+  if (message.client_only === "optimistic") return `optimistic:${message.client_operation_id}`;
+  if (isCommandClientMessage(message)) {
+    // A shell/image command can intentionally render one pending card and one
+    // response card for the same operation. Deduplicate each lifecycle slot,
+    // while keeping command operations distinct from optimistic message sends.
+    const lifecycle = message.command_name ? "response" : "pending";
+    return `command:${lifecycle}:${message.client_operation_id}`;
+  }
+  return null;
+}
+
+function appendIfUnique(
+  messages: Message[],
+  message: Message,
+  seenIds: Set<string>,
+  seenOperations: Set<string>,
+): void {
+  const operationKey = operationDedupKey(message);
+  if (message.id && seenIds.has(message.id)) return;
+  if (operationKey && seenOperations.has(operationKey)) return;
+  messages.push(message);
+  if (message.id) seenIds.add(message.id);
+  if (operationKey) seenOperations.add(operationKey);
+}
+
+/**
+ * Stably place local timestamped entries into an authoritative newest page.
+ * Authoritative/base order wins equal-timestamp ties; placed entries preserve
+ * their input order for equal or missing/invalid timestamps. Only these two
+ * bounded arrays are examined -- older transcript pages are never sorted.
+ */
+export function mergeMessagesByTimestamp(base: Message[], placed: Message[]): Message[] {
+  const merged: Message[] = [];
+  const seenIds = new Set<string>();
+  const seenOperations = new Set<string>();
+  base.forEach((message) => appendIfUnique(merged, message, seenIds, seenOperations));
+
+  const uniquePlaced: Array<{ message: Message; index: number; timestampMs: number | null }> = [];
+  placed.forEach((message, index) => {
+    const operationKey = operationDedupKey(message);
+    if (message.id && seenIds.has(message.id)) return;
+    if (operationKey && seenOperations.has(operationKey)) return;
+    if (message.id) seenIds.add(message.id);
+    if (operationKey) seenOperations.add(operationKey);
+    uniquePlaced.push({ message, index, timestampMs: messageTimestampMs(message) });
   });
-  return insertAt === -1
-    ? [...messages, message]
-    : [...messages.slice(0, insertAt), message, ...messages.slice(insertAt)];
+  uniquePlaced.sort((left, right) => {
+    if (left.timestampMs !== null && right.timestampMs !== null && left.timestampMs !== right.timestampMs) {
+      return left.timestampMs - right.timestampMs;
+    }
+    if (left.timestampMs !== null && right.timestampMs === null) return -1;
+    if (left.timestampMs === null && right.timestampMs !== null) return 1;
+    return left.index - right.index;
+  });
+
+  for (const entry of uniquePlaced) {
+    if (entry.timestampMs === null) {
+      merged.push(entry.message);
+      continue;
+    }
+    const insertAt = merged.findIndex((candidate) => {
+      const candidateMs = messageTimestampMs(candidate);
+      return candidateMs !== null && candidateMs > entry.timestampMs!;
+    });
+    if (insertAt === -1) merged.push(entry.message);
+    else merged.splice(insertAt, 0, entry.message);
+  }
+  return merged;
 }
 
 /** Keep only explicit client-owned entries when an authoritative tail arrives. */
@@ -39,8 +99,13 @@ export function reconcileTranscriptTail(
 ): TranscriptPage {
   if (!previous) return fetched;
   const fetchedIds = new Set(fetched.items.map((message) => message.id).filter(Boolean));
+  const fetchedOperations = new Set(
+    fetched.items.map(operationDedupKey).filter((key): key is string => Boolean(key)),
+  );
   const preserved = previous.items.filter((message) => {
-    if (fetchedIds.has(message.id)) return false;
+    if (message.id && fetchedIds.has(message.id)) return false;
+    const operationKey = operationDedupKey(message);
+    if (operationKey && fetchedOperations.has(operationKey)) return false;
     if (message.client_operation_id && message.client_only === "optimistic") return true;
     if (isCommandClientMessage(message)) return true;
     // A delayed HTTP snapshot must not erase a msg.create already consumed
@@ -49,7 +114,12 @@ export function reconcileTranscriptTail(
     return Number.isSafeInteger(message.event_seq) && message.event_seq! > fetched.snapshot_cursor;
   });
   if (!preserved.length) return fetched;
-  return { ...fetched, items: [...fetched.items, ...preserved] };
+  const commands = preserved.filter(isCommandClientMessage);
+  const otherPreserved = preserved.filter((message) => !isCommandClientMessage(message));
+  return {
+    ...fetched,
+    items: mergeMessagesByTimestamp([...fetched.items, ...otherPreserved], commands),
+  };
 }
 
 export function transcriptInfiniteQueryOptions(threadId: string, queryClient: QueryClient) {
@@ -162,7 +232,10 @@ export function appendClientTranscriptMessage(
     pages[0] = {
       ...tail,
       items: isCommandClientMessage(message)
-        ? insertMessageByTimestamp(tail.items, message)
+        ? mergeMessagesByTimestamp(
+            tail.items.filter((candidate) => !isCommandClientMessage(candidate)),
+            [...tail.items.filter(isCommandClientMessage), message],
+          )
         : [...tail.items, message],
     };
     return { ...data, pages };

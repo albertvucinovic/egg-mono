@@ -1,6 +1,6 @@
 # EggW Streaming Continuity, Chronology, and Performance TODO
 
-Last updated: 2026-07-10 20:22 UTC
+Last updated: 2026-07-11 00:10 UTC
 Branch: `refactor20260709`
 Baseline commit: `5a6a629` (`Complete semantic refactor integration`)
 
@@ -132,7 +132,7 @@ Acceptance tests:
 
 ### Phase 4 — Restore command chronology across reconciliation
 
-Status: [ ] not started
+Status: [x] complete (2026-07-11)
 
 Deliverables:
 
@@ -147,6 +147,8 @@ Acceptance tests:
 - Multiple local commands remain stably ordered.
 - Missing/equal timestamp behavior is deterministic.
 - Pagination overlap and optimistic-send tests still pass.
+
+- 2026-07-11 00:10 UTC — Phase 4 complete. Files: `eggw/frontend/src/lib/transcript.ts` replaces one-off insertion with shared `mergeMessagesByTimestamp(...)`, used for both initial local command insertion and authoritative newest-tail reconciliation; `eggw/frontend/src/lib/transcript.test.ts` covers one/repeated refetch, multiple/equal/missing/invalid timestamps, stable IDs and operation IDs, command lifecycle cards versus optimistic sends, and paginated newest-tail metadata/optimistic preservation; `eggw/frontend/e2e/flows.spec.ts` makes the command-order scenario trigger and observe an authoritative refetch before asserting chronology. Decisions: authoritative newest-page order wins equal-timestamp ties; local entries retain stable input order for equal timestamps; missing/invalid local timestamps remain at the local tail in deterministic order; timestamped commands are placed before the first later valid authoritative timestamp without sorting authoritative messages. Deduplication always keys command cards by `client_operation_id`, including pending shell/image cards without `command_name`, but namespaces command and optimistic operations and distinguishes pending from response lifecycle slots because one shell/image operation intentionally emits both. Work is bounded to the fetched newest page and its preserved local entries; older pages, `pageParams`, pagination cursors, overlap authority, event-installed messages, and optimistic operations remain unchanged. This restores the local chronology behavior without backend command persistence or canonical-command changes. Verification: focused transcript/message-operation Vitest (19 passed); final full frontend unit suite (43 passed); TypeScript (passed); focused command-order Playwright (2 passed); full frontend Playwright (38 passed before the final dedup-key refinement, whose frontend unit/focused browser suites were rerun); `git diff --check` (passed). No backend files or routes changed, so backend tests were not run. Caveat: command pending/response lifecycle classification follows actual construction: pending shell and image-generation cards omit `command_name`, while completed/error responses always set it through the response field or `commandNameFromText(...)`. `review-20260709.md` remains untouched and untracked. Exact next task: Phase 5 — keep immediate textarea edits local to `MessageInput`, persist thread drafts only on safe/coalesced boundaries, then gate and latest-wins autocomplete requests without weakening navigation, rollback, or send behavior.
 
 ### Phase 5 — Isolate composer and autocomplete hot state
 

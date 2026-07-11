@@ -679,11 +679,20 @@ test.describe('Command Transcript Ordering', () => {
     const commandTimestamp = '2026-01-01T00:00:01.000Z';
     const afterTimestamp = '2026-01-01T00:00:02.000Z';
 
-    await mockThreadShell(page, threadId, {
-      messages: [
-        { id: 'message-before-command', role: 'user', timestamp: beforeTimestamp, content: 'Before command', content_text: 'Before command' },
-        { id: 'message-after-command', role: 'assistant', timestamp: afterTimestamp, content: 'After command', content_text: 'After command' },
-      ],
+    const authoritativeMessages = [
+      { id: 'message-before-command', role: 'user', timestamp: beforeTimestamp, content: 'Before command', content_text: 'Before command' },
+      { id: 'message-after-command', role: 'assistant', timestamp: afterTimestamp, content: 'After command', content_text: 'After command' },
+    ];
+    await mockThreadShell(page, threadId, { messages: authoritativeMessages });
+    let messageRequests = 0;
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      messageRequests += 1;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { items: authoritativeMessages, snapshot_cursor: messageRequests, next_before: null },
+      });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
       await route.fulfill({
@@ -697,7 +706,7 @@ test.describe('Command Transcript Ordering', () => {
           started_at: commandTimestamp,
           finished_at: commandTimestamp,
           elapsed_sec: 0.01,
-          data: { action: 'list_attachments' },
+          data: { action: 'list_attachments', reload: true },
         },
       });
     });
@@ -710,6 +719,7 @@ test.describe('Command Transcript Ordering', () => {
 
     const chatContent = page.getByTestId('chat-panel-content');
     await expect(chatContent).toContainText('Command output in timestamp position', { timeout: 5000 });
+    await expect.poll(() => messageRequests).toBeGreaterThan(1);
     const orderedText = await chatContent.innerText();
     expect(orderedText.indexOf('Before command')).toBeLessThan(orderedText.indexOf('Command output in timestamp position'));
     expect(orderedText.indexOf('Command output in timestamp position')).toBeLessThan(orderedText.indexOf('After command'));
