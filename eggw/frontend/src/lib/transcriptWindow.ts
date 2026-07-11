@@ -1,6 +1,6 @@
 import type { Message } from "./store";
 
-export const INITIAL_RENDERED_TRANSCRIPT_MESSAGES = 10;
+export const INITIAL_RENDERED_TRANSCRIPT_MESSAGES = 5;
 export const TRANSCRIPT_WINDOW_EXPANSION_MESSAGES = 60;
 
 export interface TranscriptWindow {

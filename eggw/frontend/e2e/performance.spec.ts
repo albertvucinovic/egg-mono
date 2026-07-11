@@ -63,7 +63,7 @@ test.describe('Deterministic performance gates', () => {
     expect(Buffer.byteLength(JSON.stringify(messages))).toBeGreaterThan(1_800_000);
     await page.goto(`/${threadId}`);
     await expect(page.getByText(/Chat Messages · 300 loaded/)).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('.eggw-message-card')).toHaveCount(10);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
 
     const before = await counters(page);
     await page.getByTestId('message-input').pressSequentially('x'.repeat(200), { delay: 0 });
@@ -73,7 +73,7 @@ test.describe('Deterministic performance gates', () => {
     expect(after.chatPanelCommits - before.chatPanelCommits).toBeLessThanOrEqual(1);
 
     await page.getByTestId('show-more-loaded-messages').click();
-    await expect(page.locator('.eggw-message-card')).toHaveCount(70);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(65);
 
     await page.getByTitle('Transcript display verbosity').selectOption('min');
     await expect(page.getByTestId('hidden-details').first()).toBeVisible();

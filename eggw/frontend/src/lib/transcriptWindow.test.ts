@@ -11,19 +11,19 @@ const messages = (count: number): Message[] => Array.from({ length: count }, (_,
 describe("transcript render window", () => {
   it("mounts a bounded newest tail without removing loaded messages", () => {
     const loaded = messages(300);
-    const window = transcriptWindow(loaded, null, 10);
-    expect(window.messages).toHaveLength(10);
-    expect(window.messages[0].id).toBe("message-290");
-    expect(window.hiddenCount).toBe(290);
+    const window = transcriptWindow(loaded, null, 5);
+    expect(window.messages).toHaveLength(5);
+    expect(window.messages[0].id).toBe("message-295");
+    expect(window.hiddenCount).toBe(295);
     expect(loaded).toHaveLength(300);
   });
 
   it("keeps an anchored mounted start when new tail messages arrive", () => {
     const loaded = messages(300);
-    const initial = transcriptWindow(loaded, null, 10);
+    const initial = transcriptWindow(loaded, null, 5);
     const appended = [...loaded, { id: "message-300", role: "assistant" }];
     const anchored = transcriptWindow(appended, initial.messages[0].id, 60);
-    expect(anchored.messages[0].id).toBe("message-290");
+    expect(anchored.messages[0].id).toBe("message-295");
     expect(anchored.messages.at(-1)?.id).toBe("message-300");
   });
 

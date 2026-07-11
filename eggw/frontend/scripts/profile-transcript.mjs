@@ -86,11 +86,20 @@ for (const size of sizes) {
   }
   const readyMs = performance.now() - responseStart;
   const input = page.getByTestId('message-input');
+  await input.focus();
+  await input.fill('');
+  if (!(await input.evaluate((element) => element === document.activeElement))) {
+    throw new Error('Composer textarea did not retain focus');
+  }
   const samples = [];
   for (let index = 0; index < 200; index += 1) {
     const started = performance.now();
-    await page.keyboard.press('x');
+    await input.pressSequentially('x');
     samples.push(performance.now() - started);
+  }
+  const finalInput = await input.inputValue();
+  if (finalInput !== 'x'.repeat(200)) {
+    throw new Error(`Composer verification failed: expected 200 characters, received ${finalInput.length}`);
   }
   const browserMetrics = await page.evaluate(() => ({
     domNodes: document.getElementsByTagName('*').length,
@@ -104,12 +113,13 @@ for (const size of sizes) {
     cpuRate,
     readyMs: Number(readyMs.toFixed(1)),
     domNodes: browserMetrics.domNodes,
+    verifiedInputCharacters: finalInput.length,
     inputRoundTripP95Ms: Number(percentile(samples, 0.95).toFixed(1)),
     eventTimingP95Ms: Number(percentile(browserMetrics.eventDurations, 0.95).toFixed(1)),
     maxEventTimingMs: Number(Math.max(0, ...browserMetrics.eventDurations).toFixed(1)),
     maxLongTaskMs: Number(Math.max(0, ...browserMetrics.longTasks).toFixed(1)),
-    longTaskLimitation: "includes framework hydration and browser work; use render profiler duration to attribute transcript work",
-    counters: browserMetrics.counters,
+    longTaskLimitation: "includes framework hydration and browser work; compare against the 0-message floor",
+    developmentCounters: browserMetrics.counters || null,
   }));
   await page.close();
 }
