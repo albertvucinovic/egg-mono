@@ -34,6 +34,45 @@ export class AnimationFrameCoalescer {
   }
 }
 
+
+/**
+ * Coalesce frequent notifications to a bounded interval while preserving the
+ * latest buffered value. Used only for compact previews; full bodies still
+ * append through the RAF path without delay.
+ */
+export class IntervalCoalescer<TimeoutId = ReturnType<typeof setTimeout>> {
+  private timeoutId: TimeoutId | null = null;
+  private lastFlushAt = Number.NEGATIVE_INFINITY;
+
+  constructor(
+    private readonly intervalMs: number,
+    private readonly now: () => number,
+    private readonly scheduleTimeout: (callback: () => void, delayMs: number) => TimeoutId,
+    private readonly cancelTimeout: (id: TimeoutId) => void,
+  ) {}
+
+  schedule(flush: () => void): void {
+    if (this.timeoutId !== null) return;
+    const delayMs = Math.max(0, this.intervalMs - (this.now() - this.lastFlushAt));
+    if (delayMs === 0) {
+      this.lastFlushAt = this.now();
+      flush();
+      return;
+    }
+    this.timeoutId = this.scheduleTimeout(() => {
+      this.timeoutId = null;
+      this.lastFlushAt = this.now();
+      flush();
+    }, delayMs);
+  }
+
+  cancel(): void {
+    if (this.timeoutId === null) return;
+    this.cancelTimeout(this.timeoutId);
+    this.timeoutId = null;
+  }
+}
+
 export class StreamingBuffer {
   contentChunks: string[] = [];
   reasoningChunks: string[] = [];

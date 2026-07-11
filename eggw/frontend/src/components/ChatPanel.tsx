@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type WheelEvent } from "react";
+import { memo, Profiler, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type WheelEvent } from "react";
 import Link from "next/link";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -31,7 +31,9 @@ import {
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcript";
-import { AnimationFrameCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
+import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
+import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
+import { expandedTranscriptStartId, transcriptWindow } from "@/lib/transcriptWindow";
 import clsx from "clsx";
 
 const STICKY_BOTTOM_THRESHOLD_PX = 4;
@@ -39,6 +41,7 @@ const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
 const INITIAL_TRANSCRIPT_MESSAGE_LIMIT = 300;
 const TRANSCRIPT_SCROLLBACK_THRESHOLD_PX = 240;
 const THREAD_LINK_SUFFIX_LENGTH = 8;
+const TOOL_ARGUMENT_PREVIEW_INTERVAL_MS = 100;
 
 /**
  * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
@@ -1265,6 +1268,21 @@ function renderMessagesForVerbosity(
   return nodes;
 }
 
+function hasMinVisibleBody(message: Message): boolean {
+  return ((message.role === "user" || message.role === "assistant")
+    && Boolean(contentToPlainText(message.content, message.content_text || "").trim()))
+    || isImportantSystemMessage(message)
+    || message.kind === "compaction_marker"
+    || message.role === "compaction_marker";
+}
+
+/** Collapse hidden details outside the mounted tail without losing min summaries. */
+function PrefixHiddenDetails({ messages, showBorders }: { messages: Message[]; showBorders: boolean }) {
+  const details = useMemo(() => messages.flatMap(collectHiddenDetailsForMessage), [messages]);
+  if (!details.length) return null;
+  return <HiddenDetailsBlock details={details} showBorders={showBorders} />;
+}
+
 const StaticTranscript = memo(function StaticTranscript({
   messages,
   displayVerbosity,
@@ -1276,7 +1294,13 @@ const StaticTranscript = memo(function StaticTranscript({
   showBorders: boolean;
   onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }) {
-  return <>{renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment)}</>;
+  const content = renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment);
+  if (process.env.NODE_ENV === "production") return <>{content}</>;
+  return (
+    <Profiler id="StaticTranscript" onRender={(id, _phase, duration) => recordReactCommit(id as "StaticTranscript", duration)}>
+      {content}
+    </Profiler>
+  );
 });
 
 interface ChatPanelProps {
@@ -1304,14 +1328,26 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const streamingTextFlushRafRef = useRef<number | null>(null);
   const streamingToolFlushRafRef = useRef<number | null>(null);
   const streamingToolCallFlushRef = useRef<AnimationFrameCoalescer | null>(null);
+  const streamingToolPreviewFlushRef = useRef<IntervalCoalescer<number> | null>(null);
   const loadingOlderRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const [renderStartMessageId, setRenderStartMessageId] = useState<string | null>(null);
 
   const currentThreadId = threadId;
   const queryClient = useQueryClient();
   const transcriptQuery = useInfiniteQuery(transcriptInfiniteQueryOptions(threadId, queryClient));
   const messages = useMemo(() => flattenTranscript(transcriptQuery.data), [transcriptQuery.data]);
+  const displayVerbosity = useAppStore((state) => state.displayVerbosity);
+  const renderedTranscript = useMemo(() => {
+    const window = transcriptWindow(messages, renderStartMessageId);
+    if (displayVerbosity !== "min" || window.startIndex === 0) return window;
+    const visiblePrefixIndex = messages
+      .slice(0, window.startIndex)
+      .findLastIndex(hasMinVisibleBody);
+    if (visiblePrefixIndex < 0) return window;
+    return transcriptWindow(messages, messages[visiblePrefixIndex].id);
+  }, [displayVerbosity, messages, renderStartMessageId]);
   const streamingToolCalls = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolCalls);
   const streamingToolOutputs = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolOutputs);
   const streamingModelKey = useAppStore((state) => state.streamingByThread[threadId]?.streamingModelKey || null);
@@ -1323,7 +1359,6 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const visibleStreamingToolOutputs = streamingToolOutputs || {};
   const hasLiveTools = Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0;
   const showLiveCard = isStreaming || hasLiveTools;
-  const displayVerbosity = useAppStore((state) => state.displayVerbosity);
   const hasActiveToolTiming = Object.values(visibleStreamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
   const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
   const primaryToolTimeoutText = Object.values(visibleStreamingToolOutputs)
@@ -1389,6 +1424,22 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     finishAutoScrollSoon(generation);
   }, [finishAutoScrollSoon]);
 
+  const revealFromMessage = useCallback((startMessageId: string | null) => {
+    const el = scrollRef.current;
+    const previousScrollHeight = el?.scrollHeight ?? 0;
+    const previousScrollTop = el?.scrollTop ?? 0;
+    setRenderStartMessageId(startMessageId);
+    requestAnimationFrame(() => {
+      const currentEl = scrollRef.current;
+      if (!currentEl) return;
+      currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
+    });
+  }, []);
+
+  const expandLoadedTranscript = useCallback(() => {
+    revealFromMessage(expandedTranscriptStartId(messages, renderedTranscript.startIndex));
+  }, [messages, renderedTranscript.startIndex, revealFromMessage]);
+
   const loadOlderMessages = useCallback(async () => {
     if (loadingOlderRef.current || isLoadingOlder || !transcriptQuery.hasNextPage) return;
     const el = scrollRef.current;
@@ -1398,7 +1449,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     setIsLoadingOlder(true);
     stickToBottomRef.current = false;
     try {
-      await transcriptQuery.fetchNextPage();
+      const result = await transcriptQuery.fetchNextPage();
+      const updatedMessages = flattenTranscript(result.data);
+      const previousStartId = renderedTranscript.messages[0]?.id || null;
+      const previousStartIndex = previousStartId
+        ? updatedMessages.findIndex((message) => message.id === previousStartId)
+        : updatedMessages.length;
+      const nextStartId = expandedTranscriptStartId(updatedMessages, previousStartIndex);
+      setRenderStartMessageId(nextStartId);
       requestAnimationFrame(() => {
         const currentEl = scrollRef.current;
         if (!currentEl) return;
@@ -1410,7 +1468,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       loadingOlderRef.current = false;
       setIsLoadingOlder(false);
     }
-  }, [isLoadingOlder, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
+  }, [isLoadingOlder, renderedTranscript.messages, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
 
   const handleScroll = useCallback(() => {
     if (isAutoScrollingRef.current) return;
@@ -1481,6 +1539,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   }, [distanceFromBottom, scrollToBottomNow]);
 
   const flushStreamingText = useCallback(() => {
+    recordStreamingFlush("text");
     const streamingBuffer = streamingBufferForThread(threadId);
     let appended = false;
 
@@ -1514,6 +1573,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   }, [scrollToBottom, threadId]);
 
   const flushStreamingToolOutput = useCallback(() => {
+    recordStreamingFlush("toolOutput");
     const streamingBuffer = streamingBufferForThread(threadId);
     let appended = false;
 
@@ -1532,6 +1592,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   }, [scrollToBottom, threadId]);
 
   const flushStreamingToolCalls = useCallback(() => {
+    recordStreamingFlush("toolArguments");
     const streamingBuffer = streamingBufferForThread(threadId);
     streamingBuffer.toolCalls.forEach((toolCall, tcId) => {
       const chunks = toolCall.argumentChunks;
@@ -1562,15 +1623,19 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         if (!argsElement.textContent) argsElement.textContent = "...";
       }
 
+    });
+  }, [threadId]);
+
+  const flushStreamingToolCallPreviews = useCallback(() => {
+    recordStreamingFlush("toolPreview");
+    const streamingBuffer = streamingBufferForThread(threadId);
+    streamingBuffer.toolCalls.forEach((toolCall, tcId) => {
       const previewElement = streamingToolCallPreviewRefs.current[tcId];
-      if (previewElement) {
-        // Preview work is bounded even when the full call contains megabytes.
-        // The expanded body above appends only the newly arrived chunks.
-        const argumentPrefix = streamingBuffer.getToolCallArgumentPrefix(tcId);
-        previewElement.textContent = oneLinePreview(
-          toolCall.name === "bash" ? argumentPrefix.replace(/^\s*\{?\s*"script"\s*:\s*"?/, "$ ") : argumentPrefix,
-        );
-      }
+      if (!previewElement) return;
+      const argumentPrefix = streamingBuffer.getToolCallArgumentPrefix(tcId);
+      previewElement.textContent = oneLinePreview(
+        toolCall.name === "bash" ? argumentPrefix.replace(/^\s*\{?\s*"script"\s*:\s*"?/, "$ ") : argumentPrefix,
+      );
     });
   }, [threadId]);
 
@@ -1634,18 +1699,28 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       (callback) => window.requestAnimationFrame(callback),
       (id) => window.cancelAnimationFrame(id),
     );
+    const previewCoalescer = new IntervalCoalescer<number>(
+      TOOL_ARGUMENT_PREVIEW_INTERVAL_MS,
+      () => performance.now(),
+      (callback, delayMs) => window.setTimeout(callback, delayMs),
+      (id) => window.clearTimeout(id),
+    );
     streamingToolCallFlushRef.current = coalescer;
-    const schedule = () => coalescer.schedule(flushStreamingToolCalls);
+    streamingToolPreviewFlushRef.current = previewCoalescer;
+    const schedule = () => {
+      coalescer.schedule(flushStreamingToolCalls);
+      previewCoalescer.schedule(flushStreamingToolCallPreviews);
+    };
     const unsubscribe = streamingBuffer.subscribeToolCalls(schedule);
     schedule();
     return () => {
       unsubscribe();
       coalescer.cancel();
-      if (streamingToolCallFlushRef.current === coalescer) {
-        streamingToolCallFlushRef.current = null;
-      }
+      previewCoalescer.cancel();
+      if (streamingToolCallFlushRef.current === coalescer) streamingToolCallFlushRef.current = null;
+      if (streamingToolPreviewFlushRef.current === previewCoalescer) streamingToolPreviewFlushRef.current = null;
     };
-  }, [flushStreamingToolCalls, streamingToolCalls, threadId]);
+  }, [flushStreamingToolCallPreviews, flushStreamingToolCalls, streamingToolCalls, threadId]);
 
   // Subscribe to streaming tool-output preview updates. Like text streaming,
   // this writes chunks directly to DOM so large/fast tool output does not
@@ -1702,6 +1777,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   useEffect(() => {
     stickToBottomRef.current = true;
     loadingOlderRef.current = false;
+    setRenderStartMessageId(null);
     setIsLoadingOlder(false);
     requestAnimationFrame(() => {
       scrollToBottomNow();
@@ -1762,7 +1838,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       : formatStreamingTps(lastMessageWithTps?.tps ?? null);
   const streamingRoleLabel = streamingKind === "tool" ? "Tool" : "Assistant";
 
-  return (
+  const panel = (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className={`eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
         <span>
@@ -1814,8 +1890,27 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                   </button>
                 </div>
               )}
+              {renderedTranscript.hiddenCount > 0 && (
+                <div className="mb-4 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={expandLoadedTranscript}
+                    className="rounded-full border px-3 py-1 text-xs"
+                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)", color: "var(--muted)" }}
+                    data-testid="show-more-loaded-messages"
+                  >
+                    Show more loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} hidden)
+                  </button>
+                </div>
+              )}
+              {displayVerbosity === "min" && renderedTranscript.hiddenCount > 0 && (
+                <PrefixHiddenDetails
+                  messages={messages.slice(0, renderedTranscript.startIndex)}
+                  showBorders={showBorders}
+                />
+              )}
               <StaticTranscript
-                messages={messages}
+                messages={renderedTranscript.messages}
                 displayVerbosity={displayVerbosity}
                 showBorders={showBorders}
                 onStageAttachment={onStageAttachment}
@@ -2036,5 +2131,11 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         </div>
       </div>
     </div>
+  );
+  if (process.env.NODE_ENV === "production") return panel;
+  return (
+    <Profiler id="ChatPanel" onRender={(id, _phase, duration) => recordReactCommit(id as "ChatPanel", duration)}>
+      {panel}
+    </Profiler>
   );
 }

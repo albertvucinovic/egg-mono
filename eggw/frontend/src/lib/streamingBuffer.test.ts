@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AnimationFrameCoalescer, StreamingBuffer } from "./streamingBuffer";
+import { AnimationFrameCoalescer, IntervalCoalescer, StreamingBuffer } from "./streamingBuffer";
 
 describe("StreamingBuffer tool arguments", () => {
   it("retains argument chunks without growing-string concatenation", () => {
@@ -13,6 +13,36 @@ describe("StreamingBuffer tool arguments", () => {
     expect(call?.argumentLength).toBe(chunks.reduce((total, chunk) => total + chunk.length, 0));
     expect(buffer.getToolCallArguments("call-a")).toBe(chunks.join(""));
     expect(buffer.getToolCallArgumentPrefix("call-a", 40)).toBe(chunks.join("").slice(0, 40));
+  });
+
+
+  it("bounds compact preview notifications to ten per second", () => {
+    let now = 0;
+    let pending: { callback: () => void; dueAt: number } | null = null;
+    const coalescer = new IntervalCoalescer<number>(
+      100,
+      () => now,
+      (callback, delayMs) => {
+        pending = { callback, dueAt: now + delayMs };
+        return 1;
+      },
+      () => { pending = null; },
+    );
+    const flush = vi.fn();
+
+    for (let index = 0; index < 1_100; index += 1) {
+      now = index * (1000 / 1_100);
+      const scheduled = pending as { callback: () => void; dueAt: number } | null;
+      if (scheduled && scheduled.dueAt <= now) {
+        const due = scheduled;
+        pending = null;
+        due.callback();
+      }
+      coalescer.schedule(flush);
+    }
+
+    expect(flush.mock.calls.length).toBeLessThanOrEqual(10);
+    expect(flush.mock.calls.length).toBeGreaterThanOrEqual(9);
   });
 
   it("coalesces an argument preview burst to one flush per animation frame", () => {

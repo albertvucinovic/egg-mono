@@ -10,7 +10,9 @@
     "test": "playwright test",
     "test:unit": "vitest run",
     "test:ui": "playwright test --ui",
-    "test:headed": "playwright test --headed"
+    "test:headed": "playwright test --headed",
+    "profile:transcript": "node scripts/profile-transcript.mjs",
+    "test:regression": "playwright test e2e/flows.spec.ts e2e/performance.spec.ts --grep \"Atomic Live Tool Continuity|SSE reconnect integration|Command Transcript Ordering|Composer draft and autocomplete ownership|Deterministic performance gates\""
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

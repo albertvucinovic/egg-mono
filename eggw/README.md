@@ -150,6 +150,10 @@ Common REST endpoints:
   watermark represented by the returned page and is valid even with `limit` or
   `before_id` pagination.
 - `POST /api/threads/{id}/messages` — send user message
+- `GET /api/threads/{id}/state?snapshot_cursor=<cursor>` — coherent run state
+  plus `live_replay_cursor`, `streaming_invoke_id`, and streaming kind. An
+  active lease returns the exact `stream.open` sequence minus one; idle state
+  returns the supplied authoritative message cursor.
 - `GET /api/threads/{id}/stats` — token stats
 - `GET /api/models` — configured models
 - `POST /api/threads/{id}/model` — switch model
@@ -159,8 +163,9 @@ Common REST endpoints:
 Streaming endpoints:
 
 - `GET /api/threads/{id}/events` — cursor-resumable server-sent thread events.
-  Pass the message `snapshot_cursor` as `after_seq`; on reconnect the browser
-  client sends `Last-Event-ID`. Explicit `after_seq` takes precedence. Each
+  Resolve `live_replay_cursor` from `/state` using the message snapshot cursor,
+  then pass that value as `after_seq`; on reconnect the browser client sends
+  `Last-Event-ID`. Explicit `after_seq` takes precedence. Each
   frame emits `id: <event_seq>` and JSON
   `{event_id,event_seq,type,ts,msg_id,invoke_id,chunk_seq,payload}`. Events are
   strictly after the cursor, so reconnect is duplicate-safe. A cursorless
@@ -178,14 +183,26 @@ navigation. Optimistic sends are identified by a client operation ID: success
 replaces that exact temporary message with the backend `message_id`; failure
 removes only that operation and restores its original draft and attachments.
 
-For a gap-free live view, first request the message envelope, then connect SSE
-with its `snapshot_cursor`. The frontend resumes transport with `Last-Event-ID`,
-rejects duplicate/out-of-order canonical event sequences before UI mutation,
-and on reconnect refreshes the authoritative transcript watermark plus
-`/api/threads/{id}/state`. Connection state (`connecting`, `connected`, or
+For a gap-free live view, first request the message envelope, resolve
+`/state?snapshot_cursor=...`, then initialize both transport and reducer from
+its `live_replay_cursor`. The message cursor remains a durable-normalization
+watermark and never acknowledges queued stream/tool frames. The frontend resumes
+transport with `Last-Event-ID` and rejects duplicate/out-of-order canonical event
+sequences before UI mutation. Connection state (`connecting`, `connected`, or
 `reconnecting`) is separate from lease-backed run state: a dropped network
 connection does not mean the thread stopped, and only an unexpired backend lease
 identifies active work.
+
+Canonical `msg.create` envelopes are installed synchronously before subsequent
+lifecycle frames. Live tool cards are retained by `tool_call_id` across
+`stream.close` and removed only when matching durable assistant/tool messages or
+an explicit terminal boundary covers them. High-rate text, reasoning, tool
+output, and tool-argument bodies stay in thread-keyed mutable buffers and flush
+directly to the DOM; React/Zustand receive semantic lifecycle metadata only.
+The mounted historical transcript is a bounded newest window while all loaded
+React Query pages remain authoritative. Operators can expand toward loaded
+history, and minimum verbosity keeps aggregate hidden execution summaries for
+content outside the mounted tail.
 
 ## Development checks
 
@@ -195,4 +212,7 @@ cd eggw/frontend && npm run test:unit
 cd eggw/frontend && npx tsc --noEmit --pretty false
 cd eggw/frontend && npm run build
 cd eggw/frontend && npm test
+# With backend + production frontend running on 8099/3099:
+cd eggw/frontend && npm run profile:transcript
+cd eggw/frontend && EGGW_CPU_RATE=4 npm run profile:transcript
 ```
