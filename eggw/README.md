@@ -201,8 +201,12 @@ output, and tool-argument bodies stay in thread-keyed mutable buffers and flush
 directly to the DOM; React/Zustand receive semantic lifecycle metadata only.
 The mounted historical transcript is a bounded newest window while all loaded
 React Query pages remain authoritative. Operators can expand toward loaded
-history, and minimum verbosity keeps aggregate hidden execution summaries for
-content outside the mounted tail.
+history. Transcript scrolling follows provider output only while the reader is
+at the latest content; scrolling into history detaches the view until the
+reader returns to the tail. Display verbosity is monotonic: `max` opens full
+execution detail, `medium` keeps the conversation visible with reasoning and
+tool internals collapsed but inspectable, and `min` keeps the conversation plus
+compact execution summaries while hiding ordinary system/setup detail.
 
 ## Development checks
 

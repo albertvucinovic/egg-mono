@@ -1100,6 +1100,53 @@ test.describe('Streaming', () => {
     // Streaming can finish between browser frames; the persisted user turn is stable.
     await expect(page.getByTestId('chat-panel')).toContainText('Say "Hello World"', { timeout: 5000 });
   });
+
+  test('follows new provider content only while the reader is at the latest content', async ({ page }) => {
+    const threadId = 'stream-scroll-follow';
+    const messages = Array.from({ length: 36 }, (_, index) => ({
+      id: `scroll-message-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `${index}: ${'long transcript content '.repeat(12)}`,
+    }));
+    await mockThreadShell(page, threadId, { messages });
+    await page.goto(`/${threadId}`);
+
+    const chat = page.getByTestId('chat-panel');
+    const content = page.getByTestId('chat-panel-content');
+    const geometry = () => chat.evaluate((element) => ({
+      top: element.scrollTop,
+      distance: element.scrollHeight - element.scrollTop - element.clientHeight,
+    }));
+    const appendProviderContent = (label: string) => content.evaluate((element, text) => {
+      const chunk = document.createElement('div');
+      chunk.textContent = text;
+      chunk.style.height = '320px';
+      element.appendChild(chunk);
+    }, label);
+
+    for (const verbosity of ['max', 'medium', 'min'] as const) {
+      await page.locator('select[title="Transcript display verbosity"]').selectOption(verbosity);
+      await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+
+      await appendProviderContent(`follow-${verbosity}`);
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+
+      await chat.hover();
+      await page.mouse.wheel(0, -700);
+      await expect.poll(async () => (await geometry()).distance).toBeGreaterThan(100);
+      const detachedTop = (await geometry()).top;
+
+      await appendProviderContent(`detached-${verbosity}`);
+      await expect.poll(async () => Math.abs((await geometry()).top - detachedTop)).toBeLessThanOrEqual(2);
+
+      await chat.focus();
+      await page.keyboard.press('End');
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+      await appendProviderContent(`reattached-${verbosity}`);
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+    }
+  });
 });
 
 test.describe('Per-thread transcript state', () => {
@@ -1407,6 +1454,18 @@ test.describe('Live Tool Streaming', () => {
     await expect(page.getByTestId('chat-panel')).toContainText('bash', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('streaming output...', { timeout: 5000 });
+
+    const select = page.locator('select[title="Transcript display verbosity"]');
+    const args = page.getByTestId('streaming-tool-arguments');
+    await select.selectOption('medium');
+    await expect(args).not.toBeVisible();
+    await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30');
+    await select.selectOption('min');
+    await expect(args).toHaveCount(0);
+    await expect(page.getByTestId('chat-panel')).toContainText('bash');
+    await select.selectOption('max');
+    await expect(args).toBeVisible();
+    await expect(args).toContainText('$ echo visible args; sleep 30');
   });
 });
 
@@ -1493,6 +1552,52 @@ test.describe('Atomic Live Tool Continuity', () => {
       await expect(chat).not.toContainText('No messages yet');
     }
     expect(messageRequests).toBeGreaterThan(1);
+  });
+
+  test('uses monotonic detail levels for completed transcript content', async ({ page }) => {
+    const threadId = 'verbosity-semantics';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'ordinary-system', role: 'system', content: 'private provider setup instructions' },
+        { id: 'verbosity-user', role: 'user', content: 'inspect the repository' },
+        {
+          id: 'verbosity-assistant',
+          role: 'assistant',
+          content: 'The repository looks healthy.',
+          reasoning: 'raw private reasoning body',
+          model_key: 'provider-model',
+          tool_calls: [{ id: 'verbosity-tool', name: 'bash', arguments: { script: 'git status' } }],
+        },
+        { id: 'verbosity-result', role: 'tool', name: 'bash', tool_call_id: 'verbosity-tool', content: 'clean working tree result' },
+        { id: 'verbosity-command', role: 'system', command_name: 'displayVerbosity', content: 'Display verbosity changed.' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    const select = page.locator('select[title="Transcript display verbosity"]');
+
+    await select.selectOption('max');
+    await expect(chat).toContainText('raw private reasoning body');
+    await expect(chat).toContainText('git status');
+    await expect(chat).toContainText('clean working tree result');
+    await expect(chat).toContainText('provider-model');
+
+    await select.selectOption('medium');
+    await expect(chat).toContainText('The repository looks healthy.');
+    await expect(chat.getByText('raw private reasoning body')).not.toBeVisible();
+    await expect(chat.locator('pre').getByText('clean working tree result', { exact: true })).not.toBeVisible();
+    await expect(chat).toContainText('git status');
+    await chat.getByText('Reasoning', { exact: false }).first().click();
+    await expect(chat.getByText('raw private reasoning body')).toBeVisible();
+
+    await select.selectOption('min');
+    await expect(chat).toContainText('inspect the repository');
+    await expect(chat).toContainText('The repository looks healthy.');
+    await expect(chat).toContainText('Display verbosity changed.');
+    await expect(chat).toContainText('Executed 1 tool');
+    await expect(chat).not.toContainText('private provider setup instructions');
+    await expect(chat).not.toContainText('provider-model');
+    await expect(chat).not.toContainText('raw private reasoning body');
   });
 });
 
