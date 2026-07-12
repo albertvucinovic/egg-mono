@@ -1301,6 +1301,16 @@ function renderMessagesForVerbosity(
 
     const hiddenDetails = collectHiddenDetailsForMessage(msg);
     const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
+    if (msg.role === "assistant" && msg.answer_user_preserve_turn && hasVisibleConversationBody) {
+      // A preserve-turn note is inserted while its ordinary tool lifecycle is
+      // still in flight. Keep the pending call details across this visible note
+      // so the later role=tool message can pair with the call by tool_call_id.
+      // Treating the note as a normal conversation boundary splits one tool
+      // lifecycle into two HiddenDetailsBlocks in min verbosity.
+      nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" onStageAttachment={onStageAttachment} />);
+      hidden.push(...hiddenDetails);
+      return;
+    }
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
       const beforeVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind === "reasoning") : [];
       const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;

@@ -1653,6 +1653,51 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(dialog).toContainText('RESULT_B');
     await expect(dialog).not.toContainText('ARGUMENT_A');
   });
+
+  test('keeps an Assistant Note tool result attached across the visible note in min', async ({ page }) => {
+    const threadId = 'min-assistant-note-result';
+    const toolCallId = 'call-answer-user-note';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'note-result-user', role: 'user', content: 'keep me updated' },
+        {
+          id: 'note-result-call',
+          role: 'assistant',
+          content: '',
+          tool_calls: [{
+            id: toolCallId,
+            name: 'answer_user_while_preserving_llm_turn',
+            arguments: { message: 'Visible interim status.' },
+          }],
+        },
+        {
+          id: 'note-result-visible-note',
+          role: 'assistant',
+          content: 'Visible interim status.',
+          answer_user_preserve_turn: true,
+          tool_call_id: toolCallId,
+          source_tool_name: 'answer_user_while_preserving_llm_turn',
+        },
+        {
+          id: 'note-result-tool-message',
+          role: 'tool',
+          name: 'answer_user_while_preserving_llm_turn',
+          tool_call_id: toolCallId,
+          content: 'Interim answer shown to user.',
+        },
+        { id: 'note-result-final', role: 'assistant', content: 'Final answer.' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+
+    await expect(page.getByText('Visible interim status.', { exact: true })).toBeVisible();
+    await page.getByTestId('hidden-details').getByRole('button', { name: 'answer_user_while_preserving_llm_turn' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('Visible interim status.');
+    await expect(dialog).toContainText('Interim answer shown to user.');
+    await expect(dialog).not.toContainText('(not found in the loaded transcript)');
+  });
 });
 
 test.describe('Settings and Controls', () => {
