@@ -177,6 +177,25 @@ class TestUpdatePanels:
 
         assert len(set_content_calls) >= 1
 
+    def test_children_output_uses_adaptive_formatter(self, egg_app, monkeypatch):
+        """The terminal panel uses its density-aware formatter."""
+        calls = []
+        monkeypatch.setattr(
+            egg_app,
+            "format_children_panel",
+            lambda root: calls.append(root) or "ADAPTIVE CHILDREN",
+        )
+        monkeypatch.setattr(
+            egg_app,
+            "format_tree",
+            lambda root: pytest.fail("panel must not call format_tree directly"),
+        )
+
+        egg_app.update_panels()
+
+        assert calls == [egg_app.current_thread]
+        assert egg_app.children_output.content == "ADAPTIVE CHILDREN"
+
     def test_children_tree_is_not_reformatted_when_status_key_unchanged(self, egg_app, monkeypatch):
         """Idle panel ticks should not rescan the full thread tree."""
         calls = {"count": 0}
@@ -265,6 +284,29 @@ class TestUpdatePanels:
         key_2 = egg_app._compute_children_panel_status_key()
 
         assert key_1 == key_2
+
+    def test_children_status_key_uses_one_set_based_query_for_large_subtree(self, egg_app):
+        """Fallback invalidation must not issue one event query per descendant."""
+        parent = egg_app.current_thread
+        parent_row = egg_app.db.get_thread(parent)
+        for number in range(40):
+            egg_app.db.create_thread(
+                thread_id=f"status-key-child-{number:04d}",
+                name=f"Child {number}",
+                parent_id=parent,
+                initial_model_key=parent_row.initial_model_key,
+                depth=parent_row.depth + 1,
+            )
+
+        statements = []
+        egg_app.db.conn.set_trace_callback(statements.append)
+        try:
+            egg_app._compute_children_panel_status_key()
+        finally:
+            egg_app.db.conn.set_trace_callback(None)
+
+        selects = [statement for statement in statements if statement.lstrip().upper().startswith("WITH")]
+        assert len(selects) == 1
 
     def test_shows_approval_panel_when_pending(self, egg_app):
         """Should show approval panel when pending prompt exists."""

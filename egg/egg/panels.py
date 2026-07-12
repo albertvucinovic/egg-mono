@@ -533,114 +533,62 @@ class PanelsMixin:
         )
 
     def _compute_children_panel_status_key(self) -> Any:
-        """Cheap key for Children panel tree/status state."""
-        subtree_ids = self._children_panel_subtree_ids()
+        """Return a set-based key for Children panel topology and status."""
+        placeholders = ', '.join('?' for _ in CHILDREN_PANEL_RELEVANT_EVENT_TYPES)
         cur = self.db.conn.execute(
-            """
+            f"""
             WITH RECURSIVE subtree(thread_id) AS (
                 SELECT ?
                 UNION
                 SELECT c.child_id
                 FROM children c
-                JOIN subtree s ON c.parent_id = s.thread_id
-            )
-            SELECT COUNT(*), COALESCE(MAX(c.rowid), 0)
-            FROM children c
-            JOIN subtree s ON c.parent_id = s.thread_id
-            """,
-            (self.current_thread,),
-        )
-        child_count, child_max_rowid = cur.fetchone()
-        event_version = self._children_panel_event_version(subtree_ids)
-        cur = self.db.conn.execute(
-            """
-            WITH RECURSIVE subtree(thread_id) AS (
-                SELECT ?
-                UNION
-                SELECT c.child_id
+                JOIN subtree s ON c.parent_id=s.thread_id
+            ), relevant_events AS (
+                SELECT
+                    COALESCE(MAX(e.event_seq), -1) AS event_max,
+                    COUNT(e.event_seq) AS event_count
+                FROM events e
+                JOIN subtree s ON s.thread_id=e.thread_id
+                WHERE e.type IN ({placeholders})
+            ), topology AS (
+                SELECT COUNT(*) AS child_count, COALESCE(MAX(c.rowid), 0) AS child_max
                 FROM children c
-                JOIN subtree s ON c.parent_id = s.thread_id
+                JOIN subtree s ON s.thread_id=c.parent_id
+            ), active_streams AS (
+                SELECT
+                    COUNT(*) AS open_count,
+                    COALESCE(GROUP_CONCAT(open_key, '|'), '') AS open_key
+                FROM (
+                    SELECT o.thread_id || ':' || o.invoke_id || ':' || COALESCE(o.purpose, '') AS open_key
+                    FROM open_streams o
+                    JOIN subtree s ON s.thread_id=o.thread_id
+                    WHERE o.lease_until > datetime('now')
+                    ORDER BY o.thread_id, o.invoke_id
+                )
             )
-            SELECT COUNT(*), COALESCE(GROUP_CONCAT(open_key, '|'), '')
-            FROM (
-                SELECT o.thread_id || ':' || o.invoke_id || ':' || COALESCE(o.purpose, '') AS open_key
-                FROM open_streams o
-                JOIN subtree s ON o.thread_id = s.thread_id
-                WHERE o.lease_until > datetime('now')
-                ORDER BY o.thread_id, o.invoke_id
-            )
+            SELECT
+                topology.child_count,
+                topology.child_max,
+                relevant_events.event_count,
+                relevant_events.event_max,
+                active_streams.open_count,
+                active_streams.open_key
+            FROM topology, relevant_events, active_streams
             """,
-            (self.current_thread,),
+            (self.current_thread, *CHILDREN_PANEL_RELEVANT_EVENT_TYPES),
         )
-        open_count, open_key = cur.fetchone()
+        row = cur.fetchone()
+        if not row:
+            return (self.current_thread, 0, 0, 0, -1, 0, '')
         return (
             self.current_thread,
-            int(child_count or 0),
-            int(child_max_rowid or 0),
-            int(event_version or 0),
-            int(open_count or 0),
-            str(open_key or ''),
+            int(row[0] or 0),
+            int(row[1] or 0),
+            int(row[2] or 0),
+            int(row[3] if row[3] is not None else -1),
+            int(row[4] or 0),
+            str(row[5] or ''),
         )
-
-    def _children_panel_subtree_ids(self) -> Tuple[str, ...]:
-        """Return current thread plus descendants for Children panel caching."""
-        cur = self.db.conn.execute(
-            """
-            WITH RECURSIVE subtree(thread_id) AS (
-                SELECT ?
-                UNION
-                SELECT c.child_id
-                FROM children c
-                JOIN subtree s ON c.parent_id = s.thread_id
-            )
-            SELECT thread_id FROM subtree ORDER BY thread_id
-            """,
-            (self.current_thread,),
-        )
-        return tuple(str(row[0]) for row in cur.fetchall() if row[0])
-
-    def _children_panel_event_version(self, subtree_ids: Sequence[str]) -> int:
-        """Increment a local version when new relevant subtree events appear."""
-        seen = getattr(self, '_children_panel_seen_event_seq_by_thread', None)
-        if not isinstance(seen, dict):
-            seen = {}
-        version = int(getattr(self, '_children_panel_event_version_value', 0) or 0)
-
-        subtree_set = set(subtree_ids)
-        for tid in list(seen.keys()):
-            if tid not in subtree_set:
-                seen.pop(tid, None)
-
-        placeholders = ', '.join('?' for _ in CHILDREN_PANEL_RELEVANT_EVENT_TYPES)
-        for tid in subtree_ids:
-            try:
-                cur = self.db.conn.execute(
-                    f"""
-                    SELECT COALESCE(MAX(event_seq), -1)
-                    FROM events INDEXED BY events_thread_type
-                    WHERE thread_id=? AND type IN ({placeholders})
-                    """,
-                    (tid, *CHILDREN_PANEL_RELEVANT_EVENT_TYPES),
-                )
-                row = cur.fetchone()
-                relevant_max = int(row[0]) if row and row[0] is not None else -1
-            except Exception:
-                relevant_max = -1
-            last_seen = seen.get(tid)
-            if last_seen is None:
-                seen[tid] = relevant_max
-                continue
-            try:
-                last_seen_int = int(last_seen)
-            except Exception:
-                last_seen_int = -1
-            if relevant_max > last_seen_int:
-                version += 1
-                seen[tid] = relevant_max
-
-        self._children_panel_seen_event_seq_by_thread = seen
-        self._children_panel_event_version_value = version
-        return version
 
     def _mark_children_panel_dirty(self) -> None:
         """Request a Children panel tree refresh on the next safe panel tick."""
@@ -858,7 +806,7 @@ class PanelsMixin:
                     status_key = cached_children_key
                 if children_dirty or cached_children_key != status_key:
                     try:
-                        subtree_text = self.format_tree(self.current_thread)
+                        subtree_text = self.format_children_panel(self.current_thread)
                     except Exception:
                         subtree_text = "(error rendering children tree)"
                     self.children_output.set_content(subtree_text)

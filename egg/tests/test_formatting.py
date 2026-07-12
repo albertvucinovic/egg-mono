@@ -817,3 +817,149 @@ class TestFormatModelInfo:
 
         # Either empty or some default indicator
         assert isinstance(info, str)
+
+
+class TestFormatChildrenPanel:
+    """Tests for adaptive Children panel subtree density."""
+
+    @staticmethod
+    def _child(egg_app, parent_id, suffix):
+        parent = egg_app.db.get_thread(parent_id)
+        thread_id = f"panel-child-{suffix:08d}"
+        egg_app.db.create_thread(
+            thread_id=thread_id,
+            name=f"Child {suffix}",
+            parent_id=parent_id,
+            initial_model_key=parent.initial_model_key,
+            depth=parent.depth + 1,
+        )
+        return thread_id
+
+    def test_maximal_through_four_descendants_excludes_view_root_from_count(
+        self, egg_app, monkeypatch
+    ):
+        parent = egg_app.current_thread
+        child = parent
+        for number in range(4):
+            child = self._child(egg_app, child, number)
+
+        calls = []
+        monkeypatch.setattr(
+            egg_app, "format_tree", lambda root: calls.append(root) or "MAXIMAL TREE"
+        )
+
+        assert egg_app.format_children_panel(parent) == "MAXIMAL TREE"
+        assert calls == [parent]
+
+    @pytest.mark.parametrize("descendant_count", [5, 15])
+    def test_compact_at_exact_boundaries_with_recursive_descendants(
+        self, egg_app, descendant_count, monkeypatch
+    ):
+        parent = egg_app.current_thread
+        descendant_ids = []
+        branch_parent = parent
+        for number in range(descendant_count):
+            child = self._child(egg_app, branch_parent, number)
+            descendant_ids.append(child)
+            # A chain proves grandchildren and deeper descendants are counted.
+            branch_parent = child
+
+        streaming = descendant_ids[-1]
+        assert egg_app.db.try_open_stream(
+            streaming, "compact-stream", "2999-01-01 00:00:00",
+            owner="test", purpose="assistant_stream"
+        )
+
+        monkeypatch.setattr(
+            egg_app,
+            "format_tree",
+            lambda root: pytest.fail("compact rendering must not format the full tree"),
+        )
+        text = egg_app.format_children_panel(parent)
+
+        assert text.splitlines()[0] == f"{descendant_count} descendants"
+        assert "Streaming (1):" in text
+        assert streaming[-8:] in text
+        assert f"Not streaming ({descendant_count - 1}):" in text
+        assert "No recap" not in text
+        assert "└─" not in text
+
+    def test_compact_groups_streaming_ids_and_rich_escapes_suffixes(self, egg_app):
+        parent = egg_app.current_thread
+        ids = [self._child(egg_app, parent, number) for number in range(4)]
+        marked_up_id = "panel-child-[x]12345"
+        egg_app.db.create_thread(
+            thread_id=marked_up_id,
+            name="Markup",
+            parent_id=parent,
+            initial_model_key=egg_app.db.get_thread(parent).initial_model_key,
+            depth=1,
+        )
+        ids.append(marked_up_id)
+        for number, thread_id in enumerate((ids[1], ids[3])):
+            assert egg_app.db.try_open_stream(
+                thread_id, f"stream-{number}", "2999-01-01 00:00:00",
+                owner="test", purpose="assistant_stream"
+            )
+
+        text = egg_app.format_children_panel(parent)
+        streaming_line, other_line = text.splitlines()[1:]
+
+        assert "Streaming (2):" in streaming_line
+        assert ids[1][-8:] in streaming_line
+        assert ids[3][-8:] in streaming_line
+        assert ids[0][-8:] in other_line
+        assert "\\[x]12345" in other_line
+
+    def test_minimal_from_sixteen_reports_descendants_and_streaming(
+        self, egg_app, monkeypatch
+    ):
+        parent = egg_app.current_thread
+        descendants = [self._child(egg_app, parent, number) for number in range(16)]
+        for number, thread_id in enumerate(descendants[:3]):
+            assert egg_app.db.try_open_stream(
+                thread_id, f"minimal-stream-{number}", "2999-01-01 00:00:00",
+                owner="test", purpose="assistant_stream"
+            )
+
+        monkeypatch.setattr(
+            egg_app,
+            "format_tree",
+            lambda root: pytest.fail("minimal rendering must not format the full tree"),
+        )
+        assert egg_app.format_children_panel(parent) == "16 descendants · 3 streaming"
+
+    def test_counts_only_descendants_of_selected_root(self, egg_app):
+        outer_root = egg_app.current_thread
+        selected = self._child(egg_app, outer_root, 100)
+        outside = self._child(egg_app, outer_root, 101)
+        selected_descendants = [
+            self._child(egg_app, selected, number) for number in range(5)
+        ]
+        for number in range(16):
+            self._child(egg_app, outside, 200 + number)
+        assert egg_app.db.try_open_stream(
+            outside, "outside-stream", "2999-01-01 00:00:00",
+            owner="test", purpose="assistant_stream"
+        )
+        assert egg_app.db.try_open_stream(
+            selected_descendants[0], "inside-stream", "2999-01-01 00:00:00",
+            owner="test", purpose="assistant_stream"
+        )
+
+        text = egg_app.format_children_panel(selected)
+
+        assert text.splitlines()[0] == "5 descendants"
+        assert "Streaming (1):" in text
+        assert outside[-8:] not in text
+
+    def test_format_tree_stays_maximal_for_large_subtrees(self, egg_app):
+        parent = egg_app.current_thread
+        descendants = [self._child(egg_app, parent, number) for number in range(16)]
+
+        text = egg_app.format_tree(parent)
+
+        assert parent[-8:] in text
+        assert all(thread_id[-8:] in text for thread_id in descendants)
+        assert "16 descendants" not in text
+        assert "└─" in text

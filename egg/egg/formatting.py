@@ -5,6 +5,10 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Set
 
+
+CHILDREN_PANEL_MAXIMAL_LIMIT = 4
+CHILDREN_PANEL_COMPACT_LIMIT = 15
+
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
     list_children_with_meta,
@@ -208,6 +212,88 @@ class FormattingMixin:
         for rid in roots:
             lines.extend(render_tree(rid))
         return "\n".join(lines)
+
+    def format_children_panel(self, root_tid: str) -> str:
+        """Format the selected thread subtree at a density suited to the panel.
+
+        The selected thread is the view root, not one of its descendants. A
+        recursive aggregate chooses the density without materializing the
+        subtree. Only compact mode fetches descendant IDs; minimal mode remains
+        constant-size in Python. ``format_tree`` intentionally remains the
+        maximal, inspectable view used by commands such as ``/listChildren``.
+        """
+        from rich.markup import escape as rich_escape
+
+        cur = self.db.conn.execute(
+            """
+            WITH RECURSIVE descendants(thread_id) AS (
+                SELECT child_id
+                FROM children
+                WHERE parent_id=? AND child_id<>?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN descendants d ON c.parent_id=d.thread_id
+                WHERE c.child_id<>?
+            )
+            SELECT
+                COUNT(DISTINCT d.thread_id),
+                COUNT(DISTINCT CASE
+                    WHEN o.lease_until > datetime('now') THEN d.thread_id
+                END)
+            FROM descendants d
+            LEFT JOIN open_streams o ON o.thread_id=d.thread_id
+            """,
+            (root_tid, root_tid, root_tid),
+        )
+        row = cur.fetchone()
+        descendant_count = int(row[0] or 0) if row else 0
+        streaming_count = int(row[1] or 0) if row else 0
+
+        if descendant_count <= CHILDREN_PANEL_MAXIMAL_LIMIT:
+            return self.format_tree(root_tid)
+        if descendant_count > CHILDREN_PANEL_COMPACT_LIMIT:
+            return (
+                f"{descendant_count} descendants · "
+                f"{streaming_count} streaming"
+            )
+
+        cur = self.db.conn.execute(
+            """
+            WITH RECURSIVE descendants(thread_id) AS (
+                SELECT child_id
+                FROM children
+                WHERE parent_id=? AND child_id<>?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN descendants d ON c.parent_id=d.thread_id
+                WHERE c.child_id<>?
+            )
+            SELECT thread_id FROM descendants ORDER BY thread_id
+            """,
+            (root_tid, root_tid, root_tid),
+        )
+        descendant_ids = [str(row[0]) for row in cur.fetchall() if row[0]]
+        status_map = get_thread_statuses_bulk(
+            self.db, descendant_ids, skip_runnability=True
+        )
+        streaming_ids = [
+            tid for tid in descendant_ids if status_map.get(tid) == 'streaming'
+        ]
+        streaming_set = set(streaming_ids)
+        not_streaming_ids = [
+            tid for tid in descendant_ids if tid not in streaming_set
+        ]
+
+        def suffixes(thread_ids: List[str]) -> str:
+            return ", ".join(rich_escape(tid[-8:]) for tid in thread_ids) or "none"
+
+        return "\n".join((
+            f"{descendant_count} descendants",
+            f"[bold yellow]Streaming ({len(streaming_ids)}):[/] {suffixes(streaming_ids)}",
+            f"[dim]Not streaming ({len(not_streaming_ids)}):[/] {suffixes(not_streaming_ids)}",
+        ))
 
     def _compaction_marker_text(self, marker: Dict[str, Any]) -> str:
         """Return the textual transcript divider for a compaction event."""

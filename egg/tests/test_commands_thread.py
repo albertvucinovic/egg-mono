@@ -254,6 +254,35 @@ class TestListChildrenCommand:
         assert any("Subtree" in msg or "subtree" in msg.lower() or child[-8:] in msg for msg in egg_app._system_log)
 
 
+    def test_uses_maximal_tree_formatter_for_large_subtree(self, egg_app, monkeypatch):
+        """/listChildren stays fully inspectable instead of using panel density."""
+        from eggthreads import create_child_thread
+
+        create_child_thread(egg_app.db, egg_app.current_thread, name="ChildThread")
+        calls = []
+        monkeypatch.setattr(
+            egg_app,
+            "format_tree",
+            lambda root: calls.append(root) or "MAXIMAL SUBTREE",
+        )
+        monkeypatch.setattr(
+            egg_app,
+            "format_children_panel",
+            lambda root: pytest.fail("/listChildren must not use panel formatting"),
+        )
+        blocks = []
+        monkeypatch.setattr(
+            egg_app,
+            "console_print_block",
+            lambda title, text, **kwargs: blocks.append((title, text)),
+        )
+
+        egg_app.handle_command("/listChildren")
+
+        assert calls == [egg_app.current_thread]
+        assert any(text == "MAXIMAL SUBTREE" for _, text in blocks)
+
+
 class TestParentThreadCommand:
     """Tests for /parentThread through CommandRegistry dispatch."""
 
