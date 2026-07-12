@@ -196,6 +196,23 @@ class TestUpdatePanels:
         assert calls == [egg_app.current_thread]
         assert egg_app.children_output.content == "ADAPTIVE CHILDREN"
 
+    def test_children_panel_wraps_current_identity_instead_of_cropping(self, egg_app):
+        """A narrow terminal must retain current ID, name, and description."""
+        from rich.console import Console
+
+        egg_app.children_output.set_content(
+            "Current: full-thread-id | Name: A descriptive thread name | "
+            "Description: A useful description that exceeds a narrow row"
+        )
+        console = Console(record=True, width=44)
+        console.print(egg_app.children_output.render())
+        rendered = console.export_text(styles=False)
+        normalized = " ".join(rendered.split())
+
+        assert "full-thread-id" in normalized
+        assert "A descriptive thread name" in normalized
+        assert "A useful description" in normalized
+
     def test_children_tree_is_not_reformatted_when_status_key_unchanged(self, egg_app, monkeypatch):
         """Idle panel ticks should not rescan the full thread tree."""
         calls = {"count": 0}
@@ -307,6 +324,20 @@ class TestUpdatePanels:
 
         selects = [statement for statement in statements if statement.lstrip().upper().startswith("WITH")]
         assert len(selects) == 1
+
+    def test_children_status_key_tracks_current_name_and_description(self, egg_app):
+        """Current-thread metadata changes must invalidate cached panel text."""
+        key_1 = egg_app._compute_children_panel_status_key()
+        egg_app.db.conn.execute(
+            "UPDATE threads SET name=?, short_recap=? WHERE thread_id=?",
+            ("Renamed", "Updated description", egg_app.current_thread),
+        )
+        egg_app.db.conn.commit()
+
+        key_2 = egg_app._compute_children_panel_status_key()
+
+        assert key_1 != key_2
+        assert key_2[-2:] == ("Renamed", "Updated description")
 
     def test_shows_approval_panel_when_pending(self, egg_app):
         """Should show approval panel when pending prompt exists."""

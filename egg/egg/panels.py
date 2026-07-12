@@ -572,14 +572,21 @@ class PanelsMixin:
                 relevant_events.event_count,
                 relevant_events.event_max,
                 active_streams.open_count,
-                active_streams.open_key
+                active_streams.open_key,
+                COALESCE(t.name, ''),
+                COALESCE(t.short_recap, '')
             FROM topology, relevant_events, active_streams
+            LEFT JOIN threads t ON t.thread_id=?
             """,
-            (self.current_thread, *CHILDREN_PANEL_RELEVANT_EVENT_TYPES),
+            (
+                self.current_thread,
+                *CHILDREN_PANEL_RELEVANT_EVENT_TYPES,
+                self.current_thread,
+            ),
         )
         row = cur.fetchone()
         if not row:
-            return (self.current_thread, 0, 0, 0, -1, 0, '')
+            return (self.current_thread, 0, 0, 0, -1, 0, '', '', '')
         return (
             self.current_thread,
             int(row[0] or 0),
@@ -588,6 +595,8 @@ class PanelsMixin:
             int(row[3] if row[3] is not None else -1),
             int(row[4] or 0),
             str(row[5] or ''),
+            str(row[6] or ''),
+            str(row[7] or ''),
         )
 
     def _mark_children_panel_dirty(self) -> None:

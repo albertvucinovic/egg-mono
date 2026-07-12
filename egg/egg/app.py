@@ -243,7 +243,10 @@ class EggDisplayApp(
             header_style="bold white on cyan",
             header_separator_char="─",
             header_separator_style="cyan",
-            line_wrap_mode="crop",
+            # Keep the current thread's full ID, name, and description visible.
+            # Non-maximal Children content is bounded to a few logical lines,
+            # so wrapping makes better use of narrow terminals than cropping.
+            line_wrap_mode="wrap",
         )
         self.children_output = OutputPanel(
             title="Children",
