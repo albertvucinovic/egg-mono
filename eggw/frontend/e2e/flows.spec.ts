@@ -1217,6 +1217,73 @@ test.describe('Per-thread transcript state', () => {
     await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
     await expect(page.getByTestId('chat-panel')).not.toContainText('thread b only');
   });
+
+  test('reveals loaded min history before pagination and reaches the system prompt', async ({ page }) => {
+    const threadId = 'min-system-prompt-history';
+    let messageRequests = 0;
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      messageRequests += 1;
+      const beforeId = new URL(request.url()).searchParams.get('before_id');
+      if (!beforeId) {
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            items: Array.from({ length: 70 }, (_, index) => ({
+              id: `recent-${index}`,
+              role: index % 2 ? 'assistant' : 'user',
+              content: `recent message ${index}`,
+            })),
+            snapshot_cursor: 200,
+            next_before: 'recent-0',
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          items: [
+            { id: 'root-system-prompt', role: 'system', content: 'ROOT SYSTEM PROMPT CONTENT' },
+            ...Array.from({ length: 89 }, (_, index) => ({
+              id: `older-${index}`,
+              role: index % 3 === 0 ? 'tool' : (index % 2 ? 'assistant' : 'user'),
+              ...(index % 3 === 0
+                ? { name: 'bash', tool_call_id: `older-call-${index}`, content: `older tool output ${index}` }
+                : { content: `older conversation ${index}` }),
+            })),
+          ],
+          snapshot_cursor: 200,
+          next_before: null,
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+
+    // Expose the already-loaded 65-message prefix before requesting older data.
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('5 earlier');
+    expect(messageRequests).toBe(1);
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.getByTestId('load-older-messages')).toBeVisible();
+    expect(messageRequests).toBe(1);
+
+    await page.getByTestId('load-older-messages').click();
+    await expect.poll(() => messageRequests).toBe(2);
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('30 earlier');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('ROOT SYSTEM PROMPT CONTENT');
+
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.getByTestId('chat-panel')).toContainText('ROOT SYSTEM PROMPT CONTENT');
+    await expect(page.getByText('System', { exact: true }).first()).toBeVisible();
+    expect(messageRequests).toBe(2);
+  });
 });
 
 test.describe('Tool approval integration', () => {
@@ -1601,7 +1668,7 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(chat).toContainText('The repository looks healthy.');
     await expect(chat).toContainText('Display verbosity changed.');
     await expect(chat).toContainText('Executed 1 tool');
-    await expect(chat).not.toContainText('private provider setup instructions');
+    await expect(chat).toContainText('private provider setup instructions');
     await expect(chat).not.toContainText('provider-model');
     await expect(chat).not.toContainText('raw private reasoning body');
   });

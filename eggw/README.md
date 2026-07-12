@@ -206,9 +206,11 @@ at the latest content; scrolling into history detaches the view until the
 reader returns to the tail. Display verbosity is monotonic: `max` opens full
 execution detail, `medium` keeps the conversation visible with reasoning and
 tool internals collapsed but inspectable, and `min` keeps the conversation plus
-compact historical execution summaries while hiding ordinary system/setup
-detail. Active tool-call arguments and output remain expanded in every mode so
-the operator can always see what is currently executing.
+compact historical execution summaries. System messages, including the initial
+system prompt, remain reachable in chronological history. Active tool-call
+arguments and output remain expanded in every mode so the operator can always
+see what is currently executing. Loaded history is revealed in bounded chunks
+before EggW requests another older page.
 
 ## Development checks
 

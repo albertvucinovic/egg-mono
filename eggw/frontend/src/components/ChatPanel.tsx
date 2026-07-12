@@ -280,14 +280,11 @@ function outputOptimizerRawHint(message: Message): string | null {
 }
 
 function isImportantSystemMessage(message: Message): boolean {
-  if (message.role !== "system") return false;
-  if (message.recovery_notice || message.command_name || message.id?.startsWith("cmd-")) return true;
-  const content = contentToPlainText(message.content, message.content_text || "").trim().toLowerCase();
-  return content.startsWith("llm error:")
-    || content.startsWith("error:")
-    || content.startsWith("usage:")
-    || content.startsWith("unknown command:")
-    || content.startsWith("/");
+  // System messages are part of the chronological transcript skeleton at every
+  // verbosity. In particular, the root system prompt must remain reachable
+  // after loading and revealing the oldest page.
+  return message.role === "system"
+    && Boolean(contentToPlainText(message.content, message.content_text || "").trim());
 }
 
 function plural(count: number, singular: string, pluralText?: string): string {
@@ -863,7 +860,9 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const displayRole = message.answer_user_preserve_turn && message.role === "assistant" ? "assistant_note" : message.role;
   const baseRoleLabel = message.recovery_notice && message.role === "system"
     ? "Continue Status"
-    : roleLabels[displayRole] || displayRole;
+    : message.role === "system" && !message.command_name && !message.id?.startsWith("cmd-")
+      ? "System"
+      : roleLabels[displayRole] || displayRole;
   const roleLabel = message.role === "tool" && message.name ? `${baseRoleLabel}: ${message.name}` : baseRoleLabel;
 
   // Check if this is a shell command (starts with $ or $$)
@@ -1328,21 +1327,6 @@ function renderMessagesForVerbosity(
   return nodes;
 }
 
-function hasMinVisibleBody(message: Message): boolean {
-  return ((message.role === "user" || message.role === "assistant")
-    && Boolean(contentToPlainText(message.content, message.content_text || "").trim()))
-    || isImportantSystemMessage(message)
-    || message.kind === "compaction_marker"
-    || message.role === "compaction_marker";
-}
-
-/** Collapse hidden details outside the mounted tail without losing min summaries. */
-function PrefixHiddenDetails({ messages, showBorders }: { messages: Message[]; showBorders: boolean }) {
-  const details = useMemo(() => messages.flatMap(collectHiddenDetailsForMessage), [messages]);
-  if (!details.length) return null;
-  return <HiddenDetailsBlock details={details} showBorders={showBorders} />;
-}
-
 const StaticTranscript = memo(function StaticTranscript({
   messages,
   displayVerbosity,
@@ -1390,6 +1374,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const streamingToolCallFlushRef = useRef<AnimationFrameCoalescer | null>(null);
   const streamingToolPreviewFlushRef = useRef<IntervalCoalescer<number> | null>(null);
   const loadingOlderRef = useRef(false);
+  const revealingLoadedRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [renderStartMessageId, setRenderStartMessageId] = useState<string | null>(null);
@@ -1399,15 +1384,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const transcriptQuery = useInfiniteQuery(transcriptInfiniteQueryOptions(threadId, queryClient));
   const messages = useMemo(() => flattenTranscript(transcriptQuery.data), [transcriptQuery.data]);
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
-  const renderedTranscript = useMemo(() => {
-    const window = transcriptWindow(messages, renderStartMessageId);
-    if (displayVerbosity !== "min" || window.startIndex === 0) return window;
-    const visiblePrefixIndex = messages
-      .slice(0, window.startIndex)
-      .findLastIndex(hasMinVisibleBody);
-    if (visiblePrefixIndex < 0) return window;
-    return transcriptWindow(messages, messages[visiblePrefixIndex].id);
-  }, [displayVerbosity, messages, renderStartMessageId]);
+  const renderedTranscript = useMemo(
+    () => transcriptWindow(messages, renderStartMessageId),
+    [messages, renderStartMessageId],
+  );
   const streamingToolCalls = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolCalls);
   const streamingToolOutputs = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolOutputs);
   const streamingModelKey = useAppStore((state) => state.streamingByThread[threadId]?.streamingModelKey || null);
@@ -1468,14 +1448,20 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   }, []);
 
   const revealFromMessage = useCallback((startMessageId: string | null) => {
+    if (revealingLoadedRef.current) return;
     const el = scrollRef.current;
     const previousScrollHeight = el?.scrollHeight ?? 0;
     const previousScrollTop = el?.scrollTop ?? 0;
+    revealingLoadedRef.current = true;
     setRenderStartMessageId(startMessageId);
     requestAnimationFrame(() => {
       const currentEl = scrollRef.current;
-      if (!currentEl) return;
-      currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
+      if (currentEl) {
+        currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
+      }
+      requestAnimationFrame(() => {
+        revealingLoadedRef.current = false;
+      });
     });
   }, []);
 
@@ -1523,10 +1509,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       programmaticScrollTargetRef.current = null;
       stickToBottomRef.current = isAtBottom();
     }
-    if (el && el.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
-      void loadOlderMessages();
+    if (el && el.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX && !loadingOlderRef.current && !revealingLoadedRef.current) {
+      if (renderedTranscript.hiddenCount > 0) {
+        expandLoadedTranscript();
+      } else {
+        void loadOlderMessages();
+      }
     }
-  }, [isAtBottom, loadOlderMessages, scrollToBottomNow]);
+  }, [expandLoadedTranscript, isAtBottom, loadOlderMessages, renderedTranscript.hiddenCount, scrollToBottomNow]);
 
   const detachFromBottom = useCallback(() => {
     stickToBottomRef.current = false;
@@ -1954,7 +1944,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
             </div>
           ) : (
             <>
-              {messages.length > 0 && transcriptQuery.hasNextPage && (
+              {messages.length > 0 && renderedTranscript.hiddenCount === 0 && transcriptQuery.hasNextPage && (
                 <div className="mb-4 flex justify-center">
                   <button
                     type="button"
@@ -1977,15 +1967,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                     style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)", color: "var(--muted)" }}
                     data-testid="show-more-loaded-messages"
                   >
-                    Show more loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} hidden)
+                    Show 60 older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
                   </button>
                 </div>
-              )}
-              {displayVerbosity === "min" && renderedTranscript.hiddenCount > 0 && (
-                <PrefixHiddenDetails
-                  messages={messages.slice(0, renderedTranscript.startIndex)}
-                  showBorders={showBorders}
-                />
               )}
               <StaticTranscript
                 messages={renderedTranscript.messages}

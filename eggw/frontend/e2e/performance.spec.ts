@@ -72,10 +72,17 @@ test.describe('Deterministic performance gates', () => {
     // A one-second elapsed-time label may commit independently of body chunks.
     expect(after.chatPanelCommits - before.chatPanelCommits).toBeLessThanOrEqual(1);
 
-    await page.getByTestId('show-more-loaded-messages').click();
-    await expect(page.locator('.eggw-message-card')).toHaveCount(65);
-
     await page.getByTitle('Transcript display verbosity').selectOption('min');
+    // Minimum verbosity must honor the same mounted window. It must not turn
+    // all 295 unmounted entries into one synthetic prefix tool group.
+    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+    await expect(page.getByTestId('hidden-details').getByRole('button')).toHaveCount(1);
+
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('235 earlier');
+    const revealedToolButtons = await page.getByTestId('hidden-details').getByRole('button').count();
+    expect(revealedToolButtons).toBeGreaterThan(1);
+    expect(revealedToolButtons).toBeLessThan(30);
     await expect(page.getByTestId('hidden-details').first()).toBeVisible();
     await expect(page.getByText('Streaming performance fixture').first()).toBeVisible();
   });
