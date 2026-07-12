@@ -307,76 +307,111 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
 }
 
 function hiddenToolDetails(details: HiddenDetail[]): HiddenDetail[] {
-  const structuredToolCalls = details.filter((detail) => detail.source === "tool_call" && Boolean(detail.name));
-  if (structuredToolCalls.length > 0) {
-    const toolResultDetails = details.filter((detail) => detail.source === "tool_result");
-    const streamResultDetails = details.filter((detail) => detail.source === "tool_stream");
-    // Prefer the final tool-role result.  Fall back to persisted streamed
-    // previews only for older/incomplete transcripts that do not have a tool
-    // result message in the hidden run.
-    const resultDetails = toolResultDetails.length > 0 ? toolResultDetails : streamResultDetails;
-    const resultByToolCallId = new Map<string, HiddenDetail>();
-    resultDetails.forEach((detail) => {
-      if (detail.tool_call_id && !resultByToolCallId.has(detail.tool_call_id)) {
-        resultByToolCallId.set(detail.tool_call_id, detail);
-      }
-    });
-    const usedResultIndexes = new Set<number>();
+  const structuredCalls = details.filter((detail) => detail.source === "tool_call" && Boolean(detail.name));
+  const structuredIds = new Set(structuredCalls.map((detail) => detail.tool_call_id).filter(Boolean));
+  const calls = [
+    ...structuredCalls,
+    ...details.filter((detail) => (
+      detail.source === "tool_call_stream"
+      && Boolean(detail.name)
+      && (!detail.tool_call_id || !structuredIds.has(detail.tool_call_id))
+    )),
+  ];
+  const finalResults = details.filter((detail) => detail.source === "tool_result");
+  const streamResults = details.filter((detail) => detail.source === "tool_stream");
+  if (calls.length === 0) return [...finalResults, ...streamResults].filter((detail) => Boolean(detail.name));
 
-    return structuredToolCalls.map((call, callIndex) => {
-      let result: HiddenDetail | undefined;
-      if (call.tool_call_id) {
-        result = resultByToolCallId.get(call.tool_call_id);
-      }
-      if (!result) {
-        // Older/imported transcripts may not have stable tool_call_id fields.
-        // Fall back to the corresponding result by order/name so each repeated
-        // `bash, bash, bash` entry still opens the nearest matching result.
-        const exactIndex = resultDetails.findIndex((candidate, index) => (
-          !usedResultIndexes.has(index) &&
-          Boolean(candidate.name) &&
-          Boolean(call.name) &&
-          candidate.name === call.name
-        ));
-        const fallbackIndex = exactIndex >= 0
-          ? exactIndex
-          : resultDetails.findIndex((_, index) => !usedResultIndexes.has(index) && index >= callIndex);
-        if (fallbackIndex >= 0) {
-          usedResultIndexes.add(fallbackIndex);
-          result = resultDetails[fallbackIndex];
-        }
-      }
+  const usedFinalResults = new Set<number>();
+  const usedStreamResults = new Set<number>();
+  const resultByCall = new Map<number, HiddenDetail>();
+  const exactResultQueues = new Map<string, number[]>();
+  finalResults.forEach((result, resultIndex) => {
+    if (!result.tool_call_id) return;
+    const queue = exactResultQueues.get(result.tool_call_id) || [];
+    queue.push(resultIndex);
+    exactResultQueues.set(result.tool_call_id, queue);
+  });
 
-      const callHeader = [
-        `Tool call: ${call.name || "tool"}`,
-        call.tool_call_id ? `tool_call_id: ${call.tool_call_id}` : "",
-      ].filter(Boolean).join("\n");
-      const bodyParts = [
-        callHeader,
-        "",
-        "Arguments:",
-        call.body || "(none)",
-      ];
-      if (result) {
-        bodyParts.push(
-          "",
-          "Result:",
-          result.body || "(empty)",
-        );
-      } else {
-        bodyParts.push("", "Result:", "(not found in the loaded transcript)");
-      }
+  // Identity is authoritative. Consume exact-ID results before considering any
+  // legacy inference, and never let a call with an ID steal a differently
+  // identified result merely because both tools have the same name.
+  calls.forEach((call, callIndex) => {
+    if (!call.tool_call_id) return;
+    const queue = exactResultQueues.get(call.tool_call_id);
+    const resultIndex = queue?.shift();
+    if (resultIndex === undefined) return;
+    usedFinalResults.add(resultIndex);
+    resultByCall.set(callIndex, finalResults[resultIndex]);
+  });
 
-      return {
-        ...call,
-        body: bodyParts.join("\n"),
-      };
-    });
-  }
+  // Old/imported transcripts can lack IDs. Pair only when the relationship is
+  // unambiguous inside this hidden run: one unmatched ID-less call and one
+  // unmatched ID-less final result with the same tool name.
+  const unmatchedIdlessCallsByName = new Map<string, number[]>();
+  calls.forEach((call, callIndex) => {
+    if (resultByCall.has(callIndex) || call.tool_call_id || !call.name) return;
+    const indexes = unmatchedIdlessCallsByName.get(call.name) || [];
+    indexes.push(callIndex);
+    unmatchedIdlessCallsByName.set(call.name, indexes);
+  });
+  const unmatchedIdlessResultsByName = new Map<string, number[]>();
+  finalResults.forEach((result, resultIndex) => {
+    if (usedFinalResults.has(resultIndex) || result.tool_call_id || !result.name) return;
+    const indexes = unmatchedIdlessResultsByName.get(result.name) || [];
+    indexes.push(resultIndex);
+    unmatchedIdlessResultsByName.set(result.name, indexes);
+  });
+  unmatchedIdlessCallsByName.forEach((callIndexes, name) => {
+    const resultIndexes = unmatchedIdlessResultsByName.get(name) || [];
+    if (callIndexes.length !== 1 || resultIndexes.length !== 1) return;
+    resultByCall.set(callIndexes[0], finalResults[resultIndexes[0]]);
+    usedFinalResults.add(resultIndexes[0]);
+  });
 
-  const toolCalls = details.filter((detail) => detail.kind === "tool_calls" && Boolean(detail.name));
-  if (toolCalls.length > 0) return toolCalls;
-  return details.filter((detail) => detail.kind === "tool_results" && Boolean(detail.name));
+  // A persisted streamed preview has no stable result ID. Use it only when a
+  // single still-unmatched call and a single preview share a name; otherwise
+  // expose it separately instead of fabricating a lifecycle.
+  const unmatchedCallsByName = new Map<string, number[]>();
+  calls.forEach((call, callIndex) => {
+    if (resultByCall.has(callIndex) || !call.name) return;
+    const indexes = unmatchedCallsByName.get(call.name) || [];
+    indexes.push(callIndex);
+    unmatchedCallsByName.set(call.name, indexes);
+  });
+  const streamResultsByName = new Map<string, number[]>();
+  streamResults.forEach((result, resultIndex) => {
+    if (!result.name) return;
+    const indexes = streamResultsByName.get(result.name) || [];
+    indexes.push(resultIndex);
+    streamResultsByName.set(result.name, indexes);
+  });
+  unmatchedCallsByName.forEach((callIndexes, name) => {
+    const resultIndexes = streamResultsByName.get(name) || [];
+    if (callIndexes.length !== 1 || resultIndexes.length !== 1) return;
+    resultByCall.set(callIndexes[0], streamResults[resultIndexes[0]]);
+    usedStreamResults.add(resultIndexes[0]);
+  });
+
+  const pairedCalls = calls.map((call, callIndex) => {
+    const result = resultByCall.get(callIndex);
+    const callHeader = [
+      `Tool call: ${call.name || "tool"}`,
+      call.tool_call_id ? `tool_call_id: ${call.tool_call_id}` : "",
+    ].filter(Boolean).join("\n");
+    const bodyParts = [callHeader, "", "Arguments:", call.body || "(none)"];
+    bodyParts.push(
+      "",
+      "Result:",
+      result?.body || (result ? "(empty)" : "(not found in the loaded transcript)"),
+    );
+    return { ...call, body: bodyParts.join("\n") };
+  });
+
+  const unmatchedResults = [
+    ...finalResults.filter((_, index) => !usedFinalResults.has(index)),
+    ...streamResults.filter((_, index) => !usedStreamResults.has(index)),
+  ].filter((detail) => Boolean(detail.name));
+  return [...pairedCalls, ...unmatchedResults];
 }
 
 function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
@@ -1162,6 +1197,11 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
 
 function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   const details: HiddenDetail[] = [];
+  const toolCallNameById = new Map<string, string>();
+  (message.tool_calls || []).forEach((toolCall: any) => {
+    const toolCallId = String(toolCall?.id || toolCall?.tool_call_id || "");
+    if (toolCallId) toolCallNameById.set(toolCallId, toolCallName(toolCall));
+  });
   let availableTokens = typeof message.tokens === "number" && Number.isFinite(message.tokens) ? message.tokens : undefined;
   const takeTokens = () => {
     const tokens = availableTokens;
@@ -1215,9 +1255,13 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     });
   });
   stringRecordEntries(message.tool_calls_stream).forEach(([streamKey, text]) => {
+    const structuredName = toolCallNameById.get(streamKey);
     details.push({
       kind: "tool_calls",
-      name: streamKey,
+      name: structuredName || streamKey,
+      // Historical snapshots sometimes keyed this dictionary by tool name
+      // rather than ID. Only claim identity when the same message proves it.
+      tool_call_id: structuredName ? streamKey : undefined,
       tokens: takeTokens(),
       header: streamKey ? `Tool Call Args: ${streamKey}` : "Tool Call Args",
       body: text,
@@ -1376,9 +1420,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const genericStreamingTimeText = streamingKind !== "llm"
     ? elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
     : null;
-  // Max exposes execution internals. Medium keeps them available but collapsed;
-  // min presents status only while the answer itself remains fully visible.
-  const streamingToolDetailsOpen = displayVerbosity === "max" ? true : undefined;
+  // Live execution is operational state, not historical transcript detail:
+  // always expose streamed tool arguments and output at every verbosity.
+  const streamingToolDetailsOpen = true;
 
   useEffect(() => {
     if (!shouldUpdateTiming) return;
@@ -2044,7 +2088,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                   </span>
                                 )}
                               </summary>
-                              {displayVerbosity !== "min" && <div className="px-2 pb-2">
+                              <div className="px-2 pb-2">
                                 <pre
                                   ref={(element) => attachStreamingToolCallArgs(tcId, element)}
                                   data-testid="streaming-tool-arguments"
@@ -2053,7 +2097,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 >
                                   ...
                                 </pre>
-                              </div>}
+                              </div>
                             </details>
                           );
                         })}
@@ -2095,7 +2139,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                   </span>
                                 )}
                               </summary>
-                              {displayVerbosity !== "min" && <div className="px-2 pb-2">
+                              <div className="px-2 pb-2">
                                 {elapsedText && (
                                   <div
                                     data-testid="streaming-tool-elapsed"
@@ -2138,7 +2182,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                     {toolStreamSavingText(tool.name, tool.suppressedFrames)}
                                   </div>
                                 )}
-                              </div>}
+                              </div>
                             </details>
                           );
                         })}

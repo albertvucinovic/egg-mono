@@ -1453,19 +1453,25 @@ test.describe('Live Tool Streaming', () => {
     await expect(page.getByTestId('chat-panel')).toContainText('Tool', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('bash', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30', { timeout: 5000 });
+    const liveToolOutput = page.getByTestId('streaming-tool-output');
     await expect(page.getByTestId('chat-panel')).toContainText('streaming output...', { timeout: 5000 });
 
     const select = page.locator('select[title="Transcript display verbosity"]');
     const args = page.getByTestId('streaming-tool-arguments');
     await select.selectOption('medium');
-    await expect(args).not.toBeVisible();
+    await expect(args).toBeVisible();
+    await expect(args).toContainText('$ echo visible args; sleep 30');
+    await expect(liveToolOutput).toBeVisible();
     await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30');
     await select.selectOption('min');
-    await expect(args).toHaveCount(0);
+    await expect(args).toBeVisible();
+    await expect(args).toContainText('$ echo visible args; sleep 30');
+    await expect(liveToolOutput).toBeVisible();
     await expect(page.getByTestId('chat-panel')).toContainText('bash');
     await select.selectOption('max');
     await expect(args).toBeVisible();
     await expect(args).toContainText('$ echo visible args; sleep 30');
+    await expect(liveToolOutput).toBeVisible();
   });
 });
 
@@ -1598,6 +1604,54 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(chat).not.toContainText('private provider setup instructions');
     await expect(chat).not.toContainText('provider-model');
     await expect(chat).not.toContainText('raw private reasoning body');
+  });
+
+  test('pairs Assistant Note tool popups only by matching tool call identity', async ({ page }) => {
+    const threadId = 'min-tool-popup-identity';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'identity-user', role: 'user', content: 'run the checks' },
+        {
+          id: 'identity-note-a',
+          role: 'assistant',
+          answer_user_preserve_turn: true,
+          content: 'First check is still running.',
+          tool_calls: [{ id: 'call-a', name: 'bash', arguments: { script: 'echo ARGUMENT_A' } }],
+        },
+        {
+          id: 'identity-call-b',
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'call-b', name: 'bash', arguments: { script: 'echo ARGUMENT_B' } }],
+        },
+        {
+          id: 'identity-result-b',
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: 'call-b',
+          content: 'RESULT_B',
+        },
+        { id: 'identity-answer', role: 'assistant', content: 'Checks complete.' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+
+    const tools = page.getByTestId('hidden-details').getByRole('button', { name: 'bash' });
+    await expect(tools).toHaveCount(2);
+
+    await tools.nth(0).click();
+    let dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('ARGUMENT_A');
+    await expect(dialog).toContainText('(not found in the loaded transcript)');
+    await expect(dialog).not.toContainText('RESULT_B');
+    await dialog.getByRole('button', { name: 'Close' }).click();
+
+    await tools.nth(1).click();
+    dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('ARGUMENT_B');
+    await expect(dialog).toContainText('RESULT_B');
+    await expect(dialog).not.toContainText('ARGUMENT_A');
   });
 });
 
