@@ -553,13 +553,56 @@ def _duplicate_thread_at_watermark(
             depth=0,
             initial_events=(("tools.config", tools_payload),),
         )
+        duplicated_message_event_seqs: Dict[str, int] = {}
         for message in projection.messages:
-            db.append_event(
+            duplicated_event_seq = db.append_event(
                 event_id=_ulid_like(),
                 thread_id=new_thread_id,
                 type_="msg.create",
                 payload=dict(message.payload),
                 msg_id=None if message.msg_id.startswith("event:") else message.msg_id,
+            )
+            if not message.msg_id.startswith("event:"):
+                duplicated_message_event_seqs[message.msg_id] = int(duplicated_event_seq)
+
+        # Compaction is provider-context state, not stale invocation lifecycle.
+        # Preserve the effective boundary at the selected source watermark and
+        # translate its source event_seq to the duplicate's new event log.
+        source_compaction_start = _effective_compaction_start_from_projection(
+            db,
+            source_thread_id,
+            int(through_event_seq),
+            projection,
+        )
+        if source_compaction_start is not None:
+            start_message = next(
+                (
+                    message
+                    for message in projection.message_states
+                    if message.is_effective
+                    and message.created_event_seq == int(source_compaction_start)
+                ),
+                None,
+            )
+            if start_message is None or start_message.msg_id.startswith("event:"):
+                raise ValueError(
+                    "Effective compaction start is missing from duplicated projection"
+                )
+            duplicated_start_seq = duplicated_message_event_seqs.get(start_message.msg_id)
+            if duplicated_start_seq is None:
+                raise ValueError(
+                    "Effective compaction start was not written to duplicated thread"
+                )
+            db.append_event(
+                event_id=_ulid_like(),
+                thread_id=new_thread_id,
+                type_=COMPACTION_EVENT_TYPE,
+                payload={
+                    "start_msg_id": start_message.msg_id,
+                    "start_event_seq": duplicated_start_seq,
+                    "selector": start_message.msg_id,
+                    "created_by": "duplicate_thread",
+                },
             )
 
         # A clean projected transcript intentionally omits stale stream/control
@@ -604,9 +647,11 @@ def duplicate_thread(db: ThreadsDB, source_thread_id: str, name: Optional[str] =
 
     The source watermark is captured before any destination writes. Canonical
     projection semantics apply edits, deletes, and continue skips. Snapshots may
-    accelerate the projection but never define it. Stream, control, and tool
-    lifecycle events are intentionally not copied; the clean message history is
-    sufficient to reconstruct any still-effective tools protocol state.
+    accelerate the projection but never define it. The effective compaction
+    boundary is translated into the destination event log because it defines
+    provider context; stale stream, interrupt, and tool lifecycle events are not
+    copied. The clean message history is sufficient to reconstruct any still-
+    effective tools protocol state.
     """
 
     source = db.get_thread(source_thread_id)

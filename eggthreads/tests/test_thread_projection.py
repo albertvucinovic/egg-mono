@@ -602,3 +602,50 @@ def test_duplicate_thread_up_to_uses_target_message_watermark_for_state_and_conf
     assert ts.get_thread_tools_config(db, duplicate).llm_tools_enabled is True
     assert "msg.edit" not in _event_types(db, duplicate)
     assert "msg.delete" not in _event_types(db, duplicate)
+
+
+def test_duplicate_thread_rebases_effective_compaction_boundary(tmp_path) -> None:
+    db = _make_db(tmp_path, "duplicate-compaction.sqlite")
+    source = ts.create_root_thread(db, name="source")
+    ts.append_message(db, source, "user", "old")
+    start = ts.append_message(db, source, "assistant", "summary")
+    ts.commit_thread_compaction(db, source, start, created_by="test")
+    ts.append_message(db, source, "user", "current")
+
+    duplicate = ts.duplicate_thread(db, source)
+    compaction = ts.latest_effective_thread_compaction(db, duplicate)
+    duplicate_start_seq = db.conn.execute(
+        "SELECT event_seq FROM events WHERE thread_id=? AND type='msg.create' "
+        "AND msg_id=?",
+        (duplicate, start),
+    ).fetchone()[0]
+    source_compaction = ts.latest_effective_thread_compaction(db, source)
+
+    assert compaction is not None
+    assert source_compaction is not None
+    assert compaction["start_msg_id"] == start
+    assert compaction["start_event_seq"] == duplicate_start_seq
+    assert compaction["start_event_seq"] != source_compaction["start_event_seq"]
+    assert [
+        message.get("content")
+        for message in ts.filter_messages_for_compaction_provider_context(
+            db,
+            duplicate,
+            ts.load_thread_projection(
+                db, duplicate, db.max_event_seq(duplicate)
+            ).message_dicts(),
+        )
+    ] == ["summary", "current"]
+
+
+def test_duplicate_thread_up_to_ignores_compaction_after_watermark(tmp_path) -> None:
+    db = _make_db(tmp_path, "duplicate-before-compaction.sqlite")
+    source = ts.create_root_thread(db, name="source")
+    target = ts.append_message(db, source, "user", "checkpoint")
+    start = ts.append_message(db, source, "assistant", "later summary")
+    ts.commit_thread_compaction(db, source, start, created_by="test")
+
+    duplicate = ts.duplicate_thread_up_to(db, source, target)
+
+    assert ts.latest_effective_thread_compaction(db, duplicate) is None
+    assert _event_types(db, duplicate).count("thread.compaction") == 0
