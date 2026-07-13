@@ -298,6 +298,7 @@ class StreamingMixin:
         async for batch in ew.aiter():
             saw_non_stream_msg = False
             saw_compaction_marker = False
+            snapshot_required_through = -1
             saw_children_status_event = False
             saw_get_user_input_event = False
             saw_approval_event = False
@@ -314,6 +315,8 @@ class StreamingMixin:
                         saw_children_status_event = True
                     if event_type in GET_USER_INPUT_RELEVANT_EVENT_TYPES:
                         saw_get_user_input_event = True
+                    if event_type in ("msg.create", "msg.edit", "msg.delete", "thread.compaction"):
+                        snapshot_required_through = max(snapshot_required_through, int(e["event_seq"]))
                 except Exception:
                     pass
                 await self.ingest_event_for_live(e, thread_id)
@@ -344,7 +347,14 @@ class StreamingMixin:
             # hiding the surrounding messages.
             if saw_non_stream_msg or saw_compaction_marker:
                 try:
-                    create_snapshot(self.db, self.current_thread)
+                    # The in-process runner normally publishes first. Avoid
+                    # decoding/revalidating that same large snapshot on the UI
+                    # loop; an external writer without a snapshot still gets a
+                    # single watcher publication for the semantic batch.
+                    row = self.db.get_thread_metadata(thread_id)
+                    snapshot_seq = int(row.snapshot_last_event_seq) if row is not None else -1
+                    if thread_id == self.current_thread and snapshot_seq < snapshot_required_through:
+                        create_snapshot(self.db, thread_id)
                 except Exception:
                     pass
                 # Print any new messages and compaction dividers to console
@@ -568,10 +578,6 @@ class StreamingMixin:
             self._live_state['provider_started_at'] = None
             self._live_state['provider_last_activity_at'] = None
             self._live_state['provider_timeout_sec'] = None
-            try:
-                create_snapshot(self.db, self.current_thread)
-            except Exception:
-                pass
             self._stream_end_on_renderer()
             self.log_system('Streaming finished.')
 

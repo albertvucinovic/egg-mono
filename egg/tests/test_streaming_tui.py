@@ -1046,6 +1046,86 @@ def test_stream_close_then_final_message_prints_once_after_stream_end(tmp_path, 
     assert app._last_printed_seq_by_thread[tid] == final_seq
 
 
+def test_watch_thread_snapshots_final_batch_at_most_once(tmp_path, monkeypatch):
+    """Close ingestion and batch finalization share one snapshot owner."""
+
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    invoke_id = _uid()
+    start_after = app.db.max_event_seq(tid)
+    app.db.append_event(_uid(), tid, "stream.open", {}, msg_id=_uid(), invoke_id=invoke_id)
+    app.db.append_event(_uid(), tid, "stream.close", {}, invoke_id=invoke_id)
+    from eggthreads import append_message
+
+    final_msg_id = append_message(app.db, tid, "assistant", "final")
+    batch = list(app.db.events_since(tid, start_after))
+
+    import egg.streaming as streaming_mod
+
+    class _OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _OneBatchWatcher)
+    real_create_snapshot = streaming_mod.create_snapshot
+    calls = []
+
+    def capture_snapshot(db, thread_id):
+        calls.append(thread_id)
+        return real_create_snapshot(db, thread_id)
+
+    monkeypatch.setattr(streaming_mod, "create_snapshot", capture_snapshot)
+    asyncio.run(app.watch_thread(tid))
+
+    assert calls == [tid]
+    assert app.db.get_thread(tid).snapshot_last_event_seq >= app.db.conn.execute(
+        "SELECT event_seq FROM events WHERE msg_id=?",
+        (final_msg_id,),
+    ).fetchone()[0]
+
+
+def test_watch_thread_reuses_runner_snapshot_for_final_batch(tmp_path, monkeypatch):
+    """A current runner-published snapshot is not decoded again by the UI."""
+
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    start_after = app.db.max_event_seq(tid)
+    from eggthreads import append_message, create_snapshot
+
+    final_msg_id = append_message(app.db, tid, "assistant", "final")
+
+    create_snapshot(app.db, tid)
+    batch = list(app.db.events_since(tid, start_after))
+
+    import egg.streaming as streaming_mod
+
+    class _OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _OneBatchWatcher)
+    monkeypatch.setattr(
+        streaming_mod,
+        "create_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("watcher should reuse the current snapshot")
+        ),
+    )
+    asyncio.run(app.watch_thread(tid))
+
+    assert app.db.get_thread(tid).snapshot_last_event_seq == app.db.max_event_seq(tid)
+    assert app.db.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE msg_id=?",
+        (final_msg_id,),
+    ).fetchone()[0] == 1
+
+
 def test_live_state_stream_append_does_not_materialize_prior_content(tmp_path, monkeypatch):
     """Per-delta live state append must not read all accumulated chunks."""
     from eggdisplay import ChunkedText
