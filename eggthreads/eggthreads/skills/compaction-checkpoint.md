@@ -20,7 +20,22 @@ Use hydrated thread-history helpers when needed (`all_messages`, `current_prompt
 
 ## First-pass narrative skeleton
 
-Before writing the checkpoint, pass the complete embedded script below to the hydrated `python_repl`. It builds a bounded evidence map from the preinstalled `thread_context` and helper globals. The normal execution path is **not** `bash`, a standalone Python process, or an import from Egg internals; those environments do not have the caller thread's hydrated context. The map is a discovery aid, not the checkpoint itself.
+Before writing the checkpoint, execute the complete embedded script below in the hydrated `python_repl`. It builds a bounded evidence map from the preinstalled `thread_context` and helper globals. The normal execution path is **not** `bash`, a standalone Python process, or an import from Egg internals; those environments do not have the caller thread's hydrated context. The map is a discovery aid, not the checkpoint itself.
+
+How the script source reaches `python_repl` is only a transport choice. **Using `extract_tool_output` or creating a file is optional.** If the complete fence is already available, pass it directly. When the `skill` wrapper is enabled inside the hydrated REPL, this short loader avoids copying the long fence and does not create an artifact or project file:
+
+```python
+from eggtools import skill as load_skill
+
+_document = load_skill("compaction-checkpoint")
+_opening = "```python\n# egg-compaction-narrative-skeleton\n"
+if _opening not in _document:
+    raise RuntimeError("compaction narrative script marker not found")
+_script = _document.split(_opening, 1)[1].split("\n```", 1)[0]
+exec(compile(_script, "<skill:compaction-checkpoint>", "exec"), globals(), globals())
+```
+
+Use the extraction fallback documented after the script only when direct transfer or the in-REPL loader is unavailable or unreliable.
 
 The renderer deliberately:
 
@@ -36,6 +51,7 @@ The renderer deliberately:
 Do not summarize only the current provider-prompt tail. Hidden/local-only, deleted, and `/continue`-erased content is intentionally absent from the hydrated view; do not bypass that visibility boundary with raw database inspection during ordinary checkpointing.
 
 ```python
+# egg-compaction-narrative-skeleton
 import re
 import sys
 from collections import Counter
@@ -45,6 +61,7 @@ MAX_OUTPUT_CHARS = 48_000
 MAX_OUTPUT_LINES = 700
 MAX_SELECTED_ROWS = 520
 MAX_CAPTURED_TEXT = 12_000
+SKELETON_END_MARKER = "END THREAD NARRATIVE SKELETON FOR COMPACTION v2"
 NOTE_TOOLS = {
     "answer_user_while_preserving_llm_turn",
     "get_user_message_while_preserving_llm_turn",
@@ -346,11 +363,12 @@ def _main():
     row_total = max(1, len(rows))
     recent_cutoff = max(0, len(rows) - 100)
     latest_ordinals = {row["ordinal"] for row in latest_by_kind.values()}
+    actionable_ordinals = {row["ordinal"] for row in actionable_candidates}
     for row in rows:
         kind = row["kind"]
         priority = {
             "USER": 820,
-            "CONTROL": 1_100,
+            "CONTROL": 500,
             "NOTE": 800,
             "ASST": 720,
             "SYSTEM": 740,
@@ -359,6 +377,10 @@ def _main():
         }.get(kind, 300)
         if row is latest_actionable:
             priority = 2_200
+        elif row["ordinal"] in actionable_ordinals:
+            # Candidate IDs in the header are not enough: retain their text in
+            # the bounded body even when noisy error-bearing tool rows compete.
+            priority = max(priority, 1_800)
         elif row is latest_control:
             priority = max(priority, 2_000)
         if row["boundary"] == "POST":
@@ -522,6 +544,7 @@ def _main():
 
     def render():
         lines = header_lines(selected) + body_lines(selected, True)
+        lines.extend(["", SKELETON_END_MARKER])
         return "\n".join(lines).rstrip() + "\n"
 
     base_output = render()
@@ -594,32 +617,47 @@ def _main():
         raise AssertionError(
             f"compaction skeleton exceeded hard bound: chars={len(output)} lines={len(output.splitlines())}"
         )
+    globals()["compaction_narrative_skeleton_output"] = output
     sys.stdout.write(output)
 
 
 _main()
 ```
 
-### Optional: extract the script into an artifact or file
+### Optional transport fallback: extract the script
 
-The `skill` output has stable source coordinates. To extract the embedded script without copying a long preview:
+Skip this section when direct execution or the in-REPL loader above worked. The checkpoint does not require an extracted artifact or a saved file.
+
+If the skill output was truncated or exact transfer of the embedded script would otherwise be unreliable, load the skill with numbered presentation and extract only the script fence:
 
 1. Load this skill with `line_numbers=true`.
 2. Read the displayed opening and closing fence line numbers.
 3. Call `extract_tool_output` on the skill call, using a 1-based half-open range `[start_line, end_line)`. Select the Python body only: start immediately after `````python`` and end at the closing ````` line.
-4. Save the returned provider artifact with `save_provider_artifact_to_file` if an inspectable/copyable file is useful.
-
-For this version of the skill, the body occupies displayed lines 41 through 602. (`skill` adds its two-line `# Skill:` wrapper to the document coordinates.)
+4. Saving the returned artifact with `save_provider_artifact_to_file` is also optional; do it only when an inspectable file is useful. Otherwise, add/read the artifact through an available provider-artifact mechanism and execute its text in the hydrated REPL.
 
 ```text
 skill(name="compaction-checkpoint", line_numbers=true)
-extract_tool_output(start_line=41, end_line=603, filename="compaction_narrative_skeleton.py")
+extract_tool_output(
+    start_line=<line immediately after the opening python fence>,
+    end_line=<closing fence line>,
+    filename="compaction_narrative_skeleton.py",
+)
 save_provider_artifact_to_file(artifact_id="<receipt artifact id>", path=".scratch/compaction_narrative_skeleton.py")
 ```
 
-With no source selector, `extract_tool_output` selects the latest eligible prior published output, so the adjacent `skill` → extraction sequence above needs no opaque call ID. If another tool-call group intervened, use the extractor's zero-based `source_tool_call_group_offset` plus `source_tool_call_index` selectors; consult `tool_help(tool_name="extract_tool_output")` for ordering details. Displayed line-number prefixes are presentation only and are never written into extracted bytes. Always derive the range from the current numbered skill output; do not rely on the illustrative numbers above after editing this document.
+With no source selector, `extract_tool_output` selects the latest eligible prior published output, so the adjacent `skill` → extraction sequence above needs no opaque call ID. If another tool-call group intervened, use the extractor's zero-based `source_tool_call_group_offset` plus `source_tool_call_index` selectors; consult `tool_help(tool_name="extract_tool_output")` for ordering details. Displayed line-number prefixes are presentation only and are never written into extracted bytes. Always derive the range from the current numbered skill output.
 
 Extraction does not change the execution contract. Do not run the saved file as a standalone shell/Python script. Execute its contents through the hydrated `python_repl` (for example, by passing the extracted text as the REPL's code) so the thread-context globals and helpers are present.
+
+### Required complete-map check
+
+Consume the script's **entire emitted evidence map** before writing the checkpoint. A head/tail preview of that map is not sufficient.
+
+1. Confirm that the output begins with `THREAD NARRATIVE SKELETON FOR COMPACTION v2` and reaches the terminal `END THREAD NARRATIVE SKELETON FOR COMPACTION v2` marker.
+2. If the tool response says the raw output was stored as an artifact, reports omitted middle content, or does not show the terminal marker, read **every** `read_long_tool_output` chunk in order before continuing. This is result consumption and is separate from the optional `extract_tool_output` script-transport fallback above.
+3. If chunk reading is unavailable, inspect `compaction_narrative_skeleton_output` from the same persistent REPL in bounded, non-overlapping line slices until the terminal marker is reached.
+
+Reading the complete map does not mean expanding every source message in the thread. The map is the bounded index; the next section determines which underlying messages require full inspection.
 
 ### Required follow-up inspection
 

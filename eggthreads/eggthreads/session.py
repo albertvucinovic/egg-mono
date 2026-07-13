@@ -1622,9 +1622,9 @@ def _make_eggtools_module(eval_token: str):
             return timeout_sec
         return None
 
-    def tool(name: str, **kwargs: Any) -> str:
+    def tool(tool_name: str, **kwargs: Any) -> str:
         args = dict(kwargs)
-        return repl_bridge.call_tool(eval_token, name, args, timeout_sec=_tool_timeout(args))
+        return repl_bridge.call_tool(eval_token, tool_name, args, timeout_sec=_tool_timeout(args))
 
     def _pop_timeout_arg(args: Dict[str, Any]) -> Optional[float]:
         timeout = _coerce_positive_timeout(args.pop("timeout", None))

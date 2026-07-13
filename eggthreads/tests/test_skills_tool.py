@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextlib
+import io
+
 import eggthreads as ts
 
 
@@ -44,6 +47,66 @@ def test_compaction_checkpoint_skill_includes_assistant_notes() -> None:
     assert "omitted_empty_assistant" in doc
 
 
+def test_compaction_checkpoint_script_transport_is_optional_and_output_is_checkable() -> None:
+    tools = ts.create_default_tools()
+    doc = tools.execute("skill", {"name": "compaction-checkpoint"})
+
+    assert "Using `extract_tool_output` or creating a file is optional" in doc
+    assert "Required complete-map check" in doc
+
+    opening = "```python\n# egg-compaction-narrative-skeleton\n"
+    script = doc.split(opening, 1)[1].split("\n```", 1)[0]
+    namespace = {"thread_context": {"all_messages": [], "current_prompt_messages": []}}
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        exec(compile(script, "<compaction-checkpoint-test>", "exec"), namespace, namespace)
+
+    output = captured.getvalue()
+    assert output.startswith("THREAD NARRATIVE SKELETON FOR COMPACTION v2\n")
+    assert output.endswith("END THREAD NARRATIVE SKELETON FOR COMPACTION v2\n")
+    assert namespace["compaction_narrative_skeleton_output"] == output
+
+
+def test_compaction_checkpoint_script_retains_actionable_candidate_text_under_pressure() -> None:
+    tools = ts.create_default_tools()
+    doc = tools.execute("skill", {"name": "compaction-checkpoint"})
+    opening = "```python\n# egg-compaction-narrative-skeleton\n"
+    script = doc.split(opening, 1)[1].split("\n```", 1)[0]
+
+    messages = [
+        {
+            "role": "user",
+            "msg_id": f"user-{index}",
+            "event_seq": index + 1,
+            "content": f"actionable request {index}",
+        }
+        for index in range(10)
+    ]
+    messages.extend(
+        {
+            "role": "tool",
+            "msg_id": f"result-{index}",
+            "event_seq": index + 100,
+            "tool_call_id": f"call-{index}",
+            "name": "noisy_tool",
+            "content": f"error-bearing result {index}",
+        }
+        for index in range(900)
+    )
+    namespace = {
+        "thread_context": {
+            "all_messages": messages,
+            "current_prompt_messages": [],
+        }
+    }
+    with contextlib.redirect_stdout(io.StringIO()):
+        exec(compile(script, "<compaction-checkpoint-pressure-test>", "exec"), namespace, namespace)
+
+    output = namespace["compaction_narrative_skeleton_output"]
+    for index in range(2, 10):
+        assert f"actionable request {index}" in output
+
+
 def test_eggtools_exposes_skill_helper_in_memory_repl(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB(tmp_path / "threads.sqlite")
@@ -57,12 +120,14 @@ def test_eggtools_exposes_skill_helper_in_memory_repl(tmp_path, monkeypatch) -> 
     out = ts.execute_python_repl(
         db,
         parent,
-        "from eggtools import skill\nprint('rlm' in skill())",
+        "from eggtools import skill\n"
+        "print('rlm' in skill())\n"
+        "print('# RLM Skill' in skill('rlm'))",
         drive_runtime_tools=True,
         timeout_sec=5,
     )
 
-    assert "True" in out
+    assert out.count("True") == 2
 
 
 def test_skill_commands_defensively_unwrap_shared_structured_render(monkeypatch) -> None:

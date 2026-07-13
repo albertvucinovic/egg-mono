@@ -66,6 +66,54 @@ def test_docker_runtime_eggtools_generated_wrapper_supports_from_import(tmp_path
             sys.modules["eggtools"] = old_module
 
 
+def test_docker_runtime_handwritten_skill_wrapper_can_forward_name(tmp_path, monkeypatch):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    session._write_runtime_files(runtime_dir)
+    eggtools_path = runtime_dir / "eggtools.py"
+
+    old_module = sys.modules.pop("eggtools", None)
+    try:
+        spec = importlib.util.spec_from_file_location("eggtools", eggtools_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["eggtools"] = module
+        spec.loader.exec_module(module)
+
+        seen: dict = {}
+        monkeypatch.setattr(module, "_eval_token", lambda: "test-token")
+        monkeypatch.setattr(module, "_atomic_write_json", lambda _path, payload: seen.update(payload))
+
+        class ResponsePath:
+            def exists(self):
+                return True
+
+            def read_text(self, *, encoding):
+                assert encoding == "utf-8"
+                return '{"ok": true, "result": "loaded"}'
+
+            def unlink(self):
+                return None
+
+        class RequestPath:
+            def with_suffix(self, _suffix):
+                return self
+
+        class BridgePath:
+            def __truediv__(self, value):
+                return ResponsePath() if value.endswith(".res.json") else RequestPath()
+
+        monkeypatch.setattr(module, "_bridge_dir", BridgePath)
+
+        assert module.skill("compaction-checkpoint") == "loaded"
+        assert seen["name"] == "skill"
+        assert seen["arguments"]["name"] == "compaction-checkpoint"
+    finally:
+        sys.modules.pop("eggtools", None)
+        if old_module is not None:
+            sys.modules["eggtools"] = old_module
+
+
 def test_generated_eggtools_wrappers_include_compact_thread_but_not_removed_compaction_helpers():
     from eggthreads.session_runtime.tool_wrappers import generate_tool_wrappers_source
     from eggthreads.tools import create_default_tools
