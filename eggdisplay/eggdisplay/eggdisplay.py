@@ -103,6 +103,7 @@ class TextEditor:
         self, 
         initial_text: str = "",
         autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None,
+        async_autocomplete_callback: Optional[Callable[[str, int, int, int], Any]] = None,
         width: int = 80,
         height: int = 20
     ):
@@ -120,6 +121,7 @@ class TextEditor:
         self.width = width
         self.height = height
         self.autocomplete_callback = autocomplete_callback
+        self.async_autocomplete_callback = async_autocomplete_callback
         self._event_listeners: Dict[str, List[Callable]] = {
             'key_press': [],
             'text_change': [],
@@ -134,7 +136,10 @@ class TextEditor:
         self._completion_items: List[Dict[str, str]] = []
         self._completion_index: int = 0
         self._completion_active: bool = False
-        
+        self._completion_pending: bool = False
+        self._completion_generation: int = 0
+        self._completion_request_mode: str = ""
+
         # Ensure cursor is within bounds
         self._clamp_cursor()
     
@@ -195,7 +200,7 @@ class TextEditor:
         self.lines[self.cursor.row] = new_line
         self.cursor.col += len(text)
         # Live-refresh suggestions if popup is active
-        if self._completion_active:
+        if self._completion_active or self._completion_pending:
             self._refresh_completion()
         self._trigger_event('text_change', 'insert', self.cursor.row, self.cursor.col - len(text), text)
 
@@ -221,10 +226,8 @@ class TextEditor:
             return
 
         # Multi-line insert
-        if self._completion_active:
-            self._completion_active = False
-            self._completion_items = []
-            self._completion_index = 0
+        if self._completion_active or self._completion_pending:
+            self._cancel_completion()
 
         row = self.cursor.row
         col = self.cursor.col
@@ -256,7 +259,7 @@ class TextEditor:
             new_line = current_line[:self.cursor.col] + current_line[self.cursor.col + 1:]
             self.lines[self.cursor.row] = new_line
             # Refresh after the deletion so suggestions reflect the new token
-            if self._completion_active:
+            if self._completion_active or self._completion_pending:
                 self._refresh_completion()
             self._trigger_event('text_change', 'delete', self.cursor.row, self.cursor.col, deleted_char)
     
@@ -268,7 +271,7 @@ class TextEditor:
             new_line = current_line[:self.cursor.col - 1] + current_line[self.cursor.col:]
             self.lines[self.cursor.row] = new_line
             self.cursor.col -= 1
-            if self._completion_active:
+            if self._completion_active or self._completion_pending:
                 self._refresh_completion()
             self._trigger_event('text_change', 'backspace', self.cursor.row, self.cursor.col, deleted_char)
         elif self.cursor.row > 0:
@@ -279,17 +282,15 @@ class TextEditor:
             self.lines.pop(self.cursor.row)
             self.cursor.row -= 1
             self.cursor.col = len(prev_line)
-            if self._completion_active:
+            if self._completion_active or self._completion_pending:
                 self._refresh_completion()
             self._trigger_event('text_change', 'backspace_merge', self.cursor.row, self.cursor.col)
     
     def insert_newline(self) -> None:
         """Insert a newline at cursor position."""
         # Newline typically ends the current token; dismiss popup if visible
-        if self._completion_active:
-            self._completion_active = False
-            self._completion_items = []
-            self._completion_index = 0
+        if self._completion_active or self._completion_pending:
+            self._cancel_completion()
         current_line = self.lines[self.cursor.row]
         before_cursor = current_line[:self.cursor.col]
         after_cursor = current_line[self.cursor.col:]
@@ -310,7 +311,7 @@ class TextEditor:
         self._clamp_cursor()
         
         if old_row != self.cursor.row or old_col != self.cursor.col:
-            if self._completion_active:
+            if self._completion_active or self._completion_pending:
                 self._refresh_completion()
             self._trigger_event('cursor_move', old_row, old_col, self.cursor.row, self.cursor.col)
     
@@ -326,6 +327,11 @@ class TextEditor:
         """
         self._trigger_event('key_press', key, self.cursor.row, self.cursor.col)
         
+        # Escape also cancels a request that has not produced a popup yet.
+        if self._completion_pending and key == "escape":
+            self._cancel_completion()
+            return True
+
         # When completion is active, handle navigation keys first
         if self._completion_active and key in ("up", "down", "escape", "enter"):
             if key == "up":
@@ -338,9 +344,7 @@ class TextEditor:
                 return True
             if key == "escape":
                 # Dismiss the popup on Esc
-                self._completion_active = False
-                self._completion_items = []
-                self._completion_index = 0
+                self._cancel_completion()
                 return True
             if key == "enter":
                 return self.accept_completion()
@@ -390,111 +394,130 @@ class TextEditor:
         
         return False
     
-    def _handle_tab(self) -> bool:
-        """Handle Tab key for autocomplete."""
-        if not self.autocomplete_callback:
-            return False
-
-        current_line = self.lines[self.cursor.row]
-        # If already active, accept currently selected completion
-        if self._completion_active and self._completion_items:
-            return self.accept_completion()
-
-        # Not active -> fetch suggestions
-        raw = self.autocomplete_callback(current_line, self.cursor.row, self.cursor.col) or []
-        # Normalize to list of {display,insert}
-        completions: List[Dict[str, str]] = []
-        for c in raw:
-            if isinstance(c, str):
-                completions.append({"display": c, "insert": c})
-            elif isinstance(c, dict):
-                disp = str(c.get("display", c.get("insert", "")))
-                ins = str(c.get("insert", ""))
-                item = {"display": disp, "insert": ins}
-                # Preserve optional replace count for token replacement behavior
-                if "replace" in c or "replace_chars" in c:
+    def _normalize_completion_items(self, raw: Any) -> List[Dict[str, Any]]:
+        """Normalize callback values to the editor's completion item shape."""
+        items: List[Dict[str, Any]] = []
+        for completion in raw or []:
+            if isinstance(completion, str):
+                items.append({"display": completion, "insert": completion})
+            elif isinstance(completion, dict):
+                display = str(completion.get("display", completion.get("insert", "")))
+                insert = str(completion.get("insert", ""))
+                item: Dict[str, Any] = {"display": display, "insert": insert}
+                if "replace" in completion or "replace_chars" in completion:
                     try:
-                        item["replace"] = int(c.get("replace", c.get("replace_chars", 0)) or 0)
+                        item["replace"] = int(
+                            completion.get("replace", completion.get("replace_chars", 0)) or 0
+                        )
                     except Exception:
                         item["replace"] = 0
-                if disp or ins or item.get("replace", 0):
-                    completions.append(item)
-            elif isinstance(c, (list, tuple)) and len(c) >= 2:
-                disp = str(c[0])
-                ins = str(c[1])
-                completions.append({"display": disp, "insert": ins})
-        # If single suggestion, insert immediately
-        if len(completions) == 1:
-            # Reuse accept logic so optional 'replace' is honored
-            self._completion_items = completions
-            self._completion_index = 0
-            self._completion_active = True
-            accepted = self.accept_completion()
-            # Ensure popup is closed
+                if display or insert or item.get("replace", 0):
+                    items.append(item)
+            elif isinstance(completion, (list, tuple)) and len(completion) >= 2:
+                items.append({"display": str(completion[0]), "insert": str(completion[1])})
+        return items[:200]
+
+    def _cancel_completion(self) -> None:
+        """Dismiss completion and invalidate any result still in flight."""
+        self._completion_generation += 1
+        self._completion_pending = False
+        self._completion_request_mode = ""
+        self._completion_active = False
+        self._completion_items = []
+        self._completion_index = 0
+
+    def _request_completion(self, *, mode: str) -> bool:
+        """Request completion synchronously or through the nonblocking adapter."""
+        if not self.autocomplete_callback and not self.async_autocomplete_callback:
+            return False
+        current_line = self.lines[self.cursor.row]
+        if self.async_autocomplete_callback is not None:
+            self._completion_generation += 1
+            generation = self._completion_generation
+            self._completion_pending = True
+            self._completion_request_mode = mode
+            # Existing items belong to the previous text/cursor identity and
+            # must not remain acceptable while this request is in flight.
             self._completion_active = False
             self._completion_items = []
             self._completion_index = 0
-            return accepted
-        # If multiple, open selection UI
-        if len(completions) > 1:
-            # Keep a reasonably sized list for scrolling in the UI.
-            # Rendering code is responsible for windowing the list.
-            self._completion_items = completions[:200]
+            try:
+                accepted = self.async_autocomplete_callback(
+                    current_line, self.cursor.row, self.cursor.col, generation
+                )
+            except Exception:
+                accepted = False
+            if accepted is False:
+                self._completion_pending = False
+                self._completion_request_mode = ""
+                return False
+            return True
+        raw = self.autocomplete_callback(
+            current_line, self.cursor.row, self.cursor.col
+        ) if self.autocomplete_callback else []
+        self._apply_completion_items(self._normalize_completion_items(raw), mode=mode)
+        return bool(self._completion_active)
+
+    def _apply_completion_items(self, items: List[Dict[str, Any]], *, mode: str) -> None:
+        self._completion_pending = False
+        self._completion_request_mode = ""
+        if not items:
+            self._completion_active = False
+            self._completion_items = []
+            self._completion_index = 0
+            return
+        if mode == "tab" and len(items) == 1:
+            self._completion_items = items
             self._completion_index = 0
             self._completion_active = True
-            # Fire autocomplete event with no insertion
+            self.accept_completion()
+            return
+        self._completion_items = items
+        if self._completion_index >= len(items):
+            self._completion_index = 0
+        self._completion_active = True
+        if mode == "tab":
             self._trigger_event('autocomplete', '', self.cursor.row, self.cursor.col)
+
+    def apply_completion_result(
+        self,
+        generation: int,
+        line: str,
+        row: int,
+        col: int,
+        raw: Any,
+    ) -> bool:
+        """Apply an async result only when its immutable editor identity is current."""
+        if generation != self._completion_generation or not self._completion_pending:
+            return False
+        if row != self.cursor.row or col != self.cursor.col:
+            self._cancel_completion()
+            return False
+        if row < 0 or row >= len(self.lines) or self.lines[row] != line:
+            self._cancel_completion()
+            return False
+        mode = self._completion_request_mode or "refresh"
+        self._apply_completion_items(self._normalize_completion_items(raw), mode=mode)
+        return True
+
+    def discard_completion_result(self, generation: int) -> bool:
+        """Clear a still-current request rejected by an external identity check."""
+        if generation != self._completion_generation or not self._completion_pending:
+            return False
+        self._cancel_completion()
+        return True
+
+    def _handle_tab(self) -> bool:
+        """Accept a popup selection or request suggestions without blocking input."""
+        if self._completion_active and self._completion_items:
+            return self.accept_completion()
+        if self._completion_pending:
             return True
-        return False
+        return self._request_completion(mode="tab")
 
     def _refresh_completion(self) -> None:
-        """Refresh visible completion items based on current line/cursor.
-
-        If no suggestions are returned, dismiss the popup.
-        """
-        try:
-            if not self.autocomplete_callback:
-                self._completion_active = False
-                self._completion_items = []
-                self._completion_index = 0
-                return
-            current_line = self.lines[self.cursor.row]
-            raw = self.autocomplete_callback(current_line, self.cursor.row, self.cursor.col) or []
-            # Normalize like in _handle_tab
-            items: List[Dict[str, str]] = []
-            for c in raw:
-                if isinstance(c, str):
-                    items.append({"display": c, "insert": c})
-                elif isinstance(c, dict):
-                    disp = str(c.get("display", c.get("insert", "")))
-                    ins = str(c.get("insert", ""))
-                    it = {"display": disp, "insert": ins}
-                    if "replace" in c or "replace_chars" in c:
-                        try:
-                            it["replace"] = int(c.get("replace", c.get("replace_chars", 0)) or 0)
-                        except Exception:
-                            it["replace"] = 0
-                    if disp or ins or it.get("replace", 0):
-                        items.append(it)
-                elif isinstance(c, (list, tuple)) and len(c) >= 2:
-                    disp = str(c[0])
-                    ins = str(c[1])
-                    items.append({"display": disp, "insert": ins})
-            if items:
-                self._completion_items = items[:200]
-                if self._completion_index >= len(self._completion_items):
-                    self._completion_index = 0
-                self._completion_active = True
-            else:
-                # Dismiss when there are no results
-                self._completion_active = False
-                self._completion_items = []
-                self._completion_index = 0
-        except Exception:
-            # On any error, dismiss gracefully
-            self._completion_active = False
-            self._completion_items = []
-            self._completion_index = 0
+        """Replace any pending refresh with one for the current editor identity."""
+        self._request_completion(mode="refresh")
 
     def accept_completion(self) -> bool:
         """Accept the currently highlighted completion (if active)."""
@@ -524,12 +547,14 @@ class TextEditor:
                 self.lines[self.cursor.row] = before + after
                 self.cursor.col = i - n
         if ins:
+            # Acceptance is terminal for this popup; do not schedule a refresh
+            # while inserting the selected value.
+            self._completion_active = False
+            self._completion_pending = False
             self.insert_text(ins)
             self._trigger_event('autocomplete', ins, self.cursor.row, self.cursor.col)
-        # Clear completion state after accept
-        self._completion_active = False
-        self._completion_items = []
-        self._completion_index = 0
+        # Clear completion state after accept and invalidate pending results.
+        self._cancel_completion()
         return True
     
     def get_text(self) -> str:
@@ -542,6 +567,8 @@ class TextEditor:
         self.lines = text.split('\n') if text else [""]
         self._clamp_cursor()
         if old_text != text:
+            if self._completion_active or self._completion_pending:
+                self._cancel_completion()
             self._trigger_event('text_change', 'set', -1, -1, text)
     
     def _render(self) -> Text:
@@ -709,11 +736,20 @@ class LiveEditorBase:
     )
 
     def __init__(self, initial_text: str = "", width: int = 80, height: int = 24,
-                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
-        self.editor = TextEditor(initial_text=initial_text, width=width, height=height,
-                                 autocomplete_callback=autocomplete_callback)
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None,
+                 async_autocomplete_callback: Optional[Callable[[str, int, int, int], Any]] = None):
+        self.editor = TextEditor(
+            initial_text=initial_text,
+            width=width,
+            height=height,
+            autocomplete_callback=autocomplete_callback,
+            async_autocomplete_callback=async_autocomplete_callback,
+        )
         self.console = Console()
         self.running = False
+        # Embedders can wake their event loop as soon as the reader enqueues a
+        # key, instead of polling this queue at a fixed refresh interval.
+        self.input_ready_callback: Optional[Callable[[], None]] = None
         # Bracketed paste mode support (xterm compatible): terminals can wrap
         # paste payload between ESC[200~ and ESC[201~ so applications can
         # distinguish paste from typed input.
@@ -1096,9 +1132,15 @@ class RealTimeEditor(LiveEditorBase):
     LABEL = " Real-time Text Editor "
 
     def __init__(self, initial_text: str = "", width: int = 80, height: int = 24,
-                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
-        super().__init__(initial_text=initial_text, width=width, height=height,
-                         autocomplete_callback=autocomplete_callback)
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None,
+                 async_autocomplete_callback: Optional[Callable[[str, int, int, int], Any]] = None):
+        super().__init__(
+            initial_text=initial_text,
+            width=width,
+            height=height,
+            autocomplete_callback=autocomplete_callback,
+            async_autocomplete_callback=async_autocomplete_callback,
+        )
         self.input_queue = queue.Queue()
 
     def _input_worker(self):
@@ -1131,11 +1173,20 @@ class RealTimeEditor(LiveEditorBase):
                     else:
                         key = self.read_key()
                     self.input_queue.put(key)
+                    callback = self.input_ready_callback
+                    if callback is not None:
+                        try:
+                            callback()
+                        except Exception:
+                            pass
                 except KeyboardInterrupt:
                     # Normalize KeyboardInterrupt to a Ctrl+C key and
                     # continue, letting the main loop handle it.
                     try:
                         self.input_queue.put(getattr(readchar.key, 'CTRL_C', '\x03'))
+                        callback = self.input_ready_callback
+                        if callback is not None:
+                            callback()
                     except Exception:
                         pass
                 except Exception:
@@ -1182,9 +1233,15 @@ class AsyncRealTimeEditor(LiveEditorBase):
     LABEL = " Async Real-time Editor "
 
     def __init__(self, initial_text: str = "", width: int = 80, height: int = 24,
-                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
-        super().__init__(initial_text=initial_text, width=width, height=height,
-                         autocomplete_callback=autocomplete_callback)
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None,
+                 async_autocomplete_callback: Optional[Callable[[str, int, int, int], Any]] = None):
+        super().__init__(
+            initial_text=initial_text,
+            width=width,
+            height=height,
+            autocomplete_callback=autocomplete_callback,
+            async_autocomplete_callback=async_autocomplete_callback,
+        )
         self.input_queue: asyncio.Queue = asyncio.Queue()
 
     async def _input_reader(self):
@@ -1588,7 +1645,8 @@ class InputPanel:
     def __init__(self, title: str = "Input", initial_height: int = 8, max_height: int = 12,
                  style: Optional['InputPanel.PanelStyle'] = None,
                  io_mode: str = "threaded",
-                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None):
+                 autocomplete_callback: Optional[Callable[[str, int, int], List[str]]] = None,
+                 async_autocomplete_callback: Optional[Callable[[str, int, int, int], Any]] = None):
         """
         Initialize the input panel.
         
@@ -1611,6 +1669,7 @@ class InputPanel:
                 width=80,
                 height=6,
                 autocomplete_callback=autocomplete_callback,
+                async_autocomplete_callback=async_autocomplete_callback,
             )
         else:
             self.editor = RealTimeEditor(
@@ -1618,6 +1677,7 @@ class InputPanel:
                 width=80,
                 height=6,
                 autocomplete_callback=autocomplete_callback,
+                async_autocomplete_callback=async_autocomplete_callback,
             )
         self.message_count = 0
         self.style = style or InputPanel.PanelStyle()

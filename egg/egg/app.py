@@ -54,7 +54,7 @@ from eggthreads.runner import scheduler_task_is_live, scheduler_task_status  # t
 
 # eggdisplay UI components
 from eggdisplay import OutputPanel, InputPanel, HStack, VStack, DiffRenderer  # type: ignore
-from .completion import get_autocomplete_items  # type: ignore
+from .completion import AsyncCompletionWorker, CompletionRequest  # type: ignore
 
 # Local mixins and utilities
 from .utils import (
@@ -275,10 +275,14 @@ class EggDisplayApp(
             columns_hint=1,
             style=approval_style,
         )
-        # Input panel with autocomplete via completion module
+        # Input panel completion is submitted to a latest-request-wins worker
+        # once run() owns an asyncio loop. Before then the adapter is a no-op;
+        # editor mutation and result application always remain on the UI thread.
         io_mode = os.environ.get("EGG_IO_MODE", "threaded").strip().lower()
-        def _adapter(line: str, row: int, col: int):
-            return get_autocomplete_items(line, col, self.db, lambda: self.current_thread, self.llm_client, self.command_registry)
+
+        def _async_adapter(line: str, row: int, col: int, generation: int) -> bool:
+            return self._request_async_completion(line, row, col, generation)
+
         # Input panel (no footer/status line; keep it visually clean).
         try:
             from eggdisplay import InputPanel as _InputPanel  # type: ignore
@@ -290,7 +294,7 @@ class EggDisplayApp(
             title="Message Input",
             initial_height=8,
             max_height=12,
-            autocomplete_callback=_adapter,
+            async_autocomplete_callback=_async_adapter,
             io_mode=io_mode,
             style=input_style,
         )
@@ -340,6 +344,9 @@ class EggDisplayApp(
         self._watch_task: Optional[asyncio.Task] = None
         self._user_command_tasks: set[asyncio.Task] = set()
         self._input_thread: Optional[Any] = None
+        self._input_ready_event: Optional[asyncio.Event] = None
+        self._completion_worker: Optional[AsyncCompletionWorker] = None
+        self._ui_loop: Optional[asyncio.AbstractEventLoop] = None
         self._external_terminal_active: bool = False
         self._external_terminal_release_event: Optional[asyncio.Event] = None
         self.running = False
@@ -357,6 +364,106 @@ class EggDisplayApp(
         self._pending_prompt: Dict[str, Any] = {}
         # Last time we refreshed the children tree panel (sec since epoch)
         self._last_children_refresh: float = time.time()
+
+    def _notify_input_ready(self) -> None:
+        """Wake the UI loop from the terminal reader thread."""
+        loop = self._ui_loop
+        event = self._input_ready_event
+        if loop is None or event is None:
+            return
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:
+            pass
+
+    def _request_async_completion(self, line: str, row: int, col: int, generation: int) -> bool:
+        """Submit immutable completion identity without blocking key handling."""
+        worker = self._completion_worker
+        if worker is None:
+            return False
+        try:
+            thread_id = str(self.current_thread)
+            snapshot_seq = int(self._snapshot_last_event_seq(thread_id))
+        except Exception:
+            thread_id = str(getattr(self, 'current_thread', '') or '')
+            snapshot_seq = -1
+        worker.request(CompletionRequest(
+            generation=int(generation),
+            line=str(line),
+            row=int(row),
+            col=int(col),
+            thread_id=thread_id,
+            snapshot_seq=snapshot_seq,
+        ))
+        return True
+
+    def _apply_async_completion(self, request: CompletionRequest, items: List[Dict[str, str]]) -> None:
+        """Apply a worker result only if editor and thread identity are unchanged."""
+        editor = self.input_panel.editor.editor
+        try:
+            current_snapshot_seq = int(self._snapshot_last_event_seq(self.current_thread))
+        except Exception:
+            current_snapshot_seq = -1
+        if (
+            str(self.current_thread) != request.thread_id
+            or current_snapshot_seq != request.snapshot_seq
+        ):
+            editor.discard_completion_result(request.generation)
+        else:
+            editor.apply_completion_result(
+                request.generation,
+                request.line,
+                request.row,
+                request.col,
+                items,
+            )
+        # Completion arrived on the UI loop but it may currently be waiting on
+        # the input event. Wake the render tick so the popup appears promptly.
+        if self._input_ready_event is not None:
+            self._input_ready_event.set()
+
+    def _drain_input_queue(self, limit: int = 32) -> tuple[bool, bool]:
+        """Dispatch at most *limit* queued keys, preserving event-loop fairness."""
+        had_input = False
+        keep_running = True
+        queue_obj = self.input_panel.editor.input_queue
+        for _ in range(max(1, int(limit))):
+            try:
+                key = queue_obj.get_nowait()
+            except Exception:
+                break
+            had_input = True
+            key_result = self.handle_key(key)
+            if asyncio.iscoroutine(key_result):
+                self._schedule_user_command_task(key_result)
+                key_result = True
+            if not key_result:
+                self.running = False
+                keep_running = False
+                break
+        if not queue_obj.empty() and self._input_ready_event is not None:
+            self._input_ready_event.set()
+        return had_input, keep_running
+
+    async def _wait_for_input_or_tick(self, timeout: float = 0.1) -> None:
+        """Wait for reader-thread input while retaining periodic UI updates."""
+        event = self._input_ready_event
+        if event is None:
+            await asyncio.sleep(timeout)
+            return
+        if not self.input_panel.editor.input_queue.empty():
+            await asyncio.sleep(0)
+            return
+        event.clear()
+        # Close the clear/queue race: a callback may have set the event just
+        # before clear(), while its key is already visible in the thread queue.
+        if not self.input_panel.editor.input_queue.empty():
+            event.set()
+            return
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
 
     async def run_external_terminal_command(self, argv: List[str]) -> int:
         """Run an interactive subprocess while temporarily releasing Egg's TUI.
@@ -862,6 +969,16 @@ class EggDisplayApp(
     # ---------------- Main loop ----------------
     async def run(self):
         self.running = True
+        self._ui_loop = asyncio.get_running_loop()
+        self._input_ready_event = asyncio.Event()
+        self._completion_worker = AsyncCompletionWorker(
+            getattr(self.db, 'path', '.egg/threads.sqlite'),
+            self.llm_client,
+            self.command_registry,
+            self._ui_loop,
+            self._apply_async_completion,
+        )
+        self.input_panel.editor.input_ready_callback = self._notify_input_ready
         await self.start_watching_current()
 
         self.print_banner()
@@ -916,21 +1033,10 @@ class EggDisplayApp(
                         pass
                     self._pending_mode_change = False
                     while self.running and not self._pending_mode_change and not self._external_terminal_active:
-                        # Drain input queue
-                        had_input = False
-                        try:
-                            while True:
-                                key = self.input_panel.editor.input_queue.get_nowait()
-                                had_input = True
-                                key_result = self.handle_key(key)
-                                if asyncio.iscoroutine(key_result):
-                                    self._schedule_user_command_task(key_result)
-                                    key_result = True
-                                if not key_result:
-                                    self.running = False
-                                    break
-                        except Exception:
-                            pass
+                        # Dispatch a bounded batch. If more keys remain the
+                        # input event stays set, giving watcher/render tasks a turn
+                        # before the next batch instead of monopolizing the loop.
+                        had_input, _keep_running = self._drain_input_queue()
                         # A bare ESC is held briefly so split escape
                         # sequences (e.g. SGR mouse reports delivered
                         # across multiple readkey calls) can re-attach;
@@ -983,7 +1089,7 @@ class EggDisplayApp(
                                 pass
 
                         try:
-                            await asyncio.sleep(0.1)
+                            await self._wait_for_input_or_tick(0.1)
                         except asyncio.CancelledError:
                             break
                 # Exited the with block. If the inner loop set
@@ -1050,6 +1156,20 @@ class EggDisplayApp(
                 self.active_schedulers.clear()
             except Exception:
                 pass
+            worker = self._completion_worker
+            self._completion_worker = None
+            if worker is not None:
+                worker.stop()
+                try:
+                    worker.join(0.5)
+                except Exception:
+                    pass
+            try:
+                self.input_panel.editor.input_ready_callback = None
+            except Exception:
+                pass
+            self._input_ready_event = None
+            self._ui_loop = None
             # Stop editor input loop
             try:
                 self.input_panel.editor.running = False
