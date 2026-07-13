@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Any, Set, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -111,12 +112,13 @@ class _NeverLLM:
         raise AssertionError("LLM should not be called")
 
 
-def test_interrupted_tool_publication_uses_preview_not_full_output(tmp_path):
-    """Interrupted tool output fallback must not publish full large output."""
+def test_interrupted_tool_publication_uses_canonical_artifact_preview(tmp_path, monkeypatch):
+    """Interrupted output uses the committed artifact plan before publication."""
+    monkeypatch.chdir(tmp_path)
     db = _make_db(tmp_path)
     root = ts.create_root_thread(db, name="root")
     tcid = "tc-interrupted-large"
-    full_output = "z" * 9000
+    full_output = "z" * 120_000
 
     db.append_event(
         event_id=_unique_id(),
@@ -149,12 +151,22 @@ def test_interrupted_tool_publication_uses_preview_not_full_output(tmp_path):
         type_="tool_call.finished",
         payload={"tool_call_id": tcid, "reason": "interrupted", "output": full_output},
     )
-    db.append_event(
-        event_id=_unique_id(),
-        thread_id=root,
-        type_="tool_call.output_approval",
-        payload={"tool_call_id": tcid, "decision": "whole", "preview": ""},
+    tc = ts.build_tool_call_states(db, root)[tcid]
+    approval = ts.finalize_tool_output(
+        db,
+        root,
+        tcid,
+        decision="whole",
+        source="user_cancel",
+        reason="Interrupted",
+        expected_event_seq=tc.state_event_seq,
     )
+    approval_payload = dict(approval.payload)
+    assert approval_payload["decision"] == "partial"
+    assert approval_payload["requested_decision"] == "whole"
+    assert "read_long_tool_output(" in approval_payload["preview"]
+    artifact_path = Path(approval_payload["artifact_path"])
+    assert artifact_path.is_dir()
 
     async def run_once():
         runner = ts.ThreadRunner(db, root, llm=_NeverLLM(), config=RunnerConfig())
@@ -171,7 +183,133 @@ def test_interrupted_tool_publication_uses_preview_not_full_output(tmp_path):
     assert payload["tool_call_id"] == tcid
     assert payload["content"] != full_output
     assert len(payload["content"]) < len(full_output)
+    assert "read_long_tool_output(" in payload["content"]
     assert "Output incomplete - interrupted" in payload["content"]
+
+    read = ts.create_default_tools().execute(
+        "read_long_tool_output",
+        {"artifact_id": artifact_path.name, "chunk_number": 1},
+        thread_id=root,
+        db=db,
+    )
+    assert read.endswith("z" * 40_000)
+
+
+def test_legacy_interrupted_whole_preview_is_rerouted_when_long(tmp_path, monkeypatch):
+    """Imported pre-invariant whole approvals still cannot publish raw output."""
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    tcid = "tc-legacy-interrupted-large"
+    full_output = "l" * 120_000
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="msg.create",
+        msg_id="assistant-tool-msg-legacy",
+        payload={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": tcid, "function": {"name": "bash", "arguments": "{}"}}],
+        },
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tcid, "decision": "granted"},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": tcid},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.finished",
+        payload={"tool_call_id": tcid, "reason": "interrupted", "output": full_output},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.output_approval",
+        payload={"tool_call_id": tcid, "decision": "whole", "preview": full_output},
+    )
+
+    runner = ts.ThreadRunner(db, root, llm=_NeverLLM(), config=RunnerConfig())
+    assert asyncio.run(runner.run_once()) is True
+
+    payload = json.loads(
+        db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 1",
+            (root,),
+        ).fetchone()[0]
+    )
+    assert payload["role"] == "tool"
+    assert payload["content"] != full_output
+    assert len(payload["content"]) < len(full_output)
+    assert "read_long_tool_output(" in payload["content"]
+    assert "Output incomplete - interrupted" in payload["content"]
+
+
+def test_legacy_successful_whole_preview_is_rerouted_when_long(tmp_path, monkeypatch):
+    """Successful imported whole approvals get the same publication safety net."""
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    tcid = "tc-legacy-success-large"
+    full_output = "q" * 120_000
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="msg.create",
+        msg_id="assistant-tool-msg-legacy-success",
+        payload={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": tcid, "function": {"name": "bash", "arguments": "{}"}}],
+        },
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tcid, "decision": "granted"},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": tcid},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.finished",
+        payload={"tool_call_id": tcid, "reason": "success", "output": full_output},
+    )
+    db.append_event(
+        event_id=_unique_id(),
+        thread_id=root,
+        type_="tool_call.output_approval",
+        payload={"tool_call_id": tcid, "decision": "whole", "preview": full_output},
+    )
+
+    runner = ts.ThreadRunner(db, root, llm=_NeverLLM(), config=RunnerConfig())
+    assert asyncio.run(runner.run_once()) is True
+
+    payload = json.loads(
+        db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' ORDER BY event_seq DESC LIMIT 1",
+            (root,),
+        ).fetchone()[0]
+    )
+    assert payload["role"] == "tool"
+    assert payload["content"] != full_output
+    assert len(payload["content"]) < len(full_output)
+    assert "read_long_tool_output(" in payload["content"]
 
 
 def test_parallel_schedulers_for_same_root_compete_by_thread_lease(tmp_path):
