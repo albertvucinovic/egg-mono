@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -3412,6 +3413,31 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
     if not isinstance(newer, dict) or not isinstance(newer.get('messages'), list):
         raise ValueError(f"Persisted snapshot is invalid for thread: {thread_id}")
     return newer
+
+
+async def create_snapshot_async(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
+    """Publish a snapshot without blocking the caller's asyncio event loop.
+
+    SQLite connections are thread-affine, so file-backed databases get a
+    short-lived connection owned by the worker thread. Publication still goes
+    through :func:`create_snapshot` and therefore keeps the same monotonic CAS
+    and canonical fallback semantics. In-memory databases cannot be reopened
+    as the same database and use the synchronous path for test/compatibility
+    callers.
+    """
+
+    db_path = getattr(db, "path", None)
+    if db_path is None or str(db_path) == ":memory:":
+        return create_snapshot(db, thread_id)
+
+    def publish() -> Dict[str, Any]:
+        worker_db = ThreadsDB(db_path)
+        try:
+            return create_snapshot(worker_db, thread_id)
+        finally:
+            worker_db.conn.close()
+
+    return await asyncio.to_thread(publish)
 
 
 def delete_thread(db: ThreadsDB, thread_id: str) -> None:

@@ -1561,9 +1561,9 @@ class ThreadRunner:
         # property of the just-completed invocation, so read only its final
         # message tail instead of walking a very large compatibility snapshot.
         try:
-            from .api import create_snapshot
+            from .api import create_snapshot_async
 
-            create_snapshot(self.db, self.thread_id)
+            await create_snapshot_async(self.db, self.thread_id)
             # Extract <short_recap>...</short_recap> from last assistant message
             try:
                 def _extract_short(text: str) -> Optional[str]:

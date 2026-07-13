@@ -13,7 +13,9 @@ behaviour with dedicated tests.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 
 from eggthreads import SnapshotBuilder
 import eggthreads as ts
@@ -311,6 +313,34 @@ def test_create_snapshot_unknown_tail_event_falls_back_to_canonical_projection(t
     assert calls == [True]
     assert [message["msg_id"] for message in snapshot["messages"]] == [msg_id]
     assert db.get_thread(tid).snapshot_last_event_seq == db.max_event_seq(tid)
+
+
+def test_create_snapshot_async_uses_worker_owned_connection(tmp_path, monkeypatch) -> None:
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    msg_id = ts.append_message(db, tid, "user", "hello")
+    caller_thread = threading.get_ident()
+    calls = []
+
+    import eggthreads.api as api_module
+
+    original = api_module.create_snapshot
+
+    def capture_snapshot(worker_db, thread_id):
+        calls.append((threading.get_ident(), worker_db is db, worker_db.path, thread_id))
+        return original(worker_db, thread_id)
+
+    monkeypatch.setattr(api_module, "create_snapshot", capture_snapshot)
+    snapshot = asyncio.run(api_module.create_snapshot_async(db, tid))
+
+    assert [message["msg_id"] for message in snapshot["messages"]] == [msg_id]
+    assert len(calls) == 1
+    worker_thread, shared_connection, worker_path, worker_tid = calls[0]
+    assert worker_thread != caller_thread
+    assert shared_connection is False
+    assert worker_path == db.path
+    assert worker_tid == tid
 
 
 def test_create_snapshot_falls_back_to_full_rebuild_for_edits(tmp_path) -> None:
