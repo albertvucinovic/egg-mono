@@ -1337,10 +1337,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const revealingLoadedRef = useRef(false);
   const historyDemandRef = useRef<HistoryDemandState>(IDLE_HISTORY_DEMAND);
   const historyDemandRunRef = useRef<(() => void) | null>(null);
+  const historyBoundaryRafRef = useRef<number | null>(null);
+  const historyBoundaryTokenRef = useRef(0);
+  const historyOperationRef = useRef(0);
   const pendingHistoryAnchorRef = useRef<{
     anchor: { id: string; offset: number } | null;
     fallbackTop: number;
     fallbackHeight: number;
+    operation: number;
   } | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
@@ -1471,7 +1475,9 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     scrollport.scrollTop = fallbackTop + (scrollport.scrollHeight - fallbackHeight);
   }, []);
 
-  const settleHistoryDemand = useCallback(() => {
+  const settleHistoryDemand = useCallback((operation = historyOperationRef.current) => {
+    if (operation !== historyOperationRef.current) return;
+    if (pendingHistoryAnchorRef.current?.operation === operation) pendingHistoryAnchorRef.current = null;
     revealingLoadedRef.current = false;
     loadingOlderRef.current = false;
     setIsLoadingOlder(false);
@@ -1493,10 +1499,13 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     const previousScrollHeight = el?.scrollHeight ?? 0;
     const previousScrollTop = el?.scrollTop ?? 0;
     revealingLoadedRef.current = true;
+    const operation = historyOperationRef.current + 1;
+    historyOperationRef.current = operation;
     pendingHistoryAnchorRef.current = {
       anchor,
       fallbackTop: previousScrollTop,
       fallbackHeight: previousScrollHeight,
+      operation,
     };
     setRenderStartMessageId(startMessageId);
   }, [captureHistoryAnchor, restoreHistoryAnchor, settleHistoryDemand]);
@@ -1517,6 +1526,8 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     loadingOlderRef.current = true;
     setIsLoadingOlder(true);
     detachFromBottom();
+    const operation = historyOperationRef.current + 1;
+    historyOperationRef.current = operation;
     try {
       const result = await transcriptQuery.fetchNextPage();
       const updatedMessages = flattenTranscript(result.data);
@@ -1524,15 +1535,23 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       const previousStartIndex = previousStartId
         ? updatedMessages.findIndex((message) => message.id === previousStartId)
         : updatedMessages.length;
+      const nextStartMessageId = expandedTranscriptStartId(updatedMessages, previousStartIndex);
+      const currentStartMessageId = renderedTranscript.messages[0]?.id || null;
+      if (nextStartMessageId === currentStartMessageId) {
+        restoreHistoryAnchor(anchor, previousScrollTop, previousScrollHeight);
+        requestAnimationFrame(() => settleHistoryDemand(operation));
+        return;
+      }
       pendingHistoryAnchorRef.current = {
         anchor,
         fallbackTop: previousScrollTop,
         fallbackHeight: previousScrollHeight,
+        operation,
       };
-      setRenderStartMessageId(expandedTranscriptStartId(updatedMessages, previousStartIndex));
+      setRenderStartMessageId(nextStartMessageId);
     } catch (error) {
       console.error("Failed to load older messages:", error);
-      settleHistoryDemand();
+      settleHistoryDemand(operation);
     }
   }, [captureHistoryAnchor, detachFromBottom, renderedTranscript.messages, restoreHistoryAnchor, settleHistoryDemand, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
 
@@ -1562,8 +1581,29 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     if (!pending) return;
     pendingHistoryAnchorRef.current = null;
     restoreHistoryAnchor(pending.anchor, pending.fallbackTop, pending.fallbackHeight);
-    requestAnimationFrame(settleHistoryDemand);
+    requestAnimationFrame(() => settleHistoryDemand(pending.operation));
   }, [renderStartMessageId, renderedTranscript.startIndex, restoreHistoryAnchor, settleHistoryDemand]);
+
+  const scheduleHistoryBoundaryCheck = useCallback((scrollport: HTMLDivElement) => {
+    const token = historyBoundaryTokenRef.current + 1;
+    historyBoundaryTokenRef.current = token;
+    if (historyBoundaryRafRef.current !== null) cancelAnimationFrame(historyBoundaryRafRef.current);
+    const check = (remainingFrames: number) => {
+      historyBoundaryRafRef.current = requestAnimationFrame(() => {
+        historyBoundaryRafRef.current = null;
+        if (historyBoundaryTokenRef.current !== token || scrollRef.current !== scrollport) return;
+        if (scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
+          historyBoundaryTokenRef.current += 1;
+          demandOlderHistory();
+          return;
+        }
+        if (remainingFrames > 1) check(remainingFrames - 1);
+      });
+    };
+    // Default wheel/key scrolling may be applied after the event's first RAF.
+    // Keep this input-owned check fenced for a few frames, never from onScroll.
+    check(3);
+  }, [demandOlderHistory]);
 
   const handleScroll = useCallback(() => {
     // Geometry changes are not user intent. Wheel/touch/key/scrollbar handlers
@@ -1574,11 +1614,11 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     if (nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
     if (event.deltaY < 0) {
       detachFromBottom();
-      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+      scheduleHistoryBoundaryCheck(event.currentTarget);
       return;
     }
     if (event.deltaY > 0) requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
-  }, [demandOlderHistory, detachFromBottom, followBottom, isAtBottom]);
+  }, [detachFromBottom, followBottom, isAtBottom, scheduleHistoryBoundaryCheck]);
 
   const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1603,11 +1643,11 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     lastTouchYRef.current = nextY ?? null;
     if (nextY !== undefined && previousY !== null && nextY > previousY) {
       detachFromBottom();
-      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+      scheduleHistoryBoundaryCheck(event.currentTarget);
     } else if (nextY !== undefined && previousY !== null && nextY < previousY) {
       requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
     }
-  }, [demandOlderHistory, detachFromBottom, followBottom, isAtBottom]);
+  }, [detachFromBottom, followBottom, isAtBottom, scheduleHistoryBoundaryCheck]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "End") {
@@ -1616,13 +1656,14 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     }
     if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
       detachFromBottom();
-      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+      if (event.key === "Home") event.currentTarget.scrollTop = 0;
+      scheduleHistoryBoundaryCheck(event.currentTarget);
       return;
     }
     if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) {
       requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
     }
-  }, [demandOlderHistory, detachFromBottom, followBottom, isAtBottom]);
+  }, [detachFromBottom, followBottom, isAtBottom, scheduleHistoryBoundaryCheck]);
 
   const flushStreamingText = useCallback(() => {
     recordStreamingFlush("text");
@@ -1885,6 +1926,13 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     historyDemandRef.current = reduceHistoryDemand(historyDemandRef.current, { type: "reset" }, { canReveal: false, canFetch: false });
     loadingOlderRef.current = false;
     revealingLoadedRef.current = false;
+    pendingHistoryAnchorRef.current = null;
+    historyOperationRef.current += 1;
+    historyBoundaryTokenRef.current += 1;
+    if (historyBoundaryRafRef.current !== null) {
+      cancelAnimationFrame(historyBoundaryRafRef.current);
+      historyBoundaryRafRef.current = null;
+    }
     setRenderStartMessageId(null);
     setIsLoadingOlder(false);
     requestAnimationFrame(() => {

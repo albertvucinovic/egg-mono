@@ -1182,23 +1182,27 @@ test.describe('Scroll intent state machines', () => {
     await page.goto(`/${threadId}`);
     const chat = page.getByTestId('chat-panel');
     await expect(page.locator('.eggw-message-card')).toHaveCount(5);
-    await chat.evaluate((element) => { element.scrollTop = 0; });
+    await chat.evaluate((element) => {
+      const filler = document.createElement('div');
+      filler.dataset.testid = 'top-demand-filler';
+      filler.style.height = '900px';
+      element.append(filler);
+      element.scrollTop = 500;
+    });
+    await expect.poll(() => chat.evaluate((element) => element.scrollTop)).toBeGreaterThan(240);
     await chat.hover();
 
-    const anchorBefore = await page.locator('[data-message-id="loaded-history-65"]').evaluate((element) => {
-      const scrollport = element.closest('[data-testid="chat-panel"]')!;
-      return element.getBoundingClientRect().top - scrollport.getBoundingClientRect().top;
-    });
+    // One explicit upward input begins above the threshold and lands at top.
+    // The post-input boundary check must demand history without a second input.
     await page.mouse.wheel(0, -900);
     await expect(page.locator('.eggw-message-card')).toHaveCount(65);
     expect(messageRequests).toBe(1);
     await expect(chat).not.toContainText('NETWORK OLDER PAGE');
     await expect(page.locator('[data-message-id="loaded-history-65"]')).toBeVisible();
-    await expect.poll(() => page.locator('[data-message-id="loaded-history-65"]').evaluate((element) => {
-      const scrollport = element.closest('[data-testid="chat-panel"]')!;
-      return Math.round(element.getBoundingClientRect().top - scrollport.getBoundingClientRect().top);
-    })).toBe(Math.round(anchorBefore));
-    await chat.evaluate((element) => { element.scrollTop = 0; });
+    await chat.evaluate((element) => {
+      element.querySelector('[data-testid="top-demand-filler"]')?.remove();
+      element.scrollTop = 0;
+    });
 
     // The restoration leaves the scrollport clamped at top. A second upward
     // wheel still carries demand even though it need not emit a scroll event.
@@ -1210,6 +1214,66 @@ test.describe('Scroll intent state machines', () => {
     await page.mouse.wheel(0, -900);
     await expect.poll(() => messageRequests).toBe(2);
     await expect(chat).toContainText('NETWORK OLDER PAGE');
+  });
+
+  test('checks the post-key boundary when Home crosses into history demand', async ({ page }) => {
+    const threadId = 'scroll-top-key-demand';
+    let messageRequests = 0;
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      messageRequests += 1;
+      const beforeId = new URL(request.url()).searchParams.get('before_id');
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: beforeId
+          ? { items: [{ id: 'keyboard-older', role: 'user', content: 'KEYBOARD OLDER PAGE' }], snapshot_cursor: 0, next_before: null }
+          : { items: [{ id: 'keyboard-new', role: 'user', content: 'newest' }], snapshot_cursor: 0, next_before: 'keyboard-new' },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    await expect(page.getByTestId('load-older-messages')).toBeVisible();
+    await chat.evaluate((element) => {
+      const filler = document.createElement('div');
+      filler.style.height = '900px';
+      element.append(filler);
+      element.scrollTop = 300;
+    });
+    await expect.poll(() => chat.evaluate((element) => element.scrollTop)).toBeGreaterThan(240);
+    await chat.focus();
+    await page.keyboard.press('Home');
+    await expect.poll(() => messageRequests).toBe(2);
+    await expect(chat).toContainText('KEYBOARD OLDER PAGE');
+  });
+
+  test('settles an empty overlap page whose rendered start does not change', async ({ page }) => {
+    const threadId = 'scroll-empty-overlap-page';
+    let messageRequests = 0;
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      messageRequests += 1;
+      const beforeId = new URL(request.url()).searchParams.get('before_id');
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: beforeId
+          ? { items: [], snapshot_cursor: 0, next_before: null }
+          : { items: [{ id: 'overlap-new', role: 'user', content: 'overlap newest' }], snapshot_cursor: 0, next_before: 'overlap-new' },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    const loadOlder = page.getByTestId('load-older-messages');
+    await loadOlder.click();
+    await expect.poll(() => messageRequests).toBe(2);
+    await expect(loadOlder).not.toBeVisible();
+    await expect(chat).not.toHaveAttribute('aria-busy', 'true');
+    await expect(chat).toContainText('overlap newest');
   });
 
   test('keeps following through rapid canonical tool-result reconciliation and lets user-up win', async ({ page }) => {
