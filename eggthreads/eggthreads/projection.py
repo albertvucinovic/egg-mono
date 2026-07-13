@@ -18,6 +18,38 @@ from .db import ThreadsDB
 PROJECTION_SNAPSHOT_VERSION = 1
 _PROJECTION_METADATA_KEY = "_thread_projection"
 
+# Keep the incremental publication path fail-closed.  New event types must be
+# classified deliberately before they may bypass the canonical reducer.
+_SNAPSHOT_NOOP_EVENT_TYPES = frozenset({
+    "control.pause",
+    "control.resume",
+    "model.switch",
+    "provider_request.started",
+    "runtime.config",
+    "runtime.thread",
+    "sandbox.config",
+    "stream.close",
+    "stream.delta",
+    "stream.open",
+    "thread.child_created",
+    "thread.compaction",
+    "thread.compaction_context_length",
+    "thread.compaction_summary_in_progress",
+    "thread.config",
+    "thread.context_limit",
+    "thread.recovery",
+    "thread.scheduling",
+    "tool_call.approval",
+    "tool_call.approval_policy",
+    "tool_call.execution_started",
+    "tool_call.finished",
+    "tool_call.output_approval",
+    "tool_call.summary",
+    "user_command.finished",
+    "user_command.started",
+    "user_command.status",
+})
+
 
 class ThreadProjectionError(RuntimeError):
     """Raised when a bounded event stream cannot be projected faithfully."""
@@ -208,13 +240,62 @@ def _load_events(
     return tuple(_decode_event_record(row, default_thread_id=thread_id) for row in rows)
 
 
-def _projection_from_snapshot(
+def _snapshot_message_matches_state(
+    message: Any,
+    state: Mapping[str, Any],
+) -> bool:
+    """Validate one public snapshot message without materializing a copy."""
+
+    if not isinstance(message, Mapping):
+        return False
+    payload = state.get("payload")
+    msg_id = state.get("msg_id")
+    if not isinstance(payload, Mapping) or not isinstance(msg_id, str) or not msg_id:
+        return False
+    try:
+        created_event_seq = int(state.get("created_event_seq"))
+    except (TypeError, ValueError):
+        return False
+
+    expected_keys = set(payload)
+    expected_keys.update(("msg_id", "role", "event_seq"))
+    created_at = state.get("created_at")
+    if created_at is not None:
+        expected_keys.add("ts")
+    if set(message) != expected_keys:
+        return False
+
+    for key in expected_keys:
+        if key == "msg_id":
+            expected = None if msg_id.startswith("event:") else msg_id
+        elif key == "role":
+            expected = payload.get("role")
+        elif key == "event_seq":
+            expected = created_event_seq
+        elif key == "ts" and created_at is not None:
+            expected = str(created_at)
+        else:
+            expected = payload.get(key)
+        if message.get(key) != expected:
+            return False
+    return True
+
+
+def _decode_coherent_snapshot(
     snapshot_json: Optional[str],
     *,
     thread_id: str,
     snapshot_event_seq: int,
     through_event_seq: int,
-) -> Optional[ThreadProjection]:
+) -> Optional[Dict[str, Any]]:
+    """Decode and validate current projection acceleration without deep copies.
+
+    The public message cache and private projected states are checked as one
+    coherent version.  This intentionally validates their raw JSON shapes so
+    callers that only need the persisted cache do not have to reconstruct and
+    then rematerialize every :class:`ProjectedMessage`.
+    """
+
     if not isinstance(snapshot_json, str) or not snapshot_json or snapshot_event_seq < 0:
         return None
     if snapshot_event_seq > through_event_seq:
@@ -223,10 +304,11 @@ def _projection_from_snapshot(
         snapshot = json.loads(snapshot_json)
     except Exception:
         return None
-    if not isinstance(snapshot, Mapping) or not isinstance(snapshot.get("messages"), list):
+    if not isinstance(snapshot, dict):
         return None
+    messages = snapshot.get("messages")
     metadata = snapshot.get(_PROJECTION_METADATA_KEY)
-    if not isinstance(metadata, Mapping):
+    if not isinstance(messages, list) or not isinstance(metadata, Mapping):
         return None
     try:
         version = int(metadata.get("version"))
@@ -242,6 +324,135 @@ def _projection_from_snapshot(
     raw_states = metadata.get("message_states")
     if not isinstance(raw_states, list):
         return None
+
+    seen_ids = set()
+    message_index = 0
+    for raw in raw_states:
+        if not isinstance(raw, Mapping):
+            return None
+        payload = raw.get("payload")
+        msg_id = raw.get("msg_id")
+        if not isinstance(payload, Mapping) or not isinstance(msg_id, str) or not msg_id:
+            return None
+        if msg_id in seen_ids:
+            return None
+        seen_ids.add(msg_id)
+        try:
+            created_event_seq = int(raw.get("created_event_seq"))
+            last_event_seq = int(raw.get("last_event_seq"))
+        except (TypeError, ValueError):
+            return None
+        if last_event_seq < created_event_seq or last_event_seq > snapshot_event_seq:
+            return None
+        if bool(raw.get("deleted")) or bool(raw.get("skipped_on_continue")):
+            continue
+        if message_index >= len(messages):
+            return None
+        if not _snapshot_message_matches_state(messages[message_index], raw):
+            return None
+        message_index += 1
+    if message_index != len(messages):
+        return None
+    return snapshot
+
+
+def _extend_coherent_snapshot(
+    snapshot: Dict[str, Any],
+    event_records: Iterable[Any],
+    *,
+    thread_id: str,
+    through_event_seq: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """Extend a validated snapshot for a safe append/ignored event tail.
+
+    Returns the newly appended public messages, or ``None`` when the canonical
+    reducer is required.  The caller owns ``snapshot`` (it was freshly decoded),
+    so extending its lists in place avoids copying historical state.
+    """
+
+    metadata = snapshot.get(_PROJECTION_METADATA_KEY)
+    messages = snapshot.get("messages")
+    if not isinstance(metadata, dict) or not isinstance(messages, list):
+        return None
+    raw_states = metadata.get("message_states")
+    if not isinstance(raw_states, list):
+        return None
+    try:
+        start_event_seq = int(metadata.get("through_event_seq"))
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        events = tuple(
+            _decode_event_record(record, default_thread_id=thread_id)
+            for record in event_records
+        )
+    except ThreadProjectionError:
+        return None
+    if not events or events[-1].event_seq != int(through_event_seq):
+        return None
+
+    existing_ids = {
+        raw.get("msg_id")
+        for raw in raw_states
+        if isinstance(raw, Mapping) and isinstance(raw.get("msg_id"), str)
+    }
+    appended: List[ProjectedMessage] = []
+    last_event_seq = start_event_seq
+    for event in events:
+        if event.event_seq <= last_event_seq:
+            return None
+        last_event_seq = event.event_seq
+        if event.thread_id and event.thread_id != thread_id:
+            return None
+        if event.type == "msg.create":
+            msg_id = event.msg_id or f"event:{event.event_seq}"
+            if msg_id in existing_ids:
+                return None
+            existing_ids.add(msg_id)
+            appended.append(
+                ProjectedMessage(
+                    thread_id=thread_id,
+                    msg_id=msg_id,
+                    payload=event.payload,
+                    created_event_seq=event.event_seq,
+                    created_event_id=event.event_id,
+                    created_at=event.ts,
+                    last_event_seq=event.event_seq,
+                    last_event_id=event.event_id,
+                    updated_at=event.ts,
+                )
+            )
+            continue
+        if event.type == "control.interrupt" and event.payload.get("purpose") != "continue":
+            continue
+        if event.type not in _SNAPSHOT_NOOP_EVENT_TYPES:
+            return None
+
+    tail_messages = [message.as_message_dict() for message in appended]
+    messages.extend(tail_messages)
+    raw_states.extend(message._state_dict() for message in appended)
+    metadata["through_event_seq"] = int(through_event_seq)
+    return tail_messages
+
+
+def _projection_from_snapshot(
+    snapshot_json: Optional[str],
+    *,
+    thread_id: str,
+    snapshot_event_seq: int,
+    through_event_seq: int,
+) -> Optional[ThreadProjection]:
+    snapshot = _decode_coherent_snapshot(
+        snapshot_json,
+        thread_id=thread_id,
+        snapshot_event_seq=snapshot_event_seq,
+        through_event_seq=through_event_seq,
+    )
+    if snapshot is None:
+        return None
+    metadata = snapshot[_PROJECTION_METADATA_KEY]
+    raw_states = metadata.get("message_states")
     try:
         states = tuple(ProjectedMessage._from_state_dict(thread_id, raw) for raw in raw_states)
     except (ThreadProjectionError, TypeError):
@@ -255,9 +466,6 @@ def _projection_from_snapshot(
         started_from_snapshot_event_seq=snapshot_event_seq,
         _base_snapshot=copy.deepcopy(dict(snapshot)),
     )
-    # Validate the public cache and internal state as one coherent version.
-    if projection.message_dicts() != snapshot.get("messages"):
-        return None
     return projection
 
 

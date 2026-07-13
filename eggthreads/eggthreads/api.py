@@ -3256,22 +3256,13 @@ def _snapshot_from_projection(projection) -> Dict[str, Any]:
         base_snapshot = projection.base_snapshot
         projected_messages = projection.message_dicts()
         base_messages_for_shape = base_snapshot.get('messages') if isinstance(base_snapshot, Mapping) else None
+        from .projection import _SNAPSHOT_NOOP_EVENT_TYPES
+
         tail_is_append_only = (
             isinstance(base_messages_for_shape, list)
             and len(projected_messages) >= len(base_messages_for_shape)
             and all(
-                event_type == 'msg.create' or event_type in {
-                'stream.open', 'stream.delta', 'stream.close',
-                'tool_call.approval', 'tool_call.execution_started',
-                'provider_request.started', 'user_command.started',
-                'user_command.status', 'user_command.finished',
-                'tool_call.summary', 'tool_call.finished',
-                'tool_call.output_approval',
-                'thread.compaction', 'thread.compaction_context_length',
-                'thread.compaction_summary_in_progress', 'thread.recovery',
-                'thread.child_created', 'model.switch', 'runtime.config',
-                'sandbox.config', 'thread.scheduling',
-                }
+                event_type == 'msg.create' or event_type in _SNAPSHOT_NOOP_EVENT_TYPES
                 for event_type in projection.tail_event_types
             )
         )
@@ -3305,11 +3296,62 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
     newer watermark reloads and returns the newer persisted snapshot.
     """
 
-    from .projection import load_thread_projection
+    from .projection import (
+        _decode_coherent_snapshot,
+        _extend_coherent_snapshot,
+        load_thread_projection,
+    )
 
     target_event_seq = db.max_event_seq(thread_id)
-    projection = load_thread_projection(db, thread_id, target_event_seq)
-    snap = _snapshot_from_projection(projection)
+    base_row = db.get_thread(thread_id)
+    if base_row is None:
+        raise ValueError(f"Thread not found: {thread_id}")
+
+    base_snapshot = _decode_coherent_snapshot(
+        base_row.snapshot_json,
+        thread_id=thread_id,
+        snapshot_event_seq=int(base_row.snapshot_last_event_seq),
+        through_event_seq=target_event_seq,
+    )
+    if base_snapshot is not None:
+        if int(base_row.snapshot_last_event_seq) == target_event_seq:
+            return base_snapshot
+        tail_rows = db.conn.execute(
+            """
+            SELECT event_seq, event_id, ts, thread_id, type, msg_id, payload_json
+              FROM events
+             WHERE thread_id=? AND event_seq>? AND event_seq<=?
+             ORDER BY event_seq ASC
+            """,
+            (thread_id, int(base_row.snapshot_last_event_seq), target_event_seq),
+        ).fetchall()
+        tail_messages = _extend_coherent_snapshot(
+            base_snapshot,
+            tail_rows,
+            thread_id=thread_id,
+            through_event_seq=target_event_seq,
+        )
+        if tail_messages is not None:
+            if tail_messages:
+                try:
+                    from .token_count import extend_snapshot_token_stats
+
+                    base_snapshot["token_stats"] = extend_snapshot_token_stats(
+                        base_snapshot,
+                        tail_messages,
+                    )
+                except Exception:
+                    # Projection semantics never depend on derived metadata.
+                    base_snapshot.pop("token_stats", None)
+            snap = base_snapshot
+        else:
+            snap = None
+    else:
+        snap = None
+
+    if snap is None:
+        projection = load_thread_projection(db, thread_id, target_event_seq)
+        snap = _snapshot_from_projection(projection)
     encoded = json.dumps(snap)
     published = db.conn.execute(
         """
@@ -3329,6 +3371,14 @@ def create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]:
     if row is None:
         raise ValueError(f"Thread not found: {thread_id}")
     if int(row.snapshot_last_event_seq) == target_event_seq:
+        published_snapshot = _decode_coherent_snapshot(
+            row.snapshot_json,
+            thread_id=thread_id,
+            snapshot_event_seq=target_event_seq,
+            through_event_seq=target_event_seq,
+        )
+        if published_snapshot is not None:
+            return published_snapshot
         current = load_thread_projection(db, thread_id, target_event_seq)
         if current.base_snapshot is None:
             if row.snapshot_json is None:

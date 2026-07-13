@@ -53,8 +53,8 @@ def _msg_delete(event_seq: int, msg_id: str) -> dict:
     }
 
 
-def _fail_full_projection_replay(*args, **kwargs):
-    raise AssertionError("full replay compatibility builder should not run")
+def _fail_canonical_projection(*args, **kwargs):
+    raise AssertionError("canonical projection should not run for a coherent safe snapshot path")
 
 
 def test_snapshot_preserves_no_api_and_keep_user_turn_for_user_messages() -> None:
@@ -168,7 +168,7 @@ def test_create_snapshot_appends_msg_create_tail_incrementally(tmp_path, monkeyp
         return {"extended": True}
 
     monkeypatch.setattr("eggthreads.token_count.extend_snapshot_token_stats", fake_extend_token_stats)
-    monkeypatch.setattr("eggthreads.projection.project_event_records", _fail_full_projection_replay)
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
     snapshot = ts.create_snapshot(db, tid)
 
     assert [m["msg_id"] for m in snapshot["messages"]] == [first_id, second_id]
@@ -186,7 +186,12 @@ def test_create_snapshot_returns_cached_snapshot_when_tail_empty(tmp_path, monke
     msg_id = ts.append_message(db, tid, "user", "first")
     ts.create_snapshot(db, tid)
 
-    monkeypatch.setattr("eggthreads.projection.project_event_records", _fail_full_projection_replay)
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
+    monkeypatch.setattr(
+        "eggthreads.api._snapshot_from_projection",
+        _fail_canonical_projection,
+    )
+    monkeypatch.setattr("eggthreads.api.json.dumps", _fail_canonical_projection)
     snapshot = ts.create_snapshot(db, tid)
 
     assert [m["msg_id"] for m in snapshot["messages"]] == [msg_id]
@@ -213,7 +218,7 @@ def test_create_snapshot_advances_ignored_event_tail_incrementally(tmp_path, mon
         raise AssertionError("token stats should not extend when no messages were appended")
 
     monkeypatch.setattr("eggthreads.token_count.extend_snapshot_token_stats", fail_extend_token_stats)
-    monkeypatch.setattr("eggthreads.projection.project_event_records", _fail_full_projection_replay)
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
     snapshot = ts.create_snapshot(db, tid)
 
     row = db.get_thread(tid)
@@ -243,13 +248,68 @@ def test_create_snapshot_appends_mixed_ignored_and_msg_create_tail_incrementally
         return {"extended": True}
 
     monkeypatch.setattr("eggthreads.token_count.extend_snapshot_token_stats", fake_extend_token_stats)
-    monkeypatch.setattr("eggthreads.projection.project_event_records", _fail_full_projection_replay)
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
     snapshot = ts.create_snapshot(db, tid)
 
     assert [m["msg_id"] for m in snapshot["messages"]] == [first_id, second_id]
     assert snapshot["messages"][-1]["provider_specific"] == {"signature": "abc"}
     assert snapshot["token_stats"] == {"extended": True}
     assert token_calls == [[second_id]]
+    assert db.get_thread(tid).snapshot_last_event_seq == db.max_event_seq(tid)
+    canonical = ts.load_thread_projection(
+        db,
+        tid,
+        db.max_event_seq(tid),
+        use_snapshot=False,
+    ).to_snapshot_dict()
+    assert snapshot["messages"] == canonical["messages"]
+    assert snapshot["_thread_projection"] == canonical["_thread_projection"]
+
+
+def test_create_snapshot_tail_work_does_not_materialize_historical_projection(tmp_path, monkeypatch) -> None:
+    """A one-message tail must not rebuild old projected messages."""
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    old_ids = [ts.append_message(db, tid, "user", f"old-{index}") for index in range(250)]
+    ts.create_snapshot(db, tid)
+    new_id = ts.append_message(db, tid, "assistant", "tail")
+
+    monkeypatch.setattr("eggthreads.projection.load_thread_projection", _fail_canonical_projection)
+    monkeypatch.setattr(
+        "eggthreads.projection.ProjectedMessage._from_state_dict",
+        _fail_canonical_projection,
+    )
+    snapshot = ts.create_snapshot(db, tid)
+
+    assert [message["msg_id"] for message in snapshot["messages"]] == [*old_ids, new_id]
+
+
+def test_create_snapshot_unknown_tail_event_falls_back_to_canonical_projection(tmp_path, monkeypatch) -> None:
+    """New event types must be reviewed rather than silently fast-pathed."""
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    msg_id = ts.append_message(db, tid, "user", "first")
+    ts.create_snapshot(db, tid)
+    db.append_event("future-event", tid, "future.message_semantics", {"value": 1})
+
+    import eggthreads.projection as projection_module
+
+    calls = []
+    original = projection_module.load_thread_projection
+
+    def capture_projection(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(projection_module, "load_thread_projection", capture_projection)
+    snapshot = ts.create_snapshot(db, tid)
+
+    assert calls == [True]
+    assert [message["msg_id"] for message in snapshot["messages"]] == [msg_id]
     assert db.get_thread(tid).snapshot_last_event_seq == db.max_event_seq(tid)
 
 
