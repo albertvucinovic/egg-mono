@@ -1136,3 +1136,416 @@ code {
     height: 2.75rem;
   }
 }
+
+/* ============================================
+   Transcript and content presentation
+   ============================================ */
+.eggw-transcript-scroll {
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+.eggw-transcript-inner {
+  color: var(--text-primary);
+}
+
+.eggw-role-card {
+  --role-surface: var(--surface-panel);
+  --role-border: var(--border-default);
+  --role-label: var(--text-heading);
+  --role-marker: var(--border-strong);
+  --role-content: var(--text-primary);
+  position: relative;
+  margin-bottom: 0.85rem;
+  padding: 0.9rem 1rem;
+  overflow: clip;
+  border: 1px solid var(--role-border);
+  border-radius: 0.85rem;
+  background: var(--role-surface);
+  color: var(--role-content);
+  box-shadow: none;
+}
+
+.eggw-role-card::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 0.22rem;
+  background: var(--role-marker);
+}
+
+.eggw-role-card-borderless {
+  border-color: transparent;
+}
+
+.eggw-role-card-borderless::before {
+  width: 0.22rem;
+}
+
+.eggw-role-user { --role-surface: var(--role-user-surface); --role-border: var(--role-user-border); --role-label: var(--role-user-label); --role-marker: var(--role-user-marker); --role-content: var(--role-user-content); }
+.eggw-role-assistant { --role-surface: var(--role-assistant-surface); --role-border: var(--role-assistant-border); --role-label: var(--role-assistant-label); --role-marker: var(--role-assistant-marker); --role-content: var(--role-assistant-content); }
+.eggw-role-assistant-note { --role-surface: var(--status-special-surface); --role-border: var(--status-special-border); --role-label: var(--status-special-text); --role-marker: var(--status-special-marker); --role-content: var(--text-primary); }
+.eggw-role-system { --role-surface: var(--role-system-surface); --role-border: var(--role-system-border); --role-label: var(--role-system-label); --role-marker: var(--role-system-marker); --role-content: var(--role-system-content); }
+.eggw-role-tool { --role-surface: var(--role-tool-surface); --role-border: var(--role-tool-border); --role-label: var(--role-tool-label); --role-marker: var(--role-tool-marker); --role-content: var(--role-tool-content); }
+.eggw-role-reasoning { --role-surface: var(--role-reasoning-surface); --role-border: var(--role-reasoning-border); --role-label: var(--role-reasoning-label); --role-marker: var(--role-reasoning-marker); --role-content: var(--role-reasoning-content); }
+.eggw-role-tool-call { --role-surface: var(--role-tool-call-surface); --role-border: var(--role-tool-call-border); --role-label: var(--role-tool-call-label); --role-marker: var(--role-tool-call-marker); --role-content: var(--role-tool-call-content); }
+.eggw-role-shell { --role-surface: var(--code-surface); --role-border: var(--border-default); --role-label: var(--link); --role-marker: var(--link); --role-content: var(--code-text); }
+
+.eggw-message-header {
+  min-height: 1.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem 0.65rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.55rem;
+  padding-inline-start: 0.15rem;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.eggw-role-marker {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--role-marker);
+  border-radius: 999px;
+  background: var(--role-marker);
+}
+
+.eggw-role-label {
+  color: var(--role-label);
+  font-weight: 720;
+  letter-spacing: 0.01em;
+}
+
+.eggw-message-meta {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.eggw-message-meta::before {
+  content: "·";
+  margin-inline-end: 0.4rem;
+  color: var(--border-strong);
+}
+
+.eggw-message-id {
+  border: 0;
+  border-radius: 0.35rem;
+  padding: 0.15rem 0.3rem;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.eggw-message-id:hover {
+  background: var(--control-bg-hover);
+  color: var(--link);
+}
+
+.eggw-message-action {
+  min-height: 1.75rem;
+  margin-inline-start: auto;
+  padding: 0.2rem 0.55rem;
+  border-color: var(--control-border);
+  color: var(--link);
+  font-size: 0.72rem;
+}
+
+.eggw-detail-block {
+  margin-block: 0.55rem;
+  overflow: hidden;
+  border: 1px solid var(--role-border, var(--border-default));
+  border-radius: 0.65rem;
+  background: var(--role-surface, var(--surface-inset));
+  color: var(--role-content, var(--text-primary));
+}
+
+.eggw-detail-borderless {
+  border-color: var(--border-subtle);
+}
+
+.eggw-detail-summary {
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+  color: var(--role-label, var(--text-heading));
+  font-size: 0.8125rem;
+  font-weight: 680;
+}
+
+.eggw-detail-summary:hover {
+  background: var(--control-bg-hover);
+}
+
+.eggw-detail-summary::marker {
+  color: var(--role-marker, var(--border-strong));
+}
+
+.eggw-detail-content {
+  padding: 0 0.75rem 0.75rem;
+  color: var(--role-content, var(--text-primary));
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.eggw-code-block {
+  max-width: 100%;
+  margin: 0.55rem 0;
+  padding: 0.7rem 0.8rem;
+  overflow: auto;
+  border: 1px solid var(--border-default);
+  border-radius: 0.55rem;
+  background: var(--code-surface);
+  color: var(--code-text);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.eggw-shell-command {
+  color: var(--link);
+}
+
+.eggw-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--link) 65%, transparent);
+  text-underline-offset: 0.16em;
+}
+
+.eggw-link:hover {
+  color: var(--link-hover);
+  text-decoration-color: currentColor;
+}
+
+.eggw-attachment-card {
+  padding: 0.75rem;
+  border: 1px solid var(--border-default);
+  border-radius: 0.7rem;
+  background: var(--surface-inset);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.eggw-attachment-borderless {
+  border-color: var(--border-subtle);
+}
+
+.eggw-attachment-kind {
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  padding: 0.15rem 0.45rem;
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.eggw-attachment-meta,
+.eggw-attachment-description {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.eggw-attachment-description {
+  margin-top: 0.3rem;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.eggw-attachment-preview {
+  max-width: 100%;
+  display: block;
+  margin-inline: auto;
+  border: 1px solid var(--border-default);
+  border-radius: 0.7rem;
+  background: var(--surface-panel);
+  object-fit: contain;
+}
+
+.eggw-hidden-summary {
+  color: var(--role-label);
+  font-size: 0.875rem;
+  font-weight: 680;
+}
+
+.eggw-hidden-tools {
+  margin-top: 0.3rem;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.eggw-compaction-marker {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-block: 1rem;
+}
+
+.eggw-compaction-line {
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--status-warning-border);
+}
+
+.eggw-compaction-label {
+  max-width: min(100%, 42rem);
+  border: 1px solid var(--status-warning-border);
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  background: var(--status-warning-surface);
+  color: var(--status-warning-text);
+  font-size: 0.72rem;
+  font-weight: 680;
+  text-align: center;
+}
+
+.eggw-compaction-detail {
+  margin-inline-start: 0.4rem;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.eggw-transcript-state {
+  width: 100%;
+  border: 1px dashed var(--border-default);
+  border-radius: 0.8rem;
+  padding: 1.25rem;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.eggw-transcript-state-error {
+  border-style: solid;
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-surface);
+  color: var(--status-danger-text);
+}
+
+/* Restore real prose hierarchy; role content remains readable and hue lives in labels/markers. */
+.eggw-prose,
+.eggw-prose p,
+.eggw-prose li,
+.eggw-prose em {
+  color: var(--role-content, var(--text-primary)) !important;
+}
+
+.eggw-prose h1,
+.eggw-prose h2,
+.eggw-prose h3,
+.eggw-prose h4,
+.eggw-prose h5,
+.eggw-prose h6,
+.eggw-prose strong {
+  color: var(--text-heading) !important;
+}
+
+.eggw-prose blockquote {
+  border-left-color: var(--role-marker, var(--link));
+  color: var(--text-secondary) !important;
+}
+
+.eggw-prose a {
+  color: var(--link) !important;
+}
+
+.eggw-prose a:hover {
+  color: var(--link-hover) !important;
+}
+
+.eggw-prose code:not(pre code) {
+  border: 1px solid var(--border-subtle);
+  background: var(--code-surface);
+  color: var(--code-text);
+}
+
+.eggw-prose table {
+  width: 100%;
+  border-color: var(--border-default);
+}
+
+.eggw-prose th {
+  background: var(--surface-raised);
+  color: var(--text-heading) !important;
+}
+
+.eggw-prose th,
+.eggw-prose td {
+  border-color: var(--border-default) !important;
+}
+
+@media (max-width: 639px) {
+  .eggw-transcript-scroll {
+    padding: 0.75rem;
+  }
+
+  .eggw-role-card {
+    margin-bottom: 0.65rem;
+    padding: 0.75rem 0.75rem 0.8rem 0.9rem;
+    border-radius: 0.7rem;
+  }
+
+  .eggw-message-header {
+    gap: 0.3rem 0.5rem;
+  }
+
+  .eggw-message-action {
+    margin-inline-start: 0;
+  }
+
+  .eggw-compaction-marker {
+    gap: 0.4rem;
+  }
+
+  .eggw-compaction-label {
+    border-radius: 0.6rem;
+  }
+
+  .eggw-compaction-detail {
+    display: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .eggw-role-card,
+  .eggw-detail-block,
+  .eggw-code-block,
+  .eggw-attachment-card,
+  .eggw-attachment-preview,
+  .eggw-compaction-label,
+  .eggw-transcript-state {
+    border-color: CanvasText;
+    forced-color-adjust: auto;
+  }
+
+  .eggw-role-card::before,
+  .eggw-role-marker,
+  .eggw-compaction-line {
+    background: CanvasText;
+  }
+}
+
+.eggw-streaming-content {
+  color: var(--role-content);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.eggw-streaming-label {
+  color: var(--role-label);
+  font-size: 0.72rem;
+  font-weight: 650;
+  animation: eggw-status-pulse 1.5s ease-in-out infinite;
+}

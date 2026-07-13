@@ -1712,7 +1712,7 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(dialog).toContainText('ARGUMENT_A');
     await expect(dialog).toContainText('(not found in the loaded transcript)');
     await expect(dialog).not.toContainText('RESULT_B');
-    await dialog.getByRole('button', { name: 'Close' }).click();
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
 
     await tools.nth(1).click();
     dialog = page.getByRole('dialog');

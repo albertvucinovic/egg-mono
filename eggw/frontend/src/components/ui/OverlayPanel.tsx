@@ -2,6 +2,7 @@
 
 import { useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import clsx from "clsx";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { IconButton } from "./primitives";
 
@@ -28,6 +29,7 @@ interface OverlayPanelProps {
   testId?: string;
   footer?: ReactNode;
   returnFocusSelector?: string;
+  portal?: boolean;
 }
 
 export function OverlayPanel({
@@ -41,6 +43,7 @@ export function OverlayPanel({
   testId,
   footer,
   returnFocusSelector,
+  portal = false,
 }: OverlayPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -75,7 +78,7 @@ export function OverlayPanel({
 
   if (!open) return null;
 
-  return (
+  const overlay = (
     <div
       className={clsx("ui-overlay", variant === "drawer" && "ui-overlay-drawer")}
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
@@ -128,4 +131,8 @@ export function OverlayPanel({
       </div>
     </div>
   );
+  if (portal && typeof document !== "undefined") {
+    return createPortal(overlay, document.body);
+  }
+  return overlay;
 }
