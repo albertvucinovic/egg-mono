@@ -29,6 +29,16 @@ def _error(message: str) -> str:
     return f"Error: {safe}"
 
 
+def _receipt_field(value: Any, *, max_chars: int = 160) -> str:
+    """Render one untrusted receipt field safely and within a fixed bound."""
+
+    text = sanitize_terminal_text(str(value or "unknown"))
+    text = " ".join(text.split()) or "unknown"
+    if len(text) > max_chars:
+        text = text[: max_chars - 1] + "…"
+    return text
+
+
 def _context_db(ctx: ToolContext):
     try:
         from .compaction import _context_db as context_db
@@ -237,9 +247,14 @@ def extract_tool_output_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
         # Do not reflect backend paths/provider details into a tool message.
         return _error(f"could not extract tool output ({type(exc).__name__})")
 
+    source_name = _receipt_field(source.name)
+    source_call_id = _receipt_field(source.tool_call_id)
+    receipt_filename = _receipt_field(saved.metadata.get("filename"))
     return (
-        f"Extracted [{selected.start_line}, {selected.end_line}) to provider artifact "
-        f"{saved.artifact_id} ({saved.metadata['size_bytes']} bytes, "
+        f"Extracted {source_name} call {source_call_id} lines "
+        f"{selected.start_line}–{selected.end_line - 1} "
+        f"([{selected.start_line}, {selected.end_line})) to {receipt_filename} "
+        f"as provider artifact {saved.artifact_id} ({saved.metadata['size_bytes']} bytes, "
         f"sha256 {saved.metadata['sha256']})."
     )
 

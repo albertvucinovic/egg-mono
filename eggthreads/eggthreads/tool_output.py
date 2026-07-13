@@ -235,6 +235,8 @@ def _route_long_whole_output(
 
     tool_name = _tool_name_for_call(db, thread_id, tool_call_id)
     contract = tool_output_contract(tool_name)
+    if plan.decision == "omit":
+        return plan
     if contract.bypass_long_output_routing:
         from .tool_output_contract import bounded_bypass_publication
 

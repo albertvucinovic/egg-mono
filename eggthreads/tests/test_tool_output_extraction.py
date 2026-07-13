@@ -230,6 +230,8 @@ def test_default_previous_partial_source_extracts_full_canonical_unprefixed_text
     assert metadata["derived"]["selected_line_count"] == 3
     assert metadata["size_bytes"] == len(data)
     assert metadata["sha256"] in receipt
+    assert "skill call skill-source lines 3–5 ([3, 6))" in receipt
+    assert metadata["filename"] in receipt
 
 
 def test_default_selection_skips_latest_denied_or_omitted_publication(tmp_path, monkeypatch) -> None:
@@ -706,6 +708,8 @@ def test_explicit_python_filename_exports_exact_name_and_bytes(tmp_path, monkeyp
         },
     )
     assert metadata["filename"] == "compaction_skeleton.py"
+    assert "compaction_skeleton.py" in _receipt
+    assert "lines 1–2 ([1, 3))" in _receipt
     assert data == source_text.encode("utf-8")
 
     artifact_id = metadata["artifact_id"]

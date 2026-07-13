@@ -108,6 +108,7 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
             "Line-number prefixes are presentation only. `skill(line_numbers=true)` followed by extraction returns unnumbered canonical text.",
             "A `read_long_tool_output` call has its own canonical coordinate space (unnumbered metadata header plus chunk body), not the artifact's displayed absolute labels. For original producer coordinates, pass that original tool's `source_tool_call_id`.",
             "Denied, pending, omitted, hidden, future/current, cross-thread, non-text, empty, and out-of-range sources/selections are rejected. Extracted content is stored, never executed.",
+            "The short success receipt identifies the source tool/call, both human and half-open ranges, safe filename, artifact id, byte size, and SHA-256 for immediate discovery.",
             "The result is a provider-output artifact compatible with `save_provider_artifact_to_file` and `add_provider_artifact_to_model_context`.",
         ],
         "examples": [

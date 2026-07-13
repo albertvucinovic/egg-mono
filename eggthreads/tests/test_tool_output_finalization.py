@@ -590,3 +590,87 @@ def test_automatic_policy_failure_is_detectable_and_retriable(tmp_path, monkeypa
 
     assert _decision_rows(db, thread_id) == []
     assert ts.build_tool_call_states(db, thread_id)[tool_call_id].state == "TC4"
+
+
+@pytest.mark.parametrize("tool_name", ["read_long_tool_output", "extract_tool_output"])
+def test_user_omit_can_finalize_bounded_bypass_tools_without_artifact(
+    tmp_path, monkeypatch, tool_name
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id = f"thread-omit-{tool_name}"
+    tool_call_id = f"call-omit-{tool_name}"
+    db.create_thread(thread_id=thread_id, name="omit bypass")
+    db.append_event(
+        event_id=f"declare-{tool_call_id}",
+        thread_id=thread_id,
+        type_="msg.create",
+        msg_id=f"msg-{tool_call_id}",
+        payload={
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        },
+    )
+    db.append_event(
+        event_id=f"approve-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.approval",
+        payload={"tool_call_id": tool_call_id, "decision": "granted"},
+    )
+    db.append_event(
+        event_id=f"started-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.execution_started",
+        payload={"tool_call_id": tool_call_id},
+    )
+    finish_seq = db.append_event(
+        event_id=f"finished-{tool_call_id}",
+        thread_id=thread_id,
+        type_="tool_call.finished",
+        payload={
+            "tool_call_id": tool_call_id,
+            "reason": "success",
+            "output": "x" * 120_000,
+        },
+    )
+
+    automatic = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="automatic_policy",
+        reason="Automatic bounded publication",
+        expected_event_seq=finish_seq,
+    )
+    assert automatic.committed is True
+    assert automatic.decision == "whole"
+    assert automatic.payload["artifact_path"] == ""
+    assert automatic.payload["bounded_contract_violation"] is True
+
+    result = ts.finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision="omit",
+        source="user_cancel",
+        reason="Explicit user cancellation",
+        expected_event_seq=automatic.state_event_seq,
+    )
+
+    assert result.committed is True
+    assert result.decision == "omit"
+    assert result.payload["artifact_path"] == ""
+    assert result.payload["preview"] == "Output omitted."
+    assert result.payload["supersedes_event_seq"] == automatic.event_seq
+    state = ts.build_tool_call_states(db, thread_id)[tool_call_id]
+    assert state.output_decision == "omit"
+    assert state.last_output_approval_payload["decision_source"] == "user_cancel"
+    output_root = tmp_path / ".egg" / "egg_outputs"
+    assert not output_root.exists() or list(output_root.rglob("metadata.json")) == []
