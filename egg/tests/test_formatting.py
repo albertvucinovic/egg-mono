@@ -877,14 +877,21 @@ class TestFormatChildrenPanel:
 
         calls = []
         monkeypatch.setattr(
-            egg_app, "format_tree", lambda root: calls.append(root) or "MAXIMAL TREE"
+            egg_app, "format_tree", lambda root, **kwargs: calls.append((root, kwargs)) or "MAXIMAL TREE"
         )
 
         text = egg_app.format_children_panel(parent)
 
         assert text.endswith("MAXIMAL TREE")
         assert f"Current:[/] {parent}" in text.splitlines()[0]
-        assert calls == [parent]
+        assert calls == [(parent, {"include_root": False})]
+
+    def test_maximal_leaf_does_not_repeat_current_as_tree_row(self, egg_app):
+        text = egg_app.format_children_panel(egg_app.current_thread)
+
+        assert len(text.splitlines()) == 1
+        assert text.count(egg_app.current_thread) == 1
+        assert "[CUR]" not in text
 
     @pytest.mark.parametrize("descendant_count", [5, 15])
     def test_non_maximal_boundaries_show_useful_status_groups(
@@ -912,11 +919,11 @@ class TestFormatChildrenPanel:
         lines = egg_app.format_children_panel(parent).splitlines()
 
         assert len(lines) == 5
-        assert f"Descendants ({descendant_count}):" in lines[1]
-        assert "Streaming (1):" in lines[2]
-        assert streaming[-8:] in lines[2]
-        assert "Direct children (1):" in lines[3]
-        assert f"Nested descendants ({descendant_count - 1}):" in lines[4]
+        assert "Streaming (1):" in lines[1]
+        assert streaming[-8:] in lines[1]
+        assert f"{descendant_count} descendants · 1 direct · {descendant_count - 1} nested" in lines[2]
+        assert "Direct (non-streaming):[/]" in lines[3]
+        assert "Nested (non-streaming):[/]" in lines[4]
         assert "└─" not in "\n".join(lines)
 
     def test_non_maximal_groups_escape_id_suffixes(self, egg_app):
@@ -939,10 +946,12 @@ class TestFormatChildrenPanel:
 
         lines = egg_app.format_children_panel(parent).splitlines()
 
-        assert "Streaming (2):" in lines[2]
-        assert ids[1][-8:] in lines[2]
-        assert ids[3][-8:] in lines[2]
-        assert "+1 more" in lines[1]
+        assert "Streaming (2):" in lines[1]
+        assert ids[1][-8:] in lines[1]
+        assert ids[3][-8:] in lines[1]
+        assert "Other descendants (3):" in lines[2]
+        assert ids[1][-8:] not in lines[2]
+        assert ids[3][-8:] not in lines[2]
 
     def test_large_subtree_shows_streaming_id_and_bounded_previews(
         self, egg_app, monkeypatch
@@ -962,13 +971,12 @@ class TestFormatChildrenPanel:
 
         lines = egg_app.format_children_panel(parent).splitlines()
 
-        assert len(lines) == 4
-        assert "Descendants (37):" in lines[1]
-        assert "+33 more" in lines[1]
-        assert "Streaming (1):" in lines[2]
-        assert streaming[-8:] in lines[2]
-        assert "Not streaming (36):" in lines[3]
-        assert "+32 more" in lines[3]
+        assert len(lines) == 3
+        assert "Streaming (1):" in lines[1]
+        assert streaming[-8:] in lines[1]
+        assert "Other descendants (36):" in lines[2]
+        assert "+32 more" in lines[2]
+        assert streaming[-8:] not in lines[2]
 
     def test_counts_only_descendants_of_selected_root(self, egg_app):
         outer_root = egg_app.current_thread
@@ -990,11 +998,21 @@ class TestFormatChildrenPanel:
 
         text = egg_app.format_children_panel(selected)
 
-        assert "Descendants (5):" in text
+        assert "Other descendants (4):" in text
         assert "Streaming (1):" in text
         assert "Direct children" not in text
         assert "Nested descendants" not in text
         assert outside[-8:] not in text
+
+    def test_non_maximal_omits_empty_streaming_row(self, egg_app):
+        parent = egg_app.current_thread
+        descendants = [self._child(egg_app, parent, number) for number in range(5)]
+
+        text = egg_app.format_children_panel(parent)
+
+        assert "Streaming" not in text
+        assert "Descendants (5):" in text
+        assert all(thread_id[-8:] in text for thread_id in descendants[-4:])
 
     def test_format_tree_stays_maximal_for_large_subtrees(self, egg_app):
         parent = egg_app.current_thread
@@ -1006,3 +1024,14 @@ class TestFormatChildrenPanel:
         assert all(thread_id[-8:] in text for thread_id in descendants)
         assert "16 descendants" not in text
         assert "└─" in text
+
+    def test_format_tree_can_render_only_descendant_forest(self, egg_app):
+        parent = egg_app.current_thread
+        child = self._child(egg_app, parent, 900)
+        grandchild = self._child(egg_app, child, 901)
+
+        text = egg_app.format_tree(parent, include_root=False)
+
+        assert parent[-8:] not in text
+        assert child[-8:] in text
+        assert grandchild[-8:] in text

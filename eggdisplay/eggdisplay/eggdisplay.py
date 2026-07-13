@@ -1316,38 +1316,58 @@ class OutputPanel:
         self._cached_render: Optional[Panel] = None
         self._last_term_cols: int = 0
         self._last_title: str = title
+        self._measured_segments: Optional[List[Text]] = None
+        self._measured_width: int = 0
         
     def set_content(self, content: str) -> None:
         """Set the content to display."""
         if content != self.content:
             self.content = content
             self._dirty = True
+            self._measured_segments = None
+            self._measured_width = 0
         
-    def calculate_height(self) -> int:
-        """Calculate the optimal panel height based on content.
+    def _content_width(self) -> int:
+        """Return the body width used by both measurement and rendering."""
+        term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+        return max(10, term_cols // self.columns_hint - 6)
 
-        For chat-style UIs we prefer snappy resizing rather than
-        line-by-line animation, especially when content arrives
-        in large chunks (e.g. initial system prompt or when
-        autocomplete suggestions appear/disappear).
-        """
+    def _content_segments(self, width: int) -> List[Text]:
+        """Convert content to the exact visual rows used by ``render``."""
+        console = Console()
+        segments: List[Text] = []
+        crop = getattr(self.style, "line_wrap_mode", "wrap") == "crop"
+        for line in self.content.split('\n'):
+            if line == "":
+                segments.append(Text())
+                continue
+            rich_line = self._line_to_renderable_text(line)
+            if crop:
+                try:
+                    rich_line.truncate(width, overflow="crop")
+                except Exception:
+                    pass
+                segments.append(rich_line)
+                continue
+            wrapped = rich_line.wrap(console, width=width, no_wrap=False)
+            segments.extend(wrapped or [Text()])
+        return segments
+
+    def calculate_height(self) -> int:
+        """Size the panel from its actual visual rows, without blank slack."""
         if not self.content:
             return int(self.current_height)
 
-        # Count logical lines in content
-        content_lines = self.content.count('\n') + 1
-
-        # For crop-mode panels we want one row per logical line plus two
-        # border rows (Rich Panel default padding is 0 vertical) — no
-        # extra slack, since no internal header is rendered. Wrapped
-        # panels keep the previous, looser allowance.
-        if getattr(self.style, "line_wrap_mode", "wrap") == "crop":
-            total_lines_needed = content_lines + 2
+        width = self._content_width()
+        if self._measured_segments is not None and self._measured_width == width:
+            segments = self._measured_segments
         else:
-            total_lines_needed = content_lines + 4
-        target_height = max(1, min(self.max_height, total_lines_needed))
-
-        # Jump directly to the target height for immediate layout updates.
+            segments = self._content_segments(width)
+        self._measured_segments = segments
+        self._measured_width = width
+        visual_rows = len(segments)
+        # Rich Panel contributes one top and one bottom border row.
+        target_height = max(1, min(self.max_height, visual_rows + 2))
         self.current_height = float(target_height)
         return target_height
     
@@ -1421,6 +1441,8 @@ class OutputPanel:
     def mark_dirty(self) -> None:
         """Force the panel to re-render on the next render() call."""
         self._dirty = True
+        self._measured_segments = None
+        self._measured_width = 0
 
     def is_dirty(self) -> bool:
         """Return True if the panel needs re-rendering."""
@@ -1467,86 +1489,42 @@ class OutputPanel:
         #    content_text.append(sep + "\n", style=self.style.header_separator_style)
         #    header_lines = 2
 
-        # Calculate available lines for content (after header). For
-        # crop-mode panels we reserve slightly less padding so that the
-        # number of visible logical lines more closely matches the
-        # content lines.
-        if getattr(self.style, "line_wrap_mode", "wrap") == "crop":
-            padding = 1
-        else:
-            padding = 2
-        available_content_lines = max(1, height - (header_lines + padding))
+        # Rich Panel consumes one top and one bottom border row.
+        available_content_lines = max(1, height - (header_lines + 2))
 
         # Show only the last lines that fit
         if self.content:
-            # Estimate available width per column to compute wrapped display lines
-            term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns
-            # subtract a few chars for panel borders/padding
-            approx_width = max(10, term_cols // self.columns_hint - 6)
-
-            from rich.console import Console as _Console
-            _console = _Console()
-
-            # For most panels (line_wrap_mode="wrap"), we want wrapped
-            # visual lines. For crop mode we keep one segment per logical
-            # line and rely on the Panel/terminal to clip overflow.
-            if getattr(self.style, "line_wrap_mode", "wrap") == "crop":
-                display_segments: List[Text] = []
-                for line in self.content.split('\n'):
-                    if line == "":
-                        display_segments.append(Text())
-                        continue
-                    rich_line = self._line_to_renderable_text(line)
-                    # Explicitly crop to the available width so that
-                    # long lines do not expand the column and break
-                    # the overall layout.
-                    try:
-                        rich_line.truncate(approx_width, overflow="crop")
-                    except Exception:
-                        pass
-                    display_segments.append(rich_line)
-                total_segments = len(display_segments)
-                if total_segments <= available_content_lines:
-                    visible = display_segments
-                    hidden_lines = 0
-                else:
-                    hidden_lines = total_segments - available_content_lines
-                    visible = display_segments[-available_content_lines:]
+            width = self._content_width()
+            if self._measured_segments is not None and self._measured_width == width:
+                display_segments = self._measured_segments
             else:
-                # Build display segments accounting for wrapping. Use Rich's
-                # Text.wrap so that markup is preserved while wrapping to the
-                # panel width. Each wrapped segment represents a visual line.
-                display_segments: List[Text] = []
-                for line in self.content.split('\n'):
-                    if line == "":
-                        display_segments.append(Text())
-                        continue
-                    rich_line = self._line_to_renderable_text(line)
-                    wrapped_segments = rich_line.wrap(_console, width=approx_width, no_wrap=False)
-                    if not wrapped_segments:
-                        display_segments.append(Text())
-                    else:
-                        display_segments.extend(wrapped_segments)
+                display_segments = self._content_segments(width)
+            total_segments = len(display_segments)
+            if total_segments <= available_content_lines:
+                visible = display_segments
+                hidden_lines = 0
+            else:
+                # Reserve one interior row for the overflow notice.
+                visible_count = max(0, available_content_lines - 1)
+                hidden_lines = total_segments - visible_count
+                visible = (
+                    display_segments[-visible_count:] if visible_count else []
+                )
 
-                # Now render only the tail that fits
-                total_segments = len(display_segments)
-                if total_segments <= available_content_lines:
-                    visible = display_segments
-                    hidden_lines = 0
-                else:
-                    hidden_lines = total_segments - available_content_lines
-                    visible = display_segments[-available_content_lines:]
+            if hidden_lines > 0:
+                try:
+                    notice = Text.from_markup(
+                        f"[dim]... {hidden_lines} lines above[/dim]"
+                    )
+                except MarkupError:
+                    notice = Text(f"... {hidden_lines} lines above")
+                notice.append("\n")
+                content_text.append(notice)
 
             for seg in visible:
                 seg = seg.copy()
                 seg.append("\n")
                 content_text.append(seg)
-
-            if hidden_lines > 0:
-                try:
-                    content_text.append(Text.from_markup(f"[dim]... {hidden_lines} lines above[/dim]"))
-                except MarkupError:
-                    content_text.append(Text(f"... {hidden_lines} lines above"))
         else:
             # Interpret "No content" string as markup as well so callers
             # can control styling if desired.
@@ -1571,6 +1549,8 @@ class OutputPanel:
         # Cache the result and clear the dirty flag
         self._cached_render = result
         self._dirty = False
+        self._measured_segments = None
+        self._measured_width = 0
         self._last_title = self.title
         try:
             self._last_term_cols = shutil.get_terminal_size(fallback=(100, 24)).columns

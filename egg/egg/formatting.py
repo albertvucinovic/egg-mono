@@ -94,8 +94,10 @@ class FormattingMixin:
             f"[dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
         )
 
-    def format_tree(self, root_tid: Optional[str] = None) -> str:
-        """Format a thread tree for display (optimized with bulk queries)."""
+    def format_tree(
+        self, root_tid: Optional[str] = None, *, include_root: bool = True
+    ) -> str:
+        """Format a thread tree, optionally omitting the selected root row."""
         # Fetch all data upfront to avoid N+1 queries
         all_threads = list_threads(self.db)
         if not all_threads:
@@ -208,6 +210,14 @@ class FormattingMixin:
         lines: List[str] = []
         if not roots:
             return 'No threads.'
+        if root_tid and not include_root:
+            root_children = children_map.get(root_tid, [])
+            for index, child_id in enumerate(root_children):
+                lines.extend(render_tree(
+                    child_id,
+                    is_last=index == len(root_children) - 1,
+                ))
+            return "\n".join(lines)
         for rid in roots:
             lines.extend(render_tree(rid))
         return "\n".join(lines)
@@ -275,6 +285,14 @@ class FormattingMixin:
                 SELECT thread_id FROM descendants
                 EXCEPT
                 SELECT thread_id FROM active_descendants
+            ), inactive_direct(thread_id) AS (
+                SELECT thread_id FROM direct_children
+                EXCEPT
+                SELECT thread_id FROM active_descendants
+            ), inactive_nested(thread_id) AS (
+                SELECT thread_id FROM nested_descendants
+                EXCEPT
+                SELECT thread_id FROM active_descendants
             )
             SELECT
                 (SELECT COUNT(*) FROM descendants),
@@ -282,34 +300,36 @@ class FormattingMixin:
                 (SELECT COUNT(*) FROM nested_descendants),
                 (SELECT COUNT(*) FROM active_descendants),
                 (SELECT COUNT(*) FROM inactive_descendants),
+                (SELECT COUNT(*) FROM inactive_direct),
+                (SELECT COUNT(*) FROM inactive_nested),
                 COALESCE((
                     SELECT GROUP_CONCAT(thread_id, '|') FROM (
                         SELECT thread_id FROM descendants
-                        ORDER BY thread_id LIMIT ?
+                        ORDER BY thread_id DESC LIMIT ?
                     )
                 ), ''),
                 COALESCE((
                     SELECT GROUP_CONCAT(thread_id, '|') FROM (
-                        SELECT thread_id FROM direct_children
-                        ORDER BY thread_id LIMIT ?
+                        SELECT thread_id FROM inactive_direct
+                        ORDER BY thread_id DESC LIMIT ?
                     )
                 ), ''),
                 COALESCE((
                     SELECT GROUP_CONCAT(thread_id, '|') FROM (
-                        SELECT thread_id FROM nested_descendants
-                        ORDER BY thread_id LIMIT ?
+                        SELECT thread_id FROM inactive_nested
+                        ORDER BY thread_id DESC LIMIT ?
                     )
                 ), ''),
                 COALESCE((
                     SELECT GROUP_CONCAT(thread_id, '|') FROM (
                         SELECT thread_id FROM active_descendants
-                        ORDER BY thread_id LIMIT ?
+                        ORDER BY thread_id DESC LIMIT ?
                     )
                 ), ''),
                 COALESCE((
                     SELECT GROUP_CONCAT(thread_id, '|') FROM (
                         SELECT thread_id FROM inactive_descendants
-                        ORDER BY thread_id LIMIT ?
+                        ORDER BY thread_id DESC LIMIT ?
                     )
                 ), '')
             """,
@@ -324,38 +344,46 @@ class FormattingMixin:
         descendant_count = int(row[0] or 0) if row else 0
 
         if descendant_count <= CHILDREN_PANEL_MAXIMAL_LIMIT:
-            return f"{identity}\n{self.format_tree(root_tid)}"
+            descendant_tree = self.format_tree(root_tid, include_root=False)
+            return f"{identity}\n{descendant_tree}" if descendant_tree else identity
 
         direct_count = int(row[1] or 0)
         nested_count = int(row[2] or 0)
         streaming_count = int(row[3] or 0)
         inactive_count = int(row[4] or 0)
-        lines = [
-            identity,
-            f"[dim]Descendants ({descendant_count}):[/] "
-            f"{id_preview(str(row[5] or ''), descendant_count)}",
-            f"[bold yellow]Streaming ({streaming_count}):[/] "
-            f"{id_preview(str(row[8] or ''), streaming_count)}",
-        ]
+        lines = [identity]
+        if streaming_count:
+            lines.append(
+                f"[bold yellow]Streaming ({streaming_count}):[/] "
+                f"{id_preview(str(row[10] or ''), streaming_count)}"
+            )
 
-        # Direct/nested detail is useful only when both categories exist; a
-        # flat subtree is already described by the all-descendants line.
         if direct_count and nested_count:
             lines.append(
-                f"[dim]Direct children ({direct_count}):[/] "
-                f"{id_preview(str(row[6] or ''), direct_count)}"
+                f"[dim]{descendant_count} descendants · "
+                f"{direct_count} direct · {nested_count} nested[/]"
+            )
+            lines.append(
+                f"[dim]Direct (non-streaming):[/] "
+                f"{id_preview(str(row[8] or ''), int(row[5] or 0))}"
             )
             if len(lines) < 5:
                 lines.append(
-                    f"[dim]Nested descendants ({nested_count}):[/] "
-                    f"{id_preview(str(row[7] or ''), nested_count)}"
+                    f"[dim]Nested (non-streaming):[/] "
+                    f"{id_preview(str(row[9] or ''), int(row[6] or 0))}"
                 )
-
-        if inactive_count and len(lines) < 5:
-            lines.append(
-                f"[dim]Not streaming ({inactive_count}):[/] "
-                f"{id_preview(str(row[9] or ''), inactive_count)}"
-            )
+        else:
+            if streaming_count:
+                if inactive_count:
+                    lines.append(
+                        f"[dim]Other descendants ({inactive_count}):[/] "
+                        f"{id_preview(str(row[11] or ''), inactive_count)}"
+                    )
+            else:
+                lines.append(
+                    f"[dim]Descendants ({descendant_count}):[/] "
+                    f"{id_preview(str(row[7] or ''), descendant_count)}"
+                )
         return "\n".join(lines)
 
     def _compaction_marker_text(self, marker: Dict[str, Any]) -> str:

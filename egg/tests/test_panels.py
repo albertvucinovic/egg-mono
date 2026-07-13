@@ -196,9 +196,19 @@ class TestUpdatePanels:
         assert calls == [egg_app.current_thread]
         assert egg_app.children_output.content == "ADAPTIVE CHILDREN"
 
-    def test_children_panel_wraps_current_identity_instead_of_cropping(self, egg_app):
+    def test_children_panel_wraps_current_identity_instead_of_cropping(
+        self, egg_app, monkeypatch
+    ):
         """A narrow terminal must retain current ID, name, and description."""
         from rich.console import Console
+        import os
+        import shutil
+
+        monkeypatch.setattr(
+            shutil,
+            "get_terminal_size",
+            lambda fallback=None: os.terminal_size((44, 24)),
+        )
 
         egg_app.children_output.set_content(
             "Current: full-thread-id | Name: A descriptive thread name | "
@@ -217,7 +227,7 @@ class TestUpdatePanels:
         """Idle panel ticks should not rescan the full thread tree."""
         calls = {"count": 0}
 
-        def fake_format_tree(thread_id):
+        def fake_format_tree(thread_id, **kwargs):
             calls["count"] += 1
             return f"tree for {thread_id[-8:]}"
 
@@ -247,7 +257,7 @@ class TestUpdatePanels:
         """A watcher/explicit dirty mark should refresh before the 1s fallback."""
         calls = {"count": 0}
 
-        def fake_format_tree(thread_id):
+        def fake_format_tree(thread_id, **kwargs):
             calls["count"] += 1
             return f"tree {calls['count']} for {thread_id[-8:]}"
 
@@ -266,7 +276,7 @@ class TestUpdatePanels:
         """Input echo should not wait on expensive children tree refreshes."""
         calls = {"count": 0}
 
-        def fake_format_tree(thread_id):
+        def fake_format_tree(thread_id, **kwargs):
             calls["count"] += 1
             return f"tree {calls['count']} for {thread_id[-8:]}"
 
