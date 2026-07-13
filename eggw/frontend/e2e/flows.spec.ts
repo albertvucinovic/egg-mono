@@ -1149,6 +1149,157 @@ test.describe('Streaming', () => {
   });
 });
 
+test.describe('Scroll intent state machines', () => {
+  test('services clamped top demand and reveals loaded history before fetching', async ({ page }) => {
+    const threadId = 'scroll-top-demand';
+    let messageRequests = 0;
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      messageRequests += 1;
+      const beforeId = new URL(request.url()).searchParams.get('before_id');
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: beforeId
+          ? {
+              items: [{ id: 'network-older-message', role: 'user', content: 'NETWORK OLDER PAGE' }],
+              snapshot_cursor: 0,
+              next_before: null,
+            }
+          : {
+              items: Array.from({ length: 70 }, (_, index) => ({
+                id: `loaded-history-${index}`,
+                role: index % 2 ? 'assistant' : 'user',
+                content: `loaded ${index}`,
+              })),
+              snapshot_cursor: 0,
+              next_before: 'loaded-history-0',
+            },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+    await chat.evaluate((element) => { element.scrollTop = 0; });
+    await chat.hover();
+
+    const anchorBefore = await page.locator('[data-message-id="loaded-history-65"]').evaluate((element) => {
+      const scrollport = element.closest('[data-testid="chat-panel"]')!;
+      return element.getBoundingClientRect().top - scrollport.getBoundingClientRect().top;
+    });
+    await page.mouse.wheel(0, -900);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(65);
+    expect(messageRequests).toBe(1);
+    await expect(chat).not.toContainText('NETWORK OLDER PAGE');
+    await expect(page.locator('[data-message-id="loaded-history-65"]')).toBeVisible();
+    await expect.poll(() => page.locator('[data-message-id="loaded-history-65"]').evaluate((element) => {
+      const scrollport = element.closest('[data-testid="chat-panel"]')!;
+      return Math.round(element.getBoundingClientRect().top - scrollport.getBoundingClientRect().top);
+    })).toBe(Math.round(anchorBefore));
+    await chat.evaluate((element) => { element.scrollTop = 0; });
+
+    // The restoration leaves the scrollport clamped at top. A second upward
+    // wheel still carries demand even though it need not emit a scroll event.
+    await page.mouse.wheel(0, -900);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(70);
+    expect(messageRequests).toBe(1);
+    await chat.evaluate((element) => { element.scrollTop = 0; });
+
+    await page.mouse.wheel(0, -900);
+    await expect.poll(() => messageRequests).toBe(2);
+    await expect(chat).toContainText('NETWORK OLDER PAGE');
+  });
+
+  test('keeps following through rapid canonical tool-result reconciliation and lets user-up win', async ({ page }) => {
+    const threadId = 'scroll-rapid-tool-results';
+    const initialMessages = Array.from({ length: 12 }, (_, index) => ({
+      id: `rapid-scroll-message-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `${index}: ${'long transcript content '.repeat(20)}`,
+    }));
+    await mockThreadShell(page, threadId, { messages: initialMessages });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'rapid-scroll-invoke', live_replay_cursor: 0 },
+    }));
+
+    let releaseResults!: () => void;
+    const resultsReady = new Promise<void>((resolve) => { releaseResults = resolve; });
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      await resultsReady;
+      const ts = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>, msgId: string | null = null) => JSON.stringify({
+        event_id: `rapid-scroll-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts,
+        msg_id: msgId,
+        invoke_id: 'rapid-scroll-invoke',
+        chunk_seq: null,
+        payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>, msgId: string | null = null) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload, msgId)}`, '',
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          ...block(1, 'stream.open', { stream_kind: 'tool' }),
+          ...block(2, 'stream.delta', { tool: { id: 'rapid-tool-a', name: 'bash', text: 'live a' } }),
+          ...block(3, 'stream.delta', { tool: { id: 'rapid-tool-b', name: 'bash', text: 'live b' } }),
+          ...block(4, 'msg.create', { role: 'assistant', content: '', tool_calls: [
+            { id: 'rapid-tool-a', name: 'bash', arguments: '{}' },
+            { id: 'rapid-tool-b', name: 'bash', arguments: '{}' },
+          ] }, 'rapid-tool-calls'),
+          ...block(5, 'msg.create', { role: 'tool', tool_call_id: 'rapid-tool-a', name: 'bash', content: `RESULT A ${'a'.repeat(12_000)}` }, 'rapid-result-a'),
+          ...block(6, 'msg.create', { role: 'tool', tool_call_id: 'rapid-tool-b', name: 'bash', content: `RESULT B ${'b'.repeat(12_000)}` }, 'rapid-result-b'),
+          ...block(7, 'stream.close', {}),
+          '',
+        ].join('\n'),
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    const geometry = () => chat.evaluate((element) => ({
+      top: element.scrollTop,
+      distance: element.scrollHeight - element.scrollTop - element.clientHeight,
+    }));
+    await chat.focus();
+    await page.keyboard.press('End');
+    await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+
+    releaseResults();
+    await expect(chat).toContainText('RESULT B', { timeout: 5000 });
+    await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+    await page.getByTestId('chat-panel-content').evaluate((element) => {
+      const later = document.createElement('div');
+      later.style.height = '400px';
+      later.textContent = 'later provider result';
+      element.append(later);
+    });
+    await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+
+    await chat.hover();
+    await page.mouse.wheel(0, -700);
+    await expect.poll(async () => (await geometry()).distance).toBeGreaterThan(100);
+    const detachedTop = (await geometry()).top;
+    await page.getByTestId('chat-panel-content').evaluate((element) => {
+      const later = document.createElement('div');
+      later.style.height = '320px';
+      later.textContent = 'must not steal user position';
+      element.append(later);
+    });
+    await expect.poll(async () => Math.abs((await geometry()).top - detachedTop)).toBeLessThanOrEqual(2);
+  });
+});
+
 test.describe('Per-thread transcript state', () => {
   test('preserves paginated thread A while navigating to thread B and back', async ({ page }) => {
     await page.addInitScript(() => {

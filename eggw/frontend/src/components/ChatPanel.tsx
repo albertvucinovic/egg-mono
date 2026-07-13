@@ -33,6 +33,13 @@ import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcr
 import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
 import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
 import { expandedTranscriptStartId, transcriptWindow } from "@/lib/transcriptWindow";
+import {
+  IDLE_HISTORY_DEMAND,
+  reduceHistoryDemand,
+  reduceLiveEdgeState,
+  type HistoryDemandState,
+  type LiveEdgeState,
+} from "@/lib/chatScrollState";
 import clsx from "clsx";
 import { eggwSyntaxTheme } from "@/lib/syntaxTheme";
 import { Button, IconButton, StatusChip } from "@/components/ui/primitives";
@@ -859,6 +866,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
         !showBorders && "eggw-role-card-borderless",
       )}
       data-message-role={displayRole}
+      data-message-id={message.id || undefined}
     >
       {/* Header */}
       <div className="eggw-message-header">
@@ -1327,6 +1335,13 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const streamingToolPreviewFlushRef = useRef<IntervalCoalescer<number> | null>(null);
   const loadingOlderRef = useRef(false);
   const revealingLoadedRef = useRef(false);
+  const historyDemandRef = useRef<HistoryDemandState>(IDLE_HISTORY_DEMAND);
+  const historyDemandRunRef = useRef<(() => void) | null>(null);
+  const pendingHistoryAnchorRef = useRef<{
+    anchor: { id: string; offset: number } | null;
+    fallbackTop: number;
+    fallbackHeight: number;
+  } | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [renderStartMessageId, setRenderStartMessageId] = useState<string | null>(null);
@@ -1340,6 +1355,11 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     () => transcriptWindow(messages, renderStartMessageId),
     [messages, renderStartMessageId],
   );
+  const historyAvailabilityRef = useRef({ canReveal: false, canFetch: false });
+  historyAvailabilityRef.current = {
+    canReveal: renderedTranscript.hiddenCount > 0,
+    canFetch: Boolean(transcriptQuery.hasNextPage),
+  };
   const streamingToolCalls = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolCalls);
   const streamingToolOutputs = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolOutputs);
   const streamingModelKey = useAppStore((state) => state.streamingByThread[threadId]?.streamingModelKey || null);
@@ -1373,10 +1393,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     return () => window.clearInterval(intervalId);
   }, [shouldUpdateTiming]);
 
-  // Stick-to-bottom scrolling: track if user intentionally scrolled away
-  const stickToBottomRef = useRef(true);
+  // Live-edge following is owned by explicit user intent. Scroll/layout events
+  // never infer provenance from a coordinate that can become stale mid-commit.
+  const liveEdgeStateRef = useRef<LiveEdgeState>("following");
   const rafIdRef = useRef<number | null>(null);
-  const programmaticScrollTargetRef = useRef<number | null>(null);
 
   const distanceFromBottom = useCallback(() => {
     if (!scrollRef.current) return 0;
@@ -1388,47 +1408,115 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     return distanceFromBottom() <= STICKY_BOTTOM_THRESHOLD_PX;
   }, [distanceFromBottom]);
 
-  // In sticky mode every output append must keep following the tail. User
-  // input detaches synchronously, so a previously queued frame cannot undo an
-  // intentional scroll into history.
   const scrollToBottomNow = useCallback(() => {
     const el = scrollRef.current;
-    if (!el || !stickToBottomRef.current) return;
-    const target = Math.max(0, el.scrollHeight - el.clientHeight);
-    programmaticScrollTargetRef.current = target;
-    el.scrollTop = target;
+    if (!el || liveEdgeStateRef.current !== "following") return;
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
   }, []);
 
+  // Keep pumping until current layout converges. ResizeObserver restarts this
+  // pump if a later React commit/image/tool result grows the tail again.
+  const scrollToBottom = useCallback(() => {
+    if (liveEdgeStateRef.current !== "following" || rafIdRef.current !== null) return;
+    const converge = () => {
+      rafIdRef.current = null;
+      if (liveEdgeStateRef.current !== "following") return;
+      scrollToBottomNow();
+      if (distanceFromBottom() > 1) {
+        rafIdRef.current = requestAnimationFrame(converge);
+      }
+    };
+    rafIdRef.current = requestAnimationFrame(converge);
+  }, [distanceFromBottom, scrollToBottomNow]);
+
+  const detachFromBottom = useCallback(() => {
+    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "user_toward_history" });
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+  }, []);
+
+  const followBottom = useCallback(() => {
+    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "user_reached_live_edge" });
+    scrollToBottom();
+  }, [scrollToBottom]);
+
+  const captureHistoryAnchor = useCallback(() => {
+    const scrollport = scrollRef.current;
+    if (!scrollport) return null;
+    const scrollportTop = scrollport.getBoundingClientRect().top;
+    const candidates = Array.from(scrollport.querySelectorAll<HTMLElement>("[data-message-id]"));
+    for (const candidate of candidates) {
+      const rect = candidate.getBoundingClientRect();
+      if (rect.bottom > scrollportTop) {
+        return { id: candidate.dataset.messageId || "", offset: rect.top - scrollportTop };
+      }
+    }
+    return null;
+  }, []);
+
+  const restoreHistoryAnchor = useCallback((anchor: { id: string; offset: number } | null, fallbackTop: number, fallbackHeight: number) => {
+    const scrollport = scrollRef.current;
+    if (!scrollport) return;
+    const anchored = anchor
+      ? Array.from(scrollport.querySelectorAll<HTMLElement>("[data-message-id]"))
+          .find((candidate) => candidate.dataset.messageId === anchor.id) || null
+      : null;
+    if (anchored && anchor) {
+      const scrollportTop = scrollport.getBoundingClientRect().top;
+      scrollport.scrollTop += anchored.getBoundingClientRect().top - scrollportTop - anchor.offset;
+      return;
+    }
+    scrollport.scrollTop = fallbackTop + (scrollport.scrollHeight - fallbackHeight);
+  }, []);
+
+  const settleHistoryDemand = useCallback(() => {
+    revealingLoadedRef.current = false;
+    loadingOlderRef.current = false;
+    setIsLoadingOlder(false);
+    historyAvailabilityRef.current = {
+      canReveal: renderedTranscript.hiddenCount > 0,
+      canFetch: Boolean(transcriptQuery.hasNextPage),
+    };
+    historyDemandRef.current = reduceHistoryDemand(
+      historyDemandRef.current,
+      { type: "settled" },
+      historyAvailabilityRef.current,
+    );
+    if (historyDemandRef.current.phase !== "idle") queueMicrotask(() => historyDemandRunRef.current?.());
+  }, [renderedTranscript.hiddenCount, transcriptQuery.hasNextPage]);
+
   const revealFromMessage = useCallback((startMessageId: string | null) => {
-    if (revealingLoadedRef.current) return;
     const el = scrollRef.current;
+    const anchor = captureHistoryAnchor();
     const previousScrollHeight = el?.scrollHeight ?? 0;
     const previousScrollTop = el?.scrollTop ?? 0;
     revealingLoadedRef.current = true;
+    pendingHistoryAnchorRef.current = {
+      anchor,
+      fallbackTop: previousScrollTop,
+      fallbackHeight: previousScrollHeight,
+    };
     setRenderStartMessageId(startMessageId);
-    requestAnimationFrame(() => {
-      const currentEl = scrollRef.current;
-      if (currentEl) {
-        currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
-      }
-      requestAnimationFrame(() => {
-        revealingLoadedRef.current = false;
-      });
-    });
-  }, []);
+  }, [captureHistoryAnchor, restoreHistoryAnchor, settleHistoryDemand]);
 
   const expandLoadedTranscript = useCallback(() => {
     revealFromMessage(expandedTranscriptStartId(messages, renderedTranscript.startIndex));
   }, [messages, renderedTranscript.startIndex, revealFromMessage]);
 
   const loadOlderMessages = useCallback(async () => {
-    if (loadingOlderRef.current || isLoadingOlder || !transcriptQuery.hasNextPage) return;
+    if (!transcriptQuery.hasNextPage) {
+      settleHistoryDemand();
+      return;
+    }
     const el = scrollRef.current;
+    const anchor = captureHistoryAnchor();
     const previousScrollHeight = el?.scrollHeight ?? 0;
     const previousScrollTop = el?.scrollTop ?? 0;
     loadingOlderRef.current = true;
     setIsLoadingOlder(true);
-    stickToBottomRef.current = false;
+    detachFromBottom();
     try {
       const result = await transcriptQuery.fetchNextPage();
       const updatedMessages = flattenTranscript(result.data);
@@ -1436,58 +1524,73 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       const previousStartIndex = previousStartId
         ? updatedMessages.findIndex((message) => message.id === previousStartId)
         : updatedMessages.length;
-      const nextStartId = expandedTranscriptStartId(updatedMessages, previousStartIndex);
-      setRenderStartMessageId(nextStartId);
-      requestAnimationFrame(() => {
-        const currentEl = scrollRef.current;
-        if (!currentEl) return;
-        currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
-      });
+      pendingHistoryAnchorRef.current = {
+        anchor,
+        fallbackTop: previousScrollTop,
+        fallbackHeight: previousScrollHeight,
+      };
+      setRenderStartMessageId(expandedTranscriptStartId(updatedMessages, previousStartIndex));
     } catch (error) {
       console.error("Failed to load older messages:", error);
-    } finally {
-      loadingOlderRef.current = false;
-      setIsLoadingOlder(false);
+      settleHistoryDemand();
     }
-  }, [isLoadingOlder, renderedTranscript.messages, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
+  }, [captureHistoryAnchor, detachFromBottom, renderedTranscript.messages, restoreHistoryAnchor, settleHistoryDemand, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
+
+  const runHistoryDemand = useCallback(() => {
+    if (historyDemandRef.current.phase === "revealing") {
+      expandLoadedTranscript();
+    } else if (historyDemandRef.current.phase === "fetching") {
+      void loadOlderMessages();
+    }
+  }, [expandLoadedTranscript, loadOlderMessages]);
+  historyDemandRunRef.current = runHistoryDemand;
+
+  const demandOlderHistory = useCallback(() => {
+    detachFromBottom();
+    const previous = historyDemandRef.current;
+    const next = reduceHistoryDemand(
+      previous,
+      { type: "older_intent" },
+      { canReveal: renderedTranscript.hiddenCount > 0, canFetch: Boolean(transcriptQuery.hasNextPage) },
+    );
+    historyDemandRef.current = next;
+    if (previous.phase === "idle" && next.phase !== "idle") runHistoryDemand();
+  }, [detachFromBottom, renderedTranscript.hiddenCount, runHistoryDemand, transcriptQuery.hasNextPage]);
+
+  useEffect(() => {
+    const pending = pendingHistoryAnchorRef.current;
+    if (!pending) return;
+    pendingHistoryAnchorRef.current = null;
+    restoreHistoryAnchor(pending.anchor, pending.fallbackTop, pending.fallbackHeight);
+    requestAnimationFrame(settleHistoryDemand);
+  }, [renderStartMessageId, renderedTranscript.startIndex, restoreHistoryAnchor, settleHistoryDemand]);
 
   const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    const programmaticTarget = programmaticScrollTargetRef.current;
-    if (el && programmaticTarget !== null && Math.abs(el.scrollTop - programmaticTarget) <= 1) {
-      programmaticScrollTargetRef.current = null;
-      if (stickToBottomRef.current && !isAtBottom()) requestAnimationFrame(scrollToBottomNow);
-    } else {
-      programmaticScrollTargetRef.current = null;
-      stickToBottomRef.current = isAtBottom();
-    }
-    if (el && el.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX && !loadingOlderRef.current && !revealingLoadedRef.current) {
-      if (renderedTranscript.hiddenCount > 0) {
-        expandLoadedTranscript();
-      } else {
-        void loadOlderMessages();
-      }
-    }
-  }, [expandLoadedTranscript, isAtBottom, loadOlderMessages, renderedTranscript.hiddenCount, scrollToBottomNow]);
-
-  const detachFromBottom = useCallback(() => {
-    stickToBottomRef.current = false;
-    programmaticScrollTargetRef.current = null;
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
-    }
+    // Geometry changes are not user intent. Wheel/touch/key/scrollbar handlers
+    // own FOLLOWING/DETACHED transitions.
   }, []);
 
   const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
-    if (event.deltaY >= 0 || nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
-    detachFromBottom();
-  }, [detachFromBottom]);
+    if (nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
+    if (event.deltaY < 0) {
+      detachFromBottom();
+      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+      return;
+    }
+    if (event.deltaY > 0) requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
+  }, [demandOlderHistory, detachFromBottom, followBottom, isAtBottom]);
 
   const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     if (event.clientX >= rect.right - 20) detachFromBottom();
   }, [detachFromBottom]);
+
+  const handlePointerUp = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (event.clientX < rect.right - 20) return;
+    if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+    else if (isAtBottom()) followBottom();
+  }, [demandOlderHistory, followBottom, isAtBottom]);
 
   const lastTouchYRef = useRef<number | null>(null);
   const handleTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
@@ -1498,42 +1601,28 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     const nextY = event.touches[0]?.clientY;
     const previousY = lastTouchYRef.current;
     lastTouchYRef.current = nextY ?? null;
-    if (nextY !== undefined && previousY !== null && nextY > previousY) detachFromBottom();
-  }, [detachFromBottom]);
+    if (nextY !== undefined && previousY !== null && nextY > previousY) {
+      detachFromBottom();
+      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+    } else if (nextY !== undefined && previousY !== null && nextY < previousY) {
+      requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
+    }
+  }, [demandOlderHistory, detachFromBottom, followBottom, isAtBottom]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "End") {
-      stickToBottomRef.current = true;
-      programmaticScrollTargetRef.current = null;
-      requestAnimationFrame(scrollToBottomNow);
+      followBottom();
       return;
     }
     if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
       detachFromBottom();
+      if (event.currentTarget.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) demandOlderHistory();
+      return;
     }
-  }, [detachFromBottom, scrollToBottomNow]);
-
-  // Scroll to bottom using requestAnimationFrame for smooth, reliable scrolling.
-  const scrollToBottom = useCallback(() => {
-    if (!stickToBottomRef.current) return;
-    if (rafIdRef.current !== null) return; // Already scheduled
-
-    rafIdRef.current = requestAnimationFrame(() => {
-      rafIdRef.current = null;
-      if (!stickToBottomRef.current) return;
-
-      scrollToBottomNow();
-
-      // For fast streams, content can grow again in the same frame.  Re-check
-      // for a second frame and keep sticky mode enabled if another adjustment
-      // is needed.
-      requestAnimationFrame(() => {
-        if (stickToBottomRef.current && distanceFromBottom() > 1) {
-          scrollToBottomNow();
-        }
-      });
-    });
-  }, [distanceFromBottom, scrollToBottomNow]);
+    if (["ArrowDown", "PageDown"].includes(event.key) || (event.key === " " && !event.shiftKey)) {
+      requestAnimationFrame(() => { if (isAtBottom()) followBottom(); });
+    }
+  }, [demandOlderHistory, detachFromBottom, followBottom, isAtBottom]);
 
   const flushStreamingText = useCallback(() => {
     recordStreamingFlush("text");
@@ -1579,7 +1668,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
       if (!el) return;
       const lastIndex = lastToolOutputIndexRef.current[toolId] || 0;
       appended = appendBufferedTextChunks(el, chunks, lastIndex) || appended;
-      if (stickToBottomRef.current) {
+      if (liveEdgeStateRef.current === "following") {
         el.scrollTop = el.scrollHeight;
       }
       lastToolOutputIndexRef.current[toolId] = chunks.length;
@@ -1792,8 +1881,10 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
 
   // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
-    stickToBottomRef.current = true;
+    liveEdgeStateRef.current = reduceLiveEdgeState(liveEdgeStateRef.current, { type: "thread_changed" });
+    historyDemandRef.current = reduceHistoryDemand(historyDemandRef.current, { type: "reset" }, { canReveal: false, canFetch: false });
     loadingOlderRef.current = false;
+    revealingLoadedRef.current = false;
     setRenderStartMessageId(null);
     setIsLoadingOlder(false);
     requestAnimationFrame(() => {
@@ -1814,7 +1905,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
 
   // Scroll to bottom when new streaming tool calls or tool outputs appear (tool headers)
   useEffect(() => {
-    if ((Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0) && stickToBottomRef.current) {
+    if ((Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0) && liveEdgeStateRef.current === "following") {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           scrollToBottomNow();
@@ -1871,6 +1962,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
         onKeyDown={handleKeyDown}
         aria-label="Conversation transcript"
         aria-busy={isLoading || isStreaming}
@@ -1901,7 +1993,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                 <div className="mb-4 flex justify-center">
                   <Button
                     variant="secondary"
-                    onClick={() => void loadOlderMessages()}
+                    onClick={demandOlderHistory}
                     disabled={isLoadingOlder}
                     data-testid="load-older-messages"
                   >
@@ -1913,7 +2005,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                 <div className="mb-4 flex justify-center">
                   <Button
                     variant="secondary"
-                    onClick={expandLoadedTranscript}
+                    onClick={demandOlderHistory}
                     data-testid="show-more-loaded-messages"
                   >
                     Show 60 older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
