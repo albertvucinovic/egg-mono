@@ -19,7 +19,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const systemLogs = useAppStore((state) => state.systemLogs);
   const clearSystemLogs = useAppStore((state) => state.clearSystemLogs);
-  const streamingKind = useAppStore((state) => state.streamingKind);
+  const streamingKind = useAppStore((state) => currentThreadId ? state.streamingByThread[currentThreadId]?.streamingKind || null : null);
 
   // Fetch current thread details
   const { data: currentThreadData } = useQuery({
@@ -66,7 +66,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     enabled: !!currentThreadId && currentThreadData?.has_children,
   });
 
-  const isStreaming = useAppStore((state) => state.isStreaming);
+  const isStreaming = useAppStore((state) => currentThreadId ? state.streamingByThread[currentThreadId]?.isStreaming || false : false);
 
   // Fetch token stats for current thread.  ThreadPage owns live polling for the
   // shared stats query so this side panel does not duplicate expensive reads on

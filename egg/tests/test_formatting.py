@@ -817,3 +817,221 @@ class TestFormatModelInfo:
 
         # Either empty or some default indicator
         assert isinstance(info, str)
+
+
+class TestFormatChildrenPanel:
+    """Tests for adaptive Children panel subtree density."""
+
+    @staticmethod
+    def _child(egg_app, parent_id, suffix):
+        parent = egg_app.db.get_thread(parent_id)
+        thread_id = f"panel-child-{suffix:08d}"
+        egg_app.db.create_thread(
+            thread_id=thread_id,
+            name=f"Child {suffix}",
+            parent_id=parent_id,
+            initial_model_key=parent.initial_model_key,
+            depth=parent.depth + 1,
+        )
+        return thread_id
+
+    def test_always_shows_current_id_name_and_description_on_one_line(self, egg_app):
+        root = egg_app.db.get_thread(egg_app.current_thread)
+        egg_app.db.conn.execute(
+            "UPDATE threads SET name=?, short_recap=? WHERE thread_id=?",
+            ("Current [root]\nname", "Description [details]\ncontinued", root.thread_id),
+        )
+        egg_app.db.conn.commit()
+
+        first_line = egg_app.format_children_panel(root.thread_id).splitlines()[0]
+
+        assert first_line == (
+            f"[bold cyan]Current:[/] {root.thread_id} [dim]|[/] "
+            r"[bold]Name:[/] Current \[root] name [dim]|[/] "
+            r"[bold]Description:[/] Description \[details] continued"
+        )
+
+    def test_missing_current_metadata_uses_explicit_placeholders(self, egg_app):
+        root_id = egg_app.current_thread
+        egg_app.db.conn.execute(
+            "UPDATE threads SET name=NULL, short_recap=NULL WHERE thread_id=?",
+            (root_id,),
+        )
+        egg_app.db.conn.commit()
+
+        first_line = egg_app.format_children_panel(root_id).splitlines()[0]
+
+        assert first_line == (
+            f"[bold cyan]Current:[/] {root_id} [dim]|[/] "
+            "[bold]Name:[/] Unnamed [dim]|[/] "
+            "[bold]Description:[/] No description"
+        )
+
+    def test_maximal_through_four_descendants_excludes_view_root_from_count(
+        self, egg_app, monkeypatch
+    ):
+        parent = egg_app.current_thread
+        child = parent
+        for number in range(4):
+            child = self._child(egg_app, child, number)
+
+        calls = []
+        monkeypatch.setattr(
+            egg_app, "format_tree", lambda root, **kwargs: calls.append((root, kwargs)) or "MAXIMAL TREE"
+        )
+
+        text = egg_app.format_children_panel(parent)
+
+        assert text.endswith("MAXIMAL TREE")
+        assert f"Current:[/] {parent}" in text.splitlines()[0]
+        assert calls == [(parent, {"include_root": False})]
+
+    def test_maximal_leaf_does_not_repeat_current_as_tree_row(self, egg_app):
+        text = egg_app.format_children_panel(egg_app.current_thread)
+
+        assert len(text.splitlines()) == 1
+        assert text.count(egg_app.current_thread) == 1
+        assert "[CUR]" not in text
+
+    @pytest.mark.parametrize("descendant_count", [5, 15])
+    def test_non_maximal_boundaries_show_useful_status_groups(
+        self, egg_app, descendant_count, monkeypatch
+    ):
+        parent = egg_app.current_thread
+        descendant_ids = []
+        branch_parent = parent
+        for number in range(descendant_count):
+            child = self._child(egg_app, branch_parent, number)
+            descendant_ids.append(child)
+            branch_parent = child
+
+        streaming = descendant_ids[-1]
+        assert egg_app.db.try_open_stream(
+            streaming, "compact-stream", "2999-01-01 00:00:00",
+            owner="test", purpose="assistant_stream"
+        )
+        monkeypatch.setattr(
+            egg_app,
+            "format_tree",
+            lambda root: pytest.fail("non-maximal rendering must not format the full tree"),
+        )
+
+        lines = egg_app.format_children_panel(parent).splitlines()
+
+        assert len(lines) == 5
+        assert "Streaming (1):" in lines[1]
+        assert streaming[-8:] in lines[1]
+        assert f"{descendant_count} descendants · 1 direct · {descendant_count - 1} nested" in lines[2]
+        assert "Direct (non-streaming):[/]" in lines[3]
+        assert "Nested (non-streaming):[/]" in lines[4]
+        assert "└─" not in "\n".join(lines)
+
+    def test_non_maximal_groups_escape_id_suffixes(self, egg_app):
+        parent = egg_app.current_thread
+        ids = [self._child(egg_app, parent, number) for number in range(4)]
+        marked_up_id = "panel-child-[x]12345"
+        egg_app.db.create_thread(
+            thread_id=marked_up_id,
+            name="Markup",
+            parent_id=parent,
+            initial_model_key=egg_app.db.get_thread(parent).initial_model_key,
+            depth=1,
+        )
+        ids.append(marked_up_id)
+        for number, thread_id in enumerate((ids[1], ids[3])):
+            assert egg_app.db.try_open_stream(
+                thread_id, f"stream-{number}", "2999-01-01 00:00:00",
+                owner="test", purpose="assistant_stream"
+            )
+
+        lines = egg_app.format_children_panel(parent).splitlines()
+
+        assert "Streaming (2):" in lines[1]
+        assert ids[1][-8:] in lines[1]
+        assert ids[3][-8:] in lines[1]
+        assert "Other descendants (3):" in lines[2]
+        assert ids[1][-8:] not in lines[2]
+        assert ids[3][-8:] not in lines[2]
+
+    def test_large_subtree_shows_streaming_id_and_bounded_previews(
+        self, egg_app, monkeypatch
+    ):
+        parent = egg_app.current_thread
+        descendants = [self._child(egg_app, parent, number) for number in range(37)]
+        streaming = descendants[-1]
+        assert egg_app.db.try_open_stream(
+            streaming, "minimal-stream", "2999-01-01 00:00:00",
+            owner="test", purpose="assistant_stream"
+        )
+        monkeypatch.setattr(
+            egg_app,
+            "format_tree",
+            lambda root: pytest.fail("large rendering must not format the full tree"),
+        )
+
+        lines = egg_app.format_children_panel(parent).splitlines()
+
+        assert len(lines) == 3
+        assert "Streaming (1):" in lines[1]
+        assert streaming[-8:] in lines[1]
+        assert "Other descendants (36):" in lines[2]
+        assert "+32 more" in lines[2]
+        assert streaming[-8:] not in lines[2]
+
+    def test_counts_only_descendants_of_selected_root(self, egg_app):
+        outer_root = egg_app.current_thread
+        selected = self._child(egg_app, outer_root, 100)
+        outside = self._child(egg_app, outer_root, 101)
+        selected_descendants = [
+            self._child(egg_app, selected, number) for number in range(5)
+        ]
+        for number in range(16):
+            self._child(egg_app, outside, 200 + number)
+        assert egg_app.db.try_open_stream(
+            outside, "outside-stream", "2999-01-01 00:00:00",
+            owner="test", purpose="assistant_stream"
+        )
+        assert egg_app.db.try_open_stream(
+            selected_descendants[0], "inside-stream", "2999-01-01 00:00:00",
+            owner="test", purpose="assistant_stream"
+        )
+
+        text = egg_app.format_children_panel(selected)
+
+        assert "Other descendants (4):" in text
+        assert "Streaming (1):" in text
+        assert "Direct children" not in text
+        assert "Nested descendants" not in text
+        assert outside[-8:] not in text
+
+    def test_non_maximal_omits_empty_streaming_row(self, egg_app):
+        parent = egg_app.current_thread
+        descendants = [self._child(egg_app, parent, number) for number in range(5)]
+
+        text = egg_app.format_children_panel(parent)
+
+        assert "Streaming" not in text
+        assert "Descendants (5):" in text
+        assert all(thread_id[-8:] in text for thread_id in descendants[-4:])
+
+    def test_format_tree_stays_maximal_for_large_subtrees(self, egg_app):
+        parent = egg_app.current_thread
+        descendants = [self._child(egg_app, parent, number) for number in range(16)]
+
+        text = egg_app.format_tree(parent)
+
+        assert parent[-8:] in text
+        assert all(thread_id[-8:] in text for thread_id in descendants)
+        assert "16 descendants" not in text
+        assert "└─" in text
+
+    def test_format_tree_can_render_only_descendant_forest(self, egg_app):
+        parent = egg_app.current_thread
+        child = self._child(egg_app, parent, 900)
+        grandchild = self._child(egg_app, child, 901)
+
+        text = egg_app.format_tree(parent, include_root=False)
+
+        assert parent[-8:] not in text
+        assert child[-8:] in text
+        assert grandchild[-8:] in text

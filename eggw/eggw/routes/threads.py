@@ -1,10 +1,9 @@
 """Thread API routes for eggw backend."""
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from eggthreads import (
     create_root_thread,
@@ -18,6 +17,8 @@ from eggthreads import (
     current_thread_model,
     thread_state,
     get_active_get_user_message_waiting_note,
+    ThreadEventFeed,
+    ThreadsDB,
 )
 
 from ..models import ThreadInfo, CreateThreadRequest
@@ -277,7 +278,10 @@ async def get_thread_children(thread_id: str):
 
 
 @router.get("/{thread_id}/state")
-async def get_thread_state_endpoint(thread_id: str):
+async def get_thread_state_endpoint(
+    thread_id: str,
+    snapshot_cursor: int | None = Query(default=None, ge=-1),
+):
     """Get the current state of a thread (running, waiting, etc.)."""
     if not core.db:
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -290,26 +294,28 @@ async def get_thread_state_endpoint(thread_id: str):
     state = "waiting_user" if get_user_waiting_note is not None else thread_state(core.db, thread_id)
     root_id = get_thread_root_id(thread_id)
 
-    streaming_kind = None
-    streaming_invoke_id = None
+    # This is the explicit initial live replay contract shared with the SSE
+    # feed. The caller supplies its coherent message snapshot cursor; active
+    # work rewinds only to the exact live invocation's stream.open. Legacy
+    # state callers that omit it get the current idle cursor.
+    if snapshot_cursor is None:
+        try:
+            snapshot_cursor = int(core.db.max_event_seq(thread_id))
+        except Exception:
+            snapshot_cursor = -1
+    replay_db = ThreadsDB(core.db.path)
     try:
-        row_open = core.db.current_open(thread_id)
-        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        if (
-            row_open is not None
-            and isinstance(row_open["lease_until"], str)
-            and row_open["lease_until"] > now_iso
-        ):
-            streaming_kind = row_open["purpose"]
-            streaming_invoke_id = row_open["invoke_id"]
-    except Exception:
-        streaming_kind = None
-        streaming_invoke_id = None
+        replay = ThreadEventFeed(replay_db).replay_cursor(thread_id, snapshot_cursor)
+    finally:
+        replay_db.conn.close()
+    streaming_kind = replay.streaming_kind
+    streaming_invoke_id = replay.active_invoke_id
 
     return {
         "state": state,
         "streaming_kind": streaming_kind,
         "streaming_invoke_id": streaming_invoke_id,
+        "live_replay_cursor": replay.after_seq,
         "active_get_user_wait": get_user_waiting_note is not None,
         "get_user_waiting_note": get_user_waiting_note,
         "scheduler_running": scheduler_running(root_id),

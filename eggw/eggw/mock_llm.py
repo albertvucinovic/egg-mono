@@ -35,6 +35,16 @@ class MockLLMClient:
     def __init__(self, models_path: Optional[str] = None, all_models_path: Optional[str] = None):
         self.registry = MockModelRegistry()
         self._response_delay = float(os.environ.get("EGG_MOCK_DELAY", "0.05"))
+        self.current_model_key: Optional[str] = None
+
+    def set_model(self, model_key: str) -> str:
+        """Mirror the model-selection contract used by the production client."""
+        self.current_model_key = model_key
+        return model_key
+
+    def set_model_with_config(self, model_key: str, _config: Dict[str, Any]) -> str:
+        """Accept resolved model metadata while retaining deterministic behavior."""
+        return self.set_model(model_key)
 
     def _get_last_user_message(self, messages: List[Dict[str, Any]]) -> str:
         """Extract the last user message content."""

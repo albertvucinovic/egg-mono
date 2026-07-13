@@ -10,6 +10,10 @@ Tests verify that:
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import signal
+import textwrap
+import time
 
 import pytest
 
@@ -70,6 +74,57 @@ class TestToolTimeout:
 
         assert "TIMEOUT" not in result
         assert "hello" in result
+
+    def test_bash_tool_completes_when_background_child_keeps_pipes_open(self, tmp_path, monkeypatch):
+        """Background descendants inheriting stdout/stderr must not hang Egg."""
+        eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+        tools = eggthreads.create_default_tools()
+        marker = tmp_path / "child.pid"
+        child = tmp_path / "hold_pipes.py"
+        child.write_text(
+            textwrap.dedent(
+                f"""
+                import os
+                import signal
+                import time
+
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                with open({str(marker)!r}, "w") as f:
+                    f.write(str(os.getpid()))
+                    f.flush()
+                time.sleep(4)
+                """
+            )
+        )
+
+        start = time.monotonic()
+        result = tools.execute(
+            "bash",
+            {
+                "script": f"python3 {child} &\nfor i in $(seq 1 100); do [ -f {marker} ] && break; sleep 0.05; done\necho shell done",
+                "timeout": 1,
+            },
+        )
+        elapsed = time.monotonic() - start
+
+        try:
+            child_pid = int(marker.read_text()) if marker.exists() else None
+            if child_pid:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+            assert elapsed < 3
+            assert "TIMEOUT" not in result
+            assert "shell done" in result
+        finally:
+            if marker.exists():
+                try:
+                    child_pid = int(marker.read_text())
+                    os.kill(child_pid, signal.SIGKILL)
+                except Exception:
+                    pass
 
     def test_python_tool_llm_timeout_kills_long_running_script(self, tmp_path, monkeypatch):
         """Python tool should timeout when LLM specifies timeout."""
@@ -474,7 +529,8 @@ class TestToolTimeout:
             )
             return await runner.run_once()
 
-        assert asyncio.run(asyncio.wait_for(run_once(), timeout=5)) is True
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(asyncio.wait_for(run_once(), timeout=5))
 
         events = [
             (row["type"], row["invoke_id"])
@@ -486,14 +542,14 @@ class TestToolTimeout:
         tool_invokes = [invoke for typ, invoke in events if typ == "stream.open" and invoke]
         assert len(tool_invokes) == 1
         invoke_id = tool_invokes[0]
-        assert ("tool_call.finished", invoke_id) in events
-        assert ("stream.close", invoke_id) in events
-        assert db.current_open(tid) is None
+        # Lease expiry fences timeout completion, output decisions, and close;
+        # the stale invocation cannot persist terminal state.
+        assert ("tool_call.finished", invoke_id) not in events
+        assert ("stream.close", invoke_id) not in events
+        assert not any(typ == "tool_call.output_approval" for typ, _ in events)
 
         state = eggthreads.build_tool_call_states(db, tid)[tcid]
-        assert state.state == "TC5"
-        assert state.finished_reason == "timeout"
-        assert "TIMEOUT" in (state.finished_output or "")
+        assert state.state == "TC3"
         started_payload = db.conn.execute(
             "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.execution_started'",
             (tid,),

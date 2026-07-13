@@ -62,9 +62,9 @@ def apply_spawn_child_configuration(args: Dict[str, Any], parent_id: str, child:
 
     db = ThreadsDB()
 
-    # Tool capability attenuation: create_child_thread has already copied the
-    # parent's effective tools configuration by value. A requested child
-    # allowlist can only narrow that inherited capability set.
+    # Tool capability attenuation: create_child_thread initializes policy
+    # atomically and effective reads intersect the complete live ancestry. A
+    # requested child allowlist can only narrow that inherited capability set.
     parent_cfg = get_thread_tools_config(db, parent_id)
     requested_allowed = tool_names_from_arg(args.get("allowed_tools"))
     if requested_allowed:

@@ -12,29 +12,47 @@ import { test, expect, Page } from '@playwright/test';
  * Run with: npx playwright test
  */
 
-// Helper to wait for page to be fully loaded
+test.describe('Browser authentication', () => {
+  test('public/manual mode gates API access until the operator token is verified', async ({ page }) => {
+    await page.route('**/api/eggw-bootstrap', (route) => route.fulfill({ status: 404, json: { detail: 'disabled' } }));
+    const apiRequests: Array<{ authorization: string | undefined; url: string }> = [];
+    await page.route(`${TEST_API_BASE}/api/threads`, async (route, request) => {
+      apiRequests.push({ authorization: request.headers()['authorization'], url: request.url() });
+      const authorized = request.headers()['authorization'] === 'Bearer ' + 'm'.repeat(48);
+      await route.fulfill({
+        status: authorized ? 200 : 401,
+        headers: mockApiHeaders,
+        json: authorized ? [] : { detail: 'Invalid or missing API token' },
+      });
+    });
+
+    await page.goto('/');
+    const tokenInput = page.getByTestId('api-token-input');
+    await expect(tokenInput).toBeVisible();
+    await tokenInput.fill('m'.repeat(48));
+    await page.getByRole('button', { name: 'Connect' }).click();
+
+    await expect.poll(() => apiRequests.length).toBeGreaterThan(0);
+    expect(apiRequests[0].authorization).toBe('Bearer ' + 'm'.repeat(48));
+    expect(apiRequests[0].url).not.toContain('m'.repeat(48));
+    await expect(tokenInput).not.toBeVisible();
+  });
+});
+
+// Wait for the authenticated shell and its auto-created thread composer.
 async function waitForPageLoad(page: Page) {
-  // Wait for the page to have the header
   await page.waitForSelector('h1:has-text("eggw")', { timeout: 15000 });
-  // Wait for a thread to be auto-selected (current UI auto-selects most recent thread)
-  await page.waitForTimeout(2000);
+  await expect(page.getByTestId('message-input')).toBeVisible({ timeout: 15000 });
 }
 
-// Helper to ensure we have a thread (creates one if none exists)
 async function ensureThread(page: Page): Promise<void> {
-  // Wait for page to load
   await waitForPageLoad(page);
+}
 
-  // Check if thread info panel is visible (indicates a thread is selected)
-  const threadInfo = page.locator('text=Thread Info');
-  try {
-    await expect(threadInfo).toBeVisible({ timeout: 3000 });
-  } catch {
-    // No thread selected - create one via Ctrl+N
-    await page.keyboard.press('Control+n');
-    await page.waitForTimeout(1000);
-    await expect(threadInfo).toBeVisible({ timeout: 5000 });
-  }
+async function showSystemPanel(page: Page): Promise<void> {
+  if (await page.getByText('System Log', { exact: true }).isVisible()) return;
+  await page.getByRole('button', { name: 'Show sidebar' }).click();
+  await expect(page.getByText('System Log', { exact: true })).toBeVisible();
 }
 
 // Helper to send a message
@@ -50,7 +68,7 @@ const TEST_API_BASE = 'http://localhost:8099';
 const mockApiHeaders = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'content-type',
+  'access-control-allow-headers': 'authorization, content-type',
 };
 
 function mockGeneratedImageMessage(threadId: string, prompt: string) {
@@ -100,7 +118,11 @@ async function replaceMonacoDraft(page: Page, value: string) {
   await expect(draft.locator('.view-lines')).toContainText(value.replace(/^>\s*/, ''), { timeout: 10000 });
 }
 
-async function mockThreadShell(page: Page, threadId: string, options: { messages?: unknown[] } = {}) {
+async function mockThreadShell(
+  page: Page,
+  threadId: string,
+  options: { messages?: unknown[]; tools?: unknown[]; onApprove?: (payload: Record<string, unknown>) => void } = {},
+) {
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
     await route.fulfill({
       status: 200,
@@ -112,7 +134,7 @@ async function mockThreadShell(page: Page, threadId: string, options: { messages
     await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
   });
   await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
-    await route.fulfill({ status: 200, headers: mockApiHeaders, json: options.messages || [] });
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: options.messages || [], snapshot_cursor: 0, next_before: null } });
   });
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
     await route.fulfill({
@@ -131,7 +153,11 @@ async function mockThreadShell(page: Page, threadId: string, options: { messages
     });
   });
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, async (route) => {
-    await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: options.tools || [] });
+  });
+  await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools/approve`, async (route, request) => {
+    options.onApprove?.(request.postDataJSON() as Record<string, unknown>);
+    await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'ok' } });
   });
   await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, async (route) => {
     await route.fulfill({
@@ -215,8 +241,8 @@ test.describe('Basic Operations', () => {
     await expect(page.locator('h1:has-text("eggw")')).toBeVisible();
   });
 
-  test('can see system log panel', async ({ page }) => {
-    await expect(page.locator('text=System Log')).toBeVisible({ timeout: 5000 });
+  test('can open the system log panel', async ({ page }) => {
+    await showSystemPanel(page);
   });
 });
 
@@ -230,11 +256,13 @@ test.describe('Thread Operations', () => {
     // Use /newThread command to create a new thread
     const input = page.locator('[data-testid="message-input"]');
     await expect(input).toBeVisible({ timeout: 5000 });
+    const sourcePath = new URL(page.url()).pathname;
     await input.fill('/newThread');
     await input.press('Enter');
 
-    // Should see system log about created thread (text is "Created new thread: XXXX")
-    await expect(page.locator('text=Created new thread')).toBeVisible({ timeout: 5000 });
+    // A successful command selects the newly-created thread.
+    await expect(page).toHaveURL((url) => url.pathname !== sourcePath);
+    await expect(page.getByTestId('message-input')).toBeVisible();
   });
 
   test('can send a message', async ({ page }) => {
@@ -249,8 +277,8 @@ test.describe('Thread Operations', () => {
     await input.fill('Hello, this is a test message');
     await input.press('Enter');
 
-    // Should see "Message sent" in system log
-    await expect(page.locator('text=Message sent')).toBeVisible({ timeout: 5000 });
+    // The persisted user turn is the authoritative send result.
+    await expect(page.getByTestId('chat-panel')).toContainText('Hello, this is a test message', { timeout: 5000 });
   });
 
   test('can upload, stage, and send an attachment', async ({ page }) => {
@@ -269,10 +297,11 @@ test.describe('Thread Operations', () => {
     await input.fill('See attached');
     await input.press('Enter');
 
-    await expect(page.locator('text=Message sent')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('[data-testid="staged-attachments"]')).not.toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Attachment')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=note.txt')).toBeVisible({ timeout: 5000 });
+    const chat = page.getByTestId('chat-panel');
+    await expect(chat).toContainText('See attached', { timeout: 5000 });
+    await expect(page.getByTestId('staged-attachments')).not.toBeVisible({ timeout: 5000 });
+    await expect(chat).toContainText('Attachment');
+    await expect(chat).toContainText('note.txt');
   });
 
 });
@@ -281,6 +310,7 @@ test.describe('Attachment Composer UX', () => {
   test('can drag and drop an image attachment into staging with mocked backend', async ({ page }) => {
     const threadId = 'drop-thread-1';
     let uploadCalled = false;
+    let previewRequested = false;
 
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/events`, async (route) => {
       await route.fulfill({
@@ -292,8 +322,8 @@ test.describe('Attachment Composer UX', () => {
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
       await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
     });
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/messages`, async (route) => {
-      await route.fulfill({ status: 200, headers: mockApiHeaders, json: [] });
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: [], snapshot_cursor: 0, next_before: null } });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/attachments`, async (route, request) => {
       uploadCalled = true;
@@ -328,6 +358,7 @@ test.describe('Attachment Composer UX', () => {
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/attachments/drop1234`, async (route) => {
+      previewRequested = true;
       await route.fulfill({
         status: 200,
         headers: { ...mockApiHeaders, 'content-type': 'image/png' },
@@ -417,7 +448,9 @@ test.describe('Attachment Composer UX', () => {
     await expect.poll(() => uploadCalled).toBe(true);
     await expect(page.getByTestId('staged-attachments')).toContainText('drop-egg.png', { timeout: 5000 });
     const stagedPreview = page.getByTestId('staged-attachment-preview');
-    await expect(stagedPreview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/attachments/drop1234`);
+    await expect(stagedPreview).toBeVisible();
+    await expect.poll(() => previewRequested).toBe(true);
+    await expect(stagedPreview).toHaveAttribute('src', /^blob:/);
     await expect(stagedPreview).toHaveAttribute('loading', 'lazy');
   });
 });
@@ -443,13 +476,17 @@ test.describe('Image Generation UI', () => {
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
       await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
     });
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/messages`, async (route, request) => {
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
       messagesRequests.push(request.method());
       if (imageGenerated) messagesRequestsAfterGeneration.push(request.method());
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: imageGenerated ? [generatedMessage, attachmentMessage] : [],
+        json: {
+          items: imageGenerated ? [generatedMessage, attachmentMessage] : [],
+          snapshot_cursor: imageGenerated ? 1 : 0,
+          next_before: null,
+        },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/image-generation`, async (route, request) => {
@@ -591,15 +628,15 @@ test.describe('Image Generation UI', () => {
     await expect.poll(() => messagesRequests.length).toBeGreaterThanOrEqual(1);
     await expect.poll(() => messagesRequestsAfterGeneration.length).toBeGreaterThanOrEqual(1);
     await expect(page.locator('text=Generated 1 artifact; appended result to transcript')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Provider artifact')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=generated-egg.png')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('Provider artifact', { exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('generated-egg.png', { exact: true })).toBeVisible({ timeout: 5000 });
     const preview = page.getByTestId('provider-artifact-preview');
     await expect(preview).toBeVisible({ timeout: 5000 });
-    await expect(preview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/provider-output/abc12345`);
+    await expect(preview).toHaveAttribute('src', /^blob:/);
     await expect(preview).toHaveAttribute('loading', 'lazy');
     const attachmentPreview = page.getByTestId('attachment-preview');
     await expect(attachmentPreview).toBeVisible({ timeout: 5000 });
-    await expect(attachmentPreview).toHaveAttribute('src', `${TEST_API_BASE}/api/threads/${threadId}/attachments/input123`);
+    await expect(attachmentPreview).toHaveAttribute('src', /^blob:/);
     await expect(attachmentPreview).toHaveAttribute('loading', 'lazy');
   });
 });
@@ -642,11 +679,20 @@ test.describe('Command Transcript Ordering', () => {
     const commandTimestamp = '2026-01-01T00:00:01.000Z';
     const afterTimestamp = '2026-01-01T00:00:02.000Z';
 
-    await mockThreadShell(page, threadId, {
-      messages: [
-        { id: 'message-before-command', role: 'user', timestamp: beforeTimestamp, content: 'Before command', content_text: 'Before command' },
-        { id: 'message-after-command', role: 'assistant', timestamp: afterTimestamp, content: 'After command', content_text: 'After command' },
-      ],
+    const authoritativeMessages = [
+      { id: 'message-before-command', role: 'user', timestamp: beforeTimestamp, content: 'Before command', content_text: 'Before command' },
+      { id: 'message-after-command', role: 'assistant', timestamp: afterTimestamp, content: 'After command', content_text: 'After command' },
+    ];
+    await mockThreadShell(page, threadId, { messages: authoritativeMessages });
+    let messageRequests = 0;
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      messageRequests += 1;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { items: authoritativeMessages, snapshot_cursor: messageRequests, next_before: null },
+      });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
       await route.fulfill({
@@ -660,7 +706,7 @@ test.describe('Command Transcript Ordering', () => {
           started_at: commandTimestamp,
           finished_at: commandTimestamp,
           elapsed_sec: 0.01,
-          data: { action: 'list_attachments' },
+          data: { action: 'list_attachments', reload: true },
         },
       });
     });
@@ -673,9 +719,126 @@ test.describe('Command Transcript Ordering', () => {
 
     const chatContent = page.getByTestId('chat-panel-content');
     await expect(chatContent).toContainText('Command output in timestamp position', { timeout: 5000 });
+    await expect.poll(() => messageRequests).toBeGreaterThan(1);
     const orderedText = await chatContent.innerText();
     expect(orderedText.indexOf('Before command')).toBeLessThan(orderedText.indexOf('Command output in timestamp position'));
     expect(orderedText.indexOf('Command output in timestamp position')).toBeLessThan(orderedText.indexOf('After command'));
+  });
+});
+
+test.describe('Composer draft and autocomplete ownership', () => {
+  test('keeps rapid edits local, persists navigation drafts, and restores an async failed send', async ({ page }) => {
+    const threadA = 'composer-thread-a';
+    const threadB = 'composer-thread-b';
+    for (const threadId of [threadA, threadB]) await mockThreadShell(page, threadId);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadA}/children`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [{ id: threadB, name: threadB, parent_id: threadA, has_children: false }],
+    }));
+    await page.route(`${TEST_API_BASE}/api/threads/${threadA}`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { id: threadA, name: threadA, has_children: true },
+    }));
+
+    let resolveFailedSend!: () => void;
+    const failedSend = new Promise<void>((resolve) => { resolveFailedSend = resolve; });
+    await page.unroute(new RegExp(`/api/threads/${threadA}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadA}/messages(?:\\?.*)?$`), async (route, request) => {
+      if (request.method() === 'POST') {
+        await failedSend;
+        await route.fulfill({ status: 500, headers: mockApiHeaders, json: { detail: 'failed' } });
+        return;
+      }
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { items: [], snapshot_cursor: 0, next_before: null } });
+    });
+
+    await page.goto(`/${threadA}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible();
+    await input.fill('a'.repeat(200));
+    await page.getByRole('button', { name: new RegExp(threadB) }).click();
+    await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
+    await page.getByTestId('message-input').fill('thread b draft');
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`/${threadA}$`));
+    await expect(page.getByTestId('message-input')).toHaveValue('a'.repeat(200));
+
+    await page.getByTestId('message-input').fill('failed send');
+    await page.getByTestId('message-input').press('Enter');
+    await page.getByTestId('message-input').fill('newer local draft');
+    resolveFailedSend();
+    await expect(page.getByTestId('message-input')).toHaveValue('failed send\n\nnewer local draft');
+  });
+
+  test('does not poll settings and refreshes them after a command mutation', async ({ page }) => {
+    const threadId = 'settings-invalidation-thread';
+    await mockThreadShell(page, threadId);
+    let settingsRequests = 0;
+    let autoApproval = false;
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/settings`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+      settingsRequests += 1;
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: autoApproval } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route) => {
+      autoApproval = true;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: 'Auto-approval enabled',
+          command_id: 'settings-command',
+          command_name: 'toggleAutoApproval',
+          finished_at: '2026-01-01T00:00:00Z',
+          data: { auto_approval: true, suppress_transcript: true },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.getByTitle('Auto-approval OFF')).toBeVisible();
+    await page.waitForTimeout(1200);
+    expect(settingsRequests).toBe(1);
+    await page.getByTestId('message-input').fill('/toggleAutoApproval');
+    await page.getByTestId('message-input').press('Enter');
+    await expect(page.getByTitle('Auto-approval ON')).toBeVisible();
+    expect(settingsRequests).toBe(2);
+  });
+
+  test('gates ordinary prose and renders only the latest autocomplete response', async ({ page }) => {
+    const threadId = 'autocomplete-owner-thread';
+    await mockThreadShell(page, threadId);
+    const autocompleteLines: string[] = [];
+    await page.route(`${TEST_API_BASE}/api/autocomplete**`, async (route, request) => {
+      const line = new URL(request.url()).searchParams.get('line') || '';
+      autocompleteLines.push(line);
+      if (line === '/h') {
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          await route.fulfill({ status: 200, headers: mockApiHeaders, json: { suggestions: [{ display: '/history', insert: '/history' }] } });
+        } catch {
+          // Browser cancellation may reject the route fulfillment.
+        }
+        return;
+      }
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { suggestions: [{ display: '/help latest', insert: '/help' }] } });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await input.fill('ordinary prose');
+    await page.waitForTimeout(200);
+    expect(autocompleteLines).toEqual([]);
+
+    await input.fill('/h');
+    await page.waitForTimeout(150);
+    await input.fill('/he');
+    await expect(page.getByText('/help latest', { exact: true })).toBeVisible();
+    await expect(page.getByText('/history', { exact: true })).not.toBeVisible();
+    expect(autocompleteLines).toEqual(['/h', '/he']);
   });
 });
 
@@ -854,7 +1017,7 @@ test.describe('Edit Answer Modal', () => {
 
     await expect(page.getByTestId('edit-answer-modal')).not.toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId('chat-panel-content')).toContainText("Error: /editAnswer failed: Selector 'SAME' matched multiple messages; use a longer msg_id.");
-    await expect(input).toHaveValue('');
+    await expect(input).toHaveValue('/editAnswer SAME');
   });
 });
 
@@ -924,85 +1087,352 @@ test.describe('Streaming', () => {
   });
 
   test('shows SSE connected after thread selection', async ({ page }) => {
-    // Should see "SSE connected" in system log
-    await expect(page.locator('text=SSE connected')).toBeVisible({ timeout: 5000 });
+    await showSystemPanel(page);
+    await expect(page.getByText(/SSE connected/).last()).toBeVisible({ timeout: 5000 });
   });
 
-  test('shows streaming when receiving response', async ({ page }) => {
+  test('persists a message even when streaming completes before it can be observed', async ({ page }) => {
     const input = page.locator('[data-testid="message-input"]');
     await expect(input).toBeVisible({ timeout: 5000 });
     await input.fill('Say "Hello World"');
     await input.press('Enter');
 
-    // Should see streaming indicator or "Streaming" log
-    // This depends on LLM being available
-    const streamingIndicator = page.locator('text=Streaming').or(page.locator('text=Running'));
+    // Streaming can finish between browser frames; the persisted user turn is stable.
+    await expect(page.getByTestId('chat-panel')).toContainText('Say "Hello World"', { timeout: 5000 });
+  });
 
-    // Wait up to 10 seconds for streaming to start (may not happen without real LLM)
-    try {
-      await expect(streamingIndicator).toBeVisible({ timeout: 10000 });
-    } catch {
-      // If no streaming, check that message was at least sent
-      await expect(page.locator('text=Message sent')).toBeVisible();
+  test('follows new provider content only while the reader is at the latest content', async ({ page }) => {
+    const threadId = 'stream-scroll-follow';
+    const messages = Array.from({ length: 36 }, (_, index) => ({
+      id: `scroll-message-${index}`,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `${index}: ${'long transcript content '.repeat(12)}`,
+    }));
+    await mockThreadShell(page, threadId, { messages });
+    await page.goto(`/${threadId}`);
+
+    const chat = page.getByTestId('chat-panel');
+    const content = page.getByTestId('chat-panel-content');
+    const geometry = () => chat.evaluate((element) => ({
+      top: element.scrollTop,
+      distance: element.scrollHeight - element.scrollTop - element.clientHeight,
+    }));
+    const appendProviderContent = (label: string) => content.evaluate((element, text) => {
+      const chunk = document.createElement('div');
+      chunk.textContent = text;
+      chunk.style.height = '320px';
+      element.appendChild(chunk);
+    }, label);
+
+    for (const verbosity of ['max', 'medium', 'min'] as const) {
+      await page.locator('select[title="Transcript display verbosity"]').selectOption(verbosity);
+      await chat.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+
+      await appendProviderContent(`follow-${verbosity}`);
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+
+      await chat.hover();
+      await page.mouse.wheel(0, -700);
+      await expect.poll(async () => (await geometry()).distance).toBeGreaterThan(100);
+      const detachedTop = (await geometry()).top;
+
+      await appendProviderContent(`detached-${verbosity}`);
+      await expect.poll(async () => Math.abs((await geometry()).top - detachedTop)).toBeLessThanOrEqual(2);
+
+      await chat.focus();
+      await page.keyboard.press('End');
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
+      await appendProviderContent(`reattached-${verbosity}`);
+      await expect.poll(async () => (await geometry()).distance).toBeLessThanOrEqual(16);
     }
+  });
+});
+
+test.describe('Per-thread transcript state', () => {
+  test('preserves paginated thread A while navigating to thread B and back', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadA = 'pagination-thread-a';
+    const threadB = 'pagination-thread-b';
+    const routes = async (threadId: string) => {
+      await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), (route) => route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: '',
+      }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { state: 'waiting_user', streaming_invoke_id: null, active_get_user_wait: false } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/tools`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [] }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { enabled: false, effective: false, available: false, user_control_enabled: true } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: false } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/children`, (route) => route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: threadId === threadA ? [{ id: threadB, name: threadB, has_children: false }] : [],
+      }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { context_tokens: 0, cost_usd: 0 } }));
+      await page.route(`${TEST_API_BASE}/api/threads/${threadId}`, (route) => route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { id: threadId, name: threadId, has_children: threadId === threadA, ...(threadId === threadB ? { parent_id: threadA } : {}) },
+      }));
+    };
+    await routes(threadA);
+    await routes(threadB);
+    await page.route(`${TEST_API_BASE}/api/models`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { models: [] } }));
+    await page.route(`${TEST_API_BASE}/api/image-models`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: { models: [] } }));
+    await page.route(`${TEST_API_BASE}/api/threads/roots`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [
+      { id: threadA, name: threadA, has_children: false },
+      { id: threadB, name: threadB, has_children: false },
+    ] }));
+    await page.route(`${TEST_API_BASE}/api/threads`, (route) => route.fulfill({ status: 200, headers: mockApiHeaders, json: [] }));
+    await page.route(new RegExp(`/api/threads/${threadA}/messages(?:\\?.*)?$`), async (route, request) => {
+      const url = new URL(request.url());
+      const beforeId = url.searchParams.get('before_id');
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: beforeId
+        ? { items: [{ id: 'a-old', role: 'user', content: 'thread a old' }], snapshot_cursor: 7, next_before: null }
+        : { items: [{ id: 'a-new', role: 'user', content: 'thread a new' }], snapshot_cursor: 7, next_before: 'a-new' } });
+    });
+    await page.route(new RegExp(`/api/threads/${threadB}/messages(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { items: [{ id: 'b-new', role: 'user', content: 'thread b only' }], snapshot_cursor: 9, next_before: null },
+    }));
+
+    await page.goto(`/${threadA}`);
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
+    await page.getByTestId('load-older-messages').click();
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
+
+    await page.getByRole('button', { name: new RegExp(threadB) }).click();
+    await expect(page).toHaveURL(new RegExp(`/${threadB}$`));
+    await expect(page.getByTestId('chat-panel')).toContainText('thread b only');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('thread a old');
+
+    await page.getByRole('button', { name: /Parent/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/${threadA}$`));
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a old');
+    await expect(page.getByTestId('chat-panel')).toContainText('thread a new');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('thread b only');
+  });
+
+  test('reveals loaded min history before pagination and reaches the system prompt', async ({ page }) => {
+    const threadId = 'min-system-prompt-history';
+    let messageRequests = 0;
+    await mockThreadShell(page, threadId);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route, request) => {
+      messageRequests += 1;
+      const beforeId = new URL(request.url()).searchParams.get('before_id');
+      if (!beforeId) {
+        await route.fulfill({
+          status: 200,
+          headers: mockApiHeaders,
+          json: {
+            items: Array.from({ length: 70 }, (_, index) => ({
+              id: `recent-${index}`,
+              role: index % 2 ? 'assistant' : 'user',
+              content: `recent message ${index}`,
+            })),
+            snapshot_cursor: 200,
+            next_before: 'recent-0',
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          items: [
+            { id: 'root-system-prompt', role: 'system', content: 'ROOT SYSTEM PROMPT CONTENT' },
+            ...Array.from({ length: 89 }, (_, index) => ({
+              id: `older-${index}`,
+              role: index % 3 === 0 ? 'tool' : (index % 2 ? 'assistant' : 'user'),
+              ...(index % 3 === 0
+                ? { name: 'bash', tool_call_id: `older-call-${index}`, content: `older tool output ${index}` }
+                : { content: `older conversation ${index}` }),
+            })),
+          ],
+          snapshot_cursor: 200,
+          next_before: null,
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+
+    // Expose the already-loaded 65-message prefix before requesting older data.
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('5 earlier');
+    expect(messageRequests).toBe(1);
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.getByTestId('load-older-messages')).toBeVisible();
+    expect(messageRequests).toBe(1);
+
+    await page.getByTestId('load-older-messages').click();
+    await expect.poll(() => messageRequests).toBe(2);
+    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('30 earlier');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('ROOT SYSTEM PROMPT CONTENT');
+
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.getByTestId('chat-panel')).toContainText('ROOT SYSTEM PROMPT CONTENT');
+    await expect(page.getByText('System', { exact: true }).first()).toBeVisible();
+    expect(messageRequests).toBe(2);
+  });
+});
+
+test.describe('Tool approval integration', () => {
+  test('submits a TC4 output decision through the shared approval endpoint', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'approval-thread';
+    let approval: Record<string, unknown> | undefined;
+    await mockThreadShell(page, threadId, {
+      tools: [{
+        id: 'approval-tool-call',
+        name: 'bash',
+        arguments: { script: 'echo approved' },
+        state: 'TC4',
+        output: 'inspectable output',
+      }],
+      onApprove: (payload) => { approval = payload; },
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.getByText('Pending Approvals', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Whole' }).click();
+    await expect.poll(() => approval).toMatchObject({
+      tool_call_id: 'approval-tool-call',
+      approved: true,
+      output_decision: 'whole',
+    });
+  });
+});
+
+test.describe('SSE reconnect integration', () => {
+  test('resumes with Last-Event-ID and renders a replayed delta once', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'reconnect-thread';
+    const invokeId = 'reconnect-invoke';
+    const cursors: string[] = [];
+    let connection = 0;
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'reconnect-user', role: 'user', content: 'resume stream' }],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route, request) => {
+      connection += 1;
+      cursors.push(request.headers()['last-event-id'] || new URL(request.url()).searchParams.get('after_seq') || '');
+      const startedAt = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `reconnect-event-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts: startedAt,
+        msg_id: null,
+        invoke_id: invokeId,
+        chunk_seq: type === 'stream.delta' ? 0 : null,
+        payload,
+      });
+      const nextInvokeId = connection === 1 ? invokeId : 'reconnect-invoke-new';
+      const frame = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `reconnect-${nextInvokeId}-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts: startedAt,
+        msg_id: null,
+        invoke_id: nextInvokeId,
+        chunk_seq: type === 'stream.delta' ? eventSeq : null,
+        payload,
+      });
+      const frames = connection === 1
+        ? ['id: 1', 'event: stream.open', `data: ${frame(1, 'stream.open', { stream_kind: 'llm' })}`, '', '']
+        : [
+            // Replayed cursor frame is transport-deduplicated; the ordered new
+            // stream.open adopts the replacement invocation before its delta.
+            'id: 1', 'event: stream.open', `data: ${envelope(1, 'stream.open', { stream_kind: 'llm' })}`, '',
+            'id: 2', 'event: stream.open', `data: ${frame(2, 'stream.open', { stream_kind: 'llm' })}`, '',
+            'id: 3', 'event: stream.delta', `data: ${frame(3, 'stream.delta', { text: 'resumed exactly once' })}`, '', '',
+          ];
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: frames.join('\n'),
+      });
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'llm', streaming_invoke_id: invokeId, live_replay_cursor: 0, active_get_user_wait: false },
+    }));
+
+    await page.goto(`/${threadId}`);
+    await expect.poll(() => cursors.some((cursor, index) => index > 0 && Number(cursor) > 0), { timeout: 8000 }).toBe(true);
+    await expect(page.getByTestId('chat-panel')).toContainText('resumed exactly once');
+    await expect(page.getByTestId('chat-panel')).not.toContainText('resumed exactly onceresumed exactly once');
   });
 });
 
 test.describe('Live Tool Streaming', () => {
   test('keeps tool arguments visible while the tool is running', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
     const threadId = 'running-tool-args-thread';
     const toolCallId = 'call-running-tool-args';
+    const cursors: string[] = [];
 
-    await page.addInitScript(({ tcId }) => {
-      class MockEventSource {
-        url: string;
-        readyState = 1;
-        onopen: ((event: Event) => void) | null = null;
-        onerror: ((event: Event) => void) | null = null;
-        private listeners: Record<string, Array<(event: MessageEvent) => void>> = {};
-
-        constructor(url: string) {
-          this.url = url;
-          window.setTimeout(() => {
-            this.onopen?.(new Event('open'));
-            this.dispatch('stream.open', {
-              event_type: 'stream.open',
-              ts: new Date().toISOString(),
-              payload: { stream_kind: 'tool' },
-            });
-            this.dispatch('tool_call.execution_started', {
-              event_type: 'tool_call.execution_started',
-              ts: new Date().toISOString(),
-              payload: {
-                tool_call_id: tcId,
-                name: 'bash',
-                arguments: JSON.stringify({ script: 'echo visible args; sleep 30', timeout: 300 }),
-                timeout: 300,
-              },
-            });
-          }, 25);
-        }
-
-        addEventListener(type: string, listener: (event: MessageEvent) => void) {
-          this.listeners[type] = [...(this.listeners[type] || []), listener];
-        }
-
-        removeEventListener(type: string, listener: (event: MessageEvent) => void) {
-          this.listeners[type] = (this.listeners[type] || []).filter((item) => item !== listener);
-        }
-
-        close() {
-          this.readyState = 2;
-        }
-
-        private dispatch(type: string, data: unknown) {
-          const event = new MessageEvent(type, { data: JSON.stringify(data) });
-          for (const listener of this.listeners[type] || []) listener(event);
-        }
-      }
-
-      (window as unknown as { EventSource: typeof EventSource }).EventSource = MockEventSource as unknown as typeof EventSource;
-    }, { tcId: toolCallId });
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route, request) => {
+      cursors.push(new URL(request.url()).searchParams.get('after_seq') || request.headers()['last-event-id'] || '');
+      const startedAt = new Date().toISOString();
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          'id: 1',
+          'event: stream.open',
+          `data: ${JSON.stringify({
+            event_id: 'event-stream-open',
+            event_seq: 1,
+            type: 'stream.open',
+            ts: startedAt,
+            msg_id: null,
+            invoke_id: 'invoke-running-tool',
+            chunk_seq: null,
+            payload: { stream_kind: 'tool' },
+          })}`,
+          '',
+          'id: 2',
+          'event: tool_call.execution_started',
+          `data: ${JSON.stringify({
+            event_id: 'event-tool-started',
+            event_seq: 2,
+            type: 'tool_call.execution_started',
+            ts: startedAt,
+            msg_id: null,
+            invoke_id: 'invoke-running-tool',
+            chunk_seq: null,
+            payload: {
+              tool_call_id: toolCallId,
+              name: 'bash',
+              arguments: JSON.stringify({ script: 'echo visible args; sleep 30', timeout: 300 }),
+              timeout: 300,
+            },
+          })}`,
+          '',
+          '',
+        ].join('\n'),
+      });
+    });
 
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/open`, async (route) => {
       await route.fulfill({ status: 200, headers: mockApiHeaders, json: { status: 'opened' } });
@@ -1011,7 +1441,7 @@ test.describe('Live Tool Streaming', () => {
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: [{ id: 'user-before-running-tool', role: 'user', content: 'run slow tool', content_text: 'run slow tool' }],
+        json: { items: [{ id: 'user-before-running-tool', role: 'user', content: 'run slow tool', content_text: 'run slow tool' }], snapshot_cursor: 10, next_before: null },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/stats`, async (route) => {
@@ -1040,11 +1470,11 @@ test.describe('Live Tool Streaming', () => {
         json: { enabled: false, effective: false, available: false, user_control_enabled: true },
       });
     });
-    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/state`, async (route) => {
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), async (route) => {
       await route.fulfill({
         status: 200,
         headers: mockApiHeaders,
-        json: { state: 'running', active_get_user_wait: false },
+        json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-running-tool', live_replay_cursor: 0, active_get_user_wait: false },
       });
     });
     await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
@@ -1083,10 +1513,257 @@ test.describe('Live Tool Streaming', () => {
 
     await page.goto(`/${threadId}`);
 
+    // The durable snapshot cursor is 10, but active replay starts immediately
+    // before stream.open so its tool lifecycle frames are consumed.
+    await expect.poll(() => cursors[0], { timeout: 5000 }).toBe("0");
+
     await expect(page.getByTestId('chat-panel')).toContainText('Tool', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('bash', { timeout: 5000 });
     await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30', { timeout: 5000 });
+    const liveToolOutput = page.getByTestId('streaming-tool-output');
     await expect(page.getByTestId('chat-panel')).toContainText('streaming output...', { timeout: 5000 });
+
+    const select = page.locator('select[title="Transcript display verbosity"]');
+    const args = page.getByTestId('streaming-tool-arguments');
+    await select.selectOption('medium');
+    await expect(args).toBeVisible();
+    await expect(args).toContainText('$ echo visible args; sleep 30');
+    await expect(liveToolOutput).toBeVisible();
+    await expect(page.getByTestId('chat-panel')).toContainText('$ echo visible args; sleep 30');
+    await select.selectOption('min');
+    await expect(args).toBeVisible();
+    await expect(args).toContainText('$ echo visible args; sleep 30');
+    await expect(liveToolOutput).toBeVisible();
+    await expect(page.getByTestId('chat-panel')).toContainText('bash');
+    await select.selectOption('max');
+    await expect(args).toBeVisible();
+    await expect(args).toContainText('$ echo visible args; sleep 30');
+    await expect(liveToolOutput).toBeVisible();
+  });
+});
+
+test.describe('Atomic Live Tool Continuity', () => {
+  test('keeps the canonical tool card through immediate close and a stale refetch at every verbosity', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'tool-continuity-thread';
+    const toolCallId = 'call-continuity';
+    let messageRequests = 0;
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'user-before-tool', role: 'user', content: 'run tool', content_text: 'run tool' }],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-continuity', live_replay_cursor: 0, active_get_user_wait: false },
+    }));
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      messageRequests += 1;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          // Every response deliberately lags the consumed msg.create. The
+          // event-installed card must survive these stale HTTP snapshots.
+          items: [{ id: 'user-before-tool', role: 'user', content: 'run tool', content_text: 'run tool' }],
+          snapshot_cursor: messageRequests === 1 ? 0 : 2,
+          next_before: null,
+        },
+      });
+    });
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const ts = new Date().toISOString();
+      const envelope = (event_seq: number, type: string, payload: Record<string, unknown>, msg_id: string | null = null) => JSON.stringify({
+        event_id: `continuity-${event_seq}`,
+        event_seq,
+        type,
+        ts,
+        msg_id,
+        invoke_id: 'invoke-continuity',
+        chunk_seq: type === 'stream.delta' ? event_seq : null,
+        payload,
+      });
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          'id: 1', 'event: stream.open', `data: ${envelope(1, 'stream.open', { stream_kind: 'tool' })}`, '',
+          'id: 2', 'event: stream.delta', `data: ${envelope(2, 'stream.delta', { tool_call: { id: toolCallId, name: 'bash', arguments_delta: '{"script":"echo continuity"}' } })}`, '',
+          'id: 3', 'event: msg.create', `data: ${envelope(3, 'msg.create', { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, name: 'bash', arguments: '{"script":"echo continuity"}' }] }, 'assistant-continuity')}`, '',
+          'id: 4', 'event: stream.close', `data: ${envelope(4, 'stream.close', {})}`, '', '',
+        ].join('\n'),
+      });
+    });
+
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route, request) => {
+      const command = String((request.postDataJSON() as { command?: string }).command || "");
+      const verbosity = command.split(/\s+/).at(-1);
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          success: true,
+          message: `Display verbosity set to ${verbosity}`,
+          command_id: `verbosity-${verbosity}`,
+          command_name: "displayVerbosity",
+          data: { action: "set_display_verbosity", display_verbosity: verbosity },
+        },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    const chat = page.getByTestId('chat-panel');
+    for (const verbosity of ['max', 'medium', 'min'] as const) {
+      await input.fill(`/displayVerbosity ${verbosity}`);
+      await input.press('Enter');
+      await expect(chat).toContainText(verbosity === 'min' ? 'Executed 1 tool' : 'bash', { timeout: 5000 });
+      await expect(chat).not.toContainText('No messages yet');
+    }
+    expect(messageRequests).toBeGreaterThan(1);
+  });
+
+  test('uses monotonic detail levels for completed transcript content', async ({ page }) => {
+    const threadId = 'verbosity-semantics';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'ordinary-system', role: 'system', content: 'private provider setup instructions' },
+        { id: 'verbosity-user', role: 'user', content: 'inspect the repository' },
+        {
+          id: 'verbosity-assistant',
+          role: 'assistant',
+          content: 'The repository looks healthy.',
+          reasoning: 'raw private reasoning body',
+          model_key: 'provider-model',
+          tool_calls: [{ id: 'verbosity-tool', name: 'bash', arguments: { script: 'git status' } }],
+        },
+        { id: 'verbosity-result', role: 'tool', name: 'bash', tool_call_id: 'verbosity-tool', content: 'clean working tree result' },
+        { id: 'verbosity-command', role: 'system', command_name: 'displayVerbosity', content: 'Display verbosity changed.' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    const chat = page.getByTestId('chat-panel');
+    const select = page.locator('select[title="Transcript display verbosity"]');
+
+    await select.selectOption('max');
+    await expect(chat).toContainText('raw private reasoning body');
+    await expect(chat).toContainText('git status');
+    await expect(chat).toContainText('clean working tree result');
+    await expect(chat).toContainText('provider-model');
+
+    await select.selectOption('medium');
+    await expect(chat).toContainText('The repository looks healthy.');
+    await expect(chat.getByText('raw private reasoning body')).not.toBeVisible();
+    await expect(chat.locator('pre').getByText('clean working tree result', { exact: true })).not.toBeVisible();
+    await expect(chat).toContainText('git status');
+    await chat.getByText('Reasoning', { exact: false }).first().click();
+    await expect(chat.getByText('raw private reasoning body')).toBeVisible();
+
+    await select.selectOption('min');
+    await expect(chat).toContainText('inspect the repository');
+    await expect(chat).toContainText('The repository looks healthy.');
+    await expect(chat).toContainText('Display verbosity changed.');
+    await expect(chat).toContainText('Executed 1 tool');
+    await expect(chat).toContainText('private provider setup instructions');
+    await expect(chat).not.toContainText('provider-model');
+    await expect(chat).not.toContainText('raw private reasoning body');
+  });
+
+  test('pairs Assistant Note tool popups only by matching tool call identity', async ({ page }) => {
+    const threadId = 'min-tool-popup-identity';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'identity-user', role: 'user', content: 'run the checks' },
+        {
+          id: 'identity-note-a',
+          role: 'assistant',
+          answer_user_preserve_turn: true,
+          content: 'First check is still running.',
+          tool_calls: [{ id: 'call-a', name: 'bash', arguments: { script: 'echo ARGUMENT_A' } }],
+        },
+        {
+          id: 'identity-call-b',
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'call-b', name: 'bash', arguments: { script: 'echo ARGUMENT_B' } }],
+        },
+        {
+          id: 'identity-result-b',
+          role: 'tool',
+          name: 'bash',
+          tool_call_id: 'call-b',
+          content: 'RESULT_B',
+        },
+        { id: 'identity-answer', role: 'assistant', content: 'Checks complete.' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+
+    const tools = page.getByTestId('hidden-details').getByRole('button', { name: 'bash' });
+    await expect(tools).toHaveCount(2);
+
+    await tools.nth(0).click();
+    let dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('ARGUMENT_A');
+    await expect(dialog).toContainText('(not found in the loaded transcript)');
+    await expect(dialog).not.toContainText('RESULT_B');
+    await dialog.getByRole('button', { name: 'Close' }).click();
+
+    await tools.nth(1).click();
+    dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('ARGUMENT_B');
+    await expect(dialog).toContainText('RESULT_B');
+    await expect(dialog).not.toContainText('ARGUMENT_A');
+  });
+
+  test('keeps an Assistant Note tool result attached across the visible note in min', async ({ page }) => {
+    const threadId = 'min-assistant-note-result';
+    const toolCallId = 'call-answer-user-note';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'note-result-user', role: 'user', content: 'keep me updated' },
+        {
+          id: 'note-result-call',
+          role: 'assistant',
+          content: '',
+          tool_calls: [{
+            id: toolCallId,
+            name: 'answer_user_while_preserving_llm_turn',
+            arguments: { message: 'Visible interim status.' },
+          }],
+        },
+        {
+          id: 'note-result-visible-note',
+          role: 'assistant',
+          content: 'Visible interim status.',
+          answer_user_preserve_turn: true,
+          tool_call_id: toolCallId,
+          source_tool_name: 'answer_user_while_preserving_llm_turn',
+        },
+        {
+          id: 'note-result-tool-message',
+          role: 'tool',
+          name: 'answer_user_while_preserving_llm_turn',
+          tool_call_id: toolCallId,
+          content: 'Interim answer shown to user.',
+        },
+        { id: 'note-result-final', role: 'assistant', content: 'Final answer.' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
+
+    await expect(page.getByText('Visible interim status.', { exact: true })).toBeVisible();
+    await page.getByTestId('hidden-details').getByRole('button', { name: 'answer_user_while_preserving_llm_turn' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('Visible interim status.');
+    await expect(dialog).toContainText('Interim answer shown to user.');
+    await expect(dialog).not.toContainText('(not found in the loaded transcript)');
   });
 });
 
@@ -1094,17 +1771,17 @@ test.describe('Settings and Controls', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await ensureThread(page);
+    await showSystemPanel(page);
   });
 
   test('shows thread info in system panel', async ({ page }) => {
     await expect(page.locator('text=Thread Info')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=ID:')).toBeVisible();
+    await expect(page.getByText('ID:', { exact: true })).toBeVisible();
   });
 
   test('shows model selector', async ({ page }) => {
     await expect(page.locator('text=Model:')).toBeVisible({ timeout: 5000 });
-    // Should have a select dropdown
-    await expect(page.locator('select')).toBeVisible();
+    await expect(page.getByText('Model:', { exact: true }).locator('..').getByRole('combobox')).toBeVisible();
   });
 
   test('shows token stats', async ({ page }) => {
@@ -1114,17 +1791,14 @@ test.describe('Settings and Controls', () => {
   });
 
   test('can toggle auto-approval', async ({ page }) => {
-    await expect(page.locator('text=Auto-approve:')).toBeVisible({ timeout: 5000 });
-
-    // Find toggle button and click it
-    const toggleButtons = page.locator('button.rounded-full');
-    const autoApproveToggle = toggleButtons.first();
-
-    // Click to toggle
-    await autoApproveToggle.click();
-
-    // Should see confirmation in system log
-    await expect(page.locator('text=Auto-approval')).toBeVisible({ timeout: 3000 });
+    const autoApprovalToggle = page.getByTitle(/Auto-approval (?:ON|OFF)/);
+    await expect(autoApprovalToggle).toBeVisible({ timeout: 5000 });
+    const initialTitle = await autoApprovalToggle.getAttribute('title');
+    await autoApprovalToggle.click();
+    await expect(autoApprovalToggle).toHaveAttribute(
+      'title',
+      initialTitle === 'Auto-approval ON' ? 'Auto-approval OFF' : 'Auto-approval ON',
+    );
   });
 });
 
@@ -1135,18 +1809,16 @@ test.describe('Keyboard Shortcuts', () => {
   });
 
   test('help modal opens via button click', async ({ page }) => {
-    // Click the "Press ? for help" button to open help modal
-    await page.click('text=Press ? for help');
-    await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible({ timeout: 3000 });
+    await page.getByTitle('Help (?)').click();
+    await expect(page.getByRole('heading', { name: 'Keyboard Shortcuts' })).toBeVisible();
   });
 
   test('help modal closes with Close button', async ({ page }) => {
-    // Click the "Press ? for help" button to open help modal
-    await page.click('text=Press ? for help');
-    await expect(page.locator('text=Keyboard Shortcuts')).toBeVisible({ timeout: 3000 });
-    // Click the Close button
-    await page.click('button:has-text("Close")');
-    await expect(page.locator('text=Keyboard Shortcuts')).not.toBeVisible({ timeout: 2000 });
+    await page.getByTitle('Help (?)').click();
+    const heading = page.getByRole('heading', { name: 'Keyboard Shortcuts' });
+    await expect(heading).toBeVisible();
+    await page.getByRole('button', { name: 'Close', exact: true }).last().evaluate((button: HTMLButtonElement) => button.click());
+    await expect(heading).not.toBeVisible();
   });
 
   test('i focuses input', async ({ page }) => {
@@ -1172,8 +1844,8 @@ test.describe('Commands', () => {
     // Type /
     await input.fill('/');
 
-    // Should see autocomplete suggestions
-    await expect(page.locator('[data-testid="autocomplete"]').or(page.locator('text=/newThread'))).toBeVisible({ timeout: 2000 });
+    // /help is the first visible suggestion; /newThread may be below the popup scrollport.
+    await expect(page.getByText('/help', { exact: true })).toBeVisible();
   });
 
   test('/help command works', async ({ page }) => {
@@ -1273,9 +1945,7 @@ test.describe('Mock LLM Tool Calls', () => {
     await input.press('Enter');
 
     // Should see Pending Approvals or Approve button
-    await expect(
-      page.locator('text=Pending Approvals').or(page.locator('text=Approve'))
-    ).toBeVisible({ timeout: 20000 });
+    await expect(page.getByText('Pending Approvals', { exact: true })).toBeVisible({ timeout: 20000 });
   });
 
   test('tool execution with auto-approve shows result', async ({ page }) => {

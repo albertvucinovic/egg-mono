@@ -3,17 +3,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Dict, List
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sse_starlette.sse import EventSourceResponse
 
 from eggthreads import (
     ThreadsDB,
-    EventWatcher,
+    ThreadEventCursorError,
+    ThreadEventFeed,
+    ThreadEventFeedNotFound,
     append_message,
     build_tool_call_states,
     approve_tool_calls_for_thread,
+    finalize_tool_output,
+    resolve_event_cursor,
 )
 
 from .. import core
@@ -22,194 +27,126 @@ from ..core.scheduler import scheduler_running
 
 router = APIRouter(tags=["events"])
 
+EVENT_FEED_BATCH_SIZE = 256
+EVENT_FEED_POLL_SEC = 0.015
+EVENT_FEED_MAX_BACKOFF = 0.03
 
-def _active_stream_replay_after_seq(db: ThreadsDB, thread_id: str, stream_open_seq: int) -> int:
-    """Return the event_seq to replay after when attaching mid-stream.
 
-    Replaying only from ``stream.open`` is enough for the live deltas, but it
-    can miss user messages written by another client immediately before the
-    provider stream began.  Include those pending user turns when they are after
-    the previous completed stream boundary so EggW stays synchronized with
-    terminal Egg while the answer is already streaming.
-    """
+def _sse_frame(event) -> dict[str, str]:
+    """Return one id-addressable SSE frame from a canonical envelope."""
 
-    try:
-        previous_close_row = db.conn.execute(
-            """
-            SELECT MAX(event_seq) AS event_seq FROM events
-            WHERE thread_id = ? AND type = 'stream.close' AND event_seq < ?
-            """,
-            (thread_id, stream_open_seq),
-        ).fetchone()
-        previous_close_seq = int(previous_close_row["event_seq"]) if previous_close_row and previous_close_row["event_seq"] is not None else -1
-    except Exception:
-        previous_close_seq = -1
-
-    try:
-        rows = db.conn.execute(
-            """
-            SELECT event_seq, payload_json FROM events
-            WHERE thread_id = ?
-              AND type = 'msg.create'
-              AND event_seq > ?
-              AND event_seq < ?
-            ORDER BY event_seq ASC
-            """,
-            (thread_id, previous_close_seq, stream_open_seq),
-        ).fetchall()
-    except Exception:
-        rows = []
-
-    first_user_seq = None
-    for row in rows:
-        try:
-            payload_json = row["payload_json"]
-            payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
-        except Exception:
-            payload = {}
-        if isinstance(payload, dict) and payload.get("role") == "user":
-            try:
-                first_user_seq = int(row["event_seq"])
-            except Exception:
-                pass
-            break
-
-    if first_user_seq is not None:
-        return first_user_seq - 1
-
-    return stream_open_seq - 1
+    return {
+        "id": str(event.event_seq),
+        "event": event.type,
+        "data": json.dumps(event.as_dict(), separators=(",", ":")),
+    }
 
 
 @router.get("/api/threads/{thread_id}/events")
-async def stream_events(thread_id: str):
-    """Stream events for a thread via SSE.
+async def stream_events(
+    thread_id: str,
+    after_seq: str | None = Query(
+        default=None,
+        description=(
+            "Replay events strictly after this cursor. Explicit after_seq takes "
+            "precedence over Last-Event-ID."
+        ),
+    ),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+):
+    """Stream canonical events after a durable cursor.
 
-    If a stream is already in progress, starts from that stream.open event
-    to catch up with the current streaming session. Otherwise starts from
-    current max event_seq to avoid replaying history.
-
-    Uses server-side batching to reduce HTTP overhead during streaming.
+    Cursor precedence is ``after_seq`` > ``Last-Event-ID`` > connection-time
+    default. Initial callers resolve the explicit replay cursor through
+    ``/state?snapshot_cursor=...`` and pass it as ``after_seq``. Without an
+    explicit cursor, a live unexpired lease replays its exact invocation from
+    ``stream.open``; otherwise the feed starts at the current cursor. Every
+    event has ``id: event_seq`` so reconnect advances only through consumed
+    frames and resumes without duplicates.
     """
+
     if not core.db:
         raise HTTPException(status_code=503, detail="Database not initialized")
 
-    # Check if there's an active streaming session we should catch up to.
-    # Find the last stream.open and stream.close events to determine if streaming
-    # is in progress. If stream.open is more recent, we're mid-stream and should
-    # replay from just before that stream.open.
+    # FastAPI replaces these defaults for HTTP requests; direct compatibility
+    # callers may invoke the route function without dependency injection.
+    if not isinstance(after_seq, (str, int)):
+        after_seq = None
+    if not isinstance(last_event_id, str):
+        last_event_id = None
+
+    # Resolve existence/cursor on a fresh connection so another Egg process's
+    # just-committed thread/events are immediately visible without coupling the
+    # long-lived stream to EggW's scheduler connection.
+    cursor_db = ThreadsDB(core.db.path)
+    feed = ThreadEventFeed(cursor_db, batch_size=EVENT_FEED_BATCH_SIZE)
     try:
-        cur = core.db.conn.execute("""
-            SELECT type, event_seq FROM events
-            WHERE thread_id = ? AND type IN ('stream.open', 'stream.close')
-            ORDER BY event_seq DESC LIMIT 2
-        """, (thread_id,))
-        recent_stream_events = cur.fetchall()
-
-        # Default to current max seq (don't replay history)
-        current_max_seq = core.db.max_event_seq(thread_id)
-
-        if recent_stream_events:
-            last_event = recent_stream_events[0]
-            last_type = last_event["type"] if "type" in last_event.keys() else last_event[0]
-            last_seq = last_event["event_seq"] if "event_seq" in last_event.keys() else last_event[1]
-
-            if last_type == "stream.open":
-                # Stream is in progress - start from just before stream.open,
-                # but include the preceding user turn when another client wrote
-                # it just before provider streaming began.
-                current_max_seq = _active_stream_replay_after_seq(core.db, thread_id, int(last_seq))
-    except Exception:
-        current_max_seq = -1
+        if not feed.thread_exists(thread_id):
+            raise HTTPException(status_code=404, detail="Thread not found")
+        if after_seq is not None or (last_event_id is not None and last_event_id.strip()):
+            initial_cursor = resolve_event_cursor(
+                after_seq=after_seq,
+                last_event_id=last_event_id,
+            )
+        else:
+            idle_cursor = feed.current_cursor(thread_id)
+            initial_cursor = feed.replay_cursor(thread_id, idle_cursor).after_seq
+    except ThreadEventCursorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except ThreadEventFeedNotFound:
+        raise HTTPException(status_code=404, detail="Thread not found") from None
+    finally:
+        cursor_db.conn.close()
 
     async def event_generator():
-        # Use a dedicated database connection for SSE to avoid contention
-        # with the scheduler which uses the global db connection.
-        # IMPORTANT: Use the same path as the global db to ensure we see
-        # the same data (including events from other processes like TUI).
+        # A dedicated connection preserves cross-process visibility without
+        # contending with the scheduler's global connection.
         sse_db = ThreadsDB(core.db.path)
-
-        # Use short poll interval and minimal backoff for responsive streaming
-        # max_backoff=0.03 (30ms) prevents event accumulation during idle periods
-        watcher = EventWatcher(sse_db, thread_id, after_seq=current_max_seq,
-                               poll_sec=0.015, max_backoff=0.03)
+        sse_feed = ThreadEventFeed(sse_db, batch_size=EVENT_FEED_BATCH_SIZE)
+        cursor = initial_cursor
+        idle = 0
+        last_batch_time = time.monotonic()
         try:
-            import time
-            last_batch_time = time.monotonic()
+            while True:
+                try:
+                    batch = sse_feed.read_after(thread_id, cursor)
+                except ThreadEventFeedNotFound:
+                    return
+                if batch.events:
+                    now = time.monotonic()
+                    elapsed_ms = (now - last_batch_time) * 1000
+                    if len(batch.events) > 5:
+                        types = [event.type for event in batch.events]
+                        eggw_scheduler = bool(
+                            thread_id and scheduler_running(get_thread_root_id(thread_id))
+                        )
+                        print(
+                            f"[SSE] Large batch: {len(batch.events)} events "
+                            f"(seq {batch.events[0].event_seq}-{batch.events[-1].event_seq}), "
+                            f"{elapsed_ms:.0f}ms since last, eggw_sched={eggw_scheduler}, "
+                            f"types={types[:5]}{'...' if len(types) > 5 else ''}"
+                        )
+                    last_batch_time = now
+                    idle = 0
+                    for event in batch.events:
+                        # Advance only for events actually yielded. Cancellation
+                        # before the next frame leaves that cursor resumable.
+                        yield _sse_frame(event)
+                        cursor = event.event_seq
+                    continue
 
-            async for batch in watcher.aiter():
-                now = time.monotonic()
-                elapsed_ms = (now - last_batch_time) * 1000
-
-                # Log large batches with detailed timing info to diagnose delays
-                if len(batch) > 5:
-                    # Check if events were written in burst or read delay
-                    event_types = [row["type"] if "type" in row.keys() else "?" for row in batch]
-                    first_seq = batch[0]["event_seq"]
-                    last_seq = batch[-1]["event_seq"]
-
-                    # Check which scheduler is running (if any)
-                    eggw_scheduler = bool(thread_id and scheduler_running(get_thread_root_id(thread_id)))
-
-                    print(f"[SSE] Large batch: {len(batch)} events (seq {first_seq}-{last_seq}), "
-                          f"{elapsed_ms:.0f}ms since last, eggw_sched={eggw_scheduler}, "
-                          f"types={event_types[:5]}{'...' if len(event_types) > 5 else ''}")
-
-                last_batch_time = now
-
-                # Batch all events from this poll into a single SSE message
-                # This reduces HTTP overhead significantly during fast streaming
-                if len(batch) == 1:
-                    # Single event - send directly
-                    row = batch[0]
-                    event_type = row["type"] if "type" in row.keys() else "unknown"
-                    payload = {}
-                    if "payload_json" in row.keys() and row["payload_json"]:
-                        try:
-                            payload = json.loads(row["payload_json"])
-                        except:
-                            pass
-
-                    event_data = {
-                        "event_seq": row["event_seq"],
-                        "event_type": event_type,
-                        "ts": row["ts"] if "ts" in row.keys() else None,
-                        "msg_id": row["msg_id"] if "msg_id" in row.keys() else None,
-                        "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
-                        "payload": payload,
-                    }
-
-                    yield {
-                        "event": event_type,
-                        "data": json.dumps(event_data),
-                    }
-                else:
-                    # Multiple events - send each but they're already batched by poll interval
-                    for row in batch:
-                        event_type = row["type"] if "type" in row.keys() else "unknown"
-                        payload = {}
-                        if "payload_json" in row.keys() and row["payload_json"]:
-                            try:
-                                payload = json.loads(row["payload_json"])
-                            except:
-                                pass
-
-                        event_data = {
-                            "event_seq": row["event_seq"],
-                            "event_type": event_type,
-                            "ts": row["ts"] if "ts" in row.keys() else None,
-                            "msg_id": row["msg_id"] if "msg_id" in row.keys() else None,
-                            "invoke_id": row["invoke_id"] if "invoke_id" in row.keys() else None,
-                            "payload": payload,
-                        }
-
-                        yield {
-                            "event": event_type,
-                            "data": json.dumps(event_data),
-                        }
+                idle = min(idle + 1, 4)
+                delay = (
+                    EVENT_FEED_POLL_SEC
+                    if idle < 2
+                    else min(EVENT_FEED_POLL_SEC * (idle + 1), EVENT_FEED_MAX_BACKOFF)
+                )
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
-            pass
+            return
+        finally:
+            sse_db.conn.close()
 
-    # Use ping to prevent buffering and keep connection alive
     return EventSourceResponse(event_generator(), ping=1)
 
 
@@ -220,7 +157,10 @@ class ConnectionManager:
         self.active_connections: Dict[str, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, thread_id: str):
-        await websocket.accept()
+        # Echo only the fixed application protocol, never the credential-bearing
+        # protocol used by browser WebSocket authentication.
+        selected_protocol = "eggw" if "eggw" in websocket.scope.get("subprotocols", []) else None
+        await websocket.accept(subprotocol=selected_protocol)
         if thread_id not in self.active_connections:
             self.active_connections[thread_id] = []
         self.active_connections[thread_id].append(websocket)
@@ -269,12 +209,22 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
                         decision = "granted" if approved else "denied"
                         if tc.state == "TC4":
                             decision = data.get("output_decision", "whole" if approved else "omit")
-                        approve_tool_calls_for_thread(
-                            core.db,
-                            thread_id,
-                            decision=decision,
-                            tool_call_id=tc_id,
-                        )
+                            finalize_tool_output(
+                                core.db,
+                                thread_id,
+                                tc_id,
+                                decision=decision,
+                                source="user_omit" if decision == "omit" else "user",
+                                reason="User decided over web socket",
+                                expected_event_seq=tc.state_event_seq,
+                            )
+                        else:
+                            approve_tool_calls_for_thread(
+                                core.db,
+                                thread_id,
+                                decision=decision,
+                                tool_call_id=tc_id,
+                            )
 
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})

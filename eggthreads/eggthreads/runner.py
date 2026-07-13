@@ -13,7 +13,7 @@ try:
     from eggllm import LLMClient
 except Exception:
     LLMClient = None  # type: ignore
-from .db import ThreadsDB
+from .db import InvocationEventWriter, LeaseLost, ThreadsDB
 from .tools import (
     ToolExecutionResult,
     ToolRegistry,
@@ -31,6 +31,13 @@ from .tool_state import (
     _prune_reducer_cache_for_threads,
 )
 from .tools_config import get_thread_tools_config
+from .tool_output import (
+    ToolOutputPersistenceError,
+    ToolOutputPlanError,
+    ToolOutputPublicationPlan,
+    ToolOutputStateConflict,
+    finalize_tool_output,
+)
 from .tool_call_id import normalize_tool_call_id
 from .terminal_safety import sanitize_terminal_text
 from .content_parts import content_has_artifacts, content_has_attachments, content_to_plain_text, validate_content_parts
@@ -544,7 +551,7 @@ def stash_tool_output_and_build_preview(
     return f"{preview_body}\n\n{note}" if preview_body else note, saved_path
 
 
-def _emit_auto_output_approval(
+def _finalize_auto_tool_output(
     db,
     thread_id: str,
     tool_call_id: str,
@@ -558,47 +565,39 @@ def _emit_auto_output_approval(
     tool_metadata: Optional[Dict[str, Any]] = None,
     original_char_count: Optional[int] = None,
     output_capped: bool = False,
-) -> None:
-    """Emit a ``tool_call.output_approval`` event for a finished tool call.
+    expected_event_seq: int,
+    writer: InvocationEventWriter,
+):
+    """Build policy output, then commit it through the TC4 authority."""
 
-    No-op if an explicit decision already exists (e.g. user-cancelled
-    via Ctrl+C). Small outputs are approved as ``whole``; large outputs
-    are stored as artifacts via :func:`stash_tool_output_and_build_preview`
-    and approved as ``partial`` with a bounded preview plus read-tool note.
-    """
-    try:
-        cur = db.conn.execute(
-            """
-            SELECT 1
-              FROM events
-             WHERE thread_id=?
-               AND type='tool_call.output_approval'
-               AND json_extract(payload_json, '$.tool_call_id')=?
-             LIMIT 1
-            """,
-            (thread_id, str(tool_call_id)),
-        )
-        has_decision = cur.fetchone() is not None
-    except Exception:
-        has_decision = False
-    if has_decision:
-        return
+    from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
+    from .output_optimizer.config import get_thread_output_optimizer_policy_config
 
     if not isinstance(full_output, str):
         full_output = str(full_output or "")
+
+    # Avoid policy/optimizer/artifact side effects when an explicit user
+    # decision already won. This is only a fast path; finalize_tool_output still
+    # performs the authoritative locked state/version check below.
+    from .tool_state import _reduce_thread_events
+
+    current = _reduce_thread_events(db, thread_id).tool_call_states.get(str(tool_call_id))
+    if current is not None and current.output_decision is not None:
+        return finalize_tool_output(
+            db,
+            thread_id,
+            tool_call_id,
+            decision=str(current.output_decision),
+            source="automatic_policy",
+            expected_event_seq=current.state_event_seq,
+            invocation_writer=writer,
+        )
 
     stored_char_count = len(full_output)
     stored_line_count = len(full_output.splitlines())
     original_count = original_char_count if original_char_count is not None else stored_char_count
     try:
-        from .output_policy import OutputPolicyRequest, create_output_policy_registry, decide_output_publication
-        from .output_optimizer.config import get_thread_output_optimizer_policy_config
-
-        try:
-            thread_output_optimizer_config = get_thread_output_optimizer_policy_config(db, thread_id)
-        except Exception:
-            thread_output_optimizer_config = {}
-
+        thread_output_optimizer_config = get_thread_output_optimizer_policy_config(db, thread_id)
         publication = decide_output_publication(
             create_output_policy_registry(),
             OutputPolicyRequest(
@@ -627,61 +626,35 @@ def _emit_auto_output_approval(
                 },
             ),
         )
-        preview = publication.preview
-        decision = publication.decision
-        reason = publication.reason
-        channels = dict(publication.channels or {})
-        artifact_path = publication.artifact_path
-    except Exception:
-        line_count = len(full_output.splitlines())
-        char_count = len(full_output)
-        is_long = (
-            line_count > LONG_OUTPUT_LINE_THRESHOLD
-            or char_count > LONG_OUTPUT_CHAR_THRESHOLD
-        )
-
-        if is_long:
-            preview, saved = stash_tool_output_and_build_preview(
-                db,
-                thread_id,
-                tool_call_id,
-                full_output,
-                original_char_count=original_char_count,
-                output_capped=output_capped,
-            )
-            decision = "partial"
-            reason = (
-                f"Auto: output too long ({line_count} lines, {char_count} chars) — "
-                "stored as artifact" if saved else
-                f"Auto: output too long ({line_count} lines, {char_count} chars); "
-                "artifact write failed, sending preview only"
-            )
-            artifact_path = saved
-        else:
-            preview = full_output
-            decision = "whole"
-            reason = "Auto: output below size thresholds"
-            artifact_path = ""
-        channels = {}
-
-    try:
-        db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=thread_id,
-            type_="tool_call.output_approval",
-            msg_id=None,
-            invoke_id=None,
-            payload={
-                "tool_call_id": tool_call_id,
-                "decision": decision,
-                "reason": reason,
-                "preview": preview,
-                "channels": channels,
-                "artifact_path": artifact_path,
-            },
-        )
-    except Exception:
-        pass
+    except Exception as exc:
+        raise ToolOutputPlanError(
+            thread_id,
+            str(tool_call_id),
+            f"Automatic output policy failed: {type(exc).__name__}: {exc}",
+        ) from exc
+    plan = ToolOutputPublicationPlan(
+        decision=publication.decision,
+        preview=publication.preview,
+        reason=publication.reason,
+        artifact_path=publication.artifact_path,
+        channels=dict(publication.channels or {}),
+        metadata={
+            "line_count": stored_line_count,
+            "char_count": stored_char_count,
+            "original_char_count": original_count,
+            "output_capped": bool(output_capped),
+        },
+    )
+    return finalize_tool_output(
+        db,
+        thread_id,
+        tool_call_id,
+        decision=publication.decision,
+        source="automatic_policy",
+        expected_event_seq=expected_event_seq,
+        publication_plan=plan,
+        invocation_writer=writer,
+    )
 
 
 def _tool_output_content_parts_for_transcript(tool_name: str, output: str) -> Optional[List[Dict[str, Any]]]:
@@ -730,6 +703,7 @@ def emit_tool_stream_delta(
     current_model: Optional[str] = None,
     suppressed: bool = False,
     chunk_seq: Optional[int] = None,
+    writer: Optional[InvocationEventWriter] = None,
 ) -> None:
     """Append one tool-output stream.delta event."""
     payload_tool: Dict[str, Any] = {
@@ -741,11 +715,10 @@ def emit_tool_stream_delta(
     else:
         payload_tool['text'] = text
     payload: Dict[str, Any] = {'tool': payload_tool, 'model_key': current_model}
-    db.append_event(
+    event_writer = writer or db.invocation_writer(thread_id, invoke_id)
+    event_writer.append_event(
         event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
         type_='stream.delta',
-        invoke_id=invoke_id,
         chunk_seq=chunk_seq if chunk_seq is not None else db.max_chunk_seq(invoke_id) + 1,
         payload=payload,
     )
@@ -835,15 +808,17 @@ def emit_tool_summary_event(
     tool_call_id: str,
     tool_name: str = "",
     summary: str,
+    writer: Optional[InvocationEventWriter] = None,
 ) -> None:
     """Append a persisted tool_call.summary event for live status display."""
     if not isinstance(summary, str) or not summary:
         return
-    db.append_event(
+    if not invoke_id:
+        raise ValueError("invoke_id is required for runner-owned tool summaries")
+    event_writer = writer or db.invocation_writer(thread_id, invoke_id)
+    event_writer.append_event(
         event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
         type_='tool_call.summary',
-        invoke_id=invoke_id,
         payload={
             'tool_call_id': tool_call_id,
             'name': tool_name or 'tool',
@@ -865,6 +840,7 @@ def emit_limited_tool_stream_delta(
     heartbeat,
     suppressed_counter: Optional[Dict[str, int]] = None,
     next_chunk_seq: Optional[Callable[[], int]] = None,
+    writer: Optional[InvocationEventWriter] = None,
 ) -> bool:
     """Emit bounded live preview for a tool-output chunk.
 
@@ -887,6 +863,7 @@ def emit_limited_tool_stream_delta(
             current_model=current_model,
             suppressed=True,
             chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
+            writer=writer,
         )
         if suppressed_counter is not None:
             suppressed_counter['count'] = int(suppressed_counter.get('count') or 0) + 1
@@ -904,6 +881,7 @@ def emit_limited_tool_stream_delta(
                 current_model=current_model,
                 suppressed=True,
                 chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
+                writer=writer,
             )
     if not preview_text:
         return True
@@ -918,6 +896,7 @@ def emit_limited_tool_stream_delta(
         text=preview_text,
         current_model=current_model,
         chunk_seq=next_chunk_seq() if next_chunk_seq is not None else None,
+        writer=writer,
     )
     return True
 
@@ -1035,6 +1014,30 @@ class ThreadRunner:
                 self.image_generation_models_path = str(default_image_generation_models_path(self.models_path))
             except Exception:
                 self.image_generation_models_path = str(Path(self.models_path).with_name('image-generation-models.json'))
+        self._invocation_writer: Optional[InvocationEventWriter] = None
+
+    def _owned_writer(self, invoke_id: str) -> InvocationEventWriter:
+        writer = self._invocation_writer
+        if writer is not None and writer.invoke_id == invoke_id:
+            return writer
+        return self.db.invocation_writer(self.thread_id, invoke_id)
+
+    def _owned_append(
+        self,
+        invoke_id: str,
+        *,
+        type_: str,
+        payload: Dict[str, Any],
+        msg_id: Optional[str] = None,
+        chunk_seq: Optional[int] = None,
+    ) -> int:
+        return self._owned_writer(invoke_id).append_event(
+            event_id=os.urandom(10).hex(),
+            type_=type_,
+            payload=payload,
+            msg_id=msg_id,
+            chunk_seq=chunk_seq,
+        )
 
     def _has_compaction_summary_request_between(self, start_event_seq: int, before_event_seq: int) -> bool:
         rows = self.db.conn.execute(
@@ -1315,6 +1318,8 @@ class ThreadRunner:
 
         if not self.db.try_open_stream(self.thread_id, invoke_id, lease_until, owner=self.owner, purpose=purpose):
             return False
+        invocation_writer = self.db.invocation_writer(self.thread_id, invoke_id)
+        self._invocation_writer = invocation_writer
 
         # Resolve current model for this turn from eggthreads API so that
         # the provider call and the event annotations stay in sync. Fall
@@ -1359,12 +1364,10 @@ class ThreadRunner:
         # Open streaming event tagged with model_key and kind so that
         # downstream boundary detection can distinguish RA1 from
         # tool streaming.
-        self.db.append_event(
+        invocation_writer.append_event(
             event_id=os.urandom(10).hex(),
-            thread_id=self.thread_id,
             type_='stream.open',
             msg_id=os.urandom(10).hex(),
-            invoke_id=invoke_id,
             payload={'model_key': current_model, 'stream_kind': purpose, 'ra_kind': ra.kind},
         )
 
@@ -1387,11 +1390,9 @@ class ThreadRunner:
         def _append_delta(payload: Dict[str, Any]):
             nonlocal chunk_seq
             chunk_seq += 1
-            self.db.append_event(
+            invocation_writer.append_event(
                 event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
                 type_='stream.delta',
-                invoke_id=invoke_id,
                 chunk_seq=chunk_seq,
                 payload=payload,
             )
@@ -1408,6 +1409,7 @@ class ThreadRunner:
             context_limit = self.cfg.context_limit
 
         was_cancelled = False
+        lease_lost = False
         context_length_error: Optional[str] = None
         ra1_emitted_assistant_tool_calls = False
         try:
@@ -1425,9 +1427,8 @@ class ThreadRunner:
                             # Emit error instead of calling API
                             error_msg = f"Context limit exceeded: {current_tokens} tokens >= {context_limit} limit"
                             _append_delta({'reason': error_msg, 'model_key': current_model})
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='msg.create',
                                 msg_id=os.urandom(10).hex(),
                                 payload={
@@ -1447,7 +1448,7 @@ class ThreadRunner:
                         print(f"Warning: context limit check failed: {e}")
 
                 # ---------------- RA1: LLM call ----------------
-                ra1_emitted_assistant_tool_calls = await self._run_ra1_llm(invoke_id, current_model)
+                ra1_emitted_assistant_tool_calls = await self._run_ra1_llm(invoke_id, current_model, ra)
 
             elif ra.kind in ('RA2_tools_assistant', 'RA3_tools_user'):
                 # ---------------- RA2/RA3: tool calls ----------------
@@ -1456,10 +1457,20 @@ class ThreadRunner:
                 # approved tool calls and advance their states.
                 await self._run_ra_tools(invoke_id, current_model, ra)
 
+        except LeaseLost:
+            # Database fencing, not cooperative cancellation, is authoritative.
+            was_cancelled = True
+            lease_lost = True
+            stop_flag = True
         except asyncio.CancelledError:
             # Cooperative shutdown/cancellation should not be recorded as an
             # LLM/runner error. Defer re-raising until after stream/lease cleanup.
             was_cancelled = True
+        except (ToolOutputPlanError, ToolOutputPersistenceError, ToolOutputStateConflict) as e:
+            # TC4 finalization failures are deliberately retriable. Do not append
+            # a generic runner error (which would move the turn boundary or hide
+            # the pending output prompt); leave the finished output in TC4.
+            print(f"Tool output finalization pending retry: {e}")
         except Exception as e:
             if ra.kind == 'RA1_llm' and _is_context_length_exceeded_error(e):
                 context_length_error = str(e) if str(e) else f"{type(e).__name__}: (no message)"
@@ -1467,6 +1478,8 @@ class ThreadRunner:
                     # Advance the failed RA1 boundary; the summary request is
                     # appended after stream.close so it is the next RA1 turn.
                     _append_delta({'reason': f'LLM/runner context length exceeded: {context_length_error}', 'model_key': current_model})
+                except LeaseLost:
+                    raise
                 except Exception:
                     pass
             else:
@@ -1481,6 +1494,8 @@ class ThreadRunner:
                     # LLM stream. This prevents the same user message from
                     # repeatedly triggering a failing RA1 turn.
                     _append_delta({'reason': f'LLM/runner error: {error_msg}', 'model_key': current_model})
+                except LeaseLost:
+                    raise
                 except Exception:
                     pass
                 try:
@@ -1492,9 +1507,8 @@ class ThreadRunner:
                     }
                     if current_model:
                         err_payload['model_key'] = current_model
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.thread_id,
+                    self._owned_append(
+                        invoke_id,
                         type_='msg.create',
                         msg_id=os.urandom(10).hex(),
                         payload=err_payload,
@@ -1502,6 +1516,8 @@ class ThreadRunner:
                     if 'context length' in str(error_msg).lower() or 'context limit' in str(error_msg).lower():
                         context_length_error = error_msg
                     print(f"Runner error: {error_msg}")
+                except LeaseLost:
+                    raise
                 except Exception:
                     pass
         finally:
@@ -1512,23 +1528,34 @@ class ThreadRunner:
             except Exception:
                 pass
 
-        # Close stream if we still own the lease
-        try:
-            row = self.db.current_open(self.thread_id)
-            still_owner = bool(
-                row
-                and row['invoke_id'] == invoke_id
-            )
-        except Exception:
-            still_owner = False
-        if still_owner:
-            self.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
-                type_='stream.close',
-                invoke_id=invoke_id,
-                payload={},
-            )
+        # Stream close is itself lease-fenced. A stale owner emits nothing.
+        # Cooperative task cancellation is different from lease loss: if this
+        # invocation still owns a live lease, close and release it before
+        # propagating cancellation. Never release after a fenced write proves
+        # that another owner took over (or that this lease expired).
+        if not lease_lost:
+            try:
+                invocation_writer.close(event_id=os.urandom(10).hex())
+            except LeaseLost:
+                lease_lost = True
+                was_cancelled = True
+
+        if lease_lost:
+            if self._invocation_writer is invocation_writer:
+                self._invocation_writer = None
+            raise asyncio.CancelledError
+
+        if was_cancelled:
+            try:
+                invocation_writer.release()
+            except LeaseLost:
+                # An interrupt/takeover may race cooperative cancellation. The
+                # exact-owner predicate guarantees we cannot delete its lease.
+                pass
+            finally:
+                if self._invocation_writer is invocation_writer:
+                    self._invocation_writer = None
+            raise asyncio.CancelledError
 
         # Rebuild snapshot and short_recap for readability
         try:
@@ -1601,9 +1628,8 @@ class ThreadRunner:
                     }
                     if current_model:
                         err_payload['model_key'] = current_model
-                    self.db.append_event(
-                        event_id=os.urandom(10).hex(),
-                        thread_id=self.thread_id,
+                    self._owned_append(
+                        invoke_id,
                         type_='msg.create',
                         msg_id=os.urandom(10).hex(),
                         payload=err_payload,
@@ -1682,11 +1708,14 @@ class ThreadRunner:
                 # the existing runner path on advisory compaction.
                 print(f"Warning: auto compaction check failed: {e}")
 
-        # Attempt lease release (no-op if preempted)
+        # Release through the same exact-owner, unexpired lease authority.
         try:
-            self.db.release(self.thread_id, invoke_id)
-        except Exception:
-            pass
+            invocation_writer.release()
+        except LeaseLost:
+            raise asyncio.CancelledError
+        finally:
+            if self._invocation_writer is invocation_writer:
+                self._invocation_writer = None
 
         if ra.kind == 'RA1_llm' and not was_cancelled and context_length_error is None and not recovery_compaction_queued:
             try:
@@ -1698,322 +1727,284 @@ class ThreadRunner:
             raise asyncio.CancelledError
         return True
 
-    async def _run_ra1_llm(self, invoke_id: str, current_model: Optional[str]) -> bool:
+    def _load_ra1_provider_projection(self):
+        """Capture and load the one canonical message view for an RA1 turn."""
+
+        from .projection import load_thread_projection
+
+        watermark = self.db.max_event_seq(self.thread_id)
+        return load_thread_projection(self.db, self.thread_id, watermark)
+
+    async def _run_ra1_llm(
+        self,
+        invoke_id: str,
+        current_model: Optional[str],
+        ra: RunnerActionable,
+    ) -> bool:
         """Handle RA1: perform a single LLM call, streaming deltas,
         and append the final assistant message with optional tool_calls.
 
         Returns True when the persisted assistant message declared tool_calls
         that should be handled by a follow-up RA2 turn.
         """
-        from .tool_state import _last_stream_close_seq, _iter_messages_after
+        from .api import filter_projection_for_compaction_provider_context
 
-        # Re-discover the triggering message (first RA1-eligible message)
-        last_close = _last_stream_close_seq(self.db, self.thread_id)
-        trigger = None
-        for ev in _iter_messages_after(self.db, self.thread_id, last_close):
-            try:
-                payload = json.loads(ev['payload_json']) if isinstance(ev['payload_json'], str) else (ev['payload_json'] or {})
-            except Exception:
-                payload = {}
-            role = payload.get('role')
-            keep_user_turn = bool(payload.get('keep_user_turn'))
-            tool_calls = payload.get('tool_calls') or []
-            if role == 'user' and not tool_calls and not keep_user_turn:
-                trigger = (ev, payload)
-                break
-            if role == 'tool' and not keep_user_turn and not bool(payload.get('no_api')):
-                trigger = (ev, payload)
-                break
-        if not trigger:
+        # Capture one semantic input boundary after lease acquisition. The RA1
+        # trigger answers why this invocation runs; the canonical projection
+        # supplies every effective message visible at that exact boundary.
+        projection = self._load_ra1_provider_projection()
+        provider_context_watermark = projection.through_event_seq
+        trigger = next(
+            (
+                message
+                for message in projection.messages
+                if message.msg_id == str(ra.msg_id or "")
+                and message.created_event_seq == int(ra.triggering_event_seq)
+            ),
+            None,
+        )
+        if trigger is None:
             return False
+        # Keep the discovery reducer authoritative for why RA1 was selected.
+        # A newly appended edit after discovery may legitimately change the
+        # projected payload, but must not make this already leased turn vanish;
+        # deletion/continue does, because the trigger is then absent entirely.
+        ev: Dict[str, Any] = {
+            "event_seq": trigger.created_event_seq,
+            "msg_id": None if trigger.msg_id.startswith("event:") else trigger.msg_id,
+        }
 
-        ev, payload = trigger
-        role = payload.get('role')
-        user_content = payload.get('content', '')
-
-        # Build base_messages from snapshot, respecting no_api and
-        # applying per-model thinking-content policy/options.
-        th = self.db.get_thread(self.thread_id)
         base_messages: List[Dict[str, Any]] = []
         thinking_policy: Optional[str] = None
         thinking_key: Optional[str] = None
-        # Some providers (e.g. Gemini 3) require that we round-trip
-        # encrypted thought/signature blobs exactly as received.  These
-        # blobs are carried under a provider-defined key configured via
-        # thinking_content_key.
-        # 'send all' | 'last assistant turn'
+        # Some providers (e.g. Gemini 3) require exact opaque thinking blobs.
         encrypted_thinking_mode: Optional[str] = None
-        # Resolve per-model options from the registry if possible.
         try:
             opts = self._model_thinking_options(current_model)
-            tp = opts.get('thinking_content_policy')
+            tp = opts.get("thinking_content_policy")
             if isinstance(tp, str) and tp.strip():
                 thinking_policy = tp.strip().lower()
-            tk = opts.get('thinking_content_key')
+            tk = opts.get("thinking_content_key")
             if isinstance(tk, str) and tk.strip():
                 thinking_key = tk.strip()
         except Exception:
             thinking_policy = None
             thinking_key = None
 
-        if th and th.snapshot_json:
-            try:
-                snap = json.loads(th.snapshot_json)
-                msgs = snap.get('messages', []) or []
+        msgs = filter_projection_for_compaction_provider_context(
+            self.db, projection
+        )
+
+        # Recognize encrypted-Gemini thinking policies.
+        if thinking_policy in ('send all encrypted gemini', 'send_all_encrypted_gemini'):
+            encrypted_thinking_mode = 'send all'
+        elif thinking_policy in ('last assistant turn encrypted gemini', 'last_assistant_turn_encrypted_gemini'):
+            encrypted_thinking_mode = 'last assistant turn'
+
+        # If the model wants only the last assistant turn's
+        # thinking, identify the index of the last user message
+        # so we can treat messages after that as the "tail".
+        last_user_idx = -1
+        if thinking_policy == 'last assistant turn' or encrypted_thinking_mode == 'last assistant turn':
+            for i, m in enumerate(msgs):
                 try:
-                    from .api import filter_messages_for_compaction_provider_context
-
-                    msgs = filter_messages_for_compaction_provider_context(
-                        self.db,
-                        self.thread_id,
-                        msgs,
-                    )
+                    if m.get('role') == 'user':
+                        last_user_idx = i
                 except Exception:
-                    pass
+                    continue
 
-                # Recognize encrypted-Gemini thinking policies.
-                if thinking_policy in ('send all encrypted gemini', 'send_all_encrypted_gemini'):
-                    encrypted_thinking_mode = 'send all'
-                elif thinking_policy in ('last assistant turn encrypted gemini', 'last_assistant_turn_encrypted_gemini'):
-                    encrypted_thinking_mode = 'last assistant turn'
+        def _maybe_include_reasoning(m: Dict[str, Any], idx: int) -> Optional[str]:
+            """Return reasoning text to send for this message, or None.
 
-                # If the model wants only the last assistant turn's
-                # thinking, identify the index of the last user message
-                # so we can treat messages after that as the "tail".
-                last_user_idx = -1
-                if thinking_policy == 'last assistant turn' or encrypted_thinking_mode == 'last assistant turn':
-                    for i, m in enumerate(msgs):
-                        try:
-                            if m.get('role') == 'user':
-                                last_user_idx = i
-                        except Exception:
-                            continue
-
-                def _maybe_include_reasoning(m: Dict[str, Any], idx: int) -> Optional[str]:
-                    """Return reasoning text to send for this message, or None.
-
-                    The snapshot uses ``reasoning`` to store thinking.
-                    The provider may expect it under a different key,
-                    configured via thinking_content_key.  We return the
-                    thinking string here and let the caller attach it
-                    under the appropriate key on the outbound message.
-                    """
-                    raw = m.get('reasoning') or m.get('reasoning_content')
-                    if not isinstance(raw, str) or not raw:
-                        return None
-                    # Encrypted-Gemini modes do not send plaintext reasoning
-                    # derived from the provider stream; instead they round-trip
-                    # a provider-supplied opaque field under
-                    # thinking_content_key.
-                    if encrypted_thinking_mode is not None:
-                        return None
-                    if thinking_policy == 'send all':
-                        return raw
-                    if thinking_policy == 'last assistant turn':
-                        # Only include thinking for messages in the
-                        # "tail" after the last user content.
-                        if last_user_idx == -1 or idx <= last_user_idx:
-                            return None
-                        return raw
-                    # Default / "strip all": never send.
+            The snapshot uses ``reasoning`` to store thinking.
+            The provider may expect it under a different key,
+            configured via thinking_content_key.  We return the
+            thinking string here and let the caller attach it
+            under the appropriate key on the outbound message.
+            """
+            raw = m.get('reasoning') or m.get('reasoning_content')
+            if not isinstance(raw, str) or not raw:
+                return None
+            # Encrypted-Gemini modes do not send plaintext reasoning
+            # derived from the provider stream; instead they round-trip
+            # a provider-supplied opaque field under
+            # thinking_content_key.
+            if encrypted_thinking_mode is not None:
+                return None
+            if thinking_policy == 'send all':
+                return raw
+            if thinking_policy == 'last assistant turn':
+                # Only include thinking for messages in the
+                # "tail" after the last user content.
+                if last_user_idx == -1 or idx <= last_user_idx:
                     return None
+                return raw
+            # Default / "strip all": never send.
+            return None
 
-                def _maybe_include_encrypted_thinking(m: Dict[str, Any], idx: int) -> Optional[Any]:
-                    """Return opaque provider thinking/signature content to round-trip.
+        def _maybe_include_encrypted_thinking(m: Dict[str, Any], idx: int) -> Optional[Any]:
+            """Return opaque provider thinking/signature content to round-trip.
 
-                    The returned value is attached under the configured
-                    thinking_content_key without any interpretation.
-                    """
-                    if encrypted_thinking_mode is None:
-                        return None
-                    out_thinking_key = thinking_key or 'reasoning_content'
-                    if out_thinking_key not in m:
-                        return None
-                    val = m.get(out_thinking_key)
-                    if val is None:
-                        return None
-                    if encrypted_thinking_mode == 'send all':
-                        return val
-                    if encrypted_thinking_mode == 'last assistant turn':
-                        if last_user_idx == -1 or idx <= last_user_idx:
-                            return None
-                        return val
+            The returned value is attached under the configured
+            thinking_content_key without any interpretation.
+            """
+            if encrypted_thinking_mode is None:
+                return None
+            out_thinking_key = thinking_key or 'reasoning_content'
+            if out_thinking_key not in m:
+                return None
+            val = m.get(out_thinking_key)
+            if val is None:
+                return None
+            if encrypted_thinking_mode == 'send all':
+                return val
+            if encrypted_thinking_mode == 'last assistant turn':
+                if last_user_idx == -1 or idx <= last_user_idx:
                     return None
+                return val
+            return None
 
-                def _should_include_reasoning_field(idx: int) -> bool:
-                    """Return True if this message index should have reasoning field (even if empty).
+        def _should_include_reasoning_field(idx: int) -> bool:
+            """Return True if this message index should have reasoning field (even if empty).
 
-                    This applies when a plaintext thinking policy is active that would send
-                    reasoning for this message. Providers like DeepSeek require the field to
-                    be present even when empty.
+            This applies when a plaintext thinking policy is active that would send
+            reasoning for this message. Providers like DeepSeek require the field to
+            be present even when empty.
 
-                    NOTE: This does NOT apply to encrypted thinking modes (e.g., Gemini),
-                    which use structured objects, not strings. Adding an empty string ""
-                    would cause "Value is not a struct" errors from those providers.
-                    """
-                    # Only for plaintext reasoning mode (e.g., DeepSeek)
-                    # Encrypted modes (Gemini) use structured objects and don't need this fallback
-                    if encrypted_thinking_mode is not None:
-                        return False
-                    if thinking_policy == 'send all':
-                        return True
-                    if thinking_policy == 'last assistant turn':
-                        return last_user_idx != -1 and idx > last_user_idx
-                    return False
+            NOTE: This does NOT apply to encrypted thinking modes (e.g., Gemini),
+            which use structured objects, not strings. Adding an empty string ""
+            would cause "Value is not a struct" errors from those providers.
+            """
+            # Only for plaintext reasoning mode (e.g., DeepSeek)
+            # Encrypted modes (Gemini) use structured objects and don't need this fallback
+            if encrypted_thinking_mode is not None:
+                return False
+            if thinking_policy == 'send all':
+                return True
+            if thinking_policy == 'last assistant turn':
+                return last_user_idx != -1 and idx > last_user_idx
+            return False
 
-                def _passthrough_provider_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
-                    """Copy provider-specific fields from a snapshot message.
+        def _passthrough_provider_fields(src: Dict[str, Any], dst: Dict[str, Any]) -> None:
+            """Copy provider-specific fields from a snapshot message.
 
-                    For "encrypted gemini" modes we must be able to
-                    round-trip provider-returned blobs (e.g.
-                    thought_signature / extra_content) exactly as
-                    received.
+            For "encrypted gemini" modes we must be able to
+            round-trip provider-returned blobs (e.g.
+            thought_signature / extra_content) exactly as
+            received.
 
-                    We copy only keys that are *not* eggthreads
-                    bookkeeping fields.
-                    """
-                    if encrypted_thinking_mode is None:
-                        return
-                    if not isinstance(src, dict) or not isinstance(dst, dict):
-                        return
-                    ignore = {
-                        # OpenAI message protocol keys we always set explicitly
-                        'role', 'content', 'tool_calls',
-                        # eggthreads snapshot/DB metadata
-                        'msg_id', 'ts',
-                        # eggthreads-only flags
-                        'no_api', 'keep_user_turn',
-                        # eggthreads local annotations
-                        'model_key', 'reasoning',
-                    }
-                    for k, v in src.items():
-                        if k in ignore:
-                            continue
-                        if k in dst:
-                            continue
-                        if v is None:
-                            continue
-                        dst[k] = v
+            We copy only keys that are *not* eggthreads
+            bookkeeping fields.
+            """
+            if encrypted_thinking_mode is None:
+                return
+            if not isinstance(src, dict) or not isinstance(dst, dict):
+                return
+            ignore = {
+                # OpenAI message protocol keys we always set explicitly
+                'role', 'content', 'tool_calls',
+                # eggthreads snapshot/DB metadata
+                'msg_id', 'ts',
+                # eggthreads-only flags
+                'no_api', 'keep_user_turn',
+                # eggthreads local annotations
+                'model_key', 'reasoning',
+            }
+            for k, v in src.items():
+                if k in ignore:
+                    continue
+                if k in dst:
+                    continue
+                if v is None:
+                    continue
+                dst[k] = v
 
-                for idx, m in enumerate(msgs):
-                    if m.get('no_api'):
-                        continue
-                    if m.get('answer_user_preserve_turn'):
-                        continue
-                    r = m.get('role')
-                    content = m.get('content', '')
-                    tool_content_text = content_to_plain_text(content)
-                    # Compute optional thinking text according to policy
-                    thinking_text = _maybe_include_reasoning(m, idx)
-                    encrypted_thinking_val = _maybe_include_encrypted_thinking(m, idx)
-                    # Determine the outbound thinking key, defaulting
-                    # to the provider's native "reasoning_content" if
-                    # no explicit key was configured.
-                    out_thinking_key = thinking_key or 'reasoning_content'
+        for idx, m in enumerate(msgs):
+            if m.get('no_api'):
+                continue
+            if m.get('answer_user_preserve_turn'):
+                continue
+            r = m.get('role')
+            content = m.get('content', '')
+            tool_content_text = content_to_plain_text(content)
+            # Compute optional thinking text according to policy
+            thinking_text = _maybe_include_reasoning(m, idx)
+            encrypted_thinking_val = _maybe_include_encrypted_thinking(m, idx)
+            # Determine the outbound thinking key, defaulting
+            # to the provider's native "reasoning_content" if
+            # no explicit key was configured.
+            out_thinking_key = thinking_key or 'reasoning_content'
 
-                    tcs = m.get('tool_calls') or []
+            tcs = m.get('tool_calls') or []
 
-                    if r == 'assistant' and isinstance(tcs, list) and tcs:
-                        # Assistant messages with tool_calls may also
-                        # carry thinking. We forward tool_calls plus any
-                        # allowed thinking under the configured key.
-                        # NOTE: content field is required by some providers
-                        # (e.g., StepFun) even when empty.
-                        msg_out: Dict[str, Any] = {
-                            'role': 'assistant',
-                            'content': content,
-                            'tool_calls': tcs,
-                        }
-                        if m.get('msg_id'):
-                            msg_out['msg_id'] = m.get('msg_id')
-                        if m.get('event_seq') is not None:
-                            msg_out['event_seq'] = m.get('event_seq')
-                        if thinking_text is not None:
-                            msg_out[out_thinking_key] = thinking_text
-                        elif encrypted_thinking_val is not None:
-                            msg_out[out_thinking_key] = encrypted_thinking_val
-                        elif _should_include_reasoning_field(idx):
-                            # Provider requires reasoning field even when empty
-                            msg_out[out_thinking_key] = ""
-                        _passthrough_provider_fields(m, msg_out)
-                        base_messages.append(msg_out)
-                    elif r == 'tool':
-                        # Preserve structured attachment-producing tool
-                        # outputs until expand_tool_attachment_messages_for_provider()
-                        # can add a synthetic user-role visual/file input.
-                        # Other structured tool outputs (for example generated
-                        # provider artifact cards) should still reach providers
-                        # as plain text, because tool-role messages cannot carry
-                        # native multimodal blocks portably.
-                        tool_provider_content = (
-                            content
-                            if isinstance(content, list) and content_has_attachments(content, validate=False)
-                            else tool_content_text
-                        )
-                        obj = {'role': 'tool', 'content': tool_provider_content}
-                        if m.get('msg_id'):
-                            obj['msg_id'] = m.get('msg_id')
-                        if m.get('event_seq') is not None:
-                            obj['event_seq'] = m.get('event_seq')
-                        if m.get('name'):
-                            obj['name'] = m.get('name')
-                        if m.get('tool_call_id'):
-                            obj['tool_call_id'] = m.get('tool_call_id')
-                        # Preserve user_tool_call so that RA3 user commands
-                        # can be rewritten to user-role messages before
-                        # hitting the provider API.
-                        if m.get('user_tool_call'):
-                            obj['user_tool_call'] = m.get('user_tool_call')
-                        base_messages.append(obj)
-                    elif r in ('system', 'user', 'assistant'):
-                        msg_out: Dict[str, Any] = {'role': r, 'content': content}
-                        if m.get('msg_id'):
-                            msg_out['msg_id'] = m.get('msg_id')
-                        if m.get('event_seq') is not None:
-                            msg_out['event_seq'] = m.get('event_seq')
-                        if r == 'assistant' and thinking_text is not None:
-                            msg_out[out_thinking_key] = thinking_text
-                        elif r == 'assistant' and encrypted_thinking_val is not None:
-                            msg_out[out_thinking_key] = encrypted_thinking_val
-                        elif r == 'assistant' and _should_include_reasoning_field(idx):
-                            # Provider requires reasoning field even when empty
-                            msg_out[out_thinking_key] = ""
-                        if r == 'assistant':
-                            _passthrough_provider_fields(m, msg_out)
-                        base_messages.append(msg_out)
-            except Exception:
-                pass
-
-        # Avoid duplicating trigger if already in snapshot
-        try:
-            last_seq = int(ev['event_seq'])
-            snap_has_last = bool(th and isinstance(th.snapshot_last_event_seq, int) and th.snapshot_last_event_seq >= last_seq)
-        except Exception:
-            snap_has_last = False
-        if not snap_has_last:
-            if not payload.get('no_api'):
-                if role == 'tool':
-                    tool_provider_content = (
-                        user_content
-                        if isinstance(user_content, list) and content_has_attachments(user_content, validate=False)
-                        else content_to_plain_text(user_content)
-                    )
-                    obj = {'role': 'tool', 'content': tool_provider_content}
-                    if payload.get('name'):
-                        obj['name'] = payload.get('name')
-                    if payload.get('tool_call_id'):
-                        obj['tool_call_id'] = payload.get('tool_call_id')
-                    if payload.get('user_tool_call'):
-                        obj['user_tool_call'] = payload.get('user_tool_call')
-                    base_messages.append(obj)
-                else:
-                    msg_out = {'role': 'user', 'content': user_content}
-                    if ev.get('msg_id'):
-                        msg_out['msg_id'] = ev.get('msg_id')
-                    if ev.get('event_seq') is not None:
-                        msg_out['event_seq'] = ev.get('event_seq')
-                    base_messages.append(msg_out)
-
+            if r == 'assistant' and isinstance(tcs, list) and tcs:
+                # Assistant messages with tool_calls may also
+                # carry thinking. We forward tool_calls plus any
+                # allowed thinking under the configured key.
+                # NOTE: content field is required by some providers
+                # (e.g., StepFun) even when empty.
+                msg_out: Dict[str, Any] = {
+                    'role': 'assistant',
+                    'content': content,
+                    'tool_calls': tcs,
+                }
+                if m.get('msg_id'):
+                    msg_out['msg_id'] = m.get('msg_id')
+                if m.get('event_seq') is not None:
+                    msg_out['event_seq'] = m.get('event_seq')
+                if thinking_text is not None:
+                    msg_out[out_thinking_key] = thinking_text
+                elif encrypted_thinking_val is not None:
+                    msg_out[out_thinking_key] = encrypted_thinking_val
+                elif _should_include_reasoning_field(idx):
+                    # Provider requires reasoning field even when empty
+                    msg_out[out_thinking_key] = ""
+                _passthrough_provider_fields(m, msg_out)
+                base_messages.append(msg_out)
+            elif r == 'tool':
+                # Preserve structured attachment-producing tool
+                # outputs until expand_tool_attachment_messages_for_provider()
+                # can add a synthetic user-role visual/file input.
+                # Other structured tool outputs (for example generated
+                # provider artifact cards) should still reach providers
+                # as plain text, because tool-role messages cannot carry
+                # native multimodal blocks portably.
+                tool_provider_content = (
+                    content
+                    if isinstance(content, list) and content_has_attachments(content, validate=False)
+                    else tool_content_text
+                )
+                obj = {'role': 'tool', 'content': tool_provider_content}
+                if m.get('msg_id'):
+                    obj['msg_id'] = m.get('msg_id')
+                if m.get('event_seq') is not None:
+                    obj['event_seq'] = m.get('event_seq')
+                if m.get('name'):
+                    obj['name'] = m.get('name')
+                if m.get('tool_call_id'):
+                    obj['tool_call_id'] = m.get('tool_call_id')
+                # Preserve user_tool_call so that RA3 user commands
+                # can be rewritten to user-role messages before
+                # hitting the provider API.
+                if m.get('user_tool_call'):
+                    obj['user_tool_call'] = m.get('user_tool_call')
+                base_messages.append(obj)
+            elif r in ('system', 'user', 'assistant'):
+                msg_out: Dict[str, Any] = {'role': r, 'content': content}
+                if m.get('msg_id'):
+                    msg_out['msg_id'] = m.get('msg_id')
+                if m.get('event_seq') is not None:
+                    msg_out['event_seq'] = m.get('event_seq')
+                if r == 'assistant' and thinking_text is not None:
+                    msg_out[out_thinking_key] = thinking_text
+                elif r == 'assistant' and encrypted_thinking_val is not None:
+                    msg_out[out_thinking_key] = encrypted_thinking_val
+                elif r == 'assistant' and _should_include_reasoning_field(idx):
+                    # Provider requires reasoning field even when empty
+                    msg_out[out_thinking_key] = ""
+                if r == 'assistant':
+                    _passthrough_provider_fields(m, msg_out)
+                base_messages.append(msg_out)
 
         assistant_text_parts: List[str] = []
         reasoning_parts: List[str] = []
@@ -2087,13 +2078,21 @@ class ThreadRunner:
         # user messages never carry "tool_calls" fields and that tool
         # exposure honours any per-thread tools configuration (e.g.
         # thread-wide tool disable, per-tool blacklists).
-        base_messages = self._sanitize_messages_for_api(base_messages, model_key=current_model)
+        tools_cfg = get_thread_tools_config(
+            self.db,
+            self.thread_id,
+            through_event_seq=provider_context_watermark,
+        )
+        base_messages = self._sanitize_messages_for_api(
+            base_messages,
+            model_key=current_model,
+            tools_cfg=tools_cfg,
+        )
 
         # Apply per-thread tools configuration: this governs which tools
         # the LLM is allowed to see in this thread. User-initiated tools
         # (RA3) are still modelled as tool calls but are handled elsewhere
         # when executed.
-        tools_cfg = get_thread_tools_config(self.db, self.thread_id)
         tools_spec = self.tools.tools_spec() or None
         if tools_spec is not None:
             # Filter out disabled tool names from the spec before
@@ -2134,12 +2133,9 @@ class ThreadRunner:
         # Convert to int for aiohttp; 0 means no timeout
         api_timeout_int = int(api_timeout) if api_timeout > 0 else 0
 
-        self.db.append_event(
-            event_id=os.urandom(10).hex(),
-            thread_id=self.thread_id,
+        self._owned_append(
+            invoke_id,
             type_='provider_request.started',
-            msg_id=None,
-            invoke_id=invoke_id,
             payload={
                 'timeout': api_timeout_int,
                 'timeout_kind': 'inactivity',
@@ -2148,6 +2144,7 @@ class ThreadRunner:
         )
 
         interrupted = False
+        lease_lost_during_stream = False
         transport_error_after_output: Optional[BaseException] = None
 
         def _persist_assistant_message(final: Dict[str, Any]) -> bool:
@@ -2227,9 +2224,8 @@ class ThreadRunner:
                 }
                 if current_model:
                     err_payload['model_key'] = current_model
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=err_payload,
@@ -2249,9 +2245,8 @@ class ThreadRunner:
                     assistant_msg['tps'] = tps
             except Exception:
                 pass
-            self.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
+            self._owned_append(
+                invoke_id,
                 type_='msg.create',
                 msg_id=os.urandom(10).hex(),
                 payload=assistant_msg,
@@ -2298,13 +2293,12 @@ class ThreadRunner:
                             # Heartbeat / lease extension; stop if we lost lease
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                                 interrupted = True
+                                lease_lost_during_stream = True
                                 break
                             chunk_seq += 1
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='stream.delta',
-                                invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
                                 payload={'text': content, 'model_key': current_model},
                             )
@@ -2319,16 +2313,18 @@ class ThreadRunner:
                                 reasoning_parts.append(reason)
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                                 interrupted = True
+                                lease_lost_during_stream = True
                                 break
                             chunk_seq += 1
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='stream.delta',
-                                invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
-                                payload={'reasoning_summary': reason, 'model_key': current_model}
-                                if is_reasoning_summary else {'reason': reason, 'model_key': current_model},
+                                payload=(
+                                    {'reasoning_summary': reason, 'model_key': current_model}
+                                    if is_reasoning_summary
+                                    else {'reason': reason, 'model_key': current_model}
+                                ),
                             )
                             await asyncio.sleep(0)
                     elif et == 'tool_calls_delta':
@@ -2361,13 +2357,12 @@ class ThreadRunner:
                             # Heartbeat and stop if we lose the lease.
                             if not self.db.heartbeat(self.thread_id, invoke_id, _now_plus(self.cfg.lease_ttl_sec)):
                                 interrupted = True
+                                lease_lost_during_stream = True
                                 break
                             chunk_seq += 1
-                            self.db.append_event(
-                                event_id=os.urandom(10).hex(),
-                                thread_id=self.thread_id,
+                            self._owned_append(
+                                invoke_id,
                                 type_='stream.delta',
-                                invoke_id=invoke_id,
                                 chunk_seq=chunk_seq,
                                 payload={
                                     'tool_call': {
@@ -2388,17 +2383,19 @@ class ThreadRunner:
                         return _persist_assistant_message(final)
                 if interrupted:
                     break
+        except LeaseLost:
+            interrupted = True
+            lease_lost_during_stream = True
+            raise
         except Exception as e:
             if assistant_text_parts or reasoning_parts or tool_calls_args_so_far:
                 transport_error_after_output = e
             else:
                 raise
         finally:
-            # If the stream was interrupted (e.g. via Ctrl+C removing the
-            # lease), we still want to persist whatever partial assistant
-            # content we have as a user-visible message so that users can
-            # inspect or edit it and the model can see what was interrupted.
-            if interrupted and (assistant_text_parts or reasoning_parts):
+            # Provider interruption while the lease is still live may preserve
+            # partial output. Lease loss itself must never append stale content.
+            if interrupted and not lease_lost_during_stream and (assistant_text_parts or reasoning_parts):
                 assistant_msg: Dict[str, Any] = {'role': 'assistant'}
                 if assistant_text_parts:
                     assistant_msg['content'] = ''.join(assistant_text_parts)
@@ -2418,9 +2415,8 @@ class ThreadRunner:
                         assistant_msg['tps'] = tps
                 except Exception:
                     pass
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=assistant_msg,
@@ -2453,9 +2449,8 @@ class ThreadRunner:
                 partial_msg['tool_calls'] = partial_tool_calls
             partial_msg['incomplete'] = True
             partial_msg['incomplete_reason'] = f'provider stream ended early: {transport_error_after_output}'
-            self.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=self.thread_id,
+            self._owned_append(
+                invoke_id,
                 type_='msg.create',
                 msg_id=os.urandom(10).hex(),
                 payload=partial_msg,
@@ -2536,7 +2531,13 @@ class ThreadRunner:
         )
 
 
-    def _sanitize_messages_for_api(self, messages: List[Dict[str, Any]], model_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _sanitize_messages_for_api(
+        self,
+        messages: List[Dict[str, Any]],
+        model_key: Optional[str] = None,
+        *,
+        tools_cfg: Any = None,
+    ) -> List[Dict[str, Any]]:
         """Return a sanitized copy of messages for provider API.
 
         Responsibilities that belong specifically to eggthreads (and not
@@ -2560,8 +2561,12 @@ class ThreadRunner:
         # control characters to keep providers and downstream tooling
         # robust.
         try:
-            tools_cfg = get_thread_tools_config(self.db, self.thread_id)
-            allow_raw = bool(getattr(tools_cfg, 'allow_raw_tool_output', False))
+            effective_tools_cfg = tools_cfg or get_thread_tools_config(
+                self.db, self.thread_id
+            )
+            allow_raw = bool(
+                getattr(effective_tools_cfg, 'allow_raw_tool_output', False)
+            )
         except Exception:
             allow_raw = False
 
@@ -2892,29 +2897,37 @@ class ThreadRunner:
                 text = self._filter_tool_output(text, mask_secrets=False)
             except Exception:
                 pass
-            return emit_limited_tool_stream_delta(
-                self.db,
-                stream_limiter,
-                text,
-                thread_id=self.thread_id,
-                invoke_id=invoke_id,
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.name or '',
-                current_model=current_model,
-                heartbeat=_heartbeat,
-                suppressed_counter=suppressed_counter,
-                next_chunk_seq=_next_chunk_seq,
-            )
+            try:
+                return emit_limited_tool_stream_delta(
+                    self.db,
+                    stream_limiter,
+                    text,
+                    thread_id=self.thread_id,
+                    invoke_id=invoke_id,
+                    tool_call_id=tc.tool_call_id,
+                    tool_name=tc.name or '',
+                    current_model=current_model,
+                    heartbeat=_heartbeat,
+                    suppressed_counter=suppressed_counter,
+                    next_chunk_seq=_next_chunk_seq,
+                    writer=self._owned_writer(invoke_id),
+                )
+            except LeaseLost:
+                return False
 
         def _emit_summary(summary: str) -> None:
-            emit_tool_summary_event(
-                self.db,
-                thread_id=self.thread_id,
-                invoke_id=invoke_id,
-                tool_call_id=tc.tool_call_id,
-                tool_name=tc.name or '',
-                summary=summary,
-            )
+            try:
+                emit_tool_summary_event(
+                    self.db,
+                    thread_id=self.thread_id,
+                    invoke_id=invoke_id,
+                    tool_call_id=tc.tool_call_id,
+                    tool_name=tc.name or '',
+                    summary=summary,
+                    writer=self._owned_writer(invoke_id),
+                )
+            except LeaseLost:
+                return
 
         return ToolStreamContext(
             db=self.db,
@@ -2936,6 +2949,13 @@ class ThreadRunner:
         # both for assistant-originated tool calls (RA2) and
         # user-initiated ones (RA3).
         tools_cfg = get_thread_tools_config(self.db, self.thread_id)
+        if tools_cfg.policy_error:
+            # The config already carries a durable/best-effort diagnostic. Keep
+            # processing states so calls can terminate inspectably, but execute
+            # no tool while policy authorization is unknown.
+            policy_error_message = f"Tool policy unavailable; execution denied: {tools_cfg.policy_error}"
+        else:
+            policy_error_message = ""
         for tc in tool_calls:
             # Denied -> publish denial message and move to TC6
             if tc.state == 'TC2.2' and not tc.published:
@@ -2948,9 +2968,8 @@ class ThreadRunner:
                 }
                 if current_model:
                     msg['model_key'] = current_model
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=msg,
@@ -2965,37 +2984,40 @@ class ThreadRunner:
                 # to assistant- and user-originated calls.
                 if not tools_cfg.is_tool_allowed(tc.name):
                     import os as _os
-                    disabled_msg = (
+                    disabled_msg = policy_error_message or (
                         f"Tool '{tc.name}' is not allowed for this thread and "
                         "was not executed."
                     )
-                    self.db.append_event(
-                        event_id=_os.urandom(10).hex(),
-                        thread_id=self.thread_id,
+                    finished_seq = self._owned_append(
+                        invoke_id,
                         type_='tool_call.finished',
-                        msg_id=None,
-                        invoke_id=invoke_id,
                         payload={
                             'tool_call_id': tc.tool_call_id,
-                            'reason': 'disabled',
+                            'reason': 'policy_error' if policy_error_message else 'disabled',
                             'output': disabled_msg,
                         },
                     )
-                    # Immediately approve the small synthetic output so
-                    # it can be published as a tool message on the next
-                    # RA2/RA3 pass without user interaction.
-                    self.db.append_event(
-                        event_id=_os.urandom(10).hex(),
-                        thread_id=self.thread_id,
-                        type_='tool_call.output_approval',
-                        msg_id=None,
-                        invoke_id=None,
-                        payload={
-                            'tool_call_id': tc.tool_call_id,
-                            'decision': 'whole',
-                            'reason': 'Auto: tool not allowed for this thread',
-                            'preview': disabled_msg,
-                        },
+                    # Synthetic policy/disabled output goes through the same
+                    # transactional TC4 authority as normal tool output.
+                    synthetic_reason = (
+                        'Auto: tool policy read failed closed'
+                        if policy_error_message
+                        else 'Auto: tool not allowed for this thread'
+                    )
+                    finalize_tool_output(
+                        self.db,
+                        self.thread_id,
+                        tc.tool_call_id,
+                        decision='whole',
+                        source='automatic_synthetic',
+                        reason=synthetic_reason,
+                        expected_event_seq=finished_seq,
+                        publication_plan=ToolOutputPublicationPlan(
+                            decision='whole',
+                            preview=disabled_msg,
+                            reason=synthetic_reason,
+                        ),
+                        invocation_writer=self._owned_writer(invoke_id),
                     )
                     continue
 
@@ -3020,12 +3042,10 @@ class ThreadRunner:
                 }
                 if tool_timeout_sec is not None:
                     started_payload['timeout'] = tool_timeout_sec
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='tool_call.execution_started',
                     msg_id=None,
-                    invoke_id=invoke_id,
                     payload=started_payload,
                 )
 
@@ -3043,8 +3063,11 @@ class ThreadRunner:
                                 import sqlite3
                                 local.conn = sqlite3.connect(str(db_path), timeout=5)
                             row = local.conn.execute(
-                                "SELECT 1 FROM open_streams WHERE thread_id=? AND invoke_id=?",
-                                (thread_id, invoke_id)
+                                """
+                                SELECT 1 FROM open_streams
+                                WHERE thread_id=? AND invoke_id=? AND lease_until>datetime('now')
+                                """,
+                                (thread_id, invoke_id),
                             ).fetchone()
                             return row is None  # True = cancelled (lease lost)
                         except Exception:
@@ -3085,33 +3108,29 @@ class ThreadRunner:
                         "Tool execution was interrupted because the runner task was cancelled."
                     )
                     try:
-                        self.db.append_event(
-                            event_id=os.urandom(10).hex(),
-                            thread_id=self.thread_id,
+                        finished_seq = self._owned_append(
+                            invoke_id,
                             type_='tool_call.finished',
-                            msg_id=None,
-                            invoke_id=invoke_id,
                             payload={
                                 'tool_call_id': tc.tool_call_id,
                                 'reason': 'interrupted',
                                 'output': full_result,
                             },
                         )
-                    except Exception:
-                        pass
-                    try:
-                        self.db.append_event(
-                            event_id=os.urandom(10).hex(),
-                            thread_id=self.thread_id,
-                            type_='tool_call.output_approval',
-                            msg_id=None,
-                            invoke_id=None,
-                            payload={
-                                'tool_call_id': tc.tool_call_id,
-                                'decision': 'whole',
-                                'reason': 'Runner task cancelled',
-                                'preview': full_result,
-                            },
+                        finalize_tool_output(
+                            self.db,
+                            self.thread_id,
+                            tc.tool_call_id,
+                            decision='whole',
+                            source='automatic_synthetic',
+                            reason='Runner task cancelled',
+                            expected_event_seq=finished_seq,
+                            publication_plan=ToolOutputPublicationPlan(
+                                decision='whole',
+                                preview=full_result,
+                                reason='Runner task cancelled',
+                            ),
+                            invocation_writer=self._owned_writer(invoke_id),
                         )
                     except Exception:
                         pass
@@ -3176,6 +3195,7 @@ class ThreadRunner:
                             heartbeat=_heartbeat,
                             suppressed_counter=suppressed_counter,
                             next_chunk_seq=_next_chunk_seq,
+                            writer=self._owned_writer(invoke_id),
                         )
                         if not ok:
                             cancelled = True
@@ -3183,12 +3203,9 @@ class ThreadRunner:
                         await asyncio.sleep(0)
                 if cancelled and finish_reason == 'success':
                     finish_reason = 'interrupted'
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                finished_seq = self._owned_append(
+                    invoke_id,
                     type_='tool_call.finished',
-                    msg_id=None,
-                    invoke_id=invoke_id,
                     payload={
                         'tool_call_id': tc.tool_call_id,
                         'reason': finish_reason,
@@ -3200,30 +3217,29 @@ class ThreadRunner:
                 # artifacts and get decision='partial' with a preview that
                 # references read_long_tool_output usage. A UI cancellation (Ctrl+C)
                 # that already recorded an explicit decision is respected.
-                try:
-                    parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
-                    _emit_auto_output_approval(
-                        self.db,
-                        self.thread_id,
-                        tc.tool_call_id,
-                        full_result,
-                        tool_name=tc.name,
-                        tool_args=tc.arguments,
-                        finished_reason=finish_reason,
-                        origin=ra.kind,
-                        user_tool_call=bool(ra.kind == 'RA3_tools_user'),
-                        tool_metadata={
-                            'ra_kind': ra.kind,
-                            'parent_msg_id': tc.parent_msg_id,
-                            'parent_role': tc.parent_role,
-                            'parent_no_api': parent_no_api,
-                            'tool_index': tc.index,
-                        },
-                        original_char_count=original_output_char_count,
-                        output_capped=output_was_capped,
-                    )
-                except Exception:
-                    pass
+                parent_no_api = self._parent_msg_has_no_api(tc.parent_msg_id) if ra.kind == 'RA3_tools_user' else False
+                _finalize_auto_tool_output(
+                    self.db,
+                    self.thread_id,
+                    tc.tool_call_id,
+                    full_result,
+                    tool_name=tc.name,
+                    tool_args=tc.arguments,
+                    finished_reason=finish_reason,
+                    origin=ra.kind,
+                    user_tool_call=bool(ra.kind == 'RA3_tools_user'),
+                    tool_metadata={
+                        'ra_kind': ra.kind,
+                        'parent_msg_id': tc.parent_msg_id,
+                        'parent_role': tc.parent_role,
+                        'parent_no_api': parent_no_api,
+                        'tool_index': tc.index,
+                    },
+                    original_char_count=original_output_char_count,
+                    output_capped=output_was_capped,
+                    expected_event_seq=finished_seq,
+                    writer=self._owned_writer(invoke_id),
+                )
 
             # Output approval done (TC5) -> publish final tool message based on
             # the last tool_call.output_approval payload.
@@ -3327,9 +3343,8 @@ class ThreadRunner:
                     msg['no_api'] = True
                 if current_model:
                     msg['model_key'] = current_model
-                self.db.append_event(
-                    event_id=os.urandom(10).hex(),
-                    thread_id=self.thread_id,
+                self._owned_append(
+                    invoke_id,
                     type_='msg.create',
                     msg_id=os.urandom(10).hex(),
                     payload=msg,

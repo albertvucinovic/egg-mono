@@ -2091,7 +2091,8 @@ def test_scheduler_bulk_max_event_seqs(tmp_path):
 
     assert seqs[root] == db.max_event_seq(root)
     assert seqs[child] == db.max_event_seq(child)
-    assert seqs[empty] == -1
+    # Child creation atomically persists its mandatory initial tool policy.
+    assert seqs[empty] == db.max_event_seq(empty)
 
 
 def test_scheduler_bulk_active_open_threads_excludes_expired_leases(tmp_path):
@@ -2130,3 +2131,130 @@ def test_scheduler_bulk_thread_scheduling_matches_public_settings(tmp_path):
     assert settings[high].priority == 9
     assert settings[high].threshold is None
     assert _sort_by_priority_map([low, high, root], "none", settings) == [high, low, root]
+
+
+def test_late_llm_completion_after_interrupt_is_fenced(tmp_path):
+    """A provider that ignores cancellation cannot append after control.interrupt."""
+
+    db_runner = _make_db(tmp_path)
+    root = ts.create_root_thread(db_runner, name="root")
+    _make_thread_runnable(db_runner, root)
+    db_control = ThreadsDB(db_runner.path)
+    provider_started = asyncio.Event()
+    allow_completion = asyncio.Event()
+
+    class BarrierLLM:
+        current_model_key = "mock"
+
+        def set_model(self, model_key):
+            self.current_model_key = model_key
+
+        async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
+            provider_started.set()
+            await allow_completion.wait()
+            yield {"type": "done", "message": {"role": "assistant", "content": "late answer"}}
+
+    async def run_test():
+        runner = ts.ThreadRunner(
+            db_runner,
+            root,
+            llm=BarrierLLM(),
+            config=RunnerConfig(lease_ttl_sec=30, heartbeat_sec=3600),
+        )
+        task = asyncio.create_task(runner.run_once())
+        await asyncio.wait_for(provider_started.wait(), timeout=1)
+        old_invoke = db_control.current_open(root)["invoke_id"]
+        interrupt_seq_before = db_control.max_event_seq(root)
+        assert ts.interrupt_thread(db_control, root, reason="test barrier") == old_invoke
+        interrupt_seq = db_control.max_event_seq(root)
+        assert interrupt_seq > interrupt_seq_before
+        allow_completion.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return old_invoke, interrupt_seq
+
+    old_invoke, interrupt_seq = asyncio.run(run_test())
+    stale = db_runner.conn.execute(
+        "SELECT type FROM events WHERE thread_id=? AND event_seq>? AND invoke_id=?",
+        (root, interrupt_seq, old_invoke),
+    ).fetchall()
+    assert stale == []
+    assistant_rows = db_runner.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='msg.create' AND event_seq>?",
+        (root, interrupt_seq),
+    ).fetchall()
+    assert not any(json.loads(row[0]).get("content") == "late answer" for row in assistant_rows)
+
+
+def test_late_tool_completion_after_takeover_is_fenced(tmp_path):
+    """A tool returning after expired-lease takeover cannot persist completion."""
+
+    db_runner = _make_db(tmp_path)
+    root = ts.create_root_thread(db_runner, name="root")
+    tool_started = asyncio.Event()
+    allow_completion = asyncio.Event()
+    registry = ts.ToolRegistry()
+
+    async def barrier_tool(_args):
+        tool_started.set()
+        await allow_completion.wait()
+        return "late tool result"
+
+    registry.register(
+        "barrier_tool",
+        "Barrier tool",
+        {"type": "object", "properties": {}},
+        barrier_tool,
+    )
+    tool_call_id = ts.enqueue_user_tool_call(
+        db_runner,
+        root,
+        "barrier_tool",
+        {},
+        hidden=True,
+        auto_approve=True,
+    )
+    db_takeover = ThreadsDB(db_runner.path)
+
+    async def run_test():
+        runner = ts.ThreadRunner(
+            db_runner,
+            root,
+            llm=object(),
+            tools=registry,
+            config=RunnerConfig(lease_ttl_sec=30, heartbeat_sec=3600),
+        )
+        task = asyncio.create_task(runner.run_once())
+        await asyncio.wait_for(tool_started.wait(), timeout=1)
+        old_invoke = db_takeover.current_open(root)["invoke_id"]
+        db_takeover.conn.execute(
+            "UPDATE open_streams SET lease_until='2000-01-01 00:00:00' WHERE thread_id=? AND invoke_id=?",
+            (root, old_invoke),
+        )
+        assert db_takeover.try_open_stream(
+            root,
+            "replacement-invoke",
+            "2999-01-01 00:00:00",
+            owner="replacement",
+            purpose="tool",
+        )
+        takeover_seq = db_takeover.max_event_seq(root)
+        allow_completion.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return old_invoke, takeover_seq
+
+    old_invoke, takeover_seq = asyncio.run(run_test())
+    stale = db_runner.conn.execute(
+        "SELECT type FROM events WHERE thread_id=? AND event_seq>? AND invoke_id=?",
+        (root, takeover_seq, old_invoke),
+    ).fetchall()
+    assert stale == []
+    state = ts.build_tool_call_states(db_runner, root)[tool_call_id]
+    assert "late tool result" not in (state.finished_output or "")
+    assert state.published is False
+    assert db_runner.current_open(root)["invoke_id"] == "replacement-invoke"

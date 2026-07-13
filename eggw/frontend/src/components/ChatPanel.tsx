@@ -1,8 +1,8 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState, type ReactNode, type WheelEvent } from "react";
+import { memo, Profiler, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type TouchEvent, type WheelEvent } from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -11,8 +11,9 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
-import { attachmentUrl, createEditAnswerDraft, fetchMessages, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
+import { attachmentUrl, createEditAnswerDraft, promoteProviderOutput, providerOutputUrl } from "@/lib/api";
 import { useAppStore, type Message, type DisplayVerbosity, type StreamingToolTimeout } from "@/lib/store";
+import { ProtectedFileLink, ProtectedImage } from "@/components/ProtectedFileLink";
 import {
   artifactFilename,
   artifactPlaceholder,
@@ -29,13 +30,18 @@ import {
   type ContentPart,
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
+import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcript";
+import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
+import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
+import { expandedTranscriptStartId, transcriptWindow } from "@/lib/transcriptWindow";
 import clsx from "clsx";
 
-const STICKY_BOTTOM_THRESHOLD_PX = 4;
+const STICKY_BOTTOM_THRESHOLD_PX = 16;
 const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
 const INITIAL_TRANSCRIPT_MESSAGE_LIMIT = 300;
 const TRANSCRIPT_SCROLLBACK_THRESHOLD_PX = 240;
 const THREAD_LINK_SUFFIX_LENGTH = 8;
+const TOOL_ARGUMENT_PREVIEW_INTERVAL_MS = 100;
 
 /**
  * Preprocess content to convert various LaTeX-style delimiters to markdown math syntax.
@@ -274,9 +280,11 @@ function outputOptimizerRawHint(message: Message): string | null {
 }
 
 function isImportantSystemMessage(message: Message): boolean {
-  // Match terminal Egg's min-verbosity behavior: system messages are part of
-  // the visible conversation skeleton, including the initial system prompt.
-  return message.role === "system";
+  // System messages are part of the chronological transcript skeleton at every
+  // verbosity. In particular, the root system prompt must remain reachable
+  // after loading and revealing the oldest page.
+  return message.role === "system"
+    && Boolean(contentToPlainText(message.content, message.content_text || "").trim());
 }
 
 function plural(count: number, singular: string, pluralText?: string): string {
@@ -296,76 +304,111 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
 }
 
 function hiddenToolDetails(details: HiddenDetail[]): HiddenDetail[] {
-  const structuredToolCalls = details.filter((detail) => detail.source === "tool_call" && Boolean(detail.name));
-  if (structuredToolCalls.length > 0) {
-    const toolResultDetails = details.filter((detail) => detail.source === "tool_result");
-    const streamResultDetails = details.filter((detail) => detail.source === "tool_stream");
-    // Prefer the final tool-role result.  Fall back to persisted streamed
-    // previews only for older/incomplete transcripts that do not have a tool
-    // result message in the hidden run.
-    const resultDetails = toolResultDetails.length > 0 ? toolResultDetails : streamResultDetails;
-    const resultByToolCallId = new Map<string, HiddenDetail>();
-    resultDetails.forEach((detail) => {
-      if (detail.tool_call_id && !resultByToolCallId.has(detail.tool_call_id)) {
-        resultByToolCallId.set(detail.tool_call_id, detail);
-      }
-    });
-    const usedResultIndexes = new Set<number>();
+  const structuredCalls = details.filter((detail) => detail.source === "tool_call" && Boolean(detail.name));
+  const structuredIds = new Set(structuredCalls.map((detail) => detail.tool_call_id).filter(Boolean));
+  const calls = [
+    ...structuredCalls,
+    ...details.filter((detail) => (
+      detail.source === "tool_call_stream"
+      && Boolean(detail.name)
+      && (!detail.tool_call_id || !structuredIds.has(detail.tool_call_id))
+    )),
+  ];
+  const finalResults = details.filter((detail) => detail.source === "tool_result");
+  const streamResults = details.filter((detail) => detail.source === "tool_stream");
+  if (calls.length === 0) return [...finalResults, ...streamResults].filter((detail) => Boolean(detail.name));
 
-    return structuredToolCalls.map((call, callIndex) => {
-      let result: HiddenDetail | undefined;
-      if (call.tool_call_id) {
-        result = resultByToolCallId.get(call.tool_call_id);
-      }
-      if (!result) {
-        // Older/imported transcripts may not have stable tool_call_id fields.
-        // Fall back to the corresponding result by order/name so each repeated
-        // `bash, bash, bash` entry still opens the nearest matching result.
-        const exactIndex = resultDetails.findIndex((candidate, index) => (
-          !usedResultIndexes.has(index) &&
-          Boolean(candidate.name) &&
-          Boolean(call.name) &&
-          candidate.name === call.name
-        ));
-        const fallbackIndex = exactIndex >= 0
-          ? exactIndex
-          : resultDetails.findIndex((_, index) => !usedResultIndexes.has(index) && index >= callIndex);
-        if (fallbackIndex >= 0) {
-          usedResultIndexes.add(fallbackIndex);
-          result = resultDetails[fallbackIndex];
-        }
-      }
+  const usedFinalResults = new Set<number>();
+  const usedStreamResults = new Set<number>();
+  const resultByCall = new Map<number, HiddenDetail>();
+  const exactResultQueues = new Map<string, number[]>();
+  finalResults.forEach((result, resultIndex) => {
+    if (!result.tool_call_id) return;
+    const queue = exactResultQueues.get(result.tool_call_id) || [];
+    queue.push(resultIndex);
+    exactResultQueues.set(result.tool_call_id, queue);
+  });
 
-      const callHeader = [
-        `Tool call: ${call.name || "tool"}`,
-        call.tool_call_id ? `tool_call_id: ${call.tool_call_id}` : "",
-      ].filter(Boolean).join("\n");
-      const bodyParts = [
-        callHeader,
-        "",
-        "Arguments:",
-        call.body || "(none)",
-      ];
-      if (result) {
-        bodyParts.push(
-          "",
-          "Result:",
-          result.body || "(empty)",
-        );
-      } else {
-        bodyParts.push("", "Result:", "(not found in the loaded transcript)");
-      }
+  // Identity is authoritative. Consume exact-ID results before considering any
+  // legacy inference, and never let a call with an ID steal a differently
+  // identified result merely because both tools have the same name.
+  calls.forEach((call, callIndex) => {
+    if (!call.tool_call_id) return;
+    const queue = exactResultQueues.get(call.tool_call_id);
+    const resultIndex = queue?.shift();
+    if (resultIndex === undefined) return;
+    usedFinalResults.add(resultIndex);
+    resultByCall.set(callIndex, finalResults[resultIndex]);
+  });
 
-      return {
-        ...call,
-        body: bodyParts.join("\n"),
-      };
-    });
-  }
+  // Old/imported transcripts can lack IDs. Pair only when the relationship is
+  // unambiguous inside this hidden run: one unmatched ID-less call and one
+  // unmatched ID-less final result with the same tool name.
+  const unmatchedIdlessCallsByName = new Map<string, number[]>();
+  calls.forEach((call, callIndex) => {
+    if (resultByCall.has(callIndex) || call.tool_call_id || !call.name) return;
+    const indexes = unmatchedIdlessCallsByName.get(call.name) || [];
+    indexes.push(callIndex);
+    unmatchedIdlessCallsByName.set(call.name, indexes);
+  });
+  const unmatchedIdlessResultsByName = new Map<string, number[]>();
+  finalResults.forEach((result, resultIndex) => {
+    if (usedFinalResults.has(resultIndex) || result.tool_call_id || !result.name) return;
+    const indexes = unmatchedIdlessResultsByName.get(result.name) || [];
+    indexes.push(resultIndex);
+    unmatchedIdlessResultsByName.set(result.name, indexes);
+  });
+  unmatchedIdlessCallsByName.forEach((callIndexes, name) => {
+    const resultIndexes = unmatchedIdlessResultsByName.get(name) || [];
+    if (callIndexes.length !== 1 || resultIndexes.length !== 1) return;
+    resultByCall.set(callIndexes[0], finalResults[resultIndexes[0]]);
+    usedFinalResults.add(resultIndexes[0]);
+  });
 
-  const toolCalls = details.filter((detail) => detail.kind === "tool_calls" && Boolean(detail.name));
-  if (toolCalls.length > 0) return toolCalls;
-  return details.filter((detail) => detail.kind === "tool_results" && Boolean(detail.name));
+  // A persisted streamed preview has no stable result ID. Use it only when a
+  // single still-unmatched call and a single preview share a name; otherwise
+  // expose it separately instead of fabricating a lifecycle.
+  const unmatchedCallsByName = new Map<string, number[]>();
+  calls.forEach((call, callIndex) => {
+    if (resultByCall.has(callIndex) || !call.name) return;
+    const indexes = unmatchedCallsByName.get(call.name) || [];
+    indexes.push(callIndex);
+    unmatchedCallsByName.set(call.name, indexes);
+  });
+  const streamResultsByName = new Map<string, number[]>();
+  streamResults.forEach((result, resultIndex) => {
+    if (!result.name) return;
+    const indexes = streamResultsByName.get(result.name) || [];
+    indexes.push(resultIndex);
+    streamResultsByName.set(result.name, indexes);
+  });
+  unmatchedCallsByName.forEach((callIndexes, name) => {
+    const resultIndexes = streamResultsByName.get(name) || [];
+    if (callIndexes.length !== 1 || resultIndexes.length !== 1) return;
+    resultByCall.set(callIndexes[0], streamResults[resultIndexes[0]]);
+    usedStreamResults.add(resultIndexes[0]);
+  });
+
+  const pairedCalls = calls.map((call, callIndex) => {
+    const result = resultByCall.get(callIndex);
+    const callHeader = [
+      `Tool call: ${call.name || "tool"}`,
+      call.tool_call_id ? `tool_call_id: ${call.tool_call_id}` : "",
+    ].filter(Boolean).join("\n");
+    const bodyParts = [callHeader, "", "Arguments:", call.body || "(none)"];
+    bodyParts.push(
+      "",
+      "Result:",
+      result?.body || (result ? "(empty)" : "(not found in the loaded transcript)"),
+    );
+    return { ...call, body: bodyParts.join("\n") };
+  });
+
+  const unmatchedResults = [
+    ...finalResults.filter((_, index) => !usedFinalResults.has(index)),
+    ...streamResults.filter((_, index) => !usedStreamResults.has(index)),
+  ].filter((detail) => Boolean(detail.name));
+  return [...pairedCalls, ...unmatchedResults];
 }
 
 function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
@@ -440,124 +483,6 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
       )}
     </div>
   );
-}
-
-function messageIdentity(message: Message | undefined): string | null {
-  const id = typeof message?.id === "string" ? message.id : "";
-  return id ? id : null;
-}
-
-function isLocalOnlyTranscriptMessage(message: Message): boolean {
-  const id = messageIdentity(message) || "";
-  return id.startsWith("cmd-") || id.startsWith("temp-");
-}
-
-function shouldPreserveLocalTranscriptMessage(message: Message): boolean {
-  const id = messageIdentity(message) || "";
-  return id.startsWith("cmd-") && Boolean(message.command_name);
-}
-
-function messageTimestampMs(message: Message): number | null {
-  const timestamp = typeof message.timestamp === "string" ? message.timestamp : "";
-  if (!timestamp) return null;
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function mergeLocalOnlyMessagesByTimestamp(base: Message[], localOnly: Message[]): Message[] {
-  if (!localOnly.length) return base;
-
-  const merged = [...base];
-  const localWithOriginalIndex = localOnly.map((message, index) => ({ message, index }));
-  localWithOriginalIndex.sort((left, right) => {
-    const leftMs = messageTimestampMs(left.message);
-    const rightMs = messageTimestampMs(right.message);
-    if (leftMs !== null && rightMs !== null && leftMs !== rightMs) return leftMs - rightMs;
-    if (leftMs !== null && rightMs === null) return -1;
-    if (leftMs === null && rightMs !== null) return 1;
-    return left.index - right.index;
-  });
-
-  for (const { message } of localWithOriginalIndex) {
-    const localMs = messageTimestampMs(message);
-    if (localMs === null) {
-      merged.push(message);
-      continue;
-    }
-
-    const insertAt = merged.findIndex((candidate) => {
-      const candidateMs = messageTimestampMs(candidate);
-      return candidateMs !== null && candidateMs > localMs;
-    });
-    if (insertAt === -1) {
-      merged.push(message);
-    } else {
-      merged.splice(insertAt, 0, message);
-    }
-  }
-
-  return merged;
-}
-
-function mergeFetchedTranscriptMessages(existing: Message[], fetched: Message[]): { messages: Message[]; preservedLoadedScrollback: boolean } {
-  if (!existing.length) {
-    return { messages: fetched, preservedLoadedScrollback: false };
-  }
-
-  const existingLocalOnlyMessages = existing.filter((message) => shouldPreserveLocalTranscriptMessage(message));
-  if (!fetched.length) {
-    return {
-      messages: mergeLocalOnlyMessagesByTimestamp([], existingLocalOnlyMessages),
-      preservedLoadedScrollback: false,
-    };
-  }
-
-  const fetchedIds = new Set(fetched.map(messageIdentity).filter((id): id is string => Boolean(id)));
-  const existingIndexById = new Map<string, number>();
-  existing.forEach((message, index) => {
-    const id = messageIdentity(message);
-    if (id && !existingIndexById.has(id)) existingIndexById.set(id, index);
-  });
-
-  let firstOverlapIndex = Number.POSITIVE_INFINITY;
-  for (const message of fetched) {
-    const id = messageIdentity(message);
-    if (!id) continue;
-    const index = existingIndexById.get(id);
-    if (index !== undefined && index < firstOverlapIndex) {
-      firstOverlapIndex = index;
-    }
-  }
-
-  // If there is no overlap, this is likely a thread change or a cache reset;
-  // replace with the fetched tail rather than accidentally carrying messages
-  // from another thread forward.
-  if (!Number.isFinite(firstOverlapIndex)) {
-    return {
-      messages: mergeLocalOnlyMessagesByTimestamp(fetched, existingLocalOnlyMessages),
-      preservedLoadedScrollback: false,
-    };
-  }
-
-  const olderPrefix = existing
-    .slice(0, firstOverlapIndex)
-    .filter((message) => {
-      const id = messageIdentity(message);
-      return (!id || !fetchedIds.has(id)) && (!isLocalOnlyTranscriptMessage(message) || shouldPreserveLocalTranscriptMessage(message));
-    });
-  const localOnlyMessagesAfterOverlap = existing
-    .slice(firstOverlapIndex)
-    .filter((message) => {
-      const id = messageIdentity(message);
-      return shouldPreserveLocalTranscriptMessage(message) && (!id || !fetchedIds.has(id));
-    });
-
-  const mergedMessages = mergeLocalOnlyMessagesByTimestamp([...olderPrefix, ...fetched], localOnlyMessagesAfterOverlap);
-
-  return {
-    messages: mergedMessages,
-    preservedLoadedScrollback: olderPrefix.some((message) => !isLocalOnlyTranscriptMessage(message)),
-  };
 }
 
 function uniqueThreadSuffixMap(threadIds: unknown): Map<string, string> {
@@ -710,9 +635,9 @@ function ContentPartsView({
                 {attachmentPlaceholder(part)}
               </div>
               {openUrl && isImage && (
-                <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
-                  <img
-                    src={openUrl}
+                <ProtectedFileLink url={openUrl} newWindow className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${attachmentFilename(part)}`}>
+                  <ProtectedImage
+                    url={openUrl}
                     alt={`Preview of ${attachmentFilename(part)}`}
                     loading="lazy"
                     decoding="async"
@@ -723,16 +648,16 @@ function ContentPartsView({
                       event.currentTarget.style.display = "none";
                     }}
                   />
-                </a>
+                </ProtectedFileLink>
               )}
               {openUrl && downloadUrl && (
                 <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
-                  <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={openUrl} newWindow className="underline" style={{ color: "var(--accent)" }}>
                     Open
-                  </a>
-                  <a href={downloadUrl} className="underline" style={{ color: "var(--accent)" }}>
+                  </ProtectedFileLink>
+                  <ProtectedFileLink url={downloadUrl} filename={attachmentFilename(part)} className="underline" style={{ color: "var(--accent)" }}>
                     Download
-                  </a>
+                  </ProtectedFileLink>
                 </div>
               )}
             </div>
@@ -771,9 +696,9 @@ function ContentPartsView({
                 {artifactPlaceholder(part)}
               </div>
               {openUrl && isImage && (
-                <a href={openUrl} target="_blank" rel="noreferrer" className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
-                  <img
-                    src={openUrl}
+                <ProtectedFileLink url={openUrl} newWindow className="mx-auto mt-3 block w-fit" aria-label={`Open preview of ${artifactFilename(part)}`}>
+                  <ProtectedImage
+                    url={openUrl}
                     alt={`Preview of ${artifactFilename(part)}`}
                     loading="lazy"
                     decoding="async"
@@ -784,16 +709,16 @@ function ContentPartsView({
                       event.currentTarget.style.display = "none";
                     }}
                   />
-                </a>
+                </ProtectedFileLink>
               )}
               {openUrl && downloadUrl && (
                 <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
-                  <a href={openUrl} target="_blank" rel="noreferrer" className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={openUrl} newWindow className="underline" style={{ color: "var(--accent)" }}>
                     Open
-                  </a>
-                  <a href={downloadUrl} className="underline" style={{ color: "var(--accent)" }}>
+                  </ProtectedFileLink>
+                  <ProtectedFileLink url={downloadUrl} filename={artifactFilename(part)} className="underline" style={{ color: "var(--accent)" }}>
                     Download
-                  </a>
+                  </ProtectedFileLink>
                   {canPromote && (
                     <button
                       type="button"
@@ -866,6 +791,22 @@ function appendBufferedTextChunks(element: HTMLElement, chunks: string[], startI
   return true;
 }
 
+function nestedScrollportConsumesWheel(target: EventTarget | null, outer: HTMLElement, deltaY: number): boolean {
+  let element = target instanceof HTMLElement ? target : null;
+  while (element && element !== outer) {
+    const { overflowY } = window.getComputedStyle(element);
+    const canScroll = /(auto|scroll)/.test(overflowY) && element.scrollHeight > element.clientHeight;
+    if (canScroll) {
+      const distanceFromEnd = element.scrollHeight - element.scrollTop - element.clientHeight;
+      if ((deltaY < 0 && element.scrollTop > 0) || (deltaY > 0 && distanceFromEnd > 1)) {
+        return true;
+      }
+    }
+    element = element.parentElement;
+  }
+  return false;
+}
+
 const MessageBlock = memo(function MessageBlock({ message, showBorders = true, displayVerbosity = "max", onStageAttachment }: MessageBlockProps) {
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const openEditAnswerModal = useAppStore((state) => state.openEditAnswerModal);
@@ -919,7 +860,9 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const displayRole = message.answer_user_preserve_turn && message.role === "assistant" ? "assistant_note" : message.role;
   const baseRoleLabel = message.recovery_notice && message.role === "system"
     ? "Continue Status"
-    : roleLabels[displayRole] || displayRole;
+    : message.role === "system" && !message.command_name && !message.id?.startsWith("cmd-")
+      ? "System"
+      : roleLabels[displayRole] || displayRole;
   const roleLabel = message.role === "tool" && message.name ? `${baseRoleLabel}: ${message.name}` : baseRoleLabel;
 
   // Check if this is a shell command (starts with $ or $$)
@@ -933,9 +876,6 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const isCommandOutput = message.role === "system";
   const isThreadsCommandOutput = isCommandOutput && message.command_name === "threads";
 
-  // For tool messages, check if content is long
-  const isLongToolOutput = message.role === "tool" && contentText.length > 500;
-
   const shellStyle: React.CSSProperties = { background: "var(--code-bg)", borderColor: "var(--panel-border)" };
 
   const messageTps = formatStreamingTps(message.tps);
@@ -946,8 +886,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const optimizerSummary = outputOptimizerSummaryText(message, Boolean(message.output_optimizer?.artifact_available));
   const optimizerRawHint = outputOptimizerRawHint(message);
   const showReasoningBlock = Boolean(message.reasoning) && displayVerbosity !== "min";
-  const hideReasoningBody = displayVerbosity === "medium";
-  const hideToolBody = (displayVerbosity === "medium" || displayVerbosity === "min") && message.role === "tool";
+  const hideToolBody = displayVerbosity === "min" && message.role === "tool";
   const showContent = Boolean(contentText) && !hideToolBody;
   const showToolCalls = toolCalls.length > 0 && displayVerbosity !== "min";
   const showStreamedMetadata = displayVerbosity !== "min" && (toolStreamEntries.length > 0 || toolCallStreamEntries.length > 0);
@@ -969,16 +908,16 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
         <span className="font-medium" style={roleStyles[displayRole] ? { color: roleStyles[displayRole].color } : { color: "var(--foreground)" }}>
           {isShellCommand ? "Shell" : roleLabel}
         </span>
-        {message.model_key && (
+        {displayVerbosity !== "min" && message.model_key && (
           <span style={{ color: "var(--muted)" }}>({message.model_key})</span>
         )}
-        {tokenText && (
+        {displayVerbosity !== "min" && tokenText && (
           <span style={{ color: "var(--muted)" }}>({tokenText})</span>
         )}
-        {messageTps && (
+        {displayVerbosity !== "min" && messageTps && (
           <span style={{ color: "var(--muted)" }}>({messageTps})</span>
         )}
-        {message.timestamp && (
+        {displayVerbosity === "max" && message.timestamp && (
           <span className="font-mono" style={{ color: "var(--muted)" }}>
             {new Date(message.timestamp).toLocaleString(undefined, {
               year: 'numeric',
@@ -990,7 +929,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             })}
           </span>
         )}
-        {message.id && message.id.length >= 8 && !message.id.startsWith('temp-') && (
+        {displayVerbosity === "max" && message.id && message.id.length >= 8 && !message.id.startsWith('temp-') && (
           <span
             className="font-mono cursor-pointer hover:underline"
             style={{ color: "var(--muted)" }}
@@ -1004,12 +943,12 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             [msg_id: {message.id}]
           </span>
         )}
-        {message.tool_call_id && (
+        {displayVerbosity === "max" && message.tool_call_id && (
           <span className="font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
             ← {message.tool_call_id.slice(-8)}
           </span>
         )}
-        {optimizerSummary && (
+        {displayVerbosity !== "min" && optimizerSummary && (
           <span
             className="rounded px-1.5 py-0.5 text-[11px] font-medium"
             style={{ background: "var(--code-bg)", color: "var(--accent)", border: "1px solid var(--panel-border)" }}
@@ -1044,23 +983,21 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
       {/* Reasoning (collapsible) */}
       {showReasoningBlock && (
         <details
-          open={hideReasoningBody ? false : undefined}
+          open={displayVerbosity === "max" ? true : undefined}
           className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
           style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
         >
           <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
             Reasoning
-            {hideReasoningBody && (
+            {displayVerbosity === "medium" && message.reasoning && (
               <span className="ml-2 text-xs font-mono" style={{ color: "var(--muted)" }}>
-                {messageMetadataText(message, "Reasoning")}
+                {message.reasoning.length.toLocaleString()} chars
               </span>
             )}
           </summary>
-          {!hideReasoningBody && (
-            <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
-              {message.reasoning}
-            </div>
-          )}
+          <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
+            {message.reasoning}
+          </div>
         </details>
       )}
 
@@ -1084,18 +1021,17 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
           ) : isContentPartArray(message.content) ? (
             <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />
           ) : message.role === "tool" ? (
-            /* Tool output - collapsible if long */
-            isLongToolOutput ? (
+            displayVerbosity === "medium" ? (
               <details className={`rounded ${showBorders ? 'border' : ''}`} style={{ background: "var(--code-bg)", borderColor: "var(--tool-msg-border)" }}>
                 <summary className="cursor-pointer p-2 text-sm" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
-                  Output ({contentText.length.toLocaleString()} chars) - click to expand
+                  {oneLinePreview(contentText) || `Output (${contentText.length.toLocaleString()} chars)`}
                 </summary>
                 <pre className="p-2 text-xs overflow-auto max-h-96 whitespace-pre-wrap" style={{ color: "var(--tool-msg-text, var(--foreground))" }}>
                   {contentText}
                 </pre>
               </details>
             ) : (
-              <pre className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
+              <pre className="text-xs p-2 rounded overflow-auto max-h-96 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
                 {contentText}
               </pre>
             )
@@ -1161,11 +1097,6 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
       {/* Tool calls */}
       {showToolCalls && (
         <div className="mt-2 space-y-2">
-          {displayVerbosity === "medium" && (
-            <div className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-              Tool Calls | {messageMetadataText(message, "Assistant")}
-            </div>
-          )}
           {toolCalls.map((tc: any, idx: number) => {
             const toolName = toolCallName(tc);
             const args = toolCallArgs(tc);
@@ -1176,16 +1107,17 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             const toolCallId = tc.id || tc.tool_call_id || "";
 
             return (
-              <div
+              <details
                 key={toolCallId || idx}
+                open={displayVerbosity === "max" ? true : undefined}
                 className={`rounded p-2 ${showBorders ? 'border' : ''}`}
                 style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
               >
-                <div className="flex items-center gap-2 text-sm flex-wrap">
+                <summary className="flex cursor-pointer items-center gap-2 text-sm flex-wrap">
                   <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{toolName}</span>
                   {toolCallId && (
                     <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
-                      {displayVerbosity === "medium" ? `tool_call_id: ${toolCallId}` : toolCallId.slice(-8)}
+                      {toolCallId.slice(-8)}
                     </span>
                   )}
                   {displayVerbosity === "medium" && (
@@ -1193,24 +1125,20 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                       {oneLinePreview(args)}
                     </span>
                   )}
-                </div>
-                {displayVerbosity !== "medium" && (
-                  <>
-                    {/* Special display for bash scripts */}
-                    {isBash && script ? (
-                      <pre className="mt-1 text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-                        $ {String(script)}
-                      </pre>
-                    ) : (
-                      <pre className="mt-1 text-xs p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                        {typeof args === "string"
-                          ? args
-                          : JSON.stringify(args, null, 2)}
-                      </pre>
-                    )}
-                  </>
+                </summary>
+                {/* Special display for bash scripts */}
+                {isBash && script ? (
+                  <pre className="mt-1 text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
+                    $ {String(script)}
+                  </pre>
+                ) : (
+                  <pre className="mt-1 text-xs p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                    {typeof args === "string"
+                      ? args
+                      : JSON.stringify(args, null, 2)}
+                  </pre>
                 )}
-              </div>
+              </details>
             );
           })}
         </div>
@@ -1220,45 +1148,45 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
       {showStreamedMetadata && (
         <div className="mt-2 space-y-2">
           {toolStreamEntries.map(([name, text]) => (
-            <div
+            <details
               key={`tool-stream-${name}`}
+              open={displayVerbosity === "max" ? true : undefined}
               className={`rounded p-2 ${showBorders ? 'border' : ''}`}
               style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
             >
-              <div className="text-sm font-medium font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+              <summary className="cursor-pointer text-sm font-medium font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
                 {displayVerbosity === "medium"
-                  ? messageMetadataText(message, `Tool Output: ${name}`)
+                  ? `Tool Output: ${name} · ${text.length.toLocaleString()} chars`
                   : `Tool Output: ${name}`}
-              </div>
-              {displayVerbosity === "max" && (
-                <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
-                  {text}
-                </pre>
-              )}
-            </div>
+              </summary>
+              {displayVerbosity === "medium" && <div className="mt-1 text-xs font-mono">{oneLinePreview(text)}</div>}
+              <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
+                {text}
+              </pre>
+            </details>
           ))}
 
           {toolCallStreamEntries.map(([streamKey, text]) => (
-            <div
+            <details
               key={`tool-call-stream-${streamKey}`}
+              open={displayVerbosity === "max" ? true : undefined}
               className={`rounded p-2 ${showBorders ? 'border' : ''}`}
               style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
             >
-              <div className="text-sm font-medium font-mono" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>
+              <summary className="cursor-pointer text-sm font-medium font-mono" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>
                 {displayVerbosity === "medium"
-                  ? messageMetadataText(message, `Tool Call Args: ${streamKey}`)
+                  ? `Tool Call Args: ${streamKey} · ${text.length.toLocaleString()} chars`
                   : `Tool Call Args: ${streamKey}`}
-              </div>
-              {displayVerbosity === "max" ? (
-                <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                  {text}
-                </pre>
-              ) : (
+              </summary>
+              {displayVerbosity === "medium" && (
                 <div className="mt-1 text-xs font-mono" style={{ color: "var(--foreground)" }}>
                   {oneLinePreview(text)}
                 </div>
               )}
-            </div>
+              <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                {text}
+              </pre>
+            </details>
           ))}
         </div>
       )}
@@ -1268,6 +1196,11 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
 
 function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   const details: HiddenDetail[] = [];
+  const toolCallNameById = new Map<string, string>();
+  (message.tool_calls || []).forEach((toolCall: any) => {
+    const toolCallId = String(toolCall?.id || toolCall?.tool_call_id || "");
+    if (toolCallId) toolCallNameById.set(toolCallId, toolCallName(toolCall));
+  });
   let availableTokens = typeof message.tokens === "number" && Number.isFinite(message.tokens) ? message.tokens : undefined;
   const takeTokens = () => {
     const tokens = availableTokens;
@@ -1321,9 +1254,13 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
     });
   });
   stringRecordEntries(message.tool_calls_stream).forEach(([streamKey, text]) => {
+    const structuredName = toolCallNameById.get(streamKey);
     details.push({
       kind: "tool_calls",
-      name: streamKey,
+      name: structuredName || streamKey,
+      // Historical snapshots sometimes keyed this dictionary by tool name
+      // rather than ID. Only claim identity when the same message proves it.
+      tool_call_id: structuredName ? streamKey : undefined,
       tokens: takeTokens(),
       header: streamKey ? `Tool Call Args: ${streamKey}` : "Tool Call Args",
       body: text,
@@ -1363,6 +1300,16 @@ function renderMessagesForVerbosity(
 
     const hiddenDetails = collectHiddenDetailsForMessage(msg);
     const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
+    if (msg.role === "assistant" && msg.answer_user_preserve_turn && hasVisibleConversationBody) {
+      // A preserve-turn note is inserted while its ordinary tool lifecycle is
+      // still in flight. Keep the pending call details across this visible note
+      // so the later role=tool message can pair with the call by tool_call_id.
+      // Treating the note as a normal conversation boundary splits one tool
+      // lifecycle into two HiddenDetailsBlocks in min verbosity.
+      nodes.push(<MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity="min" onStageAttachment={onStageAttachment} />);
+      hidden.push(...hiddenDetails);
+      return;
+    }
     if (hasVisibleConversationBody || isImportantSystemMessage(msg)) {
       const beforeVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind === "reasoning") : [];
       const afterVisibleDetails = msg.role === "assistant" ? hiddenDetails.filter((detail) => detail.kind !== "reasoning") : hiddenDetails;
@@ -1391,48 +1338,70 @@ const StaticTranscript = memo(function StaticTranscript({
   showBorders: boolean;
   onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }) {
-  return <>{renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment)}</>;
+  const content = renderMessagesForVerbosity(messages, displayVerbosity, showBorders, onStageAttachment);
+  if (process.env.NODE_ENV === "production") return <>{content}</>;
+  return (
+    <Profiler id="StaticTranscript" onRender={(id, _phase, duration) => recordReactCommit(id as "StaticTranscript", duration)}>
+      {content}
+    </Profiler>
+  );
 });
 
 interface ChatPanelProps {
+  threadId: string;
   showBorders?: boolean;
   streamingTps?: number | null;
   onStageAttachment?: (attachment: AttachmentContentPart) => void;
 }
 
-export function ChatPanel({ showBorders = true, streamingTps = null, onStageAttachment }: ChatPanelProps) {
+export function ChatPanel({ threadId, showBorders = true, streamingTps = null, onStageAttachment }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingContentRef = useRef<HTMLDivElement>(null);
   const streamingReasoningRef = useRef<HTMLDivElement>(null);
   const streamingReasoningSummaryRef = useRef<HTMLDivElement>(null);
   const streamingToolOutputRefs = useRef<Record<string, HTMLPreElement | null>>({});
+  const streamingToolCallArgRefs = useRef<Record<string, HTMLPreElement | null>>({});
+  const streamingToolCallPreviewRefs = useRef<Record<string, HTMLSpanElement | null>>({});
   const lastContentIndexRef = useRef(0);
   const lastReasoningIndexRef = useRef(0);
   const lastReasoningSummaryIndexRef = useRef(0);
   const lastToolOutputIndexRef = useRef<Record<string, number>>({});
+  const lastToolCallArgIndexRef = useRef<Record<string, number>>({});
+  const lastToolCallChunksRef = useRef<Record<string, string[]>>({});
   const streamingTextFlushRafRef = useRef<number | null>(null);
   const streamingToolFlushRafRef = useRef<number | null>(null);
+  const streamingToolCallFlushRef = useRef<AnimationFrameCoalescer | null>(null);
+  const streamingToolPreviewFlushRef = useRef<IntervalCoalescer<number> | null>(null);
   const loadingOlderRef = useRef(false);
+  const revealingLoadedRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [renderStartMessageId, setRenderStartMessageId] = useState<string | null>(null);
 
-  const currentThreadId = useAppStore((state) => state.currentThreadId);
-  const messages = useAppStore((state) => state.messages);
-  const setMessages = useAppStore((state) => state.setMessages);
-  const streamingToolCalls = useAppStore((state) => state.streamingToolCalls);
-  const streamingToolOutputs = useAppStore((state) => state.streamingToolOutputs);
-  const streamingModelKey = useAppStore((state) => state.streamingModelKey);
-  const streamingKind = useAppStore((state) => state.streamingKind);
-  const streamingStartedAtMs = useAppStore((state) => state.streamingStartedAtMs);
-  const streamingProviderRequest = useAppStore((state) => state.streamingProviderRequest);
-  const isStreaming = useAppStore((state) => state.isStreaming);
-  const scrollTrigger = useAppStore((state) => state.scrollTrigger);
+  const currentThreadId = threadId;
+  const queryClient = useQueryClient();
+  const transcriptQuery = useInfiniteQuery(transcriptInfiniteQueryOptions(threadId, queryClient));
+  const messages = useMemo(() => flattenTranscript(transcriptQuery.data), [transcriptQuery.data]);
   const displayVerbosity = useAppStore((state) => state.displayVerbosity);
-  const hasActiveToolTiming = Object.values(streamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
+  const renderedTranscript = useMemo(
+    () => transcriptWindow(messages, renderStartMessageId),
+    [messages, renderStartMessageId],
+  );
+  const streamingToolCalls = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolCalls);
+  const streamingToolOutputs = useAppStore((state) => state.streamingByThread[threadId]?.streamingToolOutputs);
+  const streamingModelKey = useAppStore((state) => state.streamingByThread[threadId]?.streamingModelKey || null);
+  const streamingKind = useAppStore((state) => state.streamingByThread[threadId]?.streamingKind || null);
+  const streamingStartedAtMs = useAppStore((state) => state.streamingByThread[threadId]?.streamingStartedAtMs || null);
+  const streamingProviderRequest = useAppStore((state) => state.streamingByThread[threadId]?.streamingProviderRequest || null);
+  const isStreaming = useAppStore((state) => state.streamingByThread[threadId]?.isStreaming || false);
+  const visibleStreamingToolCalls = streamingToolCalls || {};
+  const visibleStreamingToolOutputs = streamingToolOutputs || {};
+  const hasLiveTools = Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0;
+  const showLiveCard = isStreaming || hasLiveTools;
+  const hasActiveToolTiming = Object.values(visibleStreamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
   const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
-  const primaryToolTimeoutText = Object.values(streamingToolOutputs)
+  const primaryToolTimeoutText = Object.values(visibleStreamingToolOutputs)
     .map((tool) => toolTimeoutCountdown(tool.timeout, nowMs))
     .find((text): text is string => Boolean(text));
   const providerTimeText = streamingKind === "llm"
@@ -1441,13 +1410,9 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   const genericStreamingTimeText = streamingKind !== "llm"
     ? elapsedSecondsText(streamingStartedAtMs, nowMs, "streaming")
     : null;
-  // Match terminal Egg's display-verbosity intent for live tool details while
-  // keeping web-only access to the still-streaming body. Medium verbosity
-  // starts collapsed (header/preview only), but leaves <details> uncontrolled
-  // so the user can expand arguments/output without it snapping shut on every
-  // streaming token. Max/min stay open by default because live tokens should
-  // be visible even when historical hidden details are summarized.
-  const streamingToolDetailsOpen = displayVerbosity === "medium" ? undefined : true;
+  // Live execution is operational state, not historical transcript detail:
+  // always expose streamed tool arguments and output at every verbosity.
+  const streamingToolDetailsOpen = true;
 
   useEffect(() => {
     if (!shouldUpdateTiming) return;
@@ -1459,8 +1424,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   // Stick-to-bottom scrolling: track if user intentionally scrolled away
   const stickToBottomRef = useRef(true);
   const rafIdRef = useRef<number | null>(null);
-  const isAutoScrollingRef = useRef(false);
-  const autoScrollGenerationRef = useRef(0);
+  const programmaticScrollTargetRef = useRef<number | null>(null);
 
   const distanceFromBottom = useCallback(() => {
     if (!scrollRef.current) return 0;
@@ -1472,70 +1436,60 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     return distanceFromBottom() <= STICKY_BOTTOM_THRESHOLD_PX;
   }, [distanceFromBottom]);
 
-  const finishAutoScrollSoon = useCallback((generation: number) => {
-    window.setTimeout(() => {
-      if (autoScrollGenerationRef.current === generation) {
-        isAutoScrollingRef.current = false;
-      }
-    }, 50);
-  }, []);
-
-  // In sticky mode every output append must keep following the tail.  Use
-  // clientHeight as the target rather than a captured scrollHeight value so
-  // fast-growing content cannot leave us one frame behind.
+  // In sticky mode every output append must keep following the tail. User
+  // input detaches synchronously, so a previously queued frame cannot undo an
+  // intentional scroll into history.
   const scrollToBottomNow = useCallback(() => {
     const el = scrollRef.current;
-    if (!el) return;
-    const generation = autoScrollGenerationRef.current + 1;
-    autoScrollGenerationRef.current = generation;
-    isAutoScrollingRef.current = true;
+    if (!el || !stickToBottomRef.current) return;
     const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    programmaticScrollTargetRef.current = target;
     el.scrollTop = target;
-    stickToBottomRef.current = true;
-    finishAutoScrollSoon(generation);
-  }, [finishAutoScrollSoon]);
+  }, []);
+
+  const revealFromMessage = useCallback((startMessageId: string | null) => {
+    if (revealingLoadedRef.current) return;
+    const el = scrollRef.current;
+    const previousScrollHeight = el?.scrollHeight ?? 0;
+    const previousScrollTop = el?.scrollTop ?? 0;
+    revealingLoadedRef.current = true;
+    setRenderStartMessageId(startMessageId);
+    requestAnimationFrame(() => {
+      const currentEl = scrollRef.current;
+      if (currentEl) {
+        currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
+      }
+      requestAnimationFrame(() => {
+        revealingLoadedRef.current = false;
+      });
+    });
+  }, []);
+
+  const expandLoadedTranscript = useCallback(() => {
+    revealFromMessage(expandedTranscriptStartId(messages, renderedTranscript.startIndex));
+  }, [messages, renderedTranscript.startIndex, revealFromMessage]);
 
   const loadOlderMessages = useCallback(async () => {
-    if (!currentThreadId || loadingOlderRef.current || isLoadingOlder || !hasOlderMessages) return;
+    if (loadingOlderRef.current || isLoadingOlder || !transcriptQuery.hasNextPage) return;
     const el = scrollRef.current;
-    const currentMessages = useAppStore.getState().messages;
-    const firstId = currentMessages[0]?.id;
-    if (!firstId) {
-      setHasOlderMessages(false);
-      return;
-    }
-
     const previousScrollHeight = el?.scrollHeight ?? 0;
     const previousScrollTop = el?.scrollTop ?? 0;
     loadingOlderRef.current = true;
     setIsLoadingOlder(true);
+    stickToBottomRef.current = false;
     try {
-      const older = await fetchMessages(currentThreadId, {
-        limit: INITIAL_TRANSCRIPT_MESSAGE_LIMIT,
-        beforeId: firstId,
-      });
-      if (!Array.isArray(older) || older.length === 0) {
-        setHasOlderMessages(false);
-        return;
-      }
-
-      const latestMessages = useAppStore.getState().messages;
-      const existingIds = new Set(latestMessages.map((message) => message.id).filter(Boolean));
-      const uniqueOlder = older.filter((message: Message) => !existingIds.has(message.id));
-      if (uniqueOlder.length === 0) {
-        setHasOlderMessages(older.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
-        return;
-      }
-
-      stickToBottomRef.current = false;
-      setMessages([...uniqueOlder, ...latestMessages]);
-      setHasOlderMessages(older.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT);
-
+      const result = await transcriptQuery.fetchNextPage();
+      const updatedMessages = flattenTranscript(result.data);
+      const previousStartId = renderedTranscript.messages[0]?.id || null;
+      const previousStartIndex = previousStartId
+        ? updatedMessages.findIndex((message) => message.id === previousStartId)
+        : updatedMessages.length;
+      const nextStartId = expandedTranscriptStartId(updatedMessages, previousStartIndex);
+      setRenderStartMessageId(nextStartId);
       requestAnimationFrame(() => {
         const currentEl = scrollRef.current;
         if (!currentEl) return;
-        const delta = currentEl.scrollHeight - previousScrollHeight;
-        currentEl.scrollTop = previousScrollTop + delta;
+        currentEl.scrollTop = previousScrollTop + (currentEl.scrollHeight - previousScrollHeight);
       });
     } catch (error) {
       console.error("Failed to load older messages:", error);
@@ -1543,55 +1497,69 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       loadingOlderRef.current = false;
       setIsLoadingOlder(false);
     }
-  }, [currentThreadId, hasOlderMessages, isLoadingOlder, setMessages]);
+  }, [isLoadingOlder, renderedTranscript.messages, transcriptQuery.fetchNextPage, transcriptQuery.hasNextPage]);
 
-  // Handle user scroll - scrolling up disables sticky mode; scrolling back to
-  // the bottom reenables it.  Programmatic scroll events should not disable it.
   const handleScroll = useCallback(() => {
-    if (isAutoScrollingRef.current) return;
-    stickToBottomRef.current = isAtBottom();
-    if (scrollRef.current && scrollRef.current.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
-      void loadOlderMessages();
+    const el = scrollRef.current;
+    const programmaticTarget = programmaticScrollTargetRef.current;
+    if (el && programmaticTarget !== null && Math.abs(el.scrollTop - programmaticTarget) <= 1) {
+      programmaticScrollTargetRef.current = null;
+      if (stickToBottomRef.current && !isAtBottom()) requestAnimationFrame(scrollToBottomNow);
+    } else {
+      programmaticScrollTargetRef.current = null;
+      stickToBottomRef.current = isAtBottom();
     }
-  }, [isAtBottom, loadOlderMessages]);
-
-  const updateStickyAfterUserScroll = useCallback((forceStickyTail = false, exactBottomOnly = false) => {
-    isAutoScrollingRef.current = false;
-    autoScrollGenerationRef.current += 1;
-    requestAnimationFrame(() => {
-      if (forceStickyTail) {
-        scrollToBottomNow();
-        return;
+    if (el && el.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX && !loadingOlderRef.current && !revealingLoadedRef.current) {
+      if (renderedTranscript.hiddenCount > 0) {
+        expandLoadedTranscript();
+      } else {
+        void loadOlderMessages();
       }
-      stickToBottomRef.current = exactBottomOnly
-        ? distanceFromBottom() <= 1
-        : isAtBottom();
-    });
-  }, [distanceFromBottom, isAtBottom, scrollToBottomNow]);
+    }
+  }, [expandLoadedTranscript, isAtBottom, loadOlderMessages, renderedTranscript.hiddenCount, scrollToBottomNow]);
+
+  const detachFromBottom = useCallback(() => {
+    stickToBottomRef.current = false;
+    programmaticScrollTargetRef.current = null;
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+  }, []);
 
   const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
-    if (event.deltaY < 0) {
-      stickToBottomRef.current = false;
-      updateStickyAfterUserScroll(false, true);
+    if (event.deltaY >= 0 || nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
+    detachFromBottom();
+  }, [detachFromBottom]);
+
+  const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (event.clientX >= rect.right - 20) detachFromBottom();
+  }, [detachFromBottom]);
+
+  const lastTouchYRef = useRef<number | null>(null);
+  const handleTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    lastTouchYRef.current = event.touches[0]?.clientY ?? null;
+  }, []);
+
+  const handleTouchMove = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    const nextY = event.touches[0]?.clientY;
+    const previousY = lastTouchYRef.current;
+    lastTouchYRef.current = nextY ?? null;
+    if (nextY !== undefined && previousY !== null && nextY > previousY) detachFromBottom();
+  }, [detachFromBottom]);
+
+  const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "End") {
+      stickToBottomRef.current = true;
+      programmaticScrollTargetRef.current = null;
+      requestAnimationFrame(scrollToBottomNow);
       return;
     }
-    const scrollingDownToTail =
-      event.deltaY > 0 &&
-      distanceFromBottom() <= Math.abs(event.deltaY) + STICKY_BOTTOM_THRESHOLD_PX;
-    updateStickyAfterUserScroll(scrollingDownToTail);
-  }, [distanceFromBottom, updateStickyAfterUserScroll]);
-
-  const handleTouchMove = useCallback(() => {
-    // Direction is not exposed here, so let the post-scroll position decide.
-    // Touch scrolling away disables sticky; touch scrolling back to the exact
-    // bottom reenables it via the normal bottom check.
-    updateStickyAfterUserScroll(false, true);
-  }, [updateStickyAfterUserScroll]);
-
-
-  const handlePointerUp = useCallback(() => {
-    updateStickyAfterUserScroll();
-  }, [updateStickyAfterUserScroll]);
+    if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
+      detachFromBottom();
+    }
+  }, [detachFromBottom, scrollToBottomNow]);
 
   // Scroll to bottom using requestAnimationFrame for smooth, reliable scrolling.
   const scrollToBottom = useCallback(() => {
@@ -1616,8 +1584,8 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
   }, [distanceFromBottom, scrollToBottomNow]);
 
   const flushStreamingText = useCallback(() => {
-    // Import here to avoid SSR issues
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    recordStreamingFlush("text");
+    const streamingBuffer = streamingBufferForThread(threadId);
     let appended = false;
 
     if (streamingContentRef.current) {
@@ -1630,7 +1598,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       const chunks = streamingBuffer.reasoningChunks;
       if (chunks.length > 0) {
         const container = document.getElementById('streaming-reasoning-container');
-        if (container) container.style.display = 'block';
+        if (container) container.style.display = displayVerbosity === "min" ? 'none' : 'block';
       }
       appended = appendBufferedTextChunks(streamingReasoningRef.current, chunks, lastReasoningIndexRef.current) || appended;
       lastReasoningIndexRef.current = chunks.length;
@@ -1640,17 +1608,18 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       const chunks = streamingBuffer.reasoningSummaryChunks;
       if (chunks.length > 0) {
         const container = document.getElementById('streaming-reasoning-summary-container');
-        if (container) container.style.display = 'block';
+        if (container) container.style.display = displayVerbosity === "min" ? 'none' : 'block';
       }
       appended = appendBufferedTextChunks(streamingReasoningSummaryRef.current, chunks, lastReasoningSummaryIndexRef.current) || appended;
       lastReasoningSummaryIndexRef.current = chunks.length;
     }
 
     if (appended) scrollToBottom();
-  }, [scrollToBottom]);
+  }, [displayVerbosity, scrollToBottom, threadId]);
 
   const flushStreamingToolOutput = useCallback(() => {
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    recordStreamingFlush("toolOutput");
+    const streamingBuffer = streamingBufferForThread(threadId);
     let appended = false;
 
     streamingBuffer.toolOutputChunks.forEach((chunks, toolId) => {
@@ -1665,7 +1634,56 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     });
 
     if (appended) scrollToBottom();
-  }, [scrollToBottom]);
+  }, [scrollToBottom, threadId]);
+
+  const flushStreamingToolCalls = useCallback(() => {
+    recordStreamingFlush("toolArguments");
+    const streamingBuffer = streamingBufferForThread(threadId);
+    streamingBuffer.toolCalls.forEach((toolCall, tcId) => {
+      const chunks = toolCall.argumentChunks;
+      const argsElement = streamingToolCallArgRefs.current[tcId];
+      if (argsElement) {
+        if (lastToolCallChunksRef.current[tcId] !== chunks) {
+          lastToolCallChunksRef.current[tcId] = chunks;
+          lastToolCallArgIndexRef.current[tcId] = 0;
+          argsElement.textContent = "";
+        }
+        let renderedAuthoritativeBash = false;
+        if (toolCall.name === "bash" && chunks.length === 1) {
+          try {
+            const parsed = JSON.parse(chunks[0]);
+            if (typeof parsed?.script === "string") {
+              argsElement.textContent = `$ ${parsed.script}`;
+              renderedAuthoritativeBash = true;
+            }
+          } catch {
+            // Streamed partial JSON is appended verbatim until complete.
+          }
+        }
+        if (!renderedAuthoritativeBash) {
+          const lastIndex = lastToolCallArgIndexRef.current[tcId] || 0;
+          appendBufferedTextChunks(argsElement, chunks, lastIndex);
+        }
+        lastToolCallArgIndexRef.current[tcId] = chunks.length;
+        if (!argsElement.textContent) argsElement.textContent = "...";
+      }
+
+    });
+    scrollToBottom();
+  }, [scrollToBottom, threadId]);
+
+  const flushStreamingToolCallPreviews = useCallback(() => {
+    recordStreamingFlush("toolPreview");
+    const streamingBuffer = streamingBufferForThread(threadId);
+    streamingBuffer.toolCalls.forEach((toolCall, tcId) => {
+      const previewElement = streamingToolCallPreviewRefs.current[tcId];
+      if (!previewElement) return;
+      const argumentPrefix = streamingBuffer.getToolCallArgumentPrefix(tcId);
+      previewElement.textContent = oneLinePreview(
+        toolCall.name === "bash" ? argumentPrefix.replace(/^\s*\{?\s*"script"\s*:\s*"?/, "$ ") : argumentPrefix,
+      );
+    });
+  }, [threadId]);
 
   const scheduleStreamingTextFlush = useCallback(() => {
     if (streamingTextFlushRafRef.current !== null) return;
@@ -1690,11 +1708,30 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
     return timeoutId;
   }, []);
 
+  const attachStreamingToolCallArgs = useCallback((toolCallId: string, element: HTMLPreElement | null) => {
+    const previous = streamingToolCallArgRefs.current[toolCallId];
+    streamingToolCallArgRefs.current[toolCallId] = element;
+    if (!element || previous === element) return;
+    lastToolCallArgIndexRef.current[toolCallId] = 0;
+    delete lastToolCallChunksRef.current[toolCallId];
+    element.textContent = "";
+    requestAnimationFrame(flushStreamingToolCalls);
+  }, [flushStreamingToolCalls]);
+
+  const attachStreamingToolOutput = useCallback((toolCallId: string, element: HTMLPreElement | null) => {
+    const previous = streamingToolOutputRefs.current[toolCallId];
+    streamingToolOutputRefs.current[toolCallId] = element;
+    if (!element || previous === element) return;
+    lastToolOutputIndexRef.current[toolCallId] = 0;
+    element.textContent = "";
+    requestAnimationFrame(flushStreamingToolOutput);
+  }, [flushStreamingToolOutput]);
+
   // Subscribe to streaming buffer updates - bypasses React entirely
   // This is O(1) per chunk with direct DOM manipulation
   // Re-runs when isStreaming changes to catch up with buffered content when refs become available
   useEffect(() => {
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    const streamingBuffer = streamingBufferForThread(threadId);
 
     const unsubContent = streamingBuffer.subscribeContent(scheduleStreamingTextFlush);
     const unsubReasoning = streamingBuffer.subscribeReasoning(scheduleStreamingTextFlush);
@@ -1716,13 +1753,45 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         rafIdRef.current = null;
       }
     };
-  }, [isStreaming, flushStreamingText, scheduleInitialStreamingFlush, scheduleStreamingTextFlush]);
+  }, [isStreaming, flushStreamingText, scheduleInitialStreamingFlush, scheduleStreamingTextFlush, threadId]);
+
+  // Tool-call arguments use the same mutable/RAF architecture as text and
+  // tool output. A burst schedules one imperative preview flush per frame and
+  // never publishes its growing argument body through React or Zustand.
+  useEffect(() => {
+    const streamingBuffer = streamingBufferForThread(threadId);
+    const coalescer = new AnimationFrameCoalescer(
+      (callback) => window.requestAnimationFrame(callback),
+      (id) => window.cancelAnimationFrame(id),
+    );
+    const previewCoalescer = new IntervalCoalescer<number>(
+      TOOL_ARGUMENT_PREVIEW_INTERVAL_MS,
+      () => performance.now(),
+      (callback, delayMs) => window.setTimeout(callback, delayMs),
+      (id) => window.clearTimeout(id),
+    );
+    streamingToolCallFlushRef.current = coalescer;
+    streamingToolPreviewFlushRef.current = previewCoalescer;
+    const schedule = () => {
+      coalescer.schedule(flushStreamingToolCalls);
+      previewCoalescer.schedule(flushStreamingToolCallPreviews);
+    };
+    const unsubscribe = streamingBuffer.subscribeToolCalls(schedule);
+    schedule();
+    return () => {
+      unsubscribe();
+      coalescer.cancel();
+      previewCoalescer.cancel();
+      if (streamingToolCallFlushRef.current === coalescer) streamingToolCallFlushRef.current = null;
+      if (streamingToolPreviewFlushRef.current === previewCoalescer) streamingToolPreviewFlushRef.current = null;
+    };
+  }, [flushStreamingToolCallPreviews, flushStreamingToolCalls, streamingToolCalls, threadId]);
 
   // Subscribe to streaming tool-output preview updates. Like text streaming,
   // this writes chunks directly to DOM so large/fast tool output does not
   // trigger a React render per chunk.
   useEffect(() => {
-    const { streamingBuffer } = require("@/lib/streamingBuffer") as typeof import("@/lib/streamingBuffer");
+    const streamingBuffer = streamingBufferForThread(threadId);
 
     const unsubToolOutput = streamingBuffer.subscribeToolOutput(scheduleStreamingToolFlush);
     const timeoutId = isStreaming ? scheduleInitialStreamingFlush(flushStreamingToolOutput) : null;
@@ -1735,15 +1804,17 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         streamingToolFlushRafRef.current = null;
       }
     };
-  }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleInitialStreamingFlush, scheduleStreamingToolFlush]);
+  }, [isStreaming, streamingToolOutputs, flushStreamingToolOutput, scheduleInitialStreamingFlush, scheduleStreamingToolFlush, threadId]);
 
-  // Reset DOM state when streaming stops
+  // Reset DOM state only after assistant and retained tool state are both gone.
   useEffect(() => {
-    if (!isStreaming) {
+    if (!showLiveCard) {
       lastContentIndexRef.current = 0;
       lastReasoningIndexRef.current = 0;
       lastReasoningSummaryIndexRef.current = 0;
       lastToolOutputIndexRef.current = {};
+      lastToolCallArgIndexRef.current = {};
+      lastToolCallChunksRef.current = {};
       if (streamingContentRef.current) {
         streamingContentRef.current.textContent = '';
       }
@@ -1756,51 +1827,22 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       Object.values(streamingToolOutputRefs.current).forEach((el) => {
         if (el) el.textContent = '';
       });
+      Object.values(streamingToolCallArgRefs.current).forEach((el) => {
+        if (el) el.textContent = '';
+      });
+      Object.values(streamingToolCallPreviewRefs.current).forEach((el) => {
+        if (el) el.textContent = '';
+      });
     }
-  }, [isStreaming]);
+  }, [showLiveCard]);
 
-  const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ["messages", currentThreadId],
-    queryFn: () => fetchMessages(currentThreadId!, { limit: INITIAL_TRANSCRIPT_MESSAGE_LIMIT }),
-    enabled: !!currentThreadId,
-    retry: 3,
-    retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 5000),
-  });
-
-  // Sync fetched messages to store and scroll to bottom if we were sticky
-  useEffect(() => {
-    if (data) {
-      // Capture sticky state BEFORE DOM update.  Do not derive this from the
-      // current distance here: replacing the streaming block with the final
-      // message can shrink content and make an intentionally scrolled-up view
-      // look "at bottom" for one render.
-      const wasSticky = stickToBottomRef.current;
-      const fetchedMessages = Array.isArray(data) ? data : [];
-      const currentMessages = useAppStore.getState().messages;
-      const merged = mergeFetchedTranscriptMessages(currentMessages, fetchedMessages);
-      setMessages(merged.messages);
-      setHasOlderMessages((previous) => (
-        merged.preservedLoadedScrollback
-          ? previous
-          : fetchedMessages.length >= INITIAL_TRANSCRIPT_MESSAGE_LIMIT
-      ));
-      // Scroll to bottom after DOM update if we were at bottom before
-      if (wasSticky) {
-        // Double RAF: first waits for React render, second waits for paint
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            scrollToBottomNow();
-          });
-        });
-      }
-    }
-  }, [data, scrollToBottomNow, setMessages]);
+  const { isLoading, isError, refetch } = transcriptQuery;
 
   // Reset scroll state and scroll to bottom when thread changes
   useEffect(() => {
     stickToBottomRef.current = true;
     loadingOlderRef.current = false;
-    setHasOlderMessages(false);
+    setRenderStartMessageId(null);
     setIsLoadingOlder(false);
     requestAnimationFrame(() => {
       scrollToBottomNow();
@@ -1820,7 +1862,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
 
   // Scroll to bottom when new streaming tool calls or tool outputs appear (tool headers)
   useEffect(() => {
-    if ((Object.keys(streamingToolCalls).length > 0 || Object.keys(streamingToolOutputs).length > 0) && stickToBottomRef.current) {
+    if ((Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0) && stickToBottomRef.current) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           scrollToBottomNow();
@@ -1828,15 +1870,6 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       });
     }
   }, [scrollToBottomNow, streamingToolCalls, streamingToolOutputs]);
-
-  // Scroll to bottom when UI-only messages are added (e.g., /cost, /help)
-  useEffect(() => {
-    if (scrollTrigger > 0 && stickToBottomRef.current) {
-      requestAnimationFrame(() => {
-        scrollToBottomNow();
-      });
-    }
-  }, [scrollToBottomNow, scrollTrigger]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -1870,11 +1903,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
       : formatStreamingTps(lastMessageWithTps?.tps ?? null);
   const streamingRoleLabel = streamingKind === "tool" ? "Tool" : "Assistant";
 
-  return (
+  const panel = (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div className={`eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
         <span>
-              Chat Messages · {messages.length.toLocaleString()} loaded{hasOlderMessages ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
+              Chat Messages · {messages.length.toLocaleString()} loaded{transcriptQuery.hasNextPage ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
           {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
           {isStreaming && !providerTimeText && genericStreamingTimeText ? ` | ${genericStreamingTimeText}` : ""}
         </span>
@@ -1883,8 +1916,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         ref={scrollRef}
         onScroll={handleScroll}
         onWheel={handleWheel}
+        onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
-        onPointerUp={handlePointerUp}
+        onPointerDown={handlePointerDown}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
         className="eggw-transcript-scroll flex-1 overflow-auto px-4 py-6 md:px-8"
         data-testid="chat-panel"
       >
@@ -1908,7 +1944,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
             </div>
           ) : (
             <>
-              {messages.length > 0 && hasOlderMessages && (
+              {messages.length > 0 && renderedTranscript.hiddenCount === 0 && transcriptQuery.hasNextPage && (
                 <div className="mb-4 flex justify-center">
                   <button
                     type="button"
@@ -1922,25 +1958,40 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                   </button>
                 </div>
               )}
+              {renderedTranscript.hiddenCount > 0 && (
+                <div className="mb-4 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={expandLoadedTranscript}
+                    className="rounded-full border px-3 py-1 text-xs"
+                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)", color: "var(--muted)" }}
+                    data-testid="show-more-loaded-messages"
+                  >
+                    Show 60 older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
+                  </button>
+                </div>
+              )}
               <StaticTranscript
-                messages={messages}
+                messages={renderedTranscript.messages}
                 displayVerbosity={displayVerbosity}
                 showBorders={showBorders}
                 onStageAttachment={onStageAttachment}
               />
 
               {/* Streaming content */}
-              {isStreaming && (
+              {showLiveCard && (
                 <div
                   className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
                   style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
                 >
                   <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
                     <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>{streamingRoleLabel}</span>
-                    {streamingModelKey && (
+                    {displayVerbosity !== "min" && streamingModelKey && (
                       <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
                     )}
-                    <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                    {isStreaming && (
+                      <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                    )}
                     {providerTimeText && (
                       <span className="ml-2" style={{ color: "var(--accent)" }}>{providerTimeText}</span>
                     )}
@@ -1957,9 +2008,9 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                   <>
                       {/* Streaming reasoning - direct DOM updates via ref */}
                       <details
-                      open
+                      open={displayVerbosity === "max" ? true : undefined}
                       className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-                      style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
+                      style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: displayVerbosity === "min" ? "none" : undefined }}
                       id="streaming-reasoning-container"
                       >
                       <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
@@ -1974,7 +2025,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
 
                       {/* Streaming reasoning summary - display-only, not persisted as reasoning */}
                       <details
-                      open
+                      open={displayVerbosity === "max" ? true : undefined}
                       className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
                       style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
                       id="streaming-reasoning-summary-container"
@@ -1992,6 +2043,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                       {/* Streaming content - direct DOM updates via ref for O(1) performance */}
                       <div
                       ref={streamingContentRef}
+                      data-testid="streaming-content"
                       className="text-sm"
                       style={{
                         color: "var(--assistant-msg-text, var(--foreground))",
@@ -2001,22 +2053,12 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                       />
 
                       {/* Streaming tool calls */}
-                      {Object.keys(streamingToolCalls).length > 0 && (
+                      {Object.keys(visibleStreamingToolCalls).length > 0 && (
                       <div className="mt-2 space-y-2">
-                        {Object.entries(streamingToolCalls).map(([tcId, tc]) => {
-                          const isBash = tc.name === "bash";
-                          let parsedArgs: any = tc.arguments;
-                          try {
-                            parsedArgs = JSON.parse(tc.arguments);
-                          } catch {
-                            // Keep as string
-                          }
-                          const script = isBash && parsedArgs?.script;
-                          const argsPreview = oneLinePreview(script ? `$ ${script}` : (tc.arguments || ""));
-
+                        {Object.entries(visibleStreamingToolCalls).map(([tcId, tc]) => {
                           return (
                             <details
-                              key={`${displayVerbosity}-${tcId}`}
+                              key={tcId}
                               open={streamingToolDetailsOpen}
                               className={`rounded ${showBorders ? 'border' : ''}`}
                               style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
@@ -2027,10 +2069,12 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                                   {tcId.slice(-8)}
                                 </span>
                                 <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
-                                {displayVerbosity === "medium" && argsPreview && (
-                                  <span className="text-xs font-mono" style={{ color: "var(--foreground)" }}>
-                                    {argsPreview}
-                                  </span>
+                                {displayVerbosity === "medium" && (
+                                  <span
+                                    ref={(element) => { streamingToolCallPreviewRefs.current[tcId] = element; }}
+                                    className="text-xs font-mono"
+                                    style={{ color: "var(--foreground)" }}
+                                  />
                                 )}
                                 {displayVerbosity === "medium" && (
                                   <span className="text-xs" style={{ color: "var(--muted)" }}>
@@ -2039,15 +2083,14 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                                 )}
                               </summary>
                               <div className="px-2 pb-2">
-                                {isBash && script ? (
-                                  <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
-                                    $ {script}
-                                  </pre>
-                                ) : (
-                                  <pre className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
-                                    {tc.arguments || "..."}
-                                  </pre>
-                                )}
+                                <pre
+                                  ref={(element) => attachStreamingToolCallArgs(tcId, element)}
+                                  data-testid="streaming-tool-arguments"
+                                  className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all"
+                                  style={{ background: "var(--code-bg)", color: tc.name === "bash" ? "var(--accent)" : "var(--foreground)" }}
+                                >
+                                  ...
+                                </pre>
                               </div>
                             </details>
                           );
@@ -2056,14 +2099,14 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                       )}
 
                       {/* Streaming tool output preview */}
-                      {Object.keys(streamingToolOutputs).length > 0 && (
+                      {Object.keys(visibleStreamingToolOutputs).length > 0 && (
                       <div className="mt-2 space-y-2">
-                        {Object.entries(streamingToolOutputs).map(([toolId, tool]) => {
+                        {Object.entries(visibleStreamingToolOutputs).map(([toolId, tool]) => {
                           const timeoutText = toolTimeoutCountdown(tool.timeout, nowMs);
                           const elapsedText = tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
                           return (
                             <details
-                              key={`${displayVerbosity}-${toolId}`}
+                              key={toolId}
                               open={streamingToolDetailsOpen}
                               className={`rounded ${showBorders ? 'border' : ''}`}
                               style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
@@ -2119,9 +2162,7 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
                                   </div>
                                 )}
                                 <pre
-                                  ref={(el) => {
-                                    streamingToolOutputRefs.current[toolId] = el;
-                                  }}
+                                  ref={(element) => attachStreamingToolOutput(toolId, element)}
                                   data-testid="streaming-tool-output"
                                   className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words"
                                   style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}
@@ -2152,5 +2193,11 @@ export function ChatPanel({ showBorders = true, streamingTps = null, onStageAtta
         </div>
       </div>
     </div>
+  );
+  if (process.env.NODE_ENV === "production") return panel;
+  return (
+    <Profiler id="ChatPanel" onRender={(id, _phase, duration) => recordReactCommit(id as "ChatPanel", duration)}>
+      {panel}
+    </Profiler>
   );
 }

@@ -36,8 +36,10 @@ jobs:
               - 'eggflow/**'
             egg:
               - 'egg/**'
+              - 'integration_tests/**'
             eggw:
               - 'eggw/**'
+              - 'integration_tests/**'
             eggconfig:
               - 'eggconfig/**'
 
@@ -130,7 +132,7 @@ jobs:
 
   test-eggw:
     needs: detect-changes
-    if: needs.detect-changes.outputs.eggw == 'true' || needs.detect-changes.outputs.eggthreads == 'true' || needs.detect-changes.outputs.eggllm == 'true' || needs.detect-changes.outputs.eggconfig == 'true' || github.event_name == 'push'
+    if: needs.detect-changes.outputs.eggw == 'true' || needs.detect-changes.outputs.eggthreads == 'true' || needs.detect-changes.outputs.eggllm == 'true' || needs.detect-changes.outputs.eggconfig == 'true' || needs.detect-changes.outputs.egg == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -144,6 +146,9 @@ jobs:
           pip install -e ./eggllm
           pip install -e ./eggconfig
           pip install -e ./eggthreads
+          pip install -e ./eggdisplay
+          pip install -e ./egg
           pip install -e ./eggw
           pip install pytest
       - run: pytest eggw/tests -q
+      - run: PYTHONPATH=egg:eggw:eggthreads:eggconfig:eggdisplay:eggllm pytest integration_tests -q

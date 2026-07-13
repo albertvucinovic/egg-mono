@@ -127,6 +127,37 @@ def test_thread_token_stats_usage_since_compaction_uses_provider_context(tmp_pat
     assert current_api["total_input_tokens"] < full_api["total_input_tokens"]
 
 
+def test_duplicate_thread_preserves_provider_context_and_full_thread_tokens(tmp_path):
+    import eggthreads as ts
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    source = ts.create_root_thread(db, name="source")
+    ts.append_message(db, source, "user", "old prompt " * 100)
+    start = ts.append_message(db, source, "assistant", "summary")
+    ts.commit_thread_compaction(db, source, start, created_by="test")
+    ts.append_message(db, source, "user", "current prompt")
+    ts.append_message(
+        db,
+        source,
+        "assistant",
+        "current answer",
+        extra={"model_key": "m"},
+    )
+    ts.create_snapshot(db, source)
+
+    duplicate = ts.duplicate_thread(db, source)
+    source_stats = thread_token_stats(db, source)
+    duplicate_stats = thread_token_stats(db, duplicate)
+    duplicate_compaction = ts.latest_effective_thread_compaction(db, duplicate)
+
+    assert duplicate_compaction is not None
+    assert duplicate_compaction["start_msg_id"] == start
+    assert duplicate_stats["context_tokens"] == source_stats["context_tokens"]
+    assert duplicate_stats["full_thread_tokens"] == source_stats["full_thread_tokens"]
+    assert duplicate_stats["context_tokens"] < duplicate_stats["full_thread_tokens"]
+
+
 def test_thread_token_stats_no_compaction_does_not_compare_fresh_provider_to_cached_full(tmp_path):
     import json
     import eggthreads as ts

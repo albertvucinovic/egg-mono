@@ -14,10 +14,12 @@ from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
     SnapshotBuilder,
+    ToolOutputPublicationPlan,
     ThreadsDB,
     append_message,
     build_tool_call_states,
     create_snapshot,
+    finalize_tool_output,
     get_active_get_user_message_waiting_note,
     interrupt_thread,
 )
@@ -48,6 +50,7 @@ from ..models import (
     ImageGenerationRequest,
     ImageGenerationResponse,
     MessageContent,
+    MessageSnapshotResponse,
     SendMessageRequest,
 )
 from .. import core
@@ -128,18 +131,20 @@ def _cancel_active_get_user_wait(thread_id: str, waiting_note: dict | None) -> b
     if name != GET_USER_MESSAGE_TOOL_NAME:
         return False
 
-    core.db.append_event(
-        event_id=os.urandom(10).hex(),
-        thread_id=thread_id,
-        type_="tool_call.output_approval",
-        msg_id=None,
-        invoke_id=None,
-        payload={
-            "tool_call_id": tool_call_id,
-            "decision": "whole",
-            "reason": "Cancelled by user via web interrupt",
-            "preview": GET_USER_INTERRUPT_CONTENT,
-        },
+    finalize_tool_output(
+        core.db,
+        thread_id,
+        tool_call_id,
+        decision="whole",
+        source="user_cancel",
+        reason="Cancelled by user via web interrupt",
+        expected_state=("TC3", "TC4", "TC5"),
+        expected_event_seq=tc.state_event_seq,
+        publication_plan=ToolOutputPublicationPlan(
+            decision="whole",
+            preview=GET_USER_INTERRUPT_CONTENT,
+            reason="Cancelled by user via web interrupt",
+        ),
     )
 
     if getattr(tc, "parent_role", None) == "assistant":
@@ -192,13 +197,16 @@ def _compaction_marker_message(marker: dict, fallback_start_seq: int) -> Message
     )
 
 
-def _output_optimizer_metadata_by_tool_call_id(db: ThreadsDB, thread_id: str) -> dict[str, dict]:
+def _output_optimizer_metadata_by_tool_call_id(
+    db: ThreadsDB, thread_id: str, through_event_seq: int
+) -> dict[str, dict]:
     """Return compact optimizer metadata derived from output-approval events."""
 
     try:
         rows = db.conn.execute(
-            "SELECT payload_json FROM events WHERE thread_id=? AND type='tool_call.output_approval' ORDER BY event_seq ASC",
-            (thread_id,),
+            "SELECT payload_json FROM events WHERE thread_id=? "
+            "AND type='tool_call.output_approval' AND event_seq<=? ORDER BY event_seq ASC",
+            (thread_id, int(through_event_seq)),
         ).fetchall()
     except Exception:
         return {}
@@ -226,7 +234,7 @@ def _get_messages_sync(
     thread_id: str,
     limit: int | None = None,
     before_id: str | None = None,
-) -> Optional[List[MessageContent]]:
+) -> Optional[MessageSnapshotResponse]:
     """Fetch messages for a thread on a worker thread.
 
     The optional ``limit`` is applied before expensive per-message content
@@ -251,6 +259,17 @@ def _get_messages_sync(
         else:
             snap = snap_raw if isinstance(snap_raw, dict) else {}
 
+        # ``create_snapshot`` returns one coherent projection cache (possibly a
+        # newer winning writer). Read the cursor from that exact object rather
+        # than re-reading the thread row, which could race ahead of ``items``.
+        projection_meta = snap.get("_thread_projection") if isinstance(snap, dict) else None
+        try:
+            snapshot_cursor = int(projection_meta["through_event_seq"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Snapshot projection cursor unavailable for thread {thread_id}"
+            ) from exc
+
         raw_messages = snap.get("messages") if isinstance(snap, dict) else []
         snapshot_messages = [m for m in raw_messages if isinstance(m, dict)] if isinstance(raw_messages, list) else []
 
@@ -260,8 +279,9 @@ def _get_messages_sync(
         raw_compactions = []
         try:
             cur = fresh_db.conn.execute(
-                "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND type=? ORDER BY event_seq ASC",
-                (thread_id, COMPACTION_EVENT_TYPE),
+                "SELECT event_seq, payload_json FROM events WHERE thread_id=? AND type=? "
+                "AND event_seq<=? ORDER BY event_seq ASC",
+                (thread_id, COMPACTION_EVENT_TYPE, snapshot_cursor),
             )
             compaction_rows = cur.fetchall()
         except Exception:
@@ -311,6 +331,7 @@ def _get_messages_sync(
                     entries.append(("marker", _compaction_marker_message(marker, msg_event_seq)))
             entries.append(("message", msg))
 
+        has_older = False
         if before_id:
             before_index = next(
                 (
@@ -326,9 +347,12 @@ def _get_messages_sync(
             entries = entries[:before_index] if before_index >= 0 else []
 
         if isinstance(limit, int) and limit > 0 and len(entries) > limit:
+            has_older = True
             entries = entries[-limit:]
 
-        optimizer_metadata_by_tool_call_id = _output_optimizer_metadata_by_tool_call_id(fresh_db, thread_id)
+        optimizer_metadata_by_tool_call_id = _output_optimizer_metadata_by_tool_call_id(
+            fresh_db, thread_id, snapshot_cursor
+        )
 
         messages: List[MessageContent] = []
         for kind, raw in entries:
@@ -387,14 +411,19 @@ def _get_messages_sync(
                 recovery_notice=bool(msg.get("recovery_notice")),
             ))
 
-        return messages
+        next_before = messages[0].id if messages and has_older else None
+        return MessageSnapshotResponse(
+            items=messages,
+            snapshot_cursor=snapshot_cursor,
+            next_before=next_before,
+        )
     finally:
         try:
             fresh_db.conn.close()
         except Exception:
             pass
 
-@router.get("/{thread_id}/messages", response_model=List[MessageContent])
+@router.get("/{thread_id}/messages")
 async def get_messages(
     thread_id: str,
     limit: int | None = Query(
@@ -407,6 +436,15 @@ async def get_messages(
         default=None,
         description="Optional id of the first loaded entry; returns entries before it.",
     ),
+    envelope: bool = Query(
+        default=False,
+        description=(
+            "Return {items, snapshot_cursor, next_before}. The legacy default "
+            "remains a plain item array and exposes the same cursor in the "
+            "X-Egg-Event-Cursor response header."
+        ),
+    ),
+    response: Response = None,
 ):
     """Get messages for a thread by building fresh snapshot from events.
 
@@ -421,12 +459,18 @@ async def get_messages(
 
     # Run database-heavy work in thread pool to avoid blocking event loop
     loop = asyncio.get_running_loop()
-    messages = await loop.run_in_executor(None, _get_messages_sync, core.db.path, thread_id, limit, before_id)
+    snapshot = await loop.run_in_executor(
+        None, _get_messages_sync, core.db.path, thread_id, limit, before_id
+    )
 
-    if messages is None:
+    if snapshot is None:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    return messages
+    if response is not None:
+        response.headers["X-Egg-Event-Cursor"] = str(snapshot.snapshot_cursor)
+    if envelope:
+        return snapshot.model_dump(mode="json")
+    return [item.model_dump(mode="json") for item in snapshot.items]
 
 
 @router.post("/{thread_id}/messages")
@@ -717,28 +761,17 @@ async def interrupt_thread_endpoint(thread_id: str):
 
     states = build_tool_call_states(core.db, thread_id)
     for tc in states.values():
-        if tc.state == "TC4" and tc.finished_reason == "interrupted":
-            # Emit output approval with 'whole' decision - runner handles interrupted specially
-            full_output = tc.finished_output or ""
-            if not isinstance(full_output, str):
-                full_output = str(full_output)
-            line_count = len(full_output.splitlines()) if full_output else 0
-            char_count = len(full_output)
-
-            core.db.append_event(
-                event_id=os.urandom(10).hex(),
-                thread_id=thread_id,
-                type_='tool_call.output_approval',
-                msg_id=None,
-                invoke_id=None,
-                payload={
-                    'tool_call_id': tc.tool_call_id,
-                    'decision': 'whole',
-                    'reason': 'Auto-approved after interrupt',
-                    'preview': full_output,
-                    'line_count': line_count,
-                    'char_count': char_count,
-                },
+        if tc.state in ("TC4", "TC5") and tc.finished_reason == "interrupted":
+            # Commit through the shared authority; user-cancel precedence wins
+            # any concurrent automatic policy decision.
+            finalize_tool_output(
+                core.db,
+                thread_id,
+                tc.tool_call_id,
+                decision='whole',
+                source='user_cancel',
+                reason='Auto-approved after interrupt',
+                expected_event_seq=tc.state_event_seq,
             )
 
     return {

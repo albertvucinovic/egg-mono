@@ -1,6 +1,34 @@
 import type { AttachmentUploadResponse, ContentPart, EggMessageContent } from "./contentParts";
+import { AuthenticatedEventSource } from "./sse";
+import { clearApiToken, getApiToken } from "./apiToken";
+export type { AuthenticatedEventSource } from "./sse";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const AUTH_WEBSOCKET_PROTOCOL_PREFIX = "eggw.auth.";
+
+function authenticatedHeaders(headers?: HeadersInit, token = getApiToken()): Headers {
+  const authenticated = new Headers(headers);
+  if (token) authenticated.set("Authorization", `Bearer ${token}`);
+  return authenticated;
+}
+
+export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const url = input instanceof Request ? input.url : String(input);
+  const apiOrigin = new URL(API_BASE).origin;
+  if (new URL(url, API_BASE).origin !== apiOrigin) {
+    throw new Error("Refusing to send EggW API credentials to a different origin");
+  }
+  const response = await fetch(input, { ...init, headers: authenticatedHeaders(init.headers) });
+  if (response.status === 401 && getApiToken()) clearApiToken();
+  return response;
+}
+
+export async function verifyApiToken(token: string): Promise<boolean> {
+  const response = await fetch(`${API_BASE}/api/threads`, {
+    headers: authenticatedHeaders(undefined, token),
+  });
+  return response.ok;
+}
 
 async function readErrorDetail(res: Response, fallback: string): Promise<string> {
   try {
@@ -14,25 +42,25 @@ async function readErrorDetail(res: Response, fallback: string): Promise<string>
 }
 
 export async function fetchThreads() {
-  const res = await fetch(`${API_BASE}/api/threads`);
+  const res = await apiFetch(`${API_BASE}/api/threads`);
   if (!res.ok) throw new Error("Failed to fetch threads");
   return res.json();
 }
 
 export async function fetchRootThreads() {
-  const res = await fetch(`${API_BASE}/api/threads/roots`);
+  const res = await apiFetch(`${API_BASE}/api/threads/roots`);
   if (!res.ok) throw new Error("Failed to fetch root threads");
   return res.json();
 }
 
 export async function fetchThread(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}`);
   if (!res.ok) throw new Error("Failed to fetch thread");
   return res.json();
 }
 
 export async function fetchThreadChildren(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/children`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/children`);
   if (!res.ok) throw new Error("Failed to fetch children");
   return res.json();
 }
@@ -43,7 +71,7 @@ export async function createThread(data: {
   model_key?: string;
   context?: string;
 }) {
-  const res = await fetch(`${API_BASE}/api/threads`, {
+  const res = await apiFetch(`${API_BASE}/api/threads`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -53,7 +81,7 @@ export async function createThread(data: {
 }
 
 export async function deleteThread(threadId: string, deleteSubtree = false) {
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/threads/${threadId}?delete_subtree=${deleteSubtree}`,
     { method: "DELETE" }
   );
@@ -62,7 +90,7 @@ export async function deleteThread(threadId: string, deleteSubtree = false) {
 }
 
 export async function renameThread(threadId: string, name: string) {
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/threads/${threadId}?name=${encodeURIComponent(name)}`,
     { method: "PATCH" }
   );
@@ -71,7 +99,7 @@ export async function renameThread(threadId: string, name: string) {
 }
 
 export async function duplicateThread(threadId: string, name?: string) {
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/threads/${threadId}/duplicate${name ? `?name=${encodeURIComponent(name)}` : ""}`,
     { method: "POST" }
   );
@@ -80,7 +108,7 @@ export async function duplicateThread(threadId: string, name?: string) {
 }
 
 export async function openThread(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/open`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/open`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to open thread");
@@ -88,25 +116,42 @@ export async function openThread(threadId: string) {
 }
 
 export async function interruptThread(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/interrupt`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/interrupt`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to interrupt thread");
   return res.json();
 }
 
-export async function fetchMessages(threadId: string, options: { limit?: number; beforeId?: string } = {}) {
-  const params = new URLSearchParams();
+export interface ApiMessage extends Record<string, unknown> {
+  id: string;
+  role: string;
+}
+
+export interface MessageSnapshot<T = ApiMessage> {
+  items: T[];
+  snapshot_cursor: number;
+  next_before: string | null;
+}
+
+export async function fetchMessages(
+  threadId: string,
+  options: { limit?: number; beforeId?: string } = {},
+): Promise<MessageSnapshot> {
+  const params = new URLSearchParams({ envelope: "true" });
   if (options.limit && options.limit > 0) params.set("limit", String(Math.trunc(options.limit)));
   if (options.beforeId) params.set("before_id", options.beforeId);
-  const query = params.toString();
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/messages${query ? `?${query}` : ""}`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages?${params.toString()}`);
   if (!res.ok) throw new Error("Failed to fetch messages");
-  return res.json();
+  const payload = await res.json();
+  if (!payload || !Array.isArray(payload.items) || !Number.isSafeInteger(payload.snapshot_cursor)) {
+    throw new Error("Invalid message snapshot response");
+  }
+  return payload;
 }
 
 export async function sendMessage(threadId: string, content: EggMessageContent) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/messages`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
@@ -118,7 +163,7 @@ export async function sendMessage(threadId: string, content: EggMessageContent) 
 export async function uploadAttachment(threadId: string, file: File): Promise<AttachmentUploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/attachments`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/attachments`, {
     method: "POST",
     body: formData,
   });
@@ -126,6 +171,12 @@ export async function uploadAttachment(threadId: string, file: File): Promise<At
     throw new Error(await readErrorDetail(res, "Failed to upload attachment"));
   }
   return res.json();
+}
+
+export async function fetchProtectedBlob(url: string): Promise<Blob> {
+  const res = await apiFetch(url);
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to fetch protected file"));
+  return res.blob();
 }
 
 export function attachmentUrl(
@@ -148,7 +199,7 @@ export async function promoteProviderOutput(
   const params = new URLSearchParams();
   if (options.descendantThreadId) params.set("descendant_thread_id", options.descendantThreadId);
   const query = params.toString();
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/threads/${encodeURIComponent(threadId)}/provider-output/${encodeURIComponent(artifactId)}/promote${query ? `?${query}` : ""}`,
     { method: "POST" },
   );
@@ -185,7 +236,7 @@ export async function generateThreadImage(
   threadId: string,
   request: ImageGenerationRequest,
 ): Promise<ImageGenerationResponse> {
-  const res = await fetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/image-generation`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/image-generation`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -234,7 +285,7 @@ export async function createEditAnswerDraft(
   threadId: string,
   request: { selector?: string; source_msg_id?: string } = {},
 ): Promise<EditAnswerDraftResponse> {
-  const res = await fetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/edit-answer-draft`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${encodeURIComponent(threadId)}/edit-answer-draft`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -250,7 +301,7 @@ export async function executeCommand(
   command: string,
   stagedAttachments: ContentPart[] = [],
 ): Promise<CommandResponse> {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/command`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/command`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command, staged_attachments: stagedAttachments }),
@@ -265,19 +316,19 @@ export function isCommand(text: string): boolean {
 }
 
 export async function fetchModels() {
-  const res = await fetch(`${API_BASE}/api/models`);
+  const res = await apiFetch(`${API_BASE}/api/models`);
   if (!res.ok) throw new Error("Failed to fetch models");
   return res.json();
 }
 
 export async function fetchImageGenerationModels() {
-  const res = await fetch(`${API_BASE}/api/image-models`);
+  const res = await apiFetch(`${API_BASE}/api/image-models`);
   if (!res.ok) throw new Error("Failed to fetch image generation models");
   return res.json();
 }
 
 export async function setThreadModel(threadId: string, modelKey: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/model`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/model`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model_key: modelKey }),
@@ -287,7 +338,7 @@ export async function setThreadModel(threadId: string, modelKey: string) {
 }
 
 export async function fetchToolCalls(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/tools`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/tools`);
   if (!res.ok) throw new Error("Failed to fetch tool calls");
   return res.json();
 }
@@ -299,7 +350,7 @@ export async function approveTool(
   outputDecision?: string,
   decision?: string  // For special decisions like 'all-in-turn'
 ) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/tools/approve`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/tools/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -314,38 +365,78 @@ export async function approveTool(
 }
 
 export async function fetchTokenStats(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/stats`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/stats`);
   if (!res.ok) throw new Error("Failed to fetch stats");
   return res.json();
 }
 
 export async function fetchThreadSettings(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/settings`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/settings`);
   if (!res.ok) throw new Error("Failed to fetch settings");
   return res.json();
 }
 
-export async function fetchThreadState(threadId: string) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/state`);
+export interface ThreadStateResponse {
+  state: string;
+  streaming_kind?: string | null;
+  streaming_invoke_id?: string | null;
+  live_replay_cursor?: number;
+  active_get_user_wait?: boolean;
+  get_user_waiting_note?: any;
+  scheduler_running?: boolean;
+}
+
+export async function fetchThreadState(threadId: string, snapshotCursor?: number) {
+  const params = Number.isSafeInteger(snapshotCursor)
+    ? `?snapshot_cursor=${encodeURIComponent(String(snapshotCursor))}`
+    : "";
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/state${params}`);
   if (!res.ok) throw new Error("Failed to fetch state");
-  return res.json();
+  return res.json() as Promise<ThreadStateResponse>;
 }
 
 export async function setAutoApproval(threadId: string, enabled: boolean) {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/settings/auto-approval?enabled=${enabled}`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/settings/auto-approval?enabled=${enabled}`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to set auto-approval");
   return res.json();
 }
 
-export function createEventSource(threadId: string) {
-  return new EventSource(`${API_BASE}/api/threads/${threadId}/events`);
+async function openEventStream(
+  threadId: string,
+  signal: AbortSignal,
+  cursor: string,
+  reconnect: boolean,
+): Promise<Response> {
+  const headers: Record<string, string> = { Accept: "text/event-stream" };
+  const url = reconnect
+    ? `${API_BASE}/api/threads/${threadId}/events`
+    : `${API_BASE}/api/threads/${threadId}/events?after_seq=${encodeURIComponent(cursor)}`;
+  if (reconnect) headers["Last-Event-ID"] = cursor;
+  const res = await apiFetch(url, {
+    headers,
+    signal,
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to connect to event stream"));
+  if (!res.body) throw new Error("Event stream response has no body");
+  return res;
+}
+
+export function createEventSource(threadId: string, afterSeq = -1): AuthenticatedEventSource {
+  return new AuthenticatedEventSource(
+    (signal, cursor, reconnect) => openEventStream(threadId, signal, cursor, reconnect),
+    afterSeq,
+  );
 }
 
 export function createWebSocket(threadId: string) {
   const wsBase = API_BASE.replace(/^http/, "ws");
-  return new WebSocket(`${wsBase}/ws/${threadId}`);
+  // Browser WebSocket cannot set Authorization. Carry the token in a
+  // credential-bearing subprotocol and have the server echo only "eggw".
+  const token = getApiToken();
+  const protocols = token ? ["eggw", `${AUTH_WEBSOCKET_PROTOCOL_PREFIX}${token}`] : ["eggw"];
+  return new WebSocket(`${wsBase}/ws/${threadId}`, protocols);
 }
 
 export interface AutocompleteSuggestion {
@@ -358,7 +449,8 @@ export interface AutocompleteSuggestion {
 export async function fetchAutocomplete(
   line: string,
   cursor: number,
-  threadId?: string
+  threadId?: string,
+  signal?: AbortSignal,
 ): Promise<AutocompleteSuggestion[]> {
   const params = new URLSearchParams({
     line,
@@ -367,7 +459,7 @@ export async function fetchAutocomplete(
   if (threadId) {
     params.set("thread_id", threadId);
   }
-  const res = await fetch(`${API_BASE}/api/autocomplete?${params}`);
+  const res = await apiFetch(`${API_BASE}/api/autocomplete?${params}`, { signal });
   if (!res.ok) return [];
   const data = await res.json();
   return data.suggestions || [];
@@ -386,7 +478,7 @@ export interface SandboxStatus {
 }
 
 export async function fetchSandboxStatus(threadId: string): Promise<SandboxStatus> {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/sandbox`);
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/sandbox`);
   if (!res.ok) {
     return { enabled: false, effective: false, available: false };
   }
@@ -394,7 +486,7 @@ export async function fetchSandboxStatus(threadId: string): Promise<SandboxStatu
 }
 
 export async function setSandboxEnabled(threadId: string, enabled: boolean): Promise<SandboxStatus> {
-  const res = await fetch(`${API_BASE}/api/threads/${threadId}/sandbox?enabled=${enabled}`, {
+  const res = await apiFetch(`${API_BASE}/api/threads/${threadId}/sandbox?enabled=${enabled}`, {
     method: "POST",
   });
   if (!res.ok) throw new Error("Failed to set sandbox");
@@ -410,19 +502,19 @@ export interface AuthStatus {
 }
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
-  const res = await fetch(`${API_BASE}/api/auth/status`);
+  const res = await apiFetch(`${API_BASE}/api/auth/status`);
   if (!res.ok) throw new Error("Failed to fetch auth status");
   return res.json();
 }
 
 export async function triggerLogin(): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/api/auth/login`, { method: "POST" });
+  const res = await apiFetch(`${API_BASE}/api/auth/login`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to trigger login");
   return res.json();
 }
 
 export async function triggerLogout(): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
+  const res = await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to trigger logout");
   return res.json();
 }

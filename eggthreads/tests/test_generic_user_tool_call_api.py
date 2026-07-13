@@ -255,9 +255,19 @@ def test_closed_tool_stream_without_finished_result_is_recoverable(tmp_path):
     db.append_event("stream-close", root, "stream.close", {}, invoke_id=invoke_id)
 
     states = ts.build_tool_call_states(db, root)
-    assert states[tcid].state == "TC5"
+    assert states[tcid].state == "TC4"
     assert states[tcid].finished_reason == "interrupted"
 
+    result = ts.finalize_tool_output(
+        db,
+        root,
+        tcid,
+        decision="whole",
+        source="automatic_synthetic",
+        reason="Recovered closed tool stream",
+        expected_event_seq=states[tcid].state_event_seq,
+    )
+    assert result.committed is True
     asyncio.run(ts.ThreadRunner(db, root, llm=object(), config=ts.RunnerConfig()).run_once())
 
     states = ts.build_tool_call_states(db, root)

@@ -68,6 +68,10 @@ class ToolCallState:
     # publishing the final tool message.
     last_output_approval_payload: Optional[Dict[str, Any]] = None
     owner_invoke_id: Optional[str] = None
+    # Event watermark of the latest lifecycle event applied to this call, and
+    # the event that currently owns the authoritative output decision.
+    state_event_seq: int = -1
+    output_decision_event_seq: Optional[int] = None
 
     @property
     def state(self) -> str:
@@ -253,6 +257,7 @@ def _tool_call_states_from_declaration(
             index=idx,
             name=str(name),
             arguments=args,
+            state_event_seq=ev_seq,
         )
         if (
             (role == "user" and not bool(payload.get("requires_tool_approval")))
@@ -347,17 +352,16 @@ def _has_incremental_safe_tail(records: List[Tuple[Dict[str, Any], Dict[str, Any
 
 
 def _interrupted_tool_update(tc: ToolCallState, reason: str, output: str) -> ToolCallState:
+    # Interrupt/close reconstructs the missing finish evidence, but output
+    # publication remains TC4 until finalize_tool_output commits a decision.
+    # This keeps one durable authority for every TC4 -> TC5 transition.
     return replace(
         tc,
         finished_reason="interrupted",
         finished_output=output,
-        output_decision="whole",
-        last_output_approval_payload={
-            "tool_call_id": tc.tool_call_id,
-            "decision": "whole",
-            "reason": reason,
-            "preview": output,
-        },
+        output_decision=None,
+        last_output_approval_payload=None,
+        output_decision_event_seq=None,
     )
 
 
@@ -546,14 +550,14 @@ def _try_reduce_thread_events_incrementally(
         if ev_type == "tool_call.summary":
             summary = payload.get("summary")
             if isinstance(summary, str):
-                tool_call_states[tcid] = replace(tc, summary=summary)
+                tool_call_states[tcid] = replace(tc, summary=summary, state_event_seq=ev_seq)
         elif ev_type == "msg.create":
             if payload.get("role") != "tool" or payload.get("tool_call_id") is None:
                 continue
             msg_id = ev.get("msg_id")
             if msg_id and str(msg_id) in skipped_msg_ids:
                 continue
-            tool_call_states[tcid] = replace(tc, published=True)
+            tool_call_states[tcid] = replace(tc, published=True, state_event_seq=ev_seq)
         elif ev_type == "tool_call.approval":
             decision = payload.get("decision")
             if decision == "global_approval":
@@ -567,12 +571,16 @@ def _try_reduce_thread_events_incrementally(
                 open_all_in_turn_approval_seq = ev_seq
                 for candidate_tcid, candidate_tc in _tool_call_ids_in_turn(tool_call_states, user_seqs, ev_seq):
                     if candidate_tc.approval_decision is None:
-                        tool_call_states[candidate_tcid] = replace(candidate_tc, approval_decision="granted")
+                        tool_call_states[candidate_tcid] = replace(
+                            candidate_tc,
+                            approval_decision="granted",
+                            state_event_seq=ev_seq,
+                        )
                 continue
             if decision in {"granted", "denied"}:
                 if tc is None:
                     return None
-                tool_call_states[tcid] = replace(tc, approval_decision=decision)
+                tool_call_states[tcid] = replace(tc, approval_decision=decision, state_event_seq=ev_seq)
             else:
                 return None
         elif ev_type == "tool_call.execution_started":
@@ -581,6 +589,7 @@ def _try_reduce_thread_events_incrementally(
                 tc,
                 execution_started=True,
                 owner_invoke_id=inv if isinstance(inv, str) and inv else tc.owner_invoke_id,
+                state_event_seq=ev_seq,
             )
         elif ev_type == "tool_call.finished":
             changes: Dict[str, Any] = {}
@@ -591,18 +600,30 @@ def _try_reduce_thread_events_incrementally(
             if out is not None:
                 changes["finished_output"] = str(out)
             if changes:
+                changes["state_event_seq"] = ev_seq
                 tool_call_states[tcid] = replace(tc, **changes)
         elif ev_type == "tool_call.output_approval":
             decision = payload.get("decision")
-            changes = {"last_output_approval_payload": payload}
-            if isinstance(decision, str):
-                changes["output_decision"] = decision
-            if tc.finished_reason is None and "output_decision" in changes:
-                changes["finished_reason"] = "interrupted"
-                changes["finished_output"] = str(
-                    payload.get("preview")
-                    or "--- INTERRUPTED ---\nTool output was decided before the tool reported a result."
-                )
+            if not isinstance(decision, str):
+                return None
+            from .tool_output import output_decision_payload_priority
+
+            current_payload = tc.last_output_approval_payload
+            current_priority = output_decision_payload_priority(current_payload)
+            candidate_priority = output_decision_payload_priority(payload)
+            changes: Dict[str, Any] = {"state_event_seq": ev_seq}
+            if tc.output_decision is None or candidate_priority > current_priority:
+                changes.update({
+                    "last_output_approval_payload": payload,
+                    "output_decision": decision,
+                    "output_decision_event_seq": ev_seq,
+                })
+                if tc.finished_reason is None:
+                    changes["finished_reason"] = "interrupted"
+                    changes["finished_output"] = str(
+                        payload.get("preview")
+                        or "--- INTERRUPTED ---\nTool output was decided before the tool reported a result."
+                    )
             tool_call_states[tcid] = replace(tc, **changes)
 
     for candidate_tcid, candidate_tc in list(tool_call_states.items()):
@@ -806,6 +827,7 @@ def _reduce_loaded_thread_events(
                 if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
                     if isinstance(decision, str):
                         states[tcid].approval_decision = decision
+                        states[tcid].state_event_seq = ev_seq
         elif ev_type == "tool_call.execution_started":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
@@ -815,6 +837,7 @@ def _reduce_loaded_thread_events(
                     inv = ev.get("invoke_id")
                     if isinstance(inv, str) and inv:
                         tc.owner_invoke_id = inv
+                    tc.state_event_seq = ev_seq
         elif ev_type == "tool_call.summary":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
@@ -823,6 +846,7 @@ def _reduce_loaded_thread_events(
                     summary = payload.get("summary")
                     if isinstance(summary, str):
                         tc.summary = summary
+                    tc.state_event_seq = ev_seq
         elif ev_type == "tool_call.finished":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
@@ -834,6 +858,7 @@ def _reduce_loaded_thread_events(
                     out = payload.get("output")
                     if out is not None:
                         tc.finished_output = str(out)
+                    tc.state_event_seq = ev_seq
         elif ev_type == "tool_call.output_approval":
             tcid = payload.get("tool_call_id")
             if tcid in states and not _should_skip_tc_event(ev_seq, tcid):
@@ -841,8 +866,15 @@ def _reduce_loaded_thread_events(
                 if ev_seq > tc.parent_event_seq:
                     decision = payload.get("decision")
                     if isinstance(decision, str):
-                        tc.output_decision = decision
-                    tc.last_output_approval_payload = payload
+                        from .tool_output import output_decision_payload_priority
+
+                        current_priority = output_decision_payload_priority(tc.last_output_approval_payload)
+                        candidate_priority = output_decision_payload_priority(payload)
+                        if tc.output_decision is None or candidate_priority > current_priority:
+                            tc.output_decision = decision
+                            tc.last_output_approval_payload = payload
+                            tc.output_decision_event_seq = ev_seq
+                    tc.state_event_seq = ev_seq
         elif ev_type == "msg.create":
             if payload.get("role") != "tool":
                 continue
@@ -854,6 +886,7 @@ def _reduce_loaded_thread_events(
                 tc = states[tcid]
                 if ev_seq > tc.parent_event_seq:
                     tc.published = True
+                    tc.state_event_seq = ev_seq
 
     if global_auto_approval and current_global_start is not None:
         global_intervals.append((current_global_start, None))

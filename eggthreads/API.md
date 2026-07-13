@@ -154,37 +154,19 @@ Removes the thread from threads; ON DELETE CASCADE removes
 
 ### `duplicate_thread(db: 'ThreadsDB', source_thread_id: 'str', name: 'Optional[str]' = None) -> 'str'`
 
-Duplicate a thread's event log into a new root thread.
+Duplicate effective messages/config into a clean independent root.
 
-This creates a new *root* thread whose events and snapshot are a
-copy of ``source_thread_id`` at the time of invocation. The new
-thread shares no open stream with the original (no rows are added
-to ``open_streams``) but otherwise has identical history: all
-``msg.create``, ``stream.*``, and ``tool_call.*`` events are
-replayed with fresh event_ids, preserving msg_id and invoke_id so
-that runner/actionable semantics (RA1/RA2/RA3, tool states, etc.)
-behave as if the thread had been executed separately.
-
-The duplicate is intended as a "checkpoint" copy: a frozen backup
-of the conversation that can be inspected or resumed independently
-of the original.
+The source watermark is captured before destination writes. Canonical projection
+semantics apply edits, deletes, and continue skips; snapshots are optional
+acceleration. Stream, control, and stale tool-lifecycle events are not copied.
+A completed transcript receives a clean close boundary, while an effective
+assistant tool declaration remains newly actionable from its message payload.
 
 ### `duplicate_thread_up_to(db: 'ThreadsDB', source_thread_id: 'str', up_to_msg_id: 'str', name: 'Optional[str]' = None) -> 'str'`
 
-Duplicate a thread's event log up to a specific message.
-
-Like duplicate_thread, but only copies events up to and including the
-message with the given msg_id. This is useful for creating a checkpoint
-at a specific point in the conversation.
-
-Args:
-    db: ThreadsDB instance
-    source_thread_id: Thread to duplicate
-    up_to_msg_id: Message ID to stop at (inclusive)
-    name: Optional name for the new thread
-
-Returns:
-    The new thread's ID
+Duplicate canonical effective state through the selected message's create-event
+watermark. Later edits, deletes, messages, and configuration do not affect the
+checkpoint.
 
 ---
 
@@ -327,20 +309,44 @@ Args:
     thread_id: ID of the thread containing the message.
     msg_id: ID of the message to delete.
 
-### `create_snapshot(db: 'ThreadsDB', thread_id: 'str') -> 'str'`
+### `load_thread_projection(db: ThreadsDB, thread_id: str, through_event_seq: int, *, use_snapshot: bool = True) -> ThreadProjection`
 
-Rebuild and persist the thread snapshot from events.
+Return the canonical typed message projection through exactly the requested
+event watermark. ``ThreadProjection.message_states`` retains effective and
+skipped/deleted messages with full provider payloads plus create/update event
+IDs, timestamps, and sequence metadata; ``messages`` exposes only effective
+messages. A coherent versioned snapshot may seed tail replay, but missing,
+stale, malformed, newer, or legacy snapshots fall back to full event replay
+with identical semantics. Raw SQLite rows and ``payload_json`` stay internal to
+the projection/event-store layer.
+RA1 captures one watermark after acquiring its lease, validates the actionable
+trigger against that projection, and derives the complete provider context from
+it. The trigger determines why work runs rather than acting as a snapshot tail
+fallback; compaction, context-only/system messages, attachments, tools protocol,
+provider fields, and usage sanitization continue through the existing provider
+boundary.
 
-Processes all events for the thread and constructs a snapshot
-representing the current conversation state. The snapshot is
-stored in the threads table for fast access.
+### `ThreadEventFeed(db: ThreadsDB, *, batch_size: int = 256)`
 
-Args:
-    db: ThreadsDB instance for database operations.
-    thread_id: ID of the thread to snapshot.
+Typed cursor/event boundary for transport synchronization. `read_after()`
+returns a bounded `ThreadEventBatch` of canonical `ThreadEventEnvelope` values
+strictly after `event_seq`; envelopes contain event ID/sequence/type/timestamp,
+message/invocation/chunk identity, and decoded payload. `active_lease()` and
+`active_replay_after_seq()` consult only an unexpired `open_streams` lease and
+its exact invocation, never unmatched historical stream events.
 
-Returns:
-    The snapshot JSON string.
+`resolve_event_cursor()` documents shared precedence: explicit `after_seq`, then
+SSE `Last-Event-ID`, then the supplied default. `-1` is the beginning sentinel.
+Missing threads and invalid cursors produce typed errors. Reads are bounded by
+the configured batch size and require no schema change.
+
+### `create_snapshot(db: ThreadsDB, thread_id: str) -> Dict[str, Any]`
+
+Build a canonical projection through a captured event watermark, attach derived
+token statistics, and conditionally publish the compatibility snapshot. The
+update is monotonic: a builder at event N cannot overwrite N+1. A losing writer
+reloads and returns the newer published snapshot. Snapshot state is optional
+acceleration, not a semantic prerequisite, and the stable schema is unchanged.
 
 ---
 
@@ -565,6 +571,26 @@ Args:
                   If omitted, the decision applies to the whole thread
                   (or to the current turn, depending on the decision).
 
+### `finalize_tool_output(db, thread_id, tool_call_id, *, decision, source, reason='', expected_state='TC4', expected_event_seq=None, publication_plan=None, invocation_writer=None) -> ToolOutputFinalizationResult`
+
+The single backend authority for the TC4-to-TC5 output-decision transition. It
+locks the thread writer, reconstructs current tool-call state, validates the
+expected lifecycle event watermark, and commits the decision with a SQL
+state/version compare-and-set. Runner callers pass an ``InvocationEventWriter``
+so lease ownership is verified in the same insert.
+
+Automatic and ordinary manual duplicates are first-commit/idempotent. Explicit
+``source='user_cancel'`` and explicit ``source='user_omit'`` have highest
+precedence and may supersede an unpublished automatic decision; the reducer
+preserves that outcome for legacy competing events too. ``partial`` requires a readable thread-owned raw-output artifact.
+Policy, artifact, state/version, lease, and append failures raise typed errors
+and leave TC4 durable for retry.
+
+``ToolOutputPublicationPlan`` carries the decision, preview, artifact path,
+optimizer/channel metadata, and additional audit metadata. The committed result
+reports whether this call appended the event or returned an idempotent existing
+outcome.
+
 ### `list_tool_calls_for_thread(db: 'ThreadsDB', thread_id: 'str') -> 'List[ToolCallState]'`
 
 Return ToolCallState objects for all tool calls in this thread.
@@ -575,11 +601,13 @@ Return ToolCallState objects for tool calls declared in a given message.
 
 ### `build_tool_call_states(db: 'ThreadsDB', thread_id: 'str') -> 'Dict[str, ToolCallState]'`
 
-Scan events for a thread and reconstruct ToolCallState per tool_call_id.
+Reconstruct ``ToolCallState`` per tool-call ID from the event log. Returned
+states include ``state_event_seq`` as the lifecycle watermark accepted by
+``finalize_tool_output`` and ``output_decision_event_seq`` for the authoritative
+output decision.
 
-This is intentionally stateless and computed on demand; threads are
-typically small enough that this is acceptable, and it avoids schema
-changes.
+The private reducer cache avoids replaying unchanged histories while SQLite
+events remain authoritative; no schema change is required.
 
 Note: This function respects the skipped_on_continue flag: tool calls
 from messages that have been marked as skipped are not included.
@@ -617,23 +645,30 @@ Attributes:
 - `llm_tools_enabled`: `bool` = `True`
 - `disabled_tools`: `Set[str]` (default factory)
 - `has_explicit_config`: `bool` = `False`
-- `allow_raw_tool_output`: `bool` = `True`
+- `allow_raw_tool_output`: `bool` = `False`
+- `allowed_tools`: `Optional[Set[str]]` = `None`
+- `policy_error`: `Optional[str]` = `None`
+- `policy_error_kind`: `Optional[str]` = `None`
+- `policy_error_source_thread_id`: `Optional[str]` = `None`
 
 ### `get_thread_tools_config(db: 'ThreadsDB', thread_id: 'str') -> 'ToolsConfig'`
 
-Return the effective ToolsConfig for a thread.
+Return the effective ToolsConfig for a thread. Internal fixed-watermark
+consumers may pass ``through_event_seq=...`` so provider/duplication policy is
+resolved at the same boundary as message projection.
 
-This walks ``tools.config`` events in order and applies their
-payloads to an initially permissive configuration.
+This validates ``tools.config`` events and intersects policy across the
+complete live ancestry. Missing policy uses safe usable defaults; DB/decode
+failures return a distinguishable fail-closed config and diagnostic.
 
 ### `inherit_tools_config_for_child(db: 'ThreadsDB', parent_thread_id: 'str', child_thread_id: 'str') -> 'None'`
 
 Copy the parent's effective tools config onto a newly-created child.
 
-Tool configuration is copied by value at child creation time rather than
-resolved dynamically through ancestors. This gives new children the
-parent's current restrictions while still allowing trusted programmatic
-code to widen the child later with the normal tools configuration helpers.
+The child receives an initial effective policy in the same transaction as
+its thread/link creation. Runtime reads also intersect every live ancestor
+policy, so children cannot widen above ancestors or escape later parent
+restrictions.
 
 ### `set_thread_tools_enabled(db: 'ThreadsDB', thread_id: 'str', enabled: 'bool') -> 'None'`
 
@@ -929,8 +964,11 @@ Return word count of thread, including events after last snapshot.
 
 ### `ThreadRunner(db: 'ThreadsDB', thread_id: 'str', llm: 'Optional[LLMClient]' = None, owner: 'Optional[str]' = None, purpose: 'str' = 'assistant_stream', config: 'Optional[RunnerConfig]' = None, models_path: 'Optional[str]' = None, all_models_path: 'Optional[str]' = None, tools: 'Optional[ToolRegistry]' = None)`
 
-Runs a single thread by acquiring the per-thread lease (open_streams with invoke_id fence)
-and streaming assistant output.
+Runs a single thread by acquiring the per-thread lease (``open_streams`` with an
+``invoke_id`` fence) and streaming assistant output. Every invocation-owned
+runner event is appended through ``InvocationEventWriter`` so ownership and
+lease expiry are checked atomically with the write. ``LeaseLost`` terminates a
+stale invocation without appending fallback output.
 
 ### `SubtreeScheduler(db: 'ThreadsDB', root_thread_id: 'str', llm: 'Optional[LLMClient]' = None, owner: 'Optional[str]' = None, config: 'Optional[RunnerConfig]' = None, models_path: 'Optional[str]' = None, all_models_path: 'Optional[str]' = None, tools: 'Optional[ToolRegistry]' = None)`
 
@@ -953,6 +991,20 @@ RunnerConfig(lease_ttl_sec: 'int' = 10, heartbeat_sec: 'float' = 1.0, max_concur
 ### `ThreadsDB(db_path: 'Path | str' = PosixPath('.egg/threads.sqlite'))`
 
 Thin DB layer adhering to ../egg/SQLITE_PLAN_CLEAN.md schema.
+
+### `ThreadsDB.invocation_writer(thread_id: str, invoke_id: str) -> InvocationEventWriter`
+
+Return the persistence authority for one runner invocation. Its
+``append_event()``, ``close()``, and ``release()`` operations require the exact
+``(thread_id, invoke_id)`` row to own an unexpired lease. Event authorization
+and insertion are one SQLite statement, preventing interrupt or takeover from
+interleaving between a lease check and the write.
+
+### `LeaseLost`
+
+Typed exception raised when an invocation-owned append, close, or release no
+longer has its exact live lease. The exception exposes ``thread_id``,
+``invoke_id``, and ``operation`` for callers and diagnostics.
 
 ### `ThreadRow`
 

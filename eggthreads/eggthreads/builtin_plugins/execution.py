@@ -447,8 +447,49 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     stderr_task = _asyncio.create_task(_reader(proc.stderr, False))
     proc_wait_task = _asyncio.create_task(proc.wait())
     proc_reported_exit = False
+
+    def _close_pipe_transports() -> None:
+        """Close parent-side pipe transports to unblock reader tasks.
+
+        A bash script may intentionally launch a background daemon and then let
+        the shell exit.  If that daemon inherits stdout/stderr, asyncio's pipe
+        readers never see EOF even though the command process is done.  Close
+        Egg's read side when we decide to stop draining so those inherited file
+        descriptors cannot keep the tool state machine alive forever.
+        """
+
+        transport = getattr(proc, "_transport", None)
+        get_pipe_transport = getattr(transport, "get_pipe_transport", None)
+        if callable(get_pipe_transport):
+            for fd in (1, 2):
+                try:
+                    pipe_transport = get_pipe_transport(fd)
+                    close = getattr(pipe_transport, "close", None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    pass
+
+    async def _cancel_reader_tasks() -> None:
+        _close_pipe_transports()
+        for task in (stdout_task, stderr_task):
+            if not task.done():
+                task.cancel()
+        try:
+            done, _pending = await _asyncio.wait({stdout_task, stderr_task}, timeout=1.0)
+            for task in done:
+                try:
+                    task.result()
+                except BaseException:
+                    pass
+        except BaseException:
+            pass
+
     try:
         while True:
+            if proc.returncode is not None:
+                proc_reported_exit = True
+                break
             done, _pending = await _asyncio.wait(
                 {proc_wait_task},
                 timeout=0.1,
@@ -474,6 +515,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                     # continue outside the user-visible tool state machine.
                     break
         reader_drain_started = time.monotonic() if proc_reported_exit and not (timed_out or interrupted) else None
+        readers_cancelled = False
         while True:
             if stdout_task.done() and stderr_task.done():
                 break
@@ -486,17 +528,18 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                     and (now - last_reader_activity >= 1.0 or now - reader_drain_started >= 5.0)
                 )
             ):
-                for task in (stdout_task, stderr_task):
-                    task.cancel()
+                await _cancel_reader_tasks()
+                readers_cancelled = True
                 break
             await _asyncio.sleep(0.25)
-        await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        if not readers_cancelled:
+            await _asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         await _flush_stream(force=True)
     finally:
         if not proc_wait_task.done():
             proc_wait_task.cancel()
         try:
-            await _asyncio.gather(proc_wait_task, return_exceptions=True)
+            await _asyncio.wait({proc_wait_task}, timeout=1.0)
         except BaseException:
             pass
         watcher.cancel()

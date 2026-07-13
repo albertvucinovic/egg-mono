@@ -29,6 +29,58 @@ class TestComputePendingPrompt:
         # Should either be empty dict or dict with kind
         assert isinstance(egg_app._pending_prompt, dict)
 
+    def test_detects_tc1_even_before_stream_lease_is_released(self, tmp_path):
+        """CLI approval panel must appear after final assistant tool_call msg."""
+        from egg.approval import ApprovalMixin
+        from eggthreads import ThreadsDB, append_message, create_snapshot
+
+        class DummyApprovalApp(ApprovalMixin):
+            def __init__(self):
+                self.db = ThreadsDB(tmp_path / "threads.sqlite")
+                self.db.init_schema()
+                self.current_thread = "thread-approval-before-lease-release"
+                self.db.create_thread(thread_id=self.current_thread, name="t", parent_id=None, depth=0)
+                self._pending_prompt = {}
+                self.logs = []
+
+            def log_system(self, message):
+                self.logs.append(message)
+
+        app = DummyApprovalApp()
+        tid = app.current_thread
+        tc_id = "tc_pending_after_stream_close"
+        append_message(app.db, tid, "user", "inspect config")
+        append_message(
+            app.db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({"script": "pwd", "timeout": 10}),
+                        },
+                    }
+                ]
+            },
+        )
+        create_snapshot(app.db, tid)
+        assert app.db.try_open_stream(
+            tid,
+            "invoke-not-yet-released",
+            "2999-01-01 00:00:00",
+            owner="test",
+            purpose="llm",
+        )
+
+        app.compute_pending_prompt()
+
+        assert app._pending_prompt == {"kind": "exec", "tool_call_ids": [tc_id]}
+
     def test_detects_tc4_output_approval(self, egg_app, monkeypatch):
         """Should detect TC4 state and set kind='output'."""
         class MockToolCallState:
@@ -199,3 +251,37 @@ class TestOutputApproval:
         except Exception:
             # May fail if approval record doesn't exist in db
             pass
+
+
+def test_output_finalization_failure_keeps_terminal_prompt_and_input(egg_app, monkeypatch):
+    """A failed TC4 transition remains visible/retriable in Terminal Egg."""
+    from eggthreads import append_message, build_tool_call_states
+
+    tid = egg_app.current_thread
+    tcid = "tc-terminal-finalize-failure"
+    append_message(
+        egg_app.db,
+        tid,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {"id": tcid, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+            ]
+        },
+    )
+    egg_app.db.append_event("terminal-approve", tid, "tool_call.approval", {"tool_call_id": tcid, "decision": "granted"})
+    egg_app.db.append_event("terminal-finish", tid, "tool_call.finished", {"tool_call_id": tcid, "reason": "success", "output": "raw"})
+    assert build_tool_call_states(egg_app.db, tid)[tcid].state == "TC4"
+    egg_app._pending_prompt = {"kind": "output", "tool_call_ids": [tcid]}
+    egg_app.input_panel.editor.editor.set_text("n")
+
+    def fail_finalize(*args, **kwargs):
+        raise RuntimeError("artifact unavailable")
+
+    monkeypatch.setattr("egg.approval.finalize_tool_output", fail_finalize)
+    assert egg_app.handle_pending_approval_answer("n", source="test") is True
+
+    assert egg_app._pending_prompt == {"kind": "output", "tool_call_ids": [tcid]}
+    assert egg_app.input_panel.get_text() == "n"
+    assert build_tool_call_states(egg_app.db, tid)[tcid].state == "TC4"

@@ -43,6 +43,14 @@ class MessageContent(BaseModel):
     recovery_notice: bool = False
 
 
+class MessageSnapshotResponse(BaseModel):
+    """Paginated transcript plus the exact event cursor it represents."""
+
+    items: List[MessageContent]
+    snapshot_cursor: int
+    next_before: Optional[str] = None
+
+
 class ToolCallInfo(BaseModel):
     """Tool call state information."""
     id: str

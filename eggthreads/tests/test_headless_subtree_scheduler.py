@@ -478,6 +478,7 @@ def test_emit_limited_tool_stream_delta_emits_preview_then_indicator(tmp_path, m
     db.init_schema()
     tid = create_root_thread(db, name="Root")
     invoke = "invoke-tool-preview"
+    assert db.try_open_stream(tid, invoke, "2999-01-01 00:00:00", owner="test", purpose="tool")
     limiter = ToolStreamPreviewLimiter(max_lines=100, max_chars=5)
     counter = {"count": 0}
 
@@ -514,6 +515,7 @@ def test_emit_limited_tool_stream_delta_uses_supplied_chunk_sequence(tmp_path, m
     db.init_schema()
     tid = create_root_thread(db, name="Root")
     invoke = "invoke-tool-seq"
+    assert db.try_open_stream(tid, invoke, "2999-01-01 00:00:00", owner="test", purpose="tool")
     seq = 40
 
     def next_seq() -> int:

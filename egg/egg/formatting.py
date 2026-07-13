@@ -5,6 +5,9 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Set
 
+
+CHILDREN_PANEL_MAXIMAL_LIMIT = 4
+
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
     list_children_with_meta,
@@ -91,8 +94,10 @@ class FormattingMixin:
             f"[dim][model: {mk}][/dim]" + (f"  [dim]{label}[/dim]" if label else '')
         )
 
-    def format_tree(self, root_tid: Optional[str] = None) -> str:
-        """Format a thread tree for display (optimized with bulk queries)."""
+    def format_tree(
+        self, root_tid: Optional[str] = None, *, include_root: bool = True
+    ) -> str:
+        """Format a thread tree, optionally omitting the selected root row."""
         # Fetch all data upfront to avoid N+1 queries
         all_threads = list_threads(self.db)
         if not all_threads:
@@ -205,8 +210,180 @@ class FormattingMixin:
         lines: List[str] = []
         if not roots:
             return 'No threads.'
+        if root_tid and not include_root:
+            root_children = children_map.get(root_tid, [])
+            for index, child_id in enumerate(root_children):
+                lines.extend(render_tree(
+                    child_id,
+                    is_last=index == len(root_children) - 1,
+                ))
+            return "\n".join(lines)
         for rid in roots:
             lines.extend(render_tree(rid))
+        return "\n".join(lines)
+
+    def format_children_panel(self, root_tid: str) -> str:
+        """Format the selected thread subtree at a density suited to the panel.
+
+        Maximal mode retains the complete tree. Non-maximal modes put current
+        thread identity on one line, then use up to four useful summary lines.
+        Streaming IDs have priority, so active descendants remain identifiable
+        even when the subtree is large. ``format_tree`` remains the complete
+        inspectable view used by `/listChildren`.
+        """
+        from rich.markup import escape as rich_escape
+
+        def one_line(value: Any, fallback: str) -> str:
+            text = " ".join(str(value or '').split())
+            return text or fallback
+
+        def id_preview(raw_ids: str, total: int) -> str:
+            thread_ids = [tid for tid in raw_ids.split('|') if tid]
+            rendered = ", ".join(rich_escape(tid[-8:]) for tid in thread_ids)
+            hidden = max(0, total - len(thread_ids))
+            if hidden:
+                rendered = f"{rendered} +{hidden} more" if rendered else f"+{hidden} more"
+            return rendered or "none"
+
+        root = self.db.get_thread(root_tid)
+        root_name = one_line(root.name if root else '', 'Unnamed')
+        root_description = one_line(
+            root.short_recap if root else '', 'No description'
+        )
+        identity = (
+            f"[bold cyan]Current:[/] {rich_escape(root_tid)}"
+            f" [dim]|[/] [bold]Name:[/] {rich_escape(root_name)}"
+            f" [dim]|[/] [bold]Description:[/] {rich_escape(root_description)}"
+        )
+
+        preview_limit = 4
+        cur = self.db.conn.execute(
+            """
+            WITH RECURSIVE descendants(thread_id) AS (
+                SELECT child_id
+                FROM children
+                WHERE parent_id=? AND child_id<>?
+                UNION
+                SELECT c.child_id
+                FROM children c
+                JOIN descendants d ON c.parent_id=d.thread_id
+                WHERE c.child_id<>?
+            ), direct_children(thread_id) AS (
+                SELECT child_id
+                FROM children
+                WHERE parent_id=? AND child_id<>?
+            ), nested_descendants(thread_id) AS (
+                SELECT thread_id FROM descendants
+                EXCEPT
+                SELECT thread_id FROM direct_children
+            ), active_descendants(thread_id) AS (
+                SELECT DISTINCT d.thread_id
+                FROM descendants d
+                JOIN open_streams o ON o.thread_id=d.thread_id
+                WHERE o.lease_until > datetime('now')
+            ), inactive_descendants(thread_id) AS (
+                SELECT thread_id FROM descendants
+                EXCEPT
+                SELECT thread_id FROM active_descendants
+            ), inactive_direct(thread_id) AS (
+                SELECT thread_id FROM direct_children
+                EXCEPT
+                SELECT thread_id FROM active_descendants
+            ), inactive_nested(thread_id) AS (
+                SELECT thread_id FROM nested_descendants
+                EXCEPT
+                SELECT thread_id FROM active_descendants
+            )
+            SELECT
+                (SELECT COUNT(*) FROM descendants),
+                (SELECT COUNT(*) FROM direct_children),
+                (SELECT COUNT(*) FROM nested_descendants),
+                (SELECT COUNT(*) FROM active_descendants),
+                (SELECT COUNT(*) FROM inactive_descendants),
+                (SELECT COUNT(*) FROM inactive_direct),
+                (SELECT COUNT(*) FROM inactive_nested),
+                COALESCE((
+                    SELECT GROUP_CONCAT(thread_id, '|') FROM (
+                        SELECT thread_id FROM descendants
+                        ORDER BY thread_id DESC LIMIT ?
+                    )
+                ), ''),
+                COALESCE((
+                    SELECT GROUP_CONCAT(thread_id, '|') FROM (
+                        SELECT thread_id FROM inactive_direct
+                        ORDER BY thread_id DESC LIMIT ?
+                    )
+                ), ''),
+                COALESCE((
+                    SELECT GROUP_CONCAT(thread_id, '|') FROM (
+                        SELECT thread_id FROM inactive_nested
+                        ORDER BY thread_id DESC LIMIT ?
+                    )
+                ), ''),
+                COALESCE((
+                    SELECT GROUP_CONCAT(thread_id, '|') FROM (
+                        SELECT thread_id FROM active_descendants
+                        ORDER BY thread_id DESC LIMIT ?
+                    )
+                ), ''),
+                COALESCE((
+                    SELECT GROUP_CONCAT(thread_id, '|') FROM (
+                        SELECT thread_id FROM inactive_descendants
+                        ORDER BY thread_id DESC LIMIT ?
+                    )
+                ), '')
+            """,
+            (
+                root_tid, root_tid, root_tid,
+                root_tid, root_tid,
+                preview_limit, preview_limit, preview_limit,
+                preview_limit, preview_limit,
+            ),
+        )
+        row = cur.fetchone()
+        descendant_count = int(row[0] or 0) if row else 0
+
+        if descendant_count <= CHILDREN_PANEL_MAXIMAL_LIMIT:
+            descendant_tree = self.format_tree(root_tid, include_root=False)
+            return f"{identity}\n{descendant_tree}" if descendant_tree else identity
+
+        direct_count = int(row[1] or 0)
+        nested_count = int(row[2] or 0)
+        streaming_count = int(row[3] or 0)
+        inactive_count = int(row[4] or 0)
+        lines = [identity]
+        if streaming_count:
+            lines.append(
+                f"[bold yellow]Streaming ({streaming_count}):[/] "
+                f"{id_preview(str(row[10] or ''), streaming_count)}"
+            )
+
+        if direct_count and nested_count:
+            lines.append(
+                f"[dim]{descendant_count} descendants · "
+                f"{direct_count} direct · {nested_count} nested[/]"
+            )
+            lines.append(
+                f"[dim]Direct (non-streaming):[/] "
+                f"{id_preview(str(row[8] or ''), int(row[5] or 0))}"
+            )
+            if len(lines) < 5:
+                lines.append(
+                    f"[dim]Nested (non-streaming):[/] "
+                    f"{id_preview(str(row[9] or ''), int(row[6] or 0))}"
+                )
+        else:
+            if streaming_count:
+                if inactive_count:
+                    lines.append(
+                        f"[dim]Other descendants ({inactive_count}):[/] "
+                        f"{id_preview(str(row[11] or ''), inactive_count)}"
+                    )
+            else:
+                lines.append(
+                    f"[dim]Descendants ({descendant_count}):[/] "
+                    f"{id_preview(str(row[7] or ''), descendant_count)}"
+                )
         return "\n".join(lines)
 
     def _compaction_marker_text(self, marker: Dict[str, Any]) -> str:

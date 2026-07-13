@@ -24,6 +24,7 @@ def test_db_path(tmp_path: Path) -> str:
 @pytest.fixture
 def app(test_db_path: str, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EGG_DB_PATH", test_db_path)
+    monkeypatch.setenv("EGGW_API_TOKEN", "test-eggw-token-" + "a" * 48)
 
     if "eggw.main" in sys.modules:
         del sys.modules["eggw.main"]
@@ -48,7 +49,7 @@ def app(test_db_path: str, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def client(app):
-    return TestClient(app)
+    return TestClient(app, headers={"Authorization": "Bearer test-eggw-token-" + "a" * 48})
 
 
 def _create_thread(client: TestClient, name: str = "Edit Answer") -> str:

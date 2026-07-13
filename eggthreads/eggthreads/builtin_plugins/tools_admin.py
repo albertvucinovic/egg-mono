@@ -147,6 +147,9 @@ def tools_status_command(context: Any, arg: str):
         return CommandResult(clear_input=False)
 
     lines = []
+    policy_error = getattr(cfg, "policy_error", None)
+    if policy_error:
+        lines.append(f"Tool policy error (fail closed): {policy_error}")
     tools_status = "ENABLED" if cfg.llm_tools_enabled else "DISABLED"
     lines.append(f"Tools for LLM: {tools_status}")
 

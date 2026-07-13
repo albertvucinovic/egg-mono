@@ -23,10 +23,28 @@ Quick start::
 
 See API.md for comprehensive documentation.
 """
-from .db import ThreadsDB  # type: ignore
+from .db import InvocationEventWriter, LeaseLost, ThreadsDB  # type: ignore
+from .event_feed import (
+    ActiveThreadLease,
+    ThreadEventBatch,
+    ThreadEventCursorError,
+    ThreadEventEnvelope,
+    ThreadEventFeed,
+    ThreadEventFeedError,
+    ThreadEventFeedNotFound,
+    ThreadReplayCursor,
+    parse_event_cursor,
+    resolve_event_cursor,
+)
 from .runner import SubtreeScheduler, ThreadRunner, RunnerConfig, set_default_tool_timeout, get_default_tool_timeout, runner_actionable_resource_class  # type: ignore
 from .terminal_safety import sanitize_terminal_text  # type: ignore
 from .snapshot import SnapshotBuilder  # type: ignore
+from .projection import (
+    ProjectedMessage,
+    ThreadProjection,
+    ThreadProjectionError,
+    load_thread_projection,
+)
 from .api import (
     validate_model_handle,
     create_root_thread,
@@ -206,6 +224,7 @@ from .image_generation import (
 )
 from .tools_config import (
     ToolsConfig,
+    ToolPolicyReadError,
     get_thread_tools_config,
     get_tool_statuses_for_config,
     inherit_tools_config_for_child,
@@ -295,6 +314,15 @@ from .approval import (
     create_approval_policy_registry,
     evaluate_approval_policies,
 )
+from .tool_output import (
+    ToolOutputFinalizationError,
+    ToolOutputFinalizationResult,
+    ToolOutputPersistenceError,
+    ToolOutputPlanError,
+    ToolOutputPublicationPlan,
+    ToolOutputStateConflict,
+    finalize_tool_output,
+)
 from .output_policy import (
     OutputPolicyRegistry,
     OutputPolicyRequest,
@@ -353,7 +381,11 @@ from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill
 from .llm import create_llm_client
 
 __all__ = [
-    'ThreadsDB', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
+    'ActiveThreadLease', 'ThreadEventBatch', 'ThreadEventCursorError',
+    'ThreadEventEnvelope', 'ThreadEventFeed', 'ThreadEventFeedError',
+    'ThreadEventFeedNotFound', 'ThreadReplayCursor', 'parse_event_cursor', 'resolve_event_cursor',
+    'ThreadsDB', 'InvocationEventWriter', 'LeaseLost', 'SubtreeScheduler', 'ThreadRunner', 'RunnerConfig', 'SnapshotBuilder',
+    'ProjectedMessage', 'ThreadProjection', 'ThreadProjectionError', 'load_thread_projection',
     'set_default_tool_timeout', 'get_default_tool_timeout',
     'validate_model_handle', 'create_root_thread', 'create_child_thread', 'append_message', 'edit_message', 'delete_message', 'delete_thread', 'is_thread_runnable', 'get_thread_status', 'get_thread_statuses_bulk', 'get_thread_auto_approval_status',
     'list_threads', 'list_root_threads', 'get_parent', 'list_children_with_meta', 'list_children_ids', 'current_open_invoke',
@@ -363,7 +395,9 @@ __all__ = [
     'set_subtree_working_directory',
     'is_descendant_thread', 'send_message_to_child_thread',
     'ChildThreadStatus', 'get_child_thread_status', 'get_child_thread_statuses', 'get_active_get_user_message_waiting_note',
-    'approve_tool_calls_for_thread',
+    'approve_tool_calls_for_thread', 'finalize_tool_output',
+    'ToolOutputFinalizationError', 'ToolOutputFinalizationResult', 'ToolOutputPersistenceError',
+    'ToolOutputPlanError', 'ToolOutputPublicationPlan', 'ToolOutputStateConflict',
     'ToolCallResult', 'ThreadWaitResult', 'enqueue_user_tool_call',
     'execute_bash_command', 'execute_bash_command_hidden', 'get_user_command_result', 'wait_for_user_command_result',
     'wait_for_tool_call_result', 'wait_for_tool_call_result_async',
@@ -386,7 +420,7 @@ __all__ = [
     'parse_args', 'ParsedArgs',
     'list_tool_calls_for_thread', 'list_tool_calls_for_message', 'build_tool_call_states', 'thread_state',
     'discover_runner_actionable', 'runner_actionable_resource_class',
-    'ToolsConfig', 'get_thread_tools_config', 'get_tool_statuses_for_config', 'inherit_tools_config_for_child', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',
+    'ToolsConfig', 'ToolPolicyReadError', 'get_thread_tools_config', 'get_tool_statuses_for_config', 'inherit_tools_config_for_child', 'set_thread_tools_enabled', 'disable_tool_for_thread', 'enable_tool_for_thread',
     'set_thread_tool_allowlist', 'clear_thread_tool_allowlist',
     'set_subtree_tools_enabled', 'disable_tool_for_subtree', 'enable_tool_for_subtree',
     'set_thread_allow_raw_tool_output',

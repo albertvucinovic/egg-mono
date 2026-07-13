@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 import eggthreads as ts
 from eggthreads.tools import ToolRegistry
@@ -126,7 +129,7 @@ def test_create_child_thread_inherits_tools_enabled_and_secret_mode(tmp_path):
     assert cfg.allow_raw_tool_output is False
 
 
-def test_programmatic_child_tool_widening_after_creation(tmp_path):
+def test_child_cannot_widen_beyond_parent_after_creation(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")
     ts.set_thread_tool_allowlist(db, parent, ["web_search"])
@@ -137,18 +140,34 @@ def test_programmatic_child_tool_widening_after_creation(tmp_path):
     ts.set_thread_tool_allowlist(db, child, ["web_search", "bash"])
     cfg = ts.get_thread_tools_config(db, child)
     assert cfg.is_tool_allowed("web_search")
-    assert cfg.is_tool_allowed("bash")
+    assert not cfg.is_tool_allowed("bash")
 
 
-def test_create_child_thread_can_skip_tool_inheritance_for_programmatic_callers(tmp_path):
+def test_later_parent_restriction_applies_to_existing_descendant(tmp_path):
     db = _make_db(tmp_path)
     parent = ts.create_root_thread(db, name="parent")
-    ts.set_thread_tool_allowlist(db, parent, ["web_search"])
+    child = ts.create_child_thread(db, parent, name="child")
+    grandchild = ts.create_child_thread(db, child, name="grandchild")
 
-    child = ts.create_child_thread(db, parent, name="child", inherit_tools_config=False)
-    cfg = ts.get_thread_tools_config(db, child)
-    assert cfg.allowed_tools is None
-    assert cfg.is_tool_allowed("bash")
+    ts.set_thread_tool_allowlist(db, child, ["web_search", "bash"])
+    assert ts.get_thread_tools_config(db, grandchild).is_tool_allowed("bash")
+
+    ts.set_thread_tool_allowlist(db, parent, ["web_search"])
+    cfg = ts.get_thread_tools_config(db, grandchild)
+    assert cfg.is_tool_allowed("web_search")
+    assert not cfg.is_tool_allowed("bash")
+
+
+def test_parent_raw_output_denial_overrides_child_enable(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    ts.set_thread_allow_raw_tool_output(db, parent, True)
+    child = ts.create_child_thread(db, parent, name="child")
+    ts.set_thread_allow_raw_tool_output(db, child, True)
+    assert ts.get_thread_tools_config(db, child).allow_raw_tool_output is True
+
+    ts.set_thread_allow_raw_tool_output(db, parent, False)
+    assert ts.get_thread_tools_config(db, child).allow_raw_tool_output is False
 
 
 class _ToolCallingLLM:
@@ -212,3 +231,175 @@ def test_ra3_denies_non_allowlisted_tool_without_executing(tmp_path):
     assert result is not None
     assert "not allowed" in result
     assert "blocked output" not in result
+
+
+def _insert_corrupt_tools_config(db, thread_id: str, payload_json: str) -> None:
+    db.conn.execute(
+        """
+        INSERT INTO events(event_id, thread_id, type, payload_json)
+        VALUES (?, ?, 'tools.config', ?)
+        """,
+        (f"corrupt-{thread_id}-{db.max_event_seq(thread_id) + 1}", thread_id, payload_json),
+    )
+
+
+def test_missing_policy_uses_safe_usable_defaults(tmp_path):
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+
+    cfg = ts.get_thread_tools_config(db, thread_id)
+
+    assert cfg.policy_error is None
+    assert cfg.has_explicit_config is False
+    assert cfg.llm_tools_enabled is True
+    assert cfg.is_tool_allowed("allowed_tool")
+    assert cfg.allow_raw_tool_output is False
+
+
+def test_corrupt_policy_fails_closed_and_emits_diagnostic(tmp_path):
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+    _insert_corrupt_tools_config(db, thread_id, "{broken")
+
+    cfg = ts.get_thread_tools_config(db, thread_id)
+
+    assert cfg.policy_error_kind == "payload_decode"
+    assert cfg.llm_tools_enabled is False
+    assert cfg.allowed_tools == set()
+    assert not cfg.is_tool_allowed("allowed_tool")
+    assert cfg.allow_raw_tool_output is False
+    row = db.conn.execute(
+        "SELECT payload_json FROM events WHERE thread_id=? AND type='tools.policy_error' ORDER BY event_seq DESC LIMIT 1",
+        (thread_id,),
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row[0])
+    assert payload["error_kind"] == "payload_decode"
+    assert payload["fail_closed"] is True
+
+
+def test_ancestor_corrupt_policy_fails_descendant_closed(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    child = ts.create_child_thread(db, parent, name="child")
+    _insert_corrupt_tools_config(db, parent, "[]")
+
+    cfg = ts.get_thread_tools_config(db, child)
+
+    assert cfg.policy_error_kind == "invalid_payload"
+    assert cfg.policy_error_source_thread_id == parent
+    assert not cfg.is_tool_allowed("allowed_tool")
+    assert cfg.allow_raw_tool_output is False
+
+
+def test_policy_db_read_failure_fails_closed(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+
+    class FailingConnection:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("simulated policy read failure")
+
+    monkeypatch.setattr(db, "conn", FailingConnection())
+    cfg = ts.get_thread_tools_config(db, thread_id)
+
+    assert cfg.policy_error_kind == "ancestry_read"
+    assert "simulated policy read failure" in (cfg.policy_error or "")
+    assert cfg.llm_tools_enabled is False
+    assert not cfg.is_tool_allowed("allowed_tool")
+    assert cfg.allow_raw_tool_output is False
+
+
+def test_child_creation_fails_before_insert_when_parent_policy_is_corrupt(tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    _insert_corrupt_tools_config(db, parent, "{broken")
+    before = db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+
+    with pytest.raises(ts.ToolPolicyReadError, match="payload_decode"):
+        ts.create_child_thread(db, parent, name="must-not-exist")
+
+    assert db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == before
+    diagnostic = db.conn.execute(
+        "SELECT 1 FROM events WHERE thread_id=? AND type='tools.policy_error'",
+        (parent,),
+    ).fetchone()
+    assert diagnostic is not None
+
+
+def test_child_creation_rolls_back_when_parent_policy_changes_during_transaction(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    original_create = db.create_thread
+
+    def change_policy_then_create(*args, **kwargs):
+        ts.disable_tool_for_thread(db, parent, "bash")
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(db, "create_thread", change_policy_then_create)
+    before = db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+
+    with pytest.raises(ts.ToolPolicyReadError, match="policy_changed"):
+        ts.create_child_thread(db, parent, name="must-not-exist")
+
+    assert db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == before
+    assert db.conn.execute("SELECT COUNT(*) FROM children WHERE parent_id=?", (parent,)).fetchone()[0] == 0
+
+
+def test_child_creation_rolls_back_when_initial_policy_event_fails(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    parent = ts.create_root_thread(db, name="parent")
+    original_append = db.append_event
+
+    def fail_initial_policy(*args, **kwargs):
+        if kwargs.get("type_") == "tools.config" and kwargs.get("thread_id") != parent:
+            raise sqlite3.OperationalError("simulated policy append failure")
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(db, "append_event", fail_initial_policy)
+    before = db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+
+    with pytest.raises(sqlite3.OperationalError, match="simulated policy append failure"):
+        ts.create_child_thread(db, parent, name="must-not-exist")
+
+    assert db.conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == before
+    assert db.conn.execute("SELECT COUNT(*) FROM children WHERE parent_id=?", (parent,)).fetchone()[0] == 0
+
+
+def test_corrupt_policy_hides_tools_from_ra1(tmp_path):
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+    ts.append_message(db, thread_id, "user", "hello")
+    ts.create_snapshot(db, thread_id)
+    _insert_corrupt_tools_config(db, thread_id, "{broken")
+
+    llm = _ToolCallingLLM()
+    runner = ts.ThreadRunner(db, thread_id, llm=llm, tools=_registry())
+    assert asyncio.run(runner.run_once()) is True
+
+    assert llm.seen_tool_names == set()
+
+
+def test_corrupt_policy_denies_tool_execution(tmp_path):
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="root")
+    _insert_corrupt_tools_config(db, thread_id, "{broken")
+    tool_call_id = ts.enqueue_user_tool_call(
+        db,
+        thread_id,
+        "allowed_tool",
+        {},
+        content="allowed_tool()",
+        hidden=True,
+        auto_approve=True,
+        approval_reason="test",
+    )
+
+    runner = ts.ThreadRunner(db, thread_id, llm=object(), tools=_registry())
+    assert asyncio.run(runner.run_once()) is True
+    assert asyncio.run(runner.run_once()) is True
+
+    result = ts.get_user_command_result(db, thread_id, tool_call_id)
+    assert result is not None
+    assert "policy unavailable" in result.lower()
+    assert "allowed output" not in result
