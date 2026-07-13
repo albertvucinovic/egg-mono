@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
+import { DEFAULT_THEME, THEME_INITIALIZATION_SCRIPT } from "@/lib/themes";
 
 export const metadata: Metadata = {
   title: "eggw - Web UI for eggthreads",
@@ -13,7 +14,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" data-theme={DEFAULT_THEME} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INITIALIZATION_SCRIPT }} />
+      </head>
       <body>
         <Providers>{children}</Providers>
       </body>

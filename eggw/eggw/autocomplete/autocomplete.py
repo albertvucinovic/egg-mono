@@ -24,6 +24,7 @@ from eggthreads.skills import list_skills
 
 from .. import core
 from ..core.scheduler import scheduler_running
+from ..theme_registry import THEMES
 
 
 def get_tool_names() -> List[str]:
@@ -37,19 +38,6 @@ def get_tool_names() -> List[str]:
 
 def _filesystem_suggestions(token: str, *, limit: int = 20) -> List[dict]:
     return filesystem_completion_items(token, limit=limit)
-
-# Available themes (text-colored variants first, then background variants)
-THEMES = [
-    # Text-colored themes (uniform background, colored text)
-    "dark", "cyberpunk", "forest", "ocean", "sunset", "mono", "midnight",
-    "disney", "fruit", "vegetables", "coffee", "matrix", "light", "light-mono",
-    "colorful", "colorful-light",
-    # Background variants (colored backgrounds)
-    "dark-background", "cyberpunk-background", "forest-background", "ocean-background",
-    "sunset-background", "mono-background", "midnight-background", "disney-background",
-    "fruit-background", "vegetables-background", "coffee-background", "matrix-background",
-    "light-background", "light-mono-background", "colorful-light-background",
-]
 
 router = APIRouter(tags=["autocomplete"])
 

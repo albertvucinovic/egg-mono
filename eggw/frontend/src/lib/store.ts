@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { AttachmentContentPart, EggMessageContent } from "./contentParts";
+import { DEFAULT_THEME, normalizeThemeName, type ThemeName } from "./themes";
 
 export interface Thread {
   id: string;
@@ -221,7 +222,7 @@ interface AppState {
   setDisplayVerbosity: (level: DisplayVerbosity) => void;
 
   // Theme
-  theme: string;
+  theme: ThemeName;
   setTheme: (theme: string) => void;
 }
 
@@ -503,23 +504,22 @@ export const useAppStore = create<AppState>((set) => ({
   setDisplayVerbosity: (level) => set({ displayVerbosity: level }),
 
   // Theme
-  theme: "dark",
+  theme: DEFAULT_THEME,
   setTheme: (theme) => {
+    const normalizedTheme = normalizeThemeName(theme);
     // Apply theme to document
     if (typeof document !== "undefined") {
-      document.documentElement.setAttribute("data-theme", theme);
+      document.documentElement.setAttribute("data-theme", normalizedTheme);
       // Persist to localStorage
-      localStorage.setItem("eggw-theme", theme);
+      localStorage.setItem("eggw-theme", normalizedTheme);
     }
-    set({ theme });
+    set({ theme: normalizedTheme });
   },
 }));
 
-// Initialize theme from localStorage on client side
+// Synchronize the store with the pre-paint initializer in the root layout.
 if (typeof window !== "undefined") {
-  const savedTheme = localStorage.getItem("eggw-theme");
-  if (savedTheme) {
-    document.documentElement.setAttribute("data-theme", savedTheme);
-    useAppStore.setState({ theme: savedTheme });
-  }
+  const initialTheme = normalizeThemeName(document.documentElement.dataset.theme);
+  document.documentElement.setAttribute("data-theme", initialTheme);
+  useAppStore.setState({ theme: initialTheme });
 }
