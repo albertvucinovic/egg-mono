@@ -113,11 +113,63 @@ def _canonical_finished_text(db: Any, thread_id: str, tool_call_id: str) -> str:
     return sanitize_terminal_text(output)
 
 
+def _optional_nonnegative_int(value: Any, *, name: str) -> int | None:
+    """Normalize an optional zero-based selector without accepting booleans."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ToolOutputExtractionError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _source_from_group_position(
+    states: Mapping[str, Any],
+    current: Any,
+    *,
+    group_offset: int,
+    call_index: int,
+):
+    """Resolve an LLM-authored prior assistant call by group and list index."""
+
+    groups: dict[int, list[Any]] = {}
+    for candidate in states.values():
+        if (
+            candidate.parent_role == "assistant"
+            and candidate.parent_event_seq < current.parent_event_seq
+        ):
+            groups.setdefault(candidate.parent_event_seq, []).append(candidate)
+
+    ordered_group_seqs = sorted(groups, reverse=True)
+    if group_offset >= len(ordered_group_seqs):
+        if ordered_group_seqs:
+            available = f"0–{len(ordered_group_seqs) - 1}"
+        else:
+            available = "none"
+        raise ToolOutputExtractionError(
+            f"source_tool_call_group_offset {group_offset} is out of range; "
+            f"available prior assistant tool-call group offsets: {available}"
+        )
+
+    group = sorted(groups[ordered_group_seqs[group_offset]], key=lambda item: item.index)
+    by_index = {candidate.index: candidate for candidate in group}
+    source = by_index.get(call_index)
+    if source is None:
+        available = ", ".join(str(candidate.index) for candidate in group) or "none"
+        raise ToolOutputExtractionError(
+            f"source_tool_call_index {call_index} is out of range for prior group offset "
+            f"{group_offset}; available declaration indices: {available}"
+        )
+    return source
+
+
 def _resolve_source_tool_call(
     db: Any,
     thread_id: str,
     current_tool_call_id: str,
     explicit_source_tool_call_id: Any,
+    source_tool_call_index: Any,
+    source_tool_call_group_offset: Any,
 ):
     from ..tool_state import build_tool_call_states
 
@@ -132,10 +184,33 @@ def _resolve_source_tool_call(
         before_event_seq=current.parent_event_seq,
     )
     visible_ids = {tool_call_id for _seq, tool_call_id in visible}
-    if explicit_source_tool_call_id is not None:
-        source_id = str(explicit_source_tool_call_id).strip()
-        if not source_id:
-            raise ToolOutputExtractionError("source_tool_call_id must not be empty")
+
+    # Treat an empty ID exactly like omission. This is friendlier to generated
+    # tool calls and prevents an opaque protocol ID from becoming mandatory.
+    if explicit_source_tool_call_id is None:
+        source_id = None
+    elif isinstance(explicit_source_tool_call_id, str):
+        source_id = explicit_source_tool_call_id.strip() or None
+    else:
+        raise ToolOutputExtractionError("source_tool_call_id must be a string when provided")
+    call_index = _optional_nonnegative_int(
+        source_tool_call_index,
+        name="source_tool_call_index",
+    )
+    group_offset = _optional_nonnegative_int(
+        source_tool_call_group_offset,
+        name="source_tool_call_group_offset",
+    )
+    if source_id is not None and (call_index is not None or group_offset is not None):
+        raise ToolOutputExtractionError(
+            "source_tool_call_id cannot be combined with positional source selectors"
+        )
+    if group_offset is not None and call_index is None:
+        raise ToolOutputExtractionError(
+            "source_tool_call_group_offset requires source_tool_call_index"
+        )
+
+    if source_id is not None:
         if source_id == current_tool_call_id:
             raise ToolOutputExtractionError("the current extraction call cannot select itself")
         source = states.get(source_id)
@@ -147,6 +222,14 @@ def _resolve_source_tool_call(
             raise ToolOutputExtractionError(
                 "source_tool_call_id must identify an authorized prior visible published tool call in the current thread"
             )
+    elif call_index is not None:
+        source = _source_from_group_position(
+            states,
+            current,
+            group_offset=group_offset or 0,
+            call_index=call_index,
+        )
+        source_id = source.tool_call_id
     else:
         eligible = [
             (event_seq, candidate_id)
@@ -175,6 +258,10 @@ def _resolve_source_tool_call(
     source = states.get(source_id)
     if source is None:
         raise ToolOutputExtractionError("source tool call is not present in authoritative thread state")
+    if source_id not in visible_ids:
+        raise ToolOutputExtractionError(
+            "selected source must be an authorized prior visible published tool call in the current thread"
+        )
     if source.approval_decision != "granted":
         raise ToolOutputExtractionError("source tool call was not approved for execution")
     if not source.published or source.state != "TC6":
@@ -203,6 +290,8 @@ def extract_tool_output_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
             thread_id,
             current_tool_call_id,
             args.get("source_tool_call_id"),
+            args.get("source_tool_call_index"),
+            args.get("source_tool_call_group_offset"),
         )
         canonical = _canonical_finished_text(db, thread_id, source.tool_call_id)
         selected = extract_text_line_range(canonical, args.get("start_line"), args.get("end_line"))
@@ -265,7 +354,8 @@ def register_tool_output_extraction_tool(registry: ToolRegistry) -> None:
         description=(
             "Extract exact canonical sanitized text lines from a prior approved, published tool call "
             "into a thread-owned file artifact. start_line is inclusive and end_line is exclusive. "
-            "Omit source_tool_call_id to select the immediately preceding visible published tool output."
+            "With no source selector (or a blank source_tool_call_id), use the latest eligible prior "
+            "output. For recent non-last calls, select by zero-based prior group offset and declaration index."
         ),
         parameters_schema={
             "type": "object",
@@ -286,7 +376,17 @@ def register_tool_output_extraction_tool(registry: ToolRegistry) -> None:
                 },
                 "source_tool_call_id": {
                     "type": "string",
-                    "description": "Optional authorized prior visible tool call id; omit for the immediately preceding published output.",
+                    "description": "Advanced exact selector for an authorized prior visible tool call. Omit or pass blank for automatic latest-output selection; do not invent IDs.",
+                },
+                "source_tool_call_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Zero-based declaration index within the selected prior assistant tool-call group. Group offset defaults to 0.",
+                },
+                "source_tool_call_group_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Reverse-chronological zero-based prior assistant tool-call group offset: 0 is the immediately preceding group. Requires source_tool_call_index.",
                 },
             },
             "required": ["start_line", "end_line"],

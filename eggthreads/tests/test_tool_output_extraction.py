@@ -61,6 +61,29 @@ def _publish_source(
     approval: str = "granted",
 ) -> None:
     _declare(db, thread_id, tool_call_id, name)
+    _publish_declared_source(
+        db,
+        thread_id,
+        tool_call_id,
+        output,
+        decision=decision,
+        preview=preview,
+        no_api=no_api,
+        approval=approval,
+    )
+
+
+def _publish_declared_source(
+    db: ts.ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+    output,
+    *,
+    decision: str = "whole",
+    preview: str | None = None,
+    no_api: bool = False,
+    approval: str = "granted",
+) -> None:
     db.append_event(
         f"approval-{tool_call_id}",
         thread_id,
@@ -102,6 +125,52 @@ def _publish_source(
         },
         msg_id=f"published-msg-{tool_call_id}",
     )
+
+
+def _publish_source_group(
+    db: ts.ThreadsDB,
+    thread_id: str,
+    sources: list[dict],
+    *,
+    publication_order: list[str] | None = None,
+) -> None:
+    """Declare one assistant tool-call group, then publish in any order."""
+
+    assert sources
+    first, *rest = sources
+    _declare(
+        db,
+        thread_id,
+        first["tool_call_id"],
+        first["name"],
+        arguments=first.get("arguments"),
+        extra_calls=[
+            {
+                "id": source["tool_call_id"],
+                "type": "function",
+                "function": {
+                    "name": source["name"],
+                    "arguments": json.dumps(source.get("arguments") or {}),
+                },
+            }
+            for source in rest
+        ],
+    )
+    by_id = {source["tool_call_id"]: source for source in sources}
+    order = publication_order or list(by_id)
+    assert set(order) == set(by_id)
+    for tool_call_id in order:
+        source = by_id[tool_call_id]
+        _publish_declared_source(
+            db,
+            thread_id,
+            tool_call_id,
+            source["output"],
+            decision=source.get("decision", "whole"),
+            preview=source.get("preview"),
+            no_api=source.get("no_api", False),
+            approval=source.get("approval", "granted"),
+        )
 
 
 def _declare_extractor(
@@ -410,6 +479,142 @@ def test_default_selection_uses_latest_prior_publication_despite_extraction_sibl
     assert metadata["provenance"]["source_tool_call_id"] == "prior"
 
 
+@pytest.mark.parametrize("blank_id", ["", "   "])
+def test_blank_source_id_uses_default_latest_eligible_output(
+    tmp_path, monkeypatch, blank_id
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="blank-source-id")
+    _publish_source(db, thread_id, "prior", "bash", "one\ntwo\n")
+    current = _declare_extractor(db, thread_id)
+
+    _receipt, metadata, data = _extract(
+        db,
+        thread_id,
+        current,
+        {"start_line": 1, "end_line": 2, "source_tool_call_id": blank_id},
+    )
+
+    assert data == b"one\n"
+    assert metadata["provenance"]["source_tool_call_id"] == "prior"
+
+
+def test_positional_selection_uses_declaration_group_and_index_not_publication_order(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="positional")
+    _publish_source_group(
+        db,
+        thread_id,
+        [
+            {"tool_call_id": "group-a-0", "name": "bash", "output": "a-zero\n"},
+            {"tool_call_id": "group-a-1", "name": "python", "output": "a-one\n"},
+            {"tool_call_id": "group-a-2", "name": "skill", "output": "a-two\n"},
+        ],
+        publication_order=["group-a-2", "group-a-0", "group-a-1"],
+    )
+    _publish_source_group(
+        db,
+        thread_id,
+        [
+            {"tool_call_id": "group-b-0", "name": "bash", "output": "b-zero\n"},
+            {"tool_call_id": "group-b-1", "name": "python", "output": "b-one\n"},
+        ],
+        publication_order=["group-b-1", "group-b-0"],
+    )
+    current = _declare_extractor(db, thread_id)
+
+    _receipt, metadata, data = _extract(
+        db,
+        thread_id,
+        current,
+        {
+            "start_line": 1,
+            "end_line": 2,
+            "source_tool_call_id": " ",
+            "source_tool_call_index": 1,
+        },
+    )
+    assert data == b"b-one\n"
+    assert metadata["provenance"]["source_tool_call_id"] == "group-b-1"
+
+    _receipt, metadata, data = _extract(
+        db,
+        thread_id,
+        current,
+        {
+            "start_line": 1,
+            "end_line": 2,
+            "source_tool_call_group_offset": 1,
+            "source_tool_call_index": 2,
+        },
+    )
+    assert data == b"a-two\n"
+    assert metadata["provenance"]["source_tool_call_id"] == "group-a-2"
+
+
+def test_positional_selection_validates_exact_declared_position(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id = ts.create_root_thread(db, name="positional-validation")
+    _publish_source_group(
+        db,
+        thread_id,
+        [
+            {"tool_call_id": "eligible", "name": "bash", "output": "ok\n"},
+            {
+                "tool_call_id": "omitted",
+                "name": "python",
+                "output": "secret\n",
+                "decision": "omit",
+                "preview": "Output omitted.",
+            },
+            {
+                "tool_call_id": "hidden",
+                "name": "skill",
+                "output": "hidden\n",
+                "no_api": True,
+            },
+        ],
+    )
+    current = _declare_extractor(db, thread_id)
+    tools = ts.create_default_tools()
+
+    cases = [
+        ({"source_tool_call_index": 1}, "omitted"),
+        ({"source_tool_call_index": 2}, "prior visible published"),
+        ({"source_tool_call_index": 3}, "available declaration indices: 0, 1, 2"),
+        (
+            {"source_tool_call_group_offset": 0},
+            "requires source_tool_call_index",
+        ),
+        (
+            {"source_tool_call_group_offset": 4, "source_tool_call_index": 0},
+            "group offsets: 0",
+        ),
+        (
+            {"source_tool_call_id": "eligible", "source_tool_call_index": 0},
+            "cannot be combined",
+        ),
+        ({"source_tool_call_index": True}, "non-negative integer"),
+        ({"source_tool_call_id": 7}, "must be a string"),
+    ]
+    for selectors, expected in cases:
+        result = tools.execute(
+            "extract_tool_output",
+            {"start_line": 1, "end_line": 2, **selectors},
+            db=db,
+            thread_id=thread_id,
+            tool_call_id=current,
+        )
+        assert expected in result
+
+
 def test_non_text_and_invalid_ranges_return_short_errors_without_artifacts(
     tmp_path, monkeypatch
 ) -> None:
@@ -665,6 +870,14 @@ def test_schema_help_wrappers_and_context_tool_call_id(tmp_path) -> None:
     assert "full sanitized canonical `tool_call.finished.output`" in help_text
     assert "read_long_tool_output" in help_text
     assert "source_tool_call_id" in help_text
+    assert "source_tool_call_index" in help_text
+    assert "source_tool_call_group_offset" in help_text
+    assert "original tool-call declaration groups" in help_text
+    assert "hydrated `python_repl` only as a fallback" in help_text
+
+    extract_props = specs["extract_tool_output"]["parameters"]["properties"]
+    assert extract_props["source_tool_call_index"]["minimum"] == 0
+    assert extract_props["source_tool_call_group_offset"]["minimum"] == 0
 
     from eggthreads.session_runtime.tool_wrappers import generate_tool_wrappers_source
 

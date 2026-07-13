@@ -617,7 +617,7 @@ extract_tool_output(start_line=41, end_line=603, filename="compaction_narrative_
 save_provider_artifact_to_file(artifact_id="<receipt artifact id>", path=".scratch/compaction_narrative_skeleton.py")
 ```
 
-Omitting `source_tool_call_id` selects the immediately preceding eligible published tool output; pass the skill call ID explicitly if another tool call intervened. Displayed line-number prefixes are presentation only and are never written into extracted bytes. Always derive the range from the current numbered skill output; do not rely on the illustrative numbers above after editing this document.
+With no source selector, `extract_tool_output` selects the latest eligible prior published output, so the adjacent `skill` → extraction sequence above needs no opaque call ID. If another tool-call group intervened, use the extractor's zero-based `source_tool_call_group_offset` plus `source_tool_call_index` selectors; consult `tool_help(tool_name="extract_tool_output")` for ordering details. Displayed line-number prefixes are presentation only and are never written into extracted bytes. Always derive the range from the current numbered skill output; do not rely on the illustrative numbers above after editing this document.
 
 Extraction does not change the execution contract. Do not run the saved file as a standalone shell/Python script. Execute its contents through the hydrated `python_repl` (for example, by passing the extracted text as the REPL's code) so the thread-context globals and helpers are present.
 
