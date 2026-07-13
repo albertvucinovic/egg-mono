@@ -221,6 +221,7 @@ def _route_long_whole_output(
     *,
     full_output: str,
     plan: ToolOutputPublicationPlan,
+    publication_presentation: Mapping[str, Any] | None = None,
 ) -> ToolOutputPublicationPlan:
     """Apply the canonical long-output policy to every ``whole`` plan.
 
@@ -234,6 +235,7 @@ def _route_long_whole_output(
     from .tool_output_contract import tool_output_contract
 
     tool_name = _tool_name_for_call(db, thread_id, tool_call_id)
+    presentation = dict(publication_presentation or {})
     contract = tool_output_contract(tool_name)
     if plan.decision == "omit":
         return plan
@@ -279,6 +281,7 @@ def _route_long_whole_output(
                 metadata={
                     "original_line_count": len(output.splitlines()),
                     "original_char_count": len(output),
+                    "publication_presentation": presentation,
                 },
             )
         )
@@ -316,14 +319,24 @@ def _manual_plan(
     decision: str,
     full_output: str,
     reason: str,
+    publication_presentation: Mapping[str, Any] | None = None,
 ) -> ToolOutputPublicationPlan:
     output = full_output if isinstance(full_output, str) else str(full_output or "")
+    from .tool_output_presentation import apply_output_presentation
+
+    presentation = dict(publication_presentation or {})
     output_stats = {
         "line_count": len(output.splitlines()) if output else 0,
         "char_count": len(output),
+        "publication_presentation": presentation,
     }
     if decision == "whole":
-        return ToolOutputPublicationPlan(decision, output, reason=reason, metadata=output_stats)
+        return ToolOutputPublicationPlan(
+            decision,
+            apply_output_presentation(output, presentation),
+            reason=reason,
+            metadata=output_stats,
+        )
     if decision == "omit":
         return ToolOutputPublicationPlan(decision, "Output omitted.", reason=reason, metadata=output_stats)
     if decision != "partial":
@@ -340,6 +353,7 @@ def _manual_plan(
             thread_id,
             tool_call_id,
             output,
+            publication_presentation=presentation,
         )
     except Exception as exc:
         raise ToolOutputPlanError(
@@ -352,10 +366,7 @@ def _manual_plan(
         preview,
         reason=reason,
         artifact_path=artifact_path,
-        metadata={
-            "line_count": len(output.splitlines()) if output else 0,
-            "char_count": len(output),
-        },
+        metadata=output_stats,
     )
 
 
@@ -659,6 +670,7 @@ def finalize_tool_output(
                 decision=normalized_decision,
                 full_output=full_output,
                 reason=reason,
+                publication_presentation=getattr(tc, "publication_presentation", {}),
             )
         plan = _route_long_whole_output(
             db,
@@ -666,6 +678,7 @@ def finalize_tool_output(
             normalized_tool_call_id,
             full_output=full_output,
             plan=plan,
+            publication_presentation=getattr(tc, "publication_presentation", {}),
         )
         auto_routed_whole = normalized_decision == "whole" and plan.decision == "partial"
         if plan.decision != normalized_decision and not auto_routed_whole:

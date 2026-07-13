@@ -60,6 +60,8 @@ class ToolCallState:
     execution_started: bool = False
     finished_reason: Optional[str] = None  # "success" | "interrupted" | ...
     finished_output: Optional[str] = None  # full tool output from tool_call.finished, if any
+    # Normalized presentation stays separate from canonical finished output.
+    publication_presentation: Dict[str, Any] = field(default_factory=dict)
     output_decision: Optional[str] = None  # "whole" | "partial" | "omit"
     summary: Optional[str] = None  # latest one-line running status from tool_call.summary
     published: bool = False  # final tool message written
@@ -599,9 +601,13 @@ def _try_reduce_thread_events_incrementally(
             out = payload.get("output")
             if out is not None:
                 changes["finished_output"] = str(out)
-            if changes:
-                changes["state_event_seq"] = ev_seq
-                tool_call_states[tcid] = replace(tc, **changes)
+            from .tool_output_presentation import normalize_publication_presentation
+
+            changes["publication_presentation"] = normalize_publication_presentation(
+                payload.get("publication_presentation")
+            )
+            changes["state_event_seq"] = ev_seq
+            tool_call_states[tcid] = replace(tc, **changes)
         elif ev_type == "tool_call.output_approval":
             decision = payload.get("decision")
             if not isinstance(decision, str):
@@ -858,6 +864,11 @@ def _reduce_loaded_thread_events(
                     out = payload.get("output")
                     if out is not None:
                         tc.finished_output = str(out)
+                    from .tool_output_presentation import normalize_publication_presentation
+
+                    tc.publication_presentation = normalize_publication_presentation(
+                        payload.get("publication_presentation")
+                    )
                     tc.state_event_seq = ev_seq
         elif ev_type == "tool_call.output_approval":
             tcid = payload.get("tool_call_id")
