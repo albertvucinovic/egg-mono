@@ -1557,11 +1557,13 @@ class ThreadRunner:
                     self._invocation_writer = None
             raise asyncio.CancelledError
 
-        # Rebuild snapshot and short_recap for readability
+        # Rebuild snapshot once for durability/token metadata. The recap is a
+        # property of the just-completed invocation, so read only its final
+        # message tail instead of walking a very large compatibility snapshot.
         try:
             from .api import create_snapshot
 
-            snap = create_snapshot(self.db, self.thread_id)
+            create_snapshot(self.db, self.thread_id)
             # Extract <short_recap>...</short_recap> from last assistant message
             try:
                 def _extract_short(text: str) -> Optional[str]:
@@ -1578,13 +1580,19 @@ class ThreadRunner:
                         return None
                     return text[inner_start:end].strip()
 
-                msgs = snap.get('messages', []) if isinstance(snap, dict) else []
-                last_assist = None
-                for m in reversed(msgs):
-                    content = m.get('content')
-                    if m.get('role') == 'assistant' and isinstance(content, (str, list)):
-                        last_assist = content_to_plain_text(content)
-                        break
+                row = self.db.conn.execute(
+                    "SELECT payload_json FROM events "
+                    "WHERE thread_id=? AND invoke_id=? AND type='msg.create' "
+                    "ORDER BY event_seq DESC LIMIT 1",
+                    (self.thread_id, invoke_id),
+                ).fetchone()
+                try:
+                    payload_json = row[0] if row is not None else None
+                    payload = json.loads(payload_json) if isinstance(payload_json, str) else (payload_json or {})
+                except Exception:
+                    payload = {}
+                content = payload.get('content') if isinstance(payload, dict) and payload.get('role') == 'assistant' else None
+                last_assist = content_to_plain_text(content) if isinstance(content, (str, list)) else None
                 rec = _extract_short(last_assist or '') if last_assist else None
                 if rec:
                     self.db.conn.execute(
@@ -1663,7 +1671,6 @@ class ThreadRunner:
                     all_models_path=self.all_models_path,
                 )
                 if threshold.enabled and threshold.threshold_tokens is not None:
-                    create_snapshot(self.db, self.thread_id)
                     stats = provider_context_token_stats(self.db, self.thread_id)
                     current_tokens = int(stats.get('context_tokens') or 0)
                     queued_users = _normal_user_messages_after_seq(
