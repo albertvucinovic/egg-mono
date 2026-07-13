@@ -291,6 +291,51 @@ def test_fullscreen_virtual_source_initial_paint_requests_visible_tail_only() ->
     assert source.row_count_calls == []
 
 
+def test_fullscreen_reset_scrollback_source_is_atomic_until_final_update() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    old_source = RecordingScrollbackSource(["old0", "old1"], total=2)
+    new_source = RecordingScrollbackSource(["new0", "new1"], total=2)
+    r._live_lines = ["LIVE"]
+    r.set_scrollback_source(old_source)
+    r._paint(20)
+    old_source.requests.clear()
+    new_source.requests.clear()
+    r._scrollback = ["local"]
+    r._scroll_offset = 1
+
+    r.reset_scrollback_source(new_source)
+
+    assert old_source.requests == []
+    assert new_source.requests == []
+    assert r._scrollback == []
+    assert r._scroll_offset == 0
+    assert r._prev_viewport == []
+
+    r.update(Text("LIVE"))
+
+    assert old_source.requests == []
+    assert new_source.requests == [(20, 0, 4)]
+    assert r._prev_viewport == ["", "", "new0", "new1", "LIVE"]
+
+
+def test_fullscreen_reset_scrollback_source_preserves_bounded_lazy_reachability() -> None:
+    r = TinyTerminalRenderer(width=20, height=5)
+    source = RecordingScrollbackSource([f"s{i}" for i in range(100)], total=None)
+    r._live_lines = ["LIVE"]
+
+    r.reset_scrollback_source(source)
+    r.update(Text("LIVE"))
+
+    assert source.requests == [(20, 0, 4)]
+    assert source.row_count_calls == []
+    assert r._prev_viewport == ["s96", "s97", "s98", "s99", "LIVE"]
+
+    r.scroll(3)
+
+    assert source.requests[-1] == (20, 3, 4)
+    assert r._prev_viewport == ["s93", "s94", "s95", "s96", "LIVE"]
+
+
 def test_fullscreen_live_update_reuses_clean_lazy_history_slice() -> None:
     """Typing/status redraws should not refetch lazy transcript rows."""
     class CountingRenderer(TinyTerminalRenderer):

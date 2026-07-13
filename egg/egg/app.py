@@ -348,8 +348,14 @@ class EggDisplayApp(
         # Use Alt+Enter / Shift+Enter to insert a newline. Ctrl+D always sends.
         # (/enterMode can still override this behaviour.)
         self.enter_sends: bool = True
-        # Track last printed event sequence per thread for console output
+        # Track last printed event sequence per thread for console output.
         self._last_printed_seq_by_thread: Dict[str, int] = {}
+        # Monotonic app-local semantic transcript generation. A full-screen
+        # scrollback source captures this value; any watcher-observed message or
+        # compaction change makes source reuse fail closed until a fresh source
+        # is installed.
+        self._static_transcript_generation_by_thread: Dict[str, int] = {}
+        self._transcript_scrollback_source_state: Optional[tuple[Any, Any]] = None
 
         # Pending approval prompt state (execution/output approvals)
         self._pending_prompt: Dict[str, Any] = {}

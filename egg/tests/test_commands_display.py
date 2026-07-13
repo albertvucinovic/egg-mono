@@ -189,13 +189,30 @@ class TestCmdDisplayVerbosity:
         assert egg_app._display_verbosity == "medium"
         assert any("Display verbosity set to medium." in msg for msg in egg_app._system_log)
 
-    def test_sets_display_verbosity_triggers_redraw(self, egg_app, monkeypatch):
+    def test_sets_display_verbosity_triggers_coherent_source_redraw(self, egg_app, monkeypatch):
         redrawn = []
-        monkeypatch.setattr(egg_app, "redraw_static_view", lambda reason=None: redrawn.append(reason))
+
+        def record_redraw(**kwargs):
+            redrawn.append(kwargs)
+
+        monkeypatch.setattr(egg_app, "redraw_static_view", record_redraw)
 
         egg_app.handle_command("/displayVerbosity medium")
 
-        assert redrawn == ["display verbosity changed"]
+        assert redrawn == [{
+            "reason": "display verbosity changed",
+            "reuse_transcript_source": True,
+        }]
+
+    def test_same_display_verbosity_is_truthful_noop_without_redraw(self, egg_app, monkeypatch):
+        redrawn = []
+        monkeypatch.setattr(egg_app, "redraw_static_view", lambda **kwargs: redrawn.append(kwargs))
+
+        egg_app.handle_command("/displayVerbosity max")
+
+        assert egg_app._display_verbosity == "max"
+        assert redrawn == []
+        assert any("Display verbosity already max." in msg for msg in egg_app._system_log)
 
     def test_invalid_display_verbosity_reports_usage_without_changing_state(self, egg_app):
         egg_app.handle_command("/displayVerbosity min")

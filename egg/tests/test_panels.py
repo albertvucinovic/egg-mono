@@ -1481,6 +1481,166 @@ class TestFullScreenScrollbackWiring:
         assert renderer.update_calls == 1
         assert printed == []
 
+    def test_display_verbosity_redraw_reuses_coherent_source_without_blob_read(self, egg_app, monkeypatch):
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "user", "coherent history")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        renderer = self.Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        assert egg_app._install_transcript_scrollback_source(renderer) is True
+        source = renderer.sources[-1]
+
+        def fail_blob_read(*args, **kwargs):
+            raise AssertionError("coherent verbosity redraw must not read snapshot_json")
+
+        monkeypatch.setattr(egg_app.db, "get_thread", fail_blob_read)
+        monkeypatch.setattr(
+            egg_app,
+            "_new_transcript_scrollback_source",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("coherent verbosity redraw must reuse the source")
+            ),
+        )
+        renderer.sources.clear()
+
+        egg_app.handle_command("/displayVerbosity medium")
+
+        assert renderer.sources == [source]
+        assert egg_app._display_verbosity == "medium"
+
+    def test_display_verbosity_redraw_rebuilds_after_local_semantic_change(self, egg_app, monkeypatch):
+        from eggthreads import append_message
+
+        renderer = self.LocalRowsRenderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        assert egg_app._install_transcript_scrollback_source(renderer) is True
+        old_source = renderer.sources[-1]
+        msg_id = append_message(egg_app.db, egg_app.current_thread, "assistant", "local tail")
+        row = egg_app.db.conn.execute(
+            "SELECT event_seq, ts FROM events WHERE msg_id=?",
+            (msg_id,),
+        ).fetchone()
+        egg_app.console_print_message({
+            "role": "assistant",
+            "content": "local tail",
+            "msg_id": msg_id,
+            "event_seq": row["event_seq"],
+            "ts": row["ts"],
+        })
+        built = []
+        original = egg_app._new_transcript_scrollback_source
+
+        def counted_source():
+            source = original()
+            built.append(source)
+            return source
+
+        monkeypatch.setattr(egg_app, "_new_transcript_scrollback_source", counted_source)
+        renderer.sources.clear()
+
+        egg_app.handle_command("/displayVerbosity medium")
+
+        assert built
+        assert renderer.sources == [built[-1]]
+        assert built[-1] is not old_source
+        assert any(
+            block.payload.get("msg_id") == msg_id
+            for block in built[-1]._blocks
+            if block.kind == "message"
+        )
+
+    def test_source_build_captures_generation_before_snapshot_load(self, egg_app, monkeypatch):
+        from egg.panels import TranscriptScrollbackSource
+
+        original = egg_app.db.get_thread
+
+        def change_during_load(thread_id):
+            egg_app._mark_static_transcript_changed(thread_id)
+            return original(thread_id)
+
+        monkeypatch.setattr(egg_app.db, "get_thread", change_during_load)
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+
+        assert source._local_transcript_generation < egg_app._static_transcript_generation()
+
+    def test_display_verbosity_redraw_rebuilds_after_snapshot_watermark_change(self, egg_app, monkeypatch):
+        from eggthreads import append_message, create_snapshot
+
+        renderer = self.Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        assert egg_app._install_transcript_scrollback_source(renderer) is True
+        old_source = renderer.sources[-1]
+        append_message(egg_app.db, egg_app.current_thread, "user", "new snapshot tail")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        built = []
+        original = egg_app._new_transcript_scrollback_source
+
+        def counted_source():
+            source = original()
+            built.append(source)
+            return source
+
+        monkeypatch.setattr(egg_app, "_new_transcript_scrollback_source", counted_source)
+        renderer.sources.clear()
+
+        egg_app.handle_command("/displayVerbosity medium")
+
+        assert built
+        assert renderer.sources == [built[-1]]
+        assert built[-1] is not old_source
+
+    @pytest.mark.parametrize("target", ["max", "medium", "min"])
+    def test_display_verbosity_source_reuse_matches_fresh_source_rows(self, egg_app, monkeypatch, target):
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        append_message(egg_app.db, egg_app.current_thread, "user", "question")
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "assistant",
+            "answer",
+            extra={"reasoning": "reason", "tool_calls": [{
+                "id": "call-1",
+                "function": {"name": "bash", "arguments": {"script": "echo hi"}},
+            }]},
+        )
+        append_message(
+            egg_app.db,
+            egg_app.current_thread,
+            "tool",
+            "hi",
+            extra={"name": "bash", "tool_call_id": "call-1"},
+        )
+        create_snapshot(egg_app.db, egg_app.current_thread)
+        renderer = self.Renderer()
+        egg_app._renderer = renderer
+        egg_app._display_is_inline = False
+        assert egg_app._install_transcript_scrollback_source(renderer) is True
+        reused = renderer.sources[-1]
+        egg_app._display_verbosity = "medium" if target == "max" else "max"
+        monkeypatch.setattr(
+            reused,
+            "_render_static_transcript_item_rows",
+            lambda item, _width: [item.fallback or str(item.renderable)],
+        )
+
+        egg_app.handle_command(f"/displayVerbosity {target}")
+        reused_rows = list(reused.rows_from_bottom(100, 0, 200))
+        fresh = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        monkeypatch.setattr(
+            fresh,
+            "_render_static_transcript_item_rows",
+            lambda item, _width: [item.fallback or str(item.renderable)],
+        )
+        fresh_rows = list(fresh.rows_from_bottom(100, 0, 200))
+
+        assert reused_rows == fresh_rows
+
     def test_full_screen_min_updates_consecutive_hidden_summary_in_place(self, egg_app):
         """Full-screen min hidden-only messages should update one local summary item."""
 

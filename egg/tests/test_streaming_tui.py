@@ -1126,6 +1126,32 @@ def test_watch_thread_reuses_runner_snapshot_for_final_batch(tmp_path, monkeypat
     ).fetchone()[0] == 1
 
 
+def test_watch_thread_invalidates_transcript_source_reuse_for_semantic_batch(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    start_after = app.db.max_event_seq(tid)
+    from eggthreads import append_message, create_snapshot
+
+    append_message(app.db, tid, "assistant", "semantic tail")
+    create_snapshot(app.db, tid)
+    batch = list(app.db.events_since(tid, start_after))
+    import egg.streaming as streaming_mod
+
+    class _OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _OneBatchWatcher)
+    before = app._static_transcript_generation(tid)
+
+    asyncio.run(app.watch_thread(tid))
+
+    assert app._static_transcript_generation(tid) > before
+
+
 def test_watch_thread_publishes_min_hidden_run_once_per_batch(tmp_path, monkeypatch):
     """Completed hidden messages do not rerender a growing summary N times."""
 
