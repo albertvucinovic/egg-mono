@@ -826,9 +826,9 @@ class FormattingMixin:
         ctx_tokens: Optional[int] = None
         api_usage: Dict[str, Any] = {}
         try:
-            from eggthreads import thread_token_stats
+            from eggthreads import header_token_stats
 
-            ts = thread_token_stats(self.db, self.current_thread, llm=self.llm_client)
+            ts = header_token_stats(self.db, self.current_thread, llm=self.llm_client)
             if isinstance(ts, dict):
                 ct = ts.get('context_tokens')
                 if isinstance(ct, int):

@@ -4,6 +4,7 @@ from eggthreads.token_count import (
     _cost_for_usage,
     count_text_tokens,
     extend_snapshot_token_stats,
+    header_token_stats,
     live_llm_tps_for_invoke,
     snapshot_token_stats,
     thread_token_stats,
@@ -102,6 +103,67 @@ def test_total_token_stats_records_snapshot_context_boundary(tmp_path):
 
     assert stats["snapshot_context_tokens"] > 0
     assert stats["context_tokens"] > stats["snapshot_context_tokens"]
+
+
+def test_header_token_stats_uses_cached_per_message_compaction_view(tmp_path, monkeypatch):
+    import eggthreads as ts
+    import eggthreads.token_count as token_count
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "system", "standing instructions")
+    old = ts.append_message(db, tid, "user", "old prompt " * 100)
+    start = ts.append_message(db, tid, "assistant", "summary", extra={"model_key": "m"})
+    ts.commit_thread_compaction(db, tid, start, created_by="test")
+    ts.append_message(db, tid, "user", "current prompt")
+    ts.append_message(db, tid, "assistant", "current answer", extra={"model_key": "m"})
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "interim note excluded from provider context",
+        extra={"answer_user_preserve_turn": True, "no_api": True},
+    )
+    ts.create_snapshot(db, tid)
+    exact_context_tokens = thread_token_stats(db, tid)["context_tokens"]
+
+    monkeypatch.setattr(
+        token_count,
+        "_token_stats_for_messages",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("header path must not retokenize historical messages")
+        ),
+    )
+    stats = header_token_stats(db, tid)
+
+    assert stats["full_thread_tokens"] > stats["context_tokens"]
+    assert old in stats["per_message"]
+    assert stats["context_tokens"] == exact_context_tokens
+
+
+def test_header_token_stats_keeps_explicit_cost_epoch_accounting_separate(tmp_path, monkeypatch):
+    import eggthreads as ts
+    import eggthreads.token_count as token_count
+
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "prompt")
+    ts.append_message(db, tid, "assistant", "answer", extra={"model_key": "m"})
+    ts.create_snapshot(db, tid)
+
+    monkeypatch.setattr(
+        token_count,
+        "_epoch_usage_token_stats",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("periodic header must not run full epoch accounting")
+        ),
+    )
+    stats = header_token_stats(db, tid, llm=_CostLLM({"input_tokens": 1.0}))
+
+    assert stats["context_tokens"] > 0
+    assert stats["api_usage"]["cost_usd"]["total"] >= 0
 
 
 def test_thread_token_stats_usage_since_compaction_uses_provider_context(tmp_path):

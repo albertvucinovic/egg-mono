@@ -175,6 +175,7 @@ from .token_count import (
     provider_context_token_stats,
     tool_message_tps_for_call,
     streaming_token_stats,
+    header_token_stats,
     total_token_stats,
     thread_token_stats,
 )
@@ -435,7 +436,7 @@ __all__ = [
     'ToolCapabilities', 'ToolContext', 'ToolExecutionResult', 'ToolRegistry', 'ToolStreamContext', 'create_default_tools', 'create_tool_registry',
     'Skill', 'get_skill', 'list_skills', 'load_skill_text', 'render_skill_index', 'render_skill_tool_output', 'search_skills',
     'create_llm_client',
-    'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'provider_context_token_stats', 'streaming_token_stats', 'total_token_stats', 'thread_token_stats', 'EventWatcher',
+    'count_text_tokens', 'llm_message_tps_for_invoke', 'live_llm_tps_for_invoke', 'tool_message_tps_for_call', 'snapshot_token_stats', 'provider_context_token_stats', 'streaming_token_stats', 'header_token_stats', 'total_token_stats', 'thread_token_stats', 'EventWatcher',
     'enable_user_sandbox_control',
     'disable_user_sandbox_control',
     'is_user_sandbox_control_enabled',
