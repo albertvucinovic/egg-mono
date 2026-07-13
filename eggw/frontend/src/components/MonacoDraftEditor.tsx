@@ -137,8 +137,7 @@ export function MonacoDraftEditor(props: MonacoDraftEditorProps) {
 
   return (
     <div
-      className="overflow-hidden rounded border"
-      style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)" }}
+      className="eggw-monaco-editor"
       data-testid="edit-answer-draft"
       data-editor="monaco"
       aria-label="Quoted assistant markdown draft"
@@ -153,7 +152,7 @@ export function MonacoDraftEditor(props: MonacoDraftEditorProps) {
         beforeMount={beforeMount}
         onMount={handleMount}
         onChange={(nextValue) => onChange(nextValue ?? "")}
-        loading={<div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--muted)" }}>Loading Monaco editor…</div>}
+        loading={<div className="eggw-editor-state h-full">Loading Monaco editor…</div>}
         options={{
           automaticLayout: true,
           bracketPairColorization: { enabled: true },

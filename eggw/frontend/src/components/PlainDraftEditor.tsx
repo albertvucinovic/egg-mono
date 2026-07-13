@@ -29,17 +29,12 @@ export function PlainDraftEditor({ value, onChange, canSubmitShortcut, onSubmitS
             onSubmitShortcut();
           }
         }}
-        className="min-h-[45vh] w-full resize-y rounded border p-3 font-mono text-sm outline-none"
-        style={{
-          background: "var(--code-bg)",
-          borderColor: "var(--panel-border)",
-          color: "var(--foreground)",
-        }}
+        className="eggw-form-control min-h-[45vh] resize-y p-3 font-mono text-sm"
         spellCheck={false}
         data-testid="edit-answer-draft-textarea"
         aria-label="Quoted assistant markdown draft"
       />
-      <p className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+      <p className="eggw-ui-muted mt-2 text-xs">
         Monaco editor did not become ready, so EggW is using a plain textarea fallback.
       </p>
     </div>

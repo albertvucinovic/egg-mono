@@ -79,6 +79,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [autocompleteLoading, setAutocompleteLoading] = useState(false);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [showImageForm, setShowImageForm] = useState(false);
   const [imagePrompt, setImagePrompt] = useState("");
@@ -504,11 +505,13 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     autocompleteRef.current?.cancel();
     const cursorPos = textareaRef.current?.selectionStart ?? input.length;
     if (!currentThreadId || !isAutocompleteEligible(input, cursorPos)) {
+      setAutocompleteLoading(false);
       setSuggestions([]);
       setShowSuggestions(false);
       return;
     }
 
+    setAutocompleteLoading(true);
     fetchTimeoutRef.current = setTimeout(async () => {
       try {
         const results = await autocompleteRef.current!.request(input, cursorPos, currentThreadId);
@@ -519,6 +522,8 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       } catch {
         setSuggestions([]);
         setShowSuggestions(false);
+      } finally {
+        setAutocompleteLoading(false);
       }
     }, 100);
 
@@ -848,6 +853,9 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
 
   const isPending = messageMutation.isPending || commandMutation.isPending || uploadMutation.isPending || imageGenerationMutation.isPending;
   const inputIsCommand = isCommand(input);
+  const autocompleteOpen = showSuggestions && suggestions.length > 0;
+  const autocompleteListboxId = "message-autocomplete-listbox";
+  const activeSuggestionId = autocompleteOpen ? `message-autocomplete-option-${selectedIndex}` : undefined;
   const showGetUserAnswerButton = isStreaming && activeGetUserWait && !inputIsCommand;
   const canSend = Boolean(currentThreadId) && (Boolean(input.trim()) || stagedAttachments.length > 0);
   const canGenerateImage = Boolean(currentThreadId) && Boolean(imagePrompt.trim()) && !isStreaming && !imageGenerationMutation.isPending;
@@ -865,11 +873,13 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
   return (
     <div
       className={clsx(
-        "eggw-composer p-4 bg-[var(--panel-bg)] relative transition-shadow",
-        (showBorders || activeGetUserWait) && "border-t",
-        isDraggingFiles && "ring-2 ring-blue-500/80",
+        "eggw-composer relative",
+        showBorders && "eggw-composer-bordered",
+        activeGetUserWait && "eggw-composer-waiting",
+        inputIsCommand && "eggw-composer-command",
+        isStreaming && "eggw-composer-streaming",
+        isDraggingFiles && "eggw-composer-dragging",
       )}
-      style={{ borderColor: activeGetUserWait ? "#d946ef" : "var(--panel-border)" }}
       data-testid="message-composer"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
@@ -878,7 +888,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
     >
       {isDraggingFiles && (
         <div
-          className="eggw-floating-overlay pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-blue-400 bg-blue-500/10 text-sm font-medium text-blue-200"
+          className="eggw-composer-drop-overlay"
           data-testid="attachment-drop-overlay"
         >
           Drop files to attach
@@ -887,8 +897,8 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
       {activeGetUserWait && (
         <div
           data-testid="get-user-input-mode"
-          className="mb-2 rounded px-3 py-2 text-xs border"
-          style={{ color: "#f0abfc", borderColor: "#d946ef", background: "rgba(217, 70, 239, 0.12)" }}
+          className="eggw-composer-notice ui-status-special"
+          role="status"
         >
           <div className="font-medium">Message Input (get answer tool)</div>
           <div>
@@ -902,36 +912,39 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
         </div>
       )}
       {/* Autocomplete dropdown */}
-      {showSuggestions && suggestions.length > 0 && (
+      {autocompleteOpen && (
         <div
           ref={suggestionsRef}
-          className={`eggw-floating-overlay absolute bottom-full left-4 right-4 mb-1 rounded-lg shadow-lg max-h-64 overflow-auto z-50 ${showBorders ? 'border' : ''}`}
-          style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)" }}
+          id={autocompleteListboxId}
+          className="eggw-autocomplete-listbox"
+          role="listbox"
+          aria-label="Command suggestions"
         >
           {suggestions.map((suggestion, index) => (
             <div
               key={`${suggestion.display}-${index}`}
+              id={`message-autocomplete-option-${index}`}
+              role="option"
+              aria-selected={index === selectedIndex}
               data-index={index}
-              className="px-3 py-2 cursor-pointer flex items-center gap-3"
-              style={{
-                background: index === selectedIndex ? "var(--selection-bg)" : undefined,
-              }}
+              className="eggw-autocomplete-option"
               onClick={() => applySuggestion(suggestion)}
               onMouseEnter={() => setSelectedIndex(index)}
             >
               <span className="font-mono text-sm flex-1 whitespace-nowrap overflow-hidden text-ellipsis">{suggestion.display}</span>
               {suggestion.meta && (
-                <span className="text-xs flex-shrink-0 max-w-[200px] truncate" style={{ color: "var(--muted)" }}>{suggestion.meta}</span>
+                <span className="eggw-autocomplete-meta">{suggestion.meta}</span>
               )}
             </div>
           ))}
-          <div className="px-3 py-1 text-xs border-t border-[var(--panel-border)]" style={{ color: "var(--muted)" }}>
-            <kbd className="px-1 rounded" style={{ background: "var(--code-bg)" }}>Tab</kbd> to select,{" "}
-            <kbd className="px-1 rounded" style={{ background: "var(--code-bg)" }}>↑↓</kbd> to navigate,{" "}
-            <kbd className="px-1 rounded" style={{ background: "var(--code-bg)" }}>Esc</kbd> to close
+          <div className="eggw-autocomplete-help">
+            <kbd>Tab</kbd> select · <kbd>↑↓</kbd> navigate · <kbd>Esc</kbd> close
           </div>
         </div>
       )}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="autocomplete-status">
+        {autocompleteLoading ? "Loading suggestions" : autocompleteOpen ? `${suggestions.length} suggestions available` : ""}
+      </div>
 
       {stagedAttachments.length > 0 && (
         <div className="mb-3 flex flex-wrap gap-2" data-testid="staged-attachments">
@@ -942,8 +955,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
             return (
               <div
                 key={`${attachment.input_id}-${index}`}
-                className={`flex max-w-full items-center gap-2 rounded px-3 py-2 text-xs ${showBorders ? "border" : ""}`}
-                style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+                className="eggw-staged-attachment"
                 title={attachmentPlaceholder(attachment)}
               >
                 <Paperclip className="h-3.5 w-3.5 flex-shrink-0" />
@@ -954,8 +966,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
                     loading="lazy"
                     decoding="async"
                     data-testid="staged-attachment-preview"
-                    className={`h-12 w-12 flex-shrink-0 rounded object-contain ${showBorders ? "border" : ""}`}
-                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)" }}
+                    className="eggw-staged-attachment-preview"
                     onError={(event) => {
                       event.currentTarget.style.display = "none";
                     }}
@@ -963,14 +974,14 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
                 )}
                 <div className="min-w-0">
                   <div className="truncate font-medium">{attachmentFilename(attachment)}</div>
-                  <div className="truncate" style={{ color: "var(--muted)" }}>
+                  <div className="eggw-staged-attachment-meta">
                     {attachment.presentation || "file"} · {attachment.mime_type || "application/octet-stream"} · {formatBytes(attachment.size_bytes)}
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => setStagedAttachments(currentThreadId, stagedAttachments.filter((_, i) => i !== index))}
-                  className="ml-1 rounded p-1 hover:bg-red-500/20"
+                  className="ui-button ui-button-danger ui-icon-button eggw-compact-icon-button"
                   title="Remove attachment"
                   aria-label={`Remove attachment ${attachmentFilename(attachment)}`}
                 >
@@ -984,8 +995,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
 
       {showImageForm && (
         <div
-          className={`mb-3 rounded p-3 text-sm ${showBorders ? "border" : ""}`}
-          style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+          className="eggw-image-form"
           data-testid="image-generation-form"
         >
           <div className="mb-2 flex items-center justify-between gap-2">
@@ -996,7 +1006,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
             <button
               type="button"
               onClick={() => setShowImageForm(false)}
-              className="rounded p-1 hover:bg-slate-700/60"
+              className="ui-button ui-button-ghost ui-icon-button eggw-compact-icon-button"
               title="Close image generation"
               aria-label="Close image generation"
             >
@@ -1008,8 +1018,8 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
             onChange={(e) => setImagePrompt(e.target.value)}
             placeholder="Describe the image to generate..."
             disabled={!currentThreadId || imageGenerationMutation.isPending}
-            className={`eggw-control w-full rounded-lg px-3 py-2 resize-none focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
-            style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+            className="eggw-form-control w-full resize-none px-3 py-2 disabled:opacity-50"
+            aria-label="Image prompt"
             rows={2}
             data-testid="image-generation-prompt"
           />
@@ -1020,8 +1030,8 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
               list="image-generation-model-options"
               placeholder={imageDefaultModel ? `Default: ${imageDefaultModel}` : "Image model (optional)"}
               disabled={!currentThreadId || imageGenerationMutation.isPending}
-              className={`eggw-control rounded-lg px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
-              style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              className="eggw-form-control px-3 py-2 text-sm disabled:opacity-50"
+              aria-label="Image model"
               data-testid="image-generation-model"
             />
             {imageModelOptions.length > 0 && (
@@ -1035,8 +1045,8 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
               value={imageCount}
               onChange={(e) => setImageCount(e.target.value)}
               disabled={!currentThreadId || imageGenerationMutation.isPending}
-              className={`eggw-control rounded-lg px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
-              style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              className="eggw-form-control px-3 py-2 text-sm disabled:opacity-50"
+              aria-label="Number of images"
               title="Number of images"
               data-testid="image-generation-count"
             >
@@ -1050,15 +1060,15 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
               onChange={(e) => setImageSize(e.target.value)}
               placeholder="Size (optional)"
               disabled={!currentThreadId || imageGenerationMutation.isPending}
-              className={`eggw-control rounded-lg px-3 py-2 text-sm focus:outline-none disabled:opacity-50 ${showBorders ? "border" : ""}`}
-              style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              className="eggw-form-control px-3 py-2 text-sm disabled:opacity-50"
+              aria-label="Image size"
               data-testid="image-generation-size"
             />
             <button
               type="button"
               onClick={handleGenerateImage}
               disabled={!canGenerateImage}
-              className="rounded bg-purple-600 px-4 py-2 text-sm hover:bg-purple-500 disabled:cursor-not-allowed disabled:opacity-50 flex items-center justify-center gap-2"
+              className="ui-button ui-button-primary"
               title={isStreaming ? "Wait for streaming to finish before generating" : "Generate image"}
               data-testid="image-generation-submit"
             >
@@ -1070,7 +1080,7 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
               Generate
             </button>
           </div>
-          <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
+          <div className="eggw-field-help">
             Generated bytes stay in provider-output storage; the backend appends artifact references to the transcript.
           </div>
         </div>
@@ -1133,11 +1143,16 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
               : "Select a thread first"
           }
           disabled={!currentThreadId}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={autocompleteOpen}
+          aria-controls={autocompleteOpen ? autocompleteListboxId : undefined}
+          aria-activedescendant={activeSuggestionId}
+          aria-describedby="composer-shortcut-hint"
           className={clsx(
             "eggw-composer-input min-w-0 flex-1 resize-none px-3 py-2 focus:outline-none disabled:opacity-50",
             (showBorders || activeGetUserWait) && "border",
           )}
-          style={activeGetUserWait ? { borderColor: "#d946ef" } : undefined}
           rows={1}
           data-testid="message-input"
         />
@@ -1199,36 +1214,36 @@ export function MessageInput({ threadId, showBorders = true }: MessageInputProps
             {currentThreadId ? `Thread ${currentThreadId.slice(-8)}` : "No thread"}
           </span>
           {inputIsCommand && (
-            <span className="eggw-composer-status-pill" style={{ color: "var(--tool-call-border)" }}>
+            <span className="eggw-composer-status-pill eggw-status-command">
               {input.startsWith('$') ? "Shell command" : "Slash command"}
             </span>
           )}
           {isStreaming && (
-            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+            <span className="eggw-composer-live-status">
               <Loader2 className="w-3 h-3 animate-spin" />
               {activeGetUserWait ? "Waiting for get-user answer..." : "Streaming; new messages will queue..."}
             </span>
           )}
           {commandMutation.isPending && (
-            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+            <span className="eggw-composer-live-status">
               <Loader2 className="w-3 h-3 animate-spin" />
               Running {displayedCommandLabel}{displayedCommandElapsed ? ` ${displayedCommandElapsed}` : ""}{activeCommandTimeout}...
             </span>
           )}
           {!commandMutation.isPending && activeUserCommand && (
-            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+            <span className="eggw-composer-live-status">
               <Loader2 className="w-3 h-3 animate-spin" />
               Running {activeUserCommand.name.startsWith("$") ? activeUserCommand.name : `/${activeUserCommand.name}`}{activeCommandElapsed ? ` ${activeCommandElapsed}` : ""}{activeCommandTimeout}...
             </span>
           )}
           {imageGenerationMutation.isPending && (
-            <span className="flex items-center gap-1" style={{ color: "var(--accent)" }}>
+            <span className="eggw-composer-live-status">
               <Loader2 className="w-3 h-3 animate-spin" />
               Generating image{imagePendingElapsed ? ` ${imagePendingElapsed}` : ""}...
             </span>
           )}
         </div>
-        <span className="eggw-composer-status-pill" title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>
+        <span id="composer-shortcut-hint" className="eggw-composer-status-pill" title={enterMode === "send" ? "Enter to send, Shift+Enter for newline" : "Ctrl+Enter to send, Enter for newline"}>
           [{enterMode === "send" ? "⏎ send" : "^⏎ send"}]
         </span>
       </div>

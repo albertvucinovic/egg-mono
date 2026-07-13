@@ -30,6 +30,9 @@ interface OverlayPanelProps {
   footer?: ReactNode;
   returnFocusSelector?: string;
   portal?: boolean;
+  panelClassName?: string;
+  bodyClassName?: string;
+  footerClassName?: string;
 }
 
 export function OverlayPanel({
@@ -44,6 +47,9 @@ export function OverlayPanel({
   footer,
   returnFocusSelector,
   portal = false,
+  panelClassName,
+  bodyClassName,
+  footerClassName,
 }: OverlayPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -73,6 +79,11 @@ export function OverlayPanel({
     return () => {
       previous.forEach(({ element, inert }) => { element.inert = inert; });
       document.body.style.overflow = previousOverflow;
+      if (returnFocusRef.current) {
+        const returnTarget = returnFocusRef.current;
+        returnFocusRef.current = null;
+        window.requestAnimationFrame(() => returnTarget.focus());
+      }
     };
   }, [open, returnFocusSelector]);
 
@@ -86,7 +97,7 @@ export function OverlayPanel({
     >
       <div
         ref={panelRef}
-        className={clsx("ui-overlay-panel", variant === "drawer" ? "ui-drawer-panel" : "ui-dialog-panel")}
+        className={clsx("ui-overlay-panel", variant === "drawer" ? "ui-drawer-panel" : "ui-dialog-panel", panelClassName)}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -126,8 +137,8 @@ export function OverlayPanel({
             <X className="h-5 w-5" aria-hidden="true" />
           </IconButton>
         </div>
-        <div className="ui-overlay-body">{children}</div>
-        {footer && <div className="ui-overlay-footer">{footer}</div>}
+        <div className={clsx("ui-overlay-body", bodyClassName)}>{children}</div>
+        {footer && <div className={clsx("ui-overlay-footer", footerClassName)}>{footer}</div>}
       </div>
     </div>
   );

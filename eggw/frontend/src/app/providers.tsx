@@ -8,6 +8,7 @@ import {
   setSessionApiToken,
   subscribeApiToken,
 } from "@/lib/apiToken";
+import { Button } from "@/components/ui/primitives";
 
 function ApiTokenGate({ children }: { children: React.ReactNode }) {
   const [initialized, setInitialized] = useState(false);
@@ -57,19 +58,17 @@ function ApiTokenGate({ children }: { children: React.ReactNode }) {
 
   if (!initialized) {
     return (
-      <div className="flex h-screen items-center justify-center" style={{ background: "var(--background)", color: "var(--foreground)" }}>
-        <div className="text-sm" style={{ color: "var(--muted)" }}>Connecting to EggW…</div>
-      </div>
+      <main className="eggw-gate-shell"><div className="eggw-gate-state" role="status"><h1>Connecting to EggW</h1><p>Checking this browser session…</p></div></main>
     );
   }
 
   if (!authenticated) {
     return (
-      <div className="flex h-screen items-center justify-center px-4" style={{ background: "var(--background)", color: "var(--foreground)" }}>
-        <form onSubmit={submit} className="w-full max-w-md space-y-4 rounded border p-6" style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)" }}>
+      <main className="eggw-gate-shell">
+        <form onSubmit={submit} className="eggw-auth-form">
           <div>
             <h1 className="text-lg font-semibold">Connect to EggW</h1>
-            <p className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
+            <p className="eggw-ui-muted mt-1 text-sm">
               Enter the API token configured by the server operator. It is kept only in this browser tab&apos;s session storage.
             </p>
           </div>
@@ -81,22 +80,21 @@ function ApiTokenGate({ children }: { children: React.ReactNode }) {
               onChange={(event) => setCandidate(event.target.value)}
               autoComplete="off"
               autoFocus
-              className="w-full rounded border px-3 py-2 font-mono"
-              style={{ background: "var(--background)", borderColor: "var(--panel-border)" }}
+              className="eggw-form-control px-3 py-2 font-mono"
               data-testid="api-token-input"
             />
           </label>
-          {error && <p className="text-sm text-red-400" role="alert">{error}</p>}
-          <button
+          {error && <p className="eggw-form-error" role="alert">{error}</p>}
+          <Button
+            variant="primary"
             type="submit"
             disabled={checking}
-            className="w-full rounded px-3 py-2 text-sm font-medium disabled:opacity-50"
-            style={{ background: "var(--accent)", color: "white" }}
+            className="w-full"
           >
             {checking ? "Checking…" : "Connect"}
-          </button>
+          </Button>
         </form>
-      </div>
+      </main>
     );
   }
 
