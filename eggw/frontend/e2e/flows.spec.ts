@@ -51,7 +51,7 @@ async function ensureThread(page: Page): Promise<void> {
 
 async function showSystemPanel(page: Page): Promise<void> {
   if (await page.getByText('System Log', { exact: true }).isVisible()) return;
-  await page.getByRole('button', { name: 'Show sidebar' }).click();
+  await page.getByRole('button', { name: 'Show system panel' }).click();
   await expect(page.getByText('System Log', { exact: true })).toBeVisible();
 }
 
@@ -1780,8 +1780,7 @@ test.describe('Settings and Controls', () => {
   });
 
   test('shows model selector', async ({ page }) => {
-    await expect(page.locator('text=Model:')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText('Model:', { exact: true }).locator('..').getByRole('combobox')).toBeVisible();
+    await expect(page.getByLabel('Model')).toBeVisible({ timeout: 5000 });
   });
 
   test('shows token stats', async ({ page }) => {

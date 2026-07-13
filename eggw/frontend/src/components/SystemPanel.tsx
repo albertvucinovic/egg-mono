@@ -8,6 +8,7 @@ import { fetchTokenStats, fetchThread, fetchThreadChildren, fetchThreadState, fe
 import { useAppStore } from "@/lib/store";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
+import { Button, IconButton, StatusChip, type StatusTone } from "@/components/ui/primitives";
 
 interface SystemPanelProps {
   showBorders?: boolean;
@@ -42,20 +43,20 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
   });
 
   // Helper to get state display info
-  const getStateDisplay = (state: string) => {
+  const getStateDisplay = (state: string): { label: string; tone: StatusTone; pulse: boolean } => {
     switch (state) {
       case "running":
-        return { label: "Running", color: "bg-green-500", pulse: true };
+        return { label: "Running", tone: "success", pulse: true };
       case "waiting_tool_approval":
-        return { label: "Waiting Approval", color: "bg-yellow-500", pulse: true };
+        return { label: "Waiting Approval", tone: "warning", pulse: true };
       case "waiting_output_approval":
-        return { label: "Output Approval", color: "bg-purple-500", pulse: true };
+        return { label: "Output Approval", tone: "special", pulse: true };
       case "waiting_user":
-        return { label: "Ready", color: "bg-blue-500", pulse: false };
+        return { label: "Ready", tone: "info", pulse: false };
       case "paused":
-        return { label: "Paused", color: "bg-gray-500", pulse: false };
+        return { label: "Paused", tone: "neutral", pulse: false };
       default:
-        return { label: state, color: "bg-gray-500", pulse: false };
+        return { label: state, tone: "neutral", pulse: false };
     }
   };
 
@@ -93,7 +94,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Thread info - scrollable if needed */}
       {currentThreadId && (
-        <div className={`p-3 overflow-auto max-h-[50%] flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
+        <div className={clsx("eggw-system-section p-3 overflow-auto max-h-[50%] flex-shrink-0", showBorders && "eggw-system-section-emphasized")}>
           <h3 className="text-sm font-medium mb-2">Thread Info</h3>
 
           <div className="text-xs space-y-1">
@@ -106,23 +107,9 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
             {threadState && (
               <div className="flex justify-between items-center">
                 <span style={{ color: "var(--muted)" }}>Status:</span>
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={clsx(
-                      "w-2 h-2 rounded-full",
-                      getStateDisplay(threadState.state).color,
-                      getStateDisplay(threadState.state).pulse && "animate-pulse"
-                    )}
-                  />
-                  <span className={clsx(
-                    threadState.state === "running" && "text-green-400",
-                    threadState.state === "waiting_tool_approval" && "text-yellow-400",
-                    threadState.state === "waiting_output_approval" && "text-purple-400",
-                    threadState.state === "waiting_user" && "text-blue-400",
-                  )}>
-                    {getStateDisplay(threadState.state).label}
-                  </span>
-                </div>
+                <StatusChip tone={getStateDisplay(threadState.state).tone} className={getStateDisplay(threadState.state).pulse ? "eggw-status-pulse" : undefined}>
+                  {getStateDisplay(threadState.state).label}
+                </StatusChip>
               </div>
             )}
 
@@ -137,14 +124,15 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
 
             {/* Parent */}
             {currentThreadData?.parent_id && (
-              <button
+              <Button
+                variant="ghost"
                 onClick={() => navigateToThread(currentThreadData.parent_id!)}
                 className="flex items-center gap-1 w-full px-2 py-1 text-left rounded"
                 style={{ color: "var(--accent)" }}
               >
                 <ArrowUp className="w-3 h-3" />
                 Parent: {currentThreadData.parent_id.slice(-8)}
-              </button>
+              </Button>
             )}
 
             {/* Children */}
@@ -153,7 +141,8 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
                 <div style={{ color: "var(--muted)" }} className="mb-1">Children ({children.length}):</div>
                 <div className="max-h-24 overflow-auto space-y-0.5">
                   {children.map((child: any) => (
-                    <button
+                    <Button
+                      variant="ghost"
                       key={child.id}
                       onClick={() => navigateToThread(child.id)}
                       className="flex items-center gap-1 w-full px-2 py-0.5 text-left rounded"
@@ -161,7 +150,7 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
                     >
                       <ArrowDown className="w-3 h-3" />
                       {child.name || child.id.slice(-8)}
-                    </button>
+                    </Button>
                   ))}
                 </div>
               </div>
@@ -177,13 +166,14 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
             <div className="mt-3 text-xs">
               <div className="flex justify-between items-center mb-1">
                 <span style={{ color: "var(--muted)" }}>Token Stats</span>
-                <button
+                <IconButton
                   onClick={() => refetchStats()}
-                  className="p-0.5 rounded"
-                  style={{ color: "var(--muted)" }}
+                  aria-label="Refresh token stats"
+                  title="Refresh token stats"
+                  className="eggw-icon-button-compact"
                 >
                   <RefreshCw className="w-3 h-3" />
-                </button>
+                </IconButton>
               </div>
               <div className="grid grid-cols-2 gap-1" style={{ color: "var(--foreground)" }}>
                 <span>Input:</span>
@@ -217,30 +207,22 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
       )}
 
       {/* System log header */}
-      <div className={`p-2 flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
+      <div className={clsx("eggw-system-section p-2 flex items-center justify-between flex-shrink-0", showBorders && "eggw-system-section-emphasized")}>
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">System Log</span>
           {threadSettings && (
-            <span
-              className="text-xs px-1.5 py-0.5 rounded border"
-              style={{
-                color: threadSettings.auto_approval ? "#fca5a5" : "#86efac",
-                borderColor: threadSettings.auto_approval ? "#7f1d1d" : "#14532d",
-                background: threadSettings.auto_approval ? "rgba(127,29,29,0.25)" : "rgba(20,83,45,0.25)",
-              }}
-            >
+            <StatusChip tone={threadSettings.auto_approval ? "warning" : "success"}>
               Autoapproval[{threadSettings.auto_approval ? "On" : "Off"}]
-            </span>
+            </StatusChip>
           )}
         </div>
-        <button
+        <IconButton
           onClick={clearSystemLogs}
-          className="p-1 rounded"
-          style={{ color: "var(--muted)" }}
           title="Clear logs"
+          aria-label="Clear logs"
         >
           <Trash2 className="w-4 h-4" />
-        </button>
+        </IconButton>
       </div>
 
       {/* Log entries */}

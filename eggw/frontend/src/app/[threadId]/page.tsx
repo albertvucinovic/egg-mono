@@ -13,13 +13,17 @@ import { useAppStore } from "@/lib/store";
 import { useSSE } from "@/hooks/useSSE";
 import { createThread, openThread, interruptThread, fetchThread, executeCommand, fetchSandboxStatus, SandboxStatus, fetchModels, fetchThreadSettings, setThreadModel, setAutoApproval, fetchTokenStats } from "@/lib/api";
 import { useMutation } from "@tanstack/react-query";
-import { PanelRight } from "lucide-react";
+import { CircleHelp, PanelRight, SlidersHorizontal } from "lucide-react";
 import clsx from "clsx";
 import { formatTokenCount } from "@/lib/tps";
 import { transcriptQueryKey } from "@/lib/transcript";
 import { streamingBufferForThread } from "@/lib/streamingBuffer";
 import { createClientOperationId } from "@/lib/messageOperations";
 import { clearLiveToolsForThread } from "@/lib/liveToolContinuity";
+import { HelpDialog } from "@/components/HelpDialog";
+import { OverlayPanel } from "@/components/ui/OverlayPanel";
+import { ControlGroup, IconButton, Select, StatusChip, Switch } from "@/components/ui/primitives";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 
 export default function ThreadPage() {
   const params = useParams();
@@ -43,6 +47,11 @@ export default function ThreadPage() {
   const setDisplayVerbosity = useAppStore((state) => state.setDisplayVerbosity);
   const setComposerDraft = useAppStore((state) => state.setComposerDraft);
   const [showHelp, setShowHelp] = useState(false);
+  const [showMobileControls, setShowMobileControls] = useState(false);
+  const isDesktopRail = useMediaQuery("(min-width: 1280px)");
+  const closeSystemPanel = useCallback(() => {
+    if (useAppStore.getState().panelVisibility.system) togglePanel("system");
+  }, [togglePanel]);
   const appendStagedAttachments = useAppStore((state) => state.appendStagedAttachments);
   const stageAttachment = useCallback((attachment: import("@/lib/contentParts").AttachmentContentPart) => {
     appendStagedAttachments(threadId, [attachment]);
@@ -167,6 +176,8 @@ export default function ThreadPage() {
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     // Escape - Cancel streaming or blur input
     if (e.key === "Escape") {
+      // Modal surfaces own Escape so dismissing them never also interrupts a stream.
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const target = e.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") {
         target.blur();
@@ -287,272 +298,149 @@ export default function ThreadPage() {
   }, [handleKeyDown]);
 
   return (
-    <main className="eggw-shell h-screen flex flex-col overflow-hidden">
-      {/* Help Modal */}
-      {showHelp && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => setShowHelp(false)}
-        >
-          <div
-            className="border rounded-lg p-6 max-w-md"
-            style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="text-lg font-semibold mb-4">Keyboard Shortcuts</h2>
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>Cancel streaming</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Esc</kbd>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>New thread</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+N</kbd>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>Spawn child thread</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+S</kbd>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>Clear input</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+E</kbd>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>Paste clipboard</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>Ctrl+P</kbd>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>Focus input</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>i</kbd>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>Start command</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>/</kbd>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: "var(--muted)" }}>Show this help</span>
-                <kbd className="px-2 py-0.5 rounded text-xs" style={{ background: "var(--code-bg)" }}>?</kbd>
-              </div>
+    <main className="eggw-shell flex flex-col overflow-hidden">
+      <HelpDialog open={showHelp} onClose={() => setShowHelp(false)} />
+
+      {/* Responsive application header */}
+      <header className="eggw-topbar" data-overlay-background>
+        <div className="eggw-topbar-primary">
+          <div className="eggw-brand-group">
+            <h1 className="eggw-brand">eggw</h1>
+            <div className="eggw-thread-identity">
+              <span className="eggw-eyebrow">Thread</span>
+              <span className="eggw-thread-name">
+                {currentThreadData?.name || (threadId ? threadId.slice(-8) : "No thread selected")}
+              </span>
+              {currentThreadData?.name && threadId && <span className="eggw-thread-id">{threadId.slice(-8)}</span>}
             </div>
-            <div className="mt-4 pt-4 border-t border-[var(--panel-border)] text-sm" style={{ color: "var(--muted)" }}>
-              <p className="font-medium mb-2" style={{ color: "var(--foreground)" }}>Commands:</p>
-              <p>/model, /updateAllModels, /spawnChildThread, /spawnAutoApprovedChildThread</p>
-              <p>/skills, /skill</p>
-              <p>/newThread, /threads, /thread, /rename, /waitForThreads</p>
-              <p>/parentThread, /listChildren, /deleteThread, /duplicateThread</p>
-              <p>/context, /compact, /compactWithSummary, /setAutoCompactThreshold</p>
-              <p>/toggleAutoApproval, /toolsOn, /toolsOff, /toolsStatus, /toolInfo</p>
-              <p>/disableTool, /enableTool, /toolsSecrets</p>
-              <p>/toggleSandboxing, /setSandboxConfiguration, /getSandboxingConfig</p>
-              <p>/sessionStatus, /sessionOn, /sessionOff, /sessionStop, /sessionReset</p>
-              <p>/sessionCleanup, /pythonRepl, /bashRepl</p>
-              <p>/setContextLimit, /setThreadPriority, /authStatus, /login, /logout</p>
-              <p>/editor, /editAnswer, /togglePanel, /toggleBorders, /enterMode, /theme, /cost, /reload, /quit</p>
-              <p>/startSearxng, /stopSearxng</p>
-              <p>$ cmd - Shell, $$ cmd - Hidden shell</p>
-            </div>
-            <button
-              onClick={() => setShowHelp(false)}
-              className="mt-4 w-full py-2 rounded"
-              style={{ background: "var(--accent)", color: "var(--background)" }}
-            >
-              Close
-            </button>
           </div>
-        </div>
-      )}
-
-      {/* Header - Two rows */}
-      <header className="eggw-topbar border-b border-[var(--panel-border)]">
-        {/* Row 1: Thread info and sidebar toggle */}
-        <div className="mx-auto flex min-h-10 w-full max-w-[var(--app-shell-max-width)] items-center gap-3 px-4 py-1 border-b border-[var(--panel-border)]">
-          <h1 className="rounded-full px-2.5 py-1 text-sm font-semibold tracking-tight" style={{ background: "color-mix(in srgb, var(--accent) 14%, transparent)", color: "var(--heading-color)" }}>eggw</h1>
-          {threadId && (
-            <span className="min-w-0 text-sm">
-              <span style={{ color: "var(--muted)" }}>Thread:</span>{" "}
-              {currentThreadData?.name ? (
-                <>
-                  <span style={{ color: "var(--foreground)" }}>{currentThreadData.name}</span>
-                  <span style={{ color: "var(--muted)" }} className="ml-1">({threadId.slice(-8)})</span>
-                </>
-              ) : (
-                <span style={{ color: "var(--muted)" }}>{threadId.slice(-8)}</span>
-              )}
-            </span>
-          )}
-          {!threadId && (
-            <span className="text-sm" style={{ color: "var(--muted)" }}>No thread selected</span>
-          )}
-
-          {/* Context length */}
           {threadId && tokenStats && (
-            <span className="hidden sm:inline text-xs" style={{ color: "var(--muted)" }}>
-              Context: <span style={{ color: "var(--foreground)" }}>{contextHeaderText}</span>
-            </span>
+            <div className="eggw-header-metric" aria-label={`Context ${contextHeaderText}`}>
+              <span>Context</span><strong>{contextHeaderText}</strong>
+            </div>
           )}
-
-          <div className="ml-auto flex items-center gap-2">
-            {/* Help button */}
-            <button
-              onClick={() => setShowHelp(true)}
-              className="text-xs px-1.5 py-0.5"
-              style={{ color: "var(--muted)" }}
-              title="Help (?)"
+          <div className="eggw-topbar-actions">
+            <IconButton onClick={() => setShowHelp(true)} aria-label="Help" title="Help (?)">
+              <CircleHelp className="h-5 w-5" aria-hidden="true" />
+            </IconButton>
+            <IconButton
+              onClick={() => setShowMobileControls(true)}
+              aria-label="Open settings"
+              title="Open settings"
+              className="eggw-mobile-settings-trigger"
             >
-              ?
-            </button>
-
-            {/* Sidebar toggle */}
-            <button
+              <SlidersHorizontal className="h-5 w-5" aria-hidden="true" />
+            </IconButton>
+            <IconButton
               onClick={() => togglePanel("system")}
+              aria-label={panelVisibility.system ? "Hide system panel" : "Show system panel"}
               title={panelVisibility.system ? "Hide sidebar" : "Show sidebar"}
-              className={clsx(
-                "p-1 rounded transition-colors",
-                panelVisibility.system
-                  ? "bg-[var(--accent)] text-[var(--background)]"
-                  : "text-[var(--muted)] hover:text-[var(--foreground)]"
-              )}
+              aria-expanded={panelVisibility.system}
+              aria-controls="system-panel"
+              variant={panelVisibility.system ? "primary" : "secondary"}
             >
-              <PanelRight className="w-4 h-4" />
-            </button>
+              <PanelRight className="h-5 w-5" aria-hidden="true" />
+            </IconButton>
           </div>
         </div>
 
-        {/* Row 2: Controls */}
-        <div className="mx-auto flex min-h-9 w-full max-w-[var(--app-shell-max-width)] items-center gap-3 overflow-x-auto px-4 py-1.5 text-xs">
-          {/* Model selector */}
+        <div className="eggw-topbar-controls" aria-label="Thread settings">
           {threadId && modelsData?.models && (
-            <div className="flex items-center gap-1.5">
-              <span style={{ color: "var(--muted)" }}>Model:</span>
-              <select
+            <ControlGroup className="eggw-model-control">
+              <label htmlFor="thread-model">Model</label>
+              <Select
+                id="thread-model"
                 value={currentModelKey}
-                onChange={(e) => {
-                  if (threadId && e.target.value) {
-                    modelMutation.mutate({ threadId, operationId: createClientOperationId("model"), modelKey: e.target.value });
+                onChange={(event) => {
+                  if (threadId && event.target.value) {
+                    modelMutation.mutate({ threadId, operationId: createClientOperationId("model"), modelKey: event.target.value });
                   }
                 }}
                 disabled={modelMutation.isPending}
-                className="eggw-control border rounded-lg px-2 py-1 text-xs disabled:opacity-50"
-                style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
               >
-                {!currentModelKey && (
-                  <option value="" disabled>
-                    Loading model...
-                  </option>
-                )}
-                {currentModelKey && !hasCurrentModelOption && (
-                  <option value={currentModelKey}>
-                    {currentModelKey}
-                  </option>
-                )}
-                {modelOptions.map((m: { key: string }) => (
-                  <option key={m.key} value={m.key}>
-                    {m.key}
-                  </option>
-                ))}
-              </select>
-            </div>
+                {!currentModelKey && <option value="" disabled>Loading model...</option>}
+                {currentModelKey && !hasCurrentModelOption && <option value={currentModelKey}>{currentModelKey}</option>}
+                {modelOptions.map((model: { key: string }) => <option key={model.key} value={model.key}>{model.key}</option>)}
+              </Select>
+            </ControlGroup>
           )}
-
-          {/* Auto-approval toggle */}
           {threadId && (
-            <div className="flex items-center gap-1.5">
-              <span style={{ color: "var(--muted)" }}>Auto:</span>
-              <button
+            <ControlGroup>
+              <span>Auto-approve</span>
+              <Switch
+                checked={Boolean(threadSettings?.auto_approval)}
                 onClick={() => autoApprovalMutation.mutate({ threadId, operationId: createClientOperationId("auto-approval"), enabled: !threadSettings?.auto_approval })}
                 disabled={autoApprovalMutation.isPending}
+                label={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"}
                 title={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"}
-                className={clsx(
-                  "relative w-8 h-4 rounded-full transition-colors disabled:opacity-50",
-                  threadSettings?.auto_approval ? "bg-green-600" : "bg-gray-600"
-                )}
-              >
-                <span
-                  className={clsx(
-                    "absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform",
-                    threadSettings?.auto_approval ? "left-4" : "left-0.5"
-                  )}
-                />
-              </button>
-            </div>
+              />
+            </ControlGroup>
           )}
-
-          {/* Sandbox toggle with status */}
           {threadId && sandboxStatus && (
-            <div className="flex items-center gap-1.5">
-              <span
-                className={clsx(
-                  "px-1.5 py-0.5 rounded border cursor-default",
-                  sandboxStatus.effective
-                    ? "bg-green-900/50 text-green-300 border-green-700"
-                    : sandboxStatus.enabled
-                    ? "bg-yellow-900/50 text-yellow-300 border-yellow-700"
-                    : "bg-red-900/30 text-red-400 border-red-800"
-                )}
-                title={
-                  sandboxStatus.effective
-                    ? `Sandbox ON (${sandboxStatus.provider || 'unknown'})`
-                    : sandboxStatus.enabled
-                    ? `Enabled but not effective: ${sandboxStatus.warning || 'provider unavailable'}`
-                    : "Sandbox OFF"
-                }
+            <ControlGroup>
+              <StatusChip
+                tone={sandboxStatus.effective ? "success" : sandboxStatus.enabled ? "warning" : "danger"}
+                title={sandboxStatus.effective ? `Sandbox ON (${sandboxStatus.provider || "unknown"})` : sandboxStatus.enabled ? `Enabled but not effective: ${sandboxStatus.warning || "provider unavailable"}` : "Sandbox OFF"}
               >
-                Sandbox[{sandboxStatus.effective ? "ON" : sandboxStatus.enabled ? "!" : "OFF"}]
-              </span>
-              <button
+                Sandbox {sandboxStatus.effective ? "on" : sandboxStatus.enabled ? "limited" : "off"}
+              </StatusChip>
+              <Switch
+                checked={sandboxStatus.enabled}
                 onClick={() => sandboxMutation.mutate({ threadId, operationId: createClientOperationId("sandbox") })}
-                disabled={sandboxMutation.isPending || sandboxStatus?.user_control_enabled === false}
-                title={sandboxStatus?.user_control_enabled === false ? "User sandbox control is disabled" : "Toggle sandboxing"}
-                className={clsx(
-                  "relative w-8 h-4 rounded-full transition-colors disabled:opacity-50",
-                  sandboxStatus.enabled ? "bg-green-600" : "bg-gray-600"
-                )}
-              >
-                <span
-                  className={clsx(
-                    "absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform",
-                    sandboxStatus.enabled ? "left-4" : "left-0.5"
-                  )}
-                />
-              </button>
-            </div>
+                disabled={sandboxMutation.isPending || sandboxStatus.user_control_enabled === false}
+                label="Toggle sandboxing"
+                title={sandboxStatus.user_control_enabled === false ? "User sandbox control is disabled" : "Toggle sandboxing"}
+              />
+            </ControlGroup>
           )}
-
-
-          {/* Display verbosity selector */}
           {threadId && (
-            <div className="flex items-center gap-1.5">
-              <span style={{ color: "var(--muted)" }}>Verbosity:</span>
-              <select
-                value={displayVerbosity}
-                onChange={(e) => setDisplayVerbosity(e.target.value as "max" | "medium" | "min")}
-                className="eggw-control border rounded-lg px-2 py-1 text-xs"
-                style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-                title="Transcript display verbosity"
-              >
-                <option value="max">max</option>
-                <option value="medium">medium</option>
-                <option value="min">min</option>
-              </select>
-            </div>
+            <ControlGroup>
+              <label htmlFor="display-verbosity">Verbosity</label>
+              <Select id="display-verbosity" value={displayVerbosity} onChange={(event) => setDisplayVerbosity(event.target.value as "max" | "medium" | "min")} title="Transcript display verbosity">
+                <option value="max">max</option><option value="medium">medium</option><option value="min">min</option>
+              </Select>
+            </ControlGroup>
           )}
-
-          {/* Cost display */}
           {threadId && tokenStats && (
-            <div className="flex items-center gap-1.5">
-              <span style={{ color: "var(--muted)" }}>Cost:</span>
-              <span style={{ color: "var(--reasoning-border)" }} className="font-medium">
-                {costHeaderText}
-              </span>
-            </div>
+            <div className="eggw-header-metric eggw-cost-metric"><span>Cost</span><strong>{costHeaderText}</strong></div>
           )}
         </div>
       </header>
 
+      <OverlayPanel
+        open={showMobileControls}
+        onClose={() => setShowMobileControls(false)}
+        title="Thread settings"
+        description="Model, approval, sandbox, display, and usage settings."
+        variant="drawer"
+        closeLabel="Close settings"
+        testId="settings-drawer"
+        returnFocusSelector="[aria-label='Open settings']"
+      >
+        <div className="eggw-settings-drawer-content">
+          {threadId && modelsData?.models && (
+            <ControlGroup className="eggw-drawer-control">
+              <label htmlFor="drawer-thread-model">Model</label>
+              <Select id="drawer-thread-model" value={currentModelKey} onChange={(event) => {
+                if (threadId && event.target.value) modelMutation.mutate({ threadId, operationId: createClientOperationId("model"), modelKey: event.target.value });
+              }} disabled={modelMutation.isPending}>
+                {!currentModelKey && <option value="" disabled>Loading model...</option>}
+                {currentModelKey && !hasCurrentModelOption && <option value={currentModelKey}>{currentModelKey}</option>}
+                {modelOptions.map((model: { key: string }) => <option key={model.key} value={model.key}>{model.key}</option>)}
+              </Select>
+            </ControlGroup>
+          )}
+          <div className="eggw-drawer-setting"><span>Auto-approval</span><Switch checked={Boolean(threadSettings?.auto_approval)} onClick={() => threadId && autoApprovalMutation.mutate({ threadId, operationId: createClientOperationId("auto-approval"), enabled: !threadSettings?.auto_approval })} disabled={autoApprovalMutation.isPending} label={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"} /></div>
+          {sandboxStatus && <div className="eggw-drawer-setting"><StatusChip tone={sandboxStatus.effective ? "success" : sandboxStatus.enabled ? "warning" : "danger"}>Sandbox {sandboxStatus.effective ? "on" : sandboxStatus.enabled ? "limited" : "off"}</StatusChip><Switch checked={sandboxStatus.enabled} onClick={() => threadId && sandboxMutation.mutate({ threadId, operationId: createClientOperationId("sandbox") })} disabled={sandboxMutation.isPending || sandboxStatus.user_control_enabled === false} label="Toggle sandboxing" /></div>}
+          <ControlGroup className="eggw-drawer-control"><label htmlFor="drawer-verbosity">Verbosity</label><Select id="drawer-verbosity" value={displayVerbosity} onChange={(event) => setDisplayVerbosity(event.target.value as "max" | "medium" | "min")}><option value="max">max</option><option value="medium">medium</option><option value="min">min</option></Select></ControlGroup>
+          {tokenStats && <div className="eggw-drawer-usage"><span>Context <strong>{contextHeaderText}</strong></span><span>Cost <strong>{costHeaderText}</strong></span></div>}
+        </div>
+      </OverlayPanel>
+
       {/* Main content */}
       <div className="eggw-main-grid flex min-h-0 flex-1 overflow-hidden">
         {/* Center - Chat */}
-        <div className={clsx("eggw-chat-card min-w-0 flex-1 flex flex-col overflow-hidden", !showBorders && "eggw-chrome-borderless")}>
+        <div className={clsx("eggw-chat-card min-w-0 flex-1 flex flex-col overflow-hidden", !showBorders && "eggw-chrome-borderless")} data-overlay-background>
           {panelVisibility.children && <ChildrenPanel showBorders={showBorders} />}
           {panelVisibility.chat && (
             <ChatPanel
@@ -567,11 +455,23 @@ export default function ThreadPage() {
         </div>
 
         {/* Right sidebar - System log */}
-        {panelVisibility.system && (
-          <div className={clsx("eggw-side-card fixed bottom-4 right-4 top-24 z-40 flex w-[min(22rem,calc(100vw-2rem))] flex-col overflow-hidden xl:static xl:z-auto xl:w-80", !showBorders && "eggw-chrome-borderless")}>
+        {panelVisibility.system && isDesktopRail && (
+          <aside id="system-panel" className={clsx("eggw-side-card eggw-system-rail", !showBorders && "eggw-chrome-borderless")} aria-label="System panel" data-overlay-background>
             <SystemPanel showBorders={showBorders} />
-          </div>
+          </aside>
         )}
+        <OverlayPanel
+          open={panelVisibility.system && !isDesktopRail}
+          onClose={closeSystemPanel}
+          title="System panel"
+          description="Thread information, usage, and system activity."
+          variant="drawer"
+          closeLabel="Close system panel"
+          testId="system-drawer"
+          returnFocusSelector="[aria-controls='system-panel']"
+        >
+          <div id="system-panel" className="h-full min-h-0"><SystemPanel showBorders={showBorders} /></div>
+        </OverlayPanel>
       </div>
       <EditAnswerModal />
     </main>
