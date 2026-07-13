@@ -1187,8 +1187,12 @@ test.describe('Scroll intent state machines', () => {
       filler.dataset.testid = 'top-demand-filler';
       filler.style.height = '900px';
       element.append(filler);
-      element.scrollTop = 500;
+      element.scrollTop = 0;
     });
+    await page.waitForTimeout(100);
+    expect(messageRequests).toBe(1);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+    await chat.evaluate((element) => { element.scrollTop = 500; });
     await expect.poll(() => chat.evaluate((element) => element.scrollTop)).toBeGreaterThan(240);
     await chat.hover();
 

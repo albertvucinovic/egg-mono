@@ -1338,6 +1338,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const historyDemandRef = useRef<HistoryDemandState>(IDLE_HISTORY_DEMAND);
   const historyDemandRunRef = useRef<(() => void) | null>(null);
   const historyBoundaryRafRef = useRef<number | null>(null);
+  const pendingHistoryBoundaryRef = useRef<{ token: number; scrollport: HTMLDivElement } | null>(null);
   const historyBoundaryTokenRef = useRef(0);
   const historyOperationRef = useRef(0);
   const pendingHistoryAnchorRef = useRef<{
@@ -1584,31 +1585,40 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     requestAnimationFrame(() => settleHistoryDemand(pending.operation));
   }, [renderStartMessageId, renderedTranscript.startIndex, restoreHistoryAnchor, settleHistoryDemand]);
 
+  const consumeHistoryBoundary = useCallback((token: number, scrollport: HTMLDivElement) => {
+    const pending = pendingHistoryBoundaryRef.current;
+    if (!pending || pending.token !== token || pending.scrollport !== scrollport) return;
+    pendingHistoryBoundaryRef.current = null;
+    historyBoundaryTokenRef.current += 1;
+    if (historyBoundaryRafRef.current !== null) {
+      cancelAnimationFrame(historyBoundaryRafRef.current);
+      historyBoundaryRafRef.current = null;
+    }
+    demandOlderHistory();
+  }, [demandOlderHistory]);
+
   const scheduleHistoryBoundaryCheck = useCallback((scrollport: HTMLDivElement) => {
     const token = historyBoundaryTokenRef.current + 1;
     historyBoundaryTokenRef.current = token;
+    pendingHistoryBoundaryRef.current = { token, scrollport };
     if (historyBoundaryRafRef.current !== null) cancelAnimationFrame(historyBoundaryRafRef.current);
-    const check = (remainingFrames: number) => {
-      historyBoundaryRafRef.current = requestAnimationFrame(() => {
-        historyBoundaryRafRef.current = null;
-        if (historyBoundaryTokenRef.current !== token || scrollRef.current !== scrollport) return;
-        if (scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
-          historyBoundaryTokenRef.current += 1;
-          demandOlderHistory();
-          return;
-        }
-        if (remainingFrames > 1) check(remainingFrames - 1);
-      });
-    };
-    // Default wheel/key scrolling may be applied after the event's first RAF.
-    // Keep this input-owned check fenced for a few frames, never from onScroll.
-    check(3);
-  }, [demandOlderHistory]);
+    // The scroll event services a moving input. This single input-owned frame is
+    // solely the fallback for an already-clamped gesture that emits no scroll.
+    historyBoundaryRafRef.current = requestAnimationFrame(() => {
+      historyBoundaryRafRef.current = null;
+      if (scrollRef.current === scrollport && scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
+        consumeHistoryBoundary(token, scrollport);
+      }
+    });
+  }, [consumeHistoryBoundary]);
 
   const handleScroll = useCallback(() => {
-    // Geometry changes are not user intent. Wheel/touch/key/scrollbar handlers
-    // own FOLLOWING/DETACHED transitions.
-  }, []);
+    const pending = pendingHistoryBoundaryRef.current;
+    if (!pending || scrollRef.current !== pending.scrollport) return;
+    if (pending.scrollport.scrollTop <= TRANSCRIPT_SCROLLBACK_THRESHOLD_PX) {
+      consumeHistoryBoundary(pending.token, pending.scrollport);
+    }
+  }, [consumeHistoryBoundary]);
 
   const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
     if (nestedScrollportConsumesWheel(event.target, event.currentTarget, event.deltaY)) return;
@@ -1929,6 +1939,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
     pendingHistoryAnchorRef.current = null;
     historyOperationRef.current += 1;
     historyBoundaryTokenRef.current += 1;
+    pendingHistoryBoundaryRef.current = null;
     if (historyBoundaryRafRef.current !== null) {
       cancelAnimationFrame(historyBoundaryRafRef.current);
       historyBoundaryRafRef.current = null;
