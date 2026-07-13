@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
+import eggthreads as ts
 
 
 class TestComputePendingPrompt:
@@ -219,22 +221,56 @@ class TestCancelPendingToolsOnInterrupt:
 class TestOutputApproval:
     """Tests for output approval workflow."""
 
-    def test_output_whole_on_y(self, egg_app, monkeypatch):
-        """Should handle 'y' for output approval."""
-        egg_app._pending_prompt = {
-            "kind": "output",
-            "tc_ids": ["tc_001"],
-            "full_output": "Full long output text",
-            "preview": "Preview...",
-        }
+    def test_output_whole_on_y_routes_long_output_to_artifact(self, egg_app, monkeypatch, tmp_path):
+        """A Terminal ``y`` cannot bypass canonical long-output routing."""
+        monkeypatch.chdir(tmp_path)
+        tid = egg_app.current_thread
+        tcid = "tc-terminal-long-whole"
+        full_output = "x" * 120_000
+        ts.append_message(
+            egg_app.db,
+            tid,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {"id": tcid, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                ]
+            },
+        )
+        egg_app.db.append_event(
+            "terminal-long-approve",
+            tid,
+            "tool_call.approval",
+            {"tool_call_id": tcid, "decision": "granted"},
+        )
+        egg_app.db.append_event(
+            "terminal-long-start",
+            tid,
+            "tool_call.execution_started",
+            {"tool_call_id": tcid},
+        )
+        egg_app.db.append_event(
+            "terminal-long-finish",
+            tid,
+            "tool_call.finished",
+            {"tool_call_id": tcid, "reason": "success", "output": full_output},
+        )
+        egg_app._pending_prompt = {"kind": "output", "tool_call_ids": [tcid]}
+        egg_app.input_panel.editor.editor.set_text("y")
 
-        # Complex mocking needed due to local imports - just verify behavior
-        try:
-            result = egg_app.handle_pending_approval_answer("y", source="test")
-            assert result is True or egg_app._pending_prompt == {}
-        except Exception:
-            # May fail if approval record doesn't exist in db
-            pass
+        assert egg_app.handle_pending_approval_answer("y", source="test") is True
+
+        state = ts.build_tool_call_states(egg_app.db, tid)[tcid]
+        payload = dict(state.last_output_approval_payload or {})
+        assert state.state == "TC5"
+        assert payload["requested_decision"] == "whole"
+        assert payload["decision"] == "partial"
+        assert Path(payload["artifact_path"]).is_dir()
+        assert "read_long_tool_output(" in payload["preview"]
+        assert len(payload["preview"]) < len(full_output)
+        assert egg_app._pending_prompt == {}
+        assert egg_app.input_panel.get_text() == ""
 
     def test_output_omit_on_o(self, egg_app, monkeypatch):
         """Should handle 'o' for output omission."""

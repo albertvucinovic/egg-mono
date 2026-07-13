@@ -557,6 +557,25 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         if self._prev_viewport or self._live_lines or self._scrollback or self._stream_buffer:
             self._paint(self._viewport_w or self._term_width())
 
+    def reset_scrollback_source(
+        self,
+        source: Optional[FullScreenScrollbackSource],
+    ) -> None:
+        """Atomically reset local history and install *source* without painting.
+
+        Transcript redraws used to scroll, clear, and replace the source through
+        three independently painting operations. Besides redundant work, that
+        briefly rendered the old source under the new display settings. This
+        canonical reset mutates the history model as one operation; the caller's
+        subsequent :meth:`update` performs the single final paint.
+        """
+        self._scroll_offset = 0
+        self._scrollback.clear()
+        self._scrollback_source = source
+        self._source_row_count_by_width.clear()
+        self._history_source_clean_paint_key = None
+        self._prev_viewport = []
+
     def print_above(self, *objects, **kwargs) -> None:
         """Append content to the scrollback model and repaint.
 

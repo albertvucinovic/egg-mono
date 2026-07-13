@@ -97,6 +97,55 @@ def test_runner_output_policy_artifacts_long_output_and_read_tool_reads_chunk(tm
     assert read.endswith("x" * 40_000)
 
 
+def test_assistant_tool_long_output_uses_artifact_before_publication(tmp_path, monkeypatch):
+    monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    tcid = "assistant-long-output"
+    ts.append_message(
+        db,
+        tid,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tcid,
+                    "type": "function",
+                    "function": {"name": "long", "arguments": "{}"},
+                }
+            ]
+        },
+    )
+    ts.approve_tool_calls_for_thread(
+        db,
+        tid,
+        decision="granted",
+        tool_call_id=tcid,
+    )
+
+    tools = ToolRegistry()
+    full_output = "a" * 120_000
+    tools.register("long", "Long", {"type": "object", "properties": {}}, lambda args: full_output)
+    runner = ts.ThreadRunner(db, tid, llm=object(), tools=tools)
+
+    assert asyncio.run(runner.run_once()) is True
+    state = ts.build_tool_call_states(db, tid)[tcid]
+    assert state.state == "TC5"
+    payload = dict(state.last_output_approval_payload or {})
+    assert payload["decision"] == "partial"
+    assert Path(payload["artifact_path"]).is_dir()
+    assert "read_long_tool_output(" in payload["preview"]
+
+    assert asyncio.run(runner.run_once()) is True
+    tool_message = _latest_payload(db, tid, "msg.create", tcid)
+    assert tool_message["role"] == "tool"
+    assert len(tool_message["content"]) < len(full_output)
+    assert "read_long_tool_output(" in tool_message["content"]
+
+
 def test_runner_artifacts_large_python_stdout(tmp_path, monkeypatch):
     monkeypatch.delenv("EGG_OUTPUT_OPTIMIZER", raising=False)
     monkeypatch.chdir(tmp_path)

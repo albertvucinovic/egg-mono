@@ -24,24 +24,39 @@ class DefaultOutputPolicy:
         safe_output = sanitize_terminal_text(output)
         line_count = len(safe_output.splitlines())
         char_count = len(safe_output)
+        metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+
+        def _count(name: str, fallback: int) -> int:
+            try:
+                return max(fallback, int(metadata.get(name, fallback)))
+            except (TypeError, ValueError):
+                return fallback
+
+        original_line_count = _count("original_line_count", len(output.splitlines()))
+        original_char_count = _count("original_char_count", len(output))
         channels = {
             OUTPUT_CHANNELS.raw: {"stored_in_finished_event": True},
             OUTPUT_CHANNELS.audit: {"line_count": line_count, "char_count": char_count},
         }
-        is_long = line_count > LONG_OUTPUT_LINE_THRESHOLD or char_count > LONG_OUTPUT_CHAR_THRESHOLD
+        is_long = (
+            line_count > LONG_OUTPUT_LINE_THRESHOLD
+            or char_count > LONG_OUTPUT_CHAR_THRESHOLD
+            or original_line_count > LONG_OUTPUT_LINE_THRESHOLD
+            or original_char_count > LONG_OUTPUT_CHAR_THRESHOLD
+        )
         if is_long:
             preview, saved = stash_tool_output_and_build_preview(
                 request.db,
                 request.thread_id,
                 request.tool_call_id,
                 safe_output,
-                original_char_count=request.metadata.get("original_char_count") if isinstance(request.metadata, dict) else None,
-                output_capped=bool(request.metadata.get("output_capped")) if isinstance(request.metadata, dict) else False,
+                original_char_count=original_char_count,
+                output_capped=bool(metadata.get("output_capped")),
             )
             reason = (
-                f"Auto: output too long ({line_count} lines, {char_count} chars) — stored as artifact"
+                f"Auto: output too long ({original_line_count} lines, {original_char_count} chars) — stored as artifact"
                 if saved
-                else f"Auto: output too long ({line_count} lines, {char_count} chars); artifact write failed, sending preview only"
+                else f"Auto: output too long ({original_line_count} lines, {original_char_count} chars); artifact write failed, sending preview only"
             )
             return OutputPublicationDecision(
                 "partial",

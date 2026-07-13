@@ -2491,6 +2491,115 @@ class TestToolCalls:
         assert metadata["original_char_count"] == len(full_output)
         assert chunk_path.read_text(encoding="utf-8").startswith("line 000")
 
+    @pytest.mark.parametrize("output_decision", [None, "whole"])
+    def test_long_whole_output_approval_uses_artifact(self, client, monkeypatch, tmp_path, output_decision):
+        from eggthreads import append_message, build_tool_call_states
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("eggw.routes.tools.ensure_scheduler_for", lambda tid: None)
+        thread_id = client.post("/api/threads", json={"name": "Long Whole Output"}).json()["id"]
+        tool_call_id = f"call-long-whole-web-{output_decision or 'default'}"
+        full_output = "w" * 120_000
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {"id": tool_call_id, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                ]
+            },
+        )
+        core_state.db.append_event(
+            f"approve-{tool_call_id}",
+            thread_id,
+            "tool_call.approval",
+            {"tool_call_id": tool_call_id, "decision": "granted"},
+        )
+        core_state.db.append_event(
+            f"start-{tool_call_id}",
+            thread_id,
+            "tool_call.execution_started",
+            {"tool_call_id": tool_call_id},
+        )
+        core_state.db.append_event(
+            f"finish-{tool_call_id}",
+            thread_id,
+            "tool_call.finished",
+            {"tool_call_id": tool_call_id, "reason": "success", "output": full_output},
+        )
+        body = {"tool_call_id": tool_call_id, "approved": True}
+        if output_decision is not None:
+            body["output_decision"] = output_decision
+
+        response = client.post(f"/api/threads/{thread_id}/tools/approve", json=body)
+
+        assert response.status_code == 200
+        payload = dict(build_tool_call_states(core_state.db, thread_id)[tool_call_id].last_output_approval_payload or {})
+        assert payload["requested_decision"] == "whole"
+        assert payload["decision"] == "partial"
+        assert Path(payload["artifact_path"]).is_dir()
+        assert "read_long_tool_output(" in payload["preview"]
+        assert len(payload["preview"]) < len(full_output)
+
+    def test_websocket_long_whole_output_approval_uses_artifact(self, client, monkeypatch, tmp_path):
+        from eggthreads import append_message, build_tool_call_states
+
+        monkeypatch.chdir(tmp_path)
+        thread_id = client.post("/api/threads", json={"name": "WebSocket Long Whole Output"}).json()["id"]
+        tool_call_id = "call-long-whole-websocket"
+        full_output = "s" * 120_000
+        append_message(
+            core_state.db,
+            thread_id,
+            "assistant",
+            "",
+            extra={
+                "tool_calls": [
+                    {"id": tool_call_id, "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                ]
+            },
+        )
+        core_state.db.append_event(
+            "approve-long-whole-websocket",
+            thread_id,
+            "tool_call.approval",
+            {"tool_call_id": tool_call_id, "decision": "granted"},
+        )
+        core_state.db.append_event(
+            "start-long-whole-websocket",
+            thread_id,
+            "tool_call.execution_started",
+            {"tool_call_id": tool_call_id},
+        )
+        core_state.db.append_event(
+            "finish-long-whole-websocket",
+            thread_id,
+            "tool_call.finished",
+            {"tool_call_id": tool_call_id, "reason": "success", "output": full_output},
+        )
+
+        with client.websocket_connect(
+            f"/ws/{thread_id}",
+            headers={"Authorization": client.headers["Authorization"]},
+            subprotocols=["eggw"],
+        ) as websocket:
+            websocket.send_json(
+                {
+                    "type": "approve_tool",
+                    "tool_call_id": tool_call_id,
+                    "approved": True,
+                    "output_decision": "whole",
+                }
+            )
+
+        payload = dict(build_tool_call_states(core_state.db, thread_id)[tool_call_id].last_output_approval_payload or {})
+        assert payload["requested_decision"] == "whole"
+        assert payload["decision"] == "partial"
+        assert Path(payload["artifact_path"]).is_dir()
+        assert "read_long_tool_output(" in payload["preview"]
+
 
 class TestAutoApproval:
     """Test auto-approval toggle via command."""

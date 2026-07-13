@@ -335,6 +335,15 @@ class StreamingMixin:
                 except Exception:
                     pass
 
+            # Always invalidate reuse for the semantic batch itself. Message
+            # printing also advances the generation, but this batch-level fence
+            # covers edits/deletes and fail-closed formatting errors.
+            if saw_non_stream_msg or saw_compaction_marker:
+                try:
+                    self._mark_static_transcript_changed(thread_id)
+                except Exception:
+                    pass
+
             if saw_get_user_input_event:
                 try:
                     self._refresh_get_user_message_input_mode()

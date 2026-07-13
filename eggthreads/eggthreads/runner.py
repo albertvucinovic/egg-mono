@@ -36,6 +36,7 @@ from .tool_output import (
     ToolOutputPlanError,
     ToolOutputPublicationPlan,
     ToolOutputStateConflict,
+    _artifact_is_ready,
     finalize_tool_output,
 )
 from .tool_call_id import normalize_tool_call_id
@@ -3256,19 +3257,48 @@ class ThreadRunner:
                 preview = payload.get('preview') or ''
                 finished_output = tc.finished_output or ''
                 finished_reason = (tc.finished_reason or '').lower()
+                long_finished_output = bool(
+                    len(finished_output) > LONG_OUTPUT_CHAR_THRESHOLD
+                    or _line_count(finished_output) > LONG_OUTPUT_LINE_THRESHOLD
+                )
+                has_artifact_recovery = bool(
+                    _artifact_is_ready(str(payload.get('artifact_path') or ''))
+                    and 'read_long_tool_output(' in str(preview)
+                )
+                legacy_long_content: Optional[str] = None
+                if (
+                    long_finished_output
+                    and decision in ('whole', 'partial')
+                    and not has_artifact_recovery
+                ):
+                    # Imported/pre-authority events may contain a long whole or
+                    # partial preview without a recoverable artifact. Route it
+                    # at the last publication boundary as a compatibility
+                    # safety net. New decisions are handled transactionally by
+                    # finalize_tool_output() before reaching TC5.
+                    try:
+                        legacy_long_content, _saved = stash_tool_output_and_build_preview(
+                            self.db,
+                            self.thread_id,
+                            str(tc.tool_call_id),
+                            finished_output,
+                        )
+                    except Exception:
+                        legacy_long_content = finished_output[:PREVIEW_MAX_CHARS]
+                        if len(finished_output) > PREVIEW_MAX_CHARS:
+                            legacy_long_content = (
+                                legacy_long_content.rstrip()
+                                + "\n\n...[output truncated for preview]..."
+                            )
 
-                # Determine base content. For interrupted tool calls we want
-                # to surface the partial output that was produced before the
-                # interruption so the user can inspect it (even if the
-                # decision is "omit" for LLM context).
+                # Determine base content. Interrupted output decisions now go
+                # through the same canonical artifact plan as every other
+                # output. Keep a bounded compatibility fallback for legacy
+                # whole/empty-preview events that predate that invariant.
                 if finished_reason == 'interrupted':
-                    # Prefer an explicit preview when decision='partial';
-                    # otherwise fall back to a bounded preview of the partial
-                    # output. Never publish the full finished_output into the
-                    # tool message: published tool messages are eligible for
-                    # provider context unless no_api, and interrupted tools can
-                    # still produce very large partial output.
-                    if decision == 'partial' and preview:
+                    if legacy_long_content is not None:
+                        content = legacy_long_content
+                    elif decision == 'partial' and preview:
                         content = str(preview)
                     elif finished_output:
                         try:
@@ -3298,10 +3328,16 @@ class ThreadRunner:
                         # User chose to omit the (possibly huge) output; we keep a
                         # small placeholder string instead of the real content.
                         content = "Output omitted."
-                    else:
-                        # 'whole' or 'partial' (or unknown) -> use the preview string.
+                    elif legacy_long_content is not None:
+                        content = legacy_long_content
+                    elif decision == 'whole':
+                        # Structured artifact content is safe only for a whole
+                        # decision. A partial long-output decision must retain
+                        # its bounded preview/read-tool recovery note.
                         structured_content = _tool_output_content_parts_for_transcript(tc.name, finished_output)
                         content = structured_content if structured_content is not None else str(preview)
+                    else:
+                        content = str(preview)
 
                 # For user-originated commands ($ / $$), prepend the original
                 # command text so that the message containing the output also

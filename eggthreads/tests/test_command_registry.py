@@ -903,7 +903,7 @@ def test_display_input_commands_change_app_state() -> None:
         approval_panel = Panel()
         enter_sends = True
 
-        def redraw_static_view(self, reason=None):
+        def redraw_static_view(self, reason=None, **kwargs):
             redrawn.append(reason)
 
     app = App()

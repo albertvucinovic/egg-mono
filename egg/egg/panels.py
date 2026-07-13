@@ -99,6 +99,14 @@ class TranscriptScrollbackSource:
         self._panels = panels
         self._db = panels.db
         self._thread_id = thread_id or panels.current_thread
+        # Capture before any snapshot/load work. A semantic event observed while
+        # this source is being built must make later reuse fail closed.
+        try:
+            self._local_transcript_generation = int(
+                panels._static_transcript_generation(self._thread_id)
+            )
+        except Exception:
+            self._local_transcript_generation = -1
         if refresh_snapshot:
             self._refresh_snapshot_if_safe()
         self._snapshot_seq = -1
@@ -442,9 +450,56 @@ class PanelsMixin:
         else:
             self.console.print(*args, **kwargs)
 
+    def _static_transcript_generation(self, thread_id: Optional[str] = None) -> int:
+        """Return the app-local semantic transcript generation for a thread."""
+        tid = thread_id or self.current_thread
+        generations = getattr(self, '_static_transcript_generation_by_thread', None)
+        if not isinstance(generations, dict):
+            generations = {}
+            self._static_transcript_generation_by_thread = generations
+        try:
+            return int(generations.get(tid, 0) or 0)
+        except Exception:
+            return 0
+
+    def _mark_static_transcript_changed(self, thread_id: Optional[str] = None) -> int:
+        """Invalidate source reuse after a watcher-observed semantic change."""
+        tid = thread_id or self.current_thread
+        generations = getattr(self, '_static_transcript_generation_by_thread', None)
+        if not isinstance(generations, dict):
+            generations = {}
+            self._static_transcript_generation_by_thread = generations
+        generation = self._static_transcript_generation(tid) + 1
+        generations[tid] = generation
+        return generation
+
     def _new_transcript_scrollback_source(self) -> TranscriptScrollbackSource:
         """Create a fresh lazy transcript source for the current thread."""
         return TranscriptScrollbackSource(self)
+
+    def _coherent_transcript_scrollback_source(
+        self,
+        renderer: Any,
+    ) -> Optional[TranscriptScrollbackSource]:
+        """Return the installed source only when all reuse invariants match."""
+        state = getattr(self, '_transcript_scrollback_source_state', None)
+        if not (isinstance(state, tuple) and len(state) == 2 and state[0] is renderer):
+            return None
+        source = state[1]
+        if not isinstance(source, TranscriptScrollbackSource):
+            return None
+        if source._thread_id != self.current_thread:
+            return None
+        if source._local_transcript_generation != self._static_transcript_generation():
+            return None
+        try:
+            row = self.db.get_thread_metadata(self.current_thread)
+            current_snapshot_seq = int(row.snapshot_last_event_seq) if row is not None else -1
+        except Exception:
+            return None
+        if current_snapshot_seq != int(source._snapshot_seq):
+            return None
+        return source
 
     def _is_full_screen_scrollback_renderer(self, renderer: Any = None) -> bool:
         """Return True when *renderer* is the active full-screen history surface."""
@@ -475,6 +530,7 @@ class PanelsMixin:
         *,
         reset_session_scrollback: bool = False,
         repaint: bool = False,
+        source: Optional[TranscriptScrollbackSource] = None,
     ) -> bool:
         """Install a fresh lazy transcript source on a full-screen renderer.
 
@@ -489,24 +545,32 @@ class PanelsMixin:
             return False
 
         try:
-            source = self._new_transcript_scrollback_source()
-            if reset_session_scrollback:
-                if hasattr(renderer, 'scroll_to_bottom'):
+            if source is None:
+                source = self._new_transcript_scrollback_source()
+            reset_source = getattr(renderer, 'reset_scrollback_source', None)
+            if reset_session_scrollback and callable(reset_source):
+                # The canonical renderer reset does not paint. The optional
+                # update below supplies the one final frame.
+                reset_source(source)
+            else:
+                if reset_session_scrollback:
+                    if hasattr(renderer, 'scroll_to_bottom'):
+                        try:
+                            renderer.scroll_to_bottom()
+                        except Exception:
+                            pass
+                    if hasattr(renderer, 'clear_scrollback'):
+                        try:
+                            renderer.clear_scrollback()
+                        except Exception:
+                            pass
+                if hasattr(renderer, 'invalidate'):
                     try:
-                        renderer.scroll_to_bottom()
+                        renderer.invalidate()
                     except Exception:
                         pass
-                if hasattr(renderer, 'clear_scrollback'):
-                    try:
-                        renderer.clear_scrollback()
-                    except Exception:
-                        pass
-            if hasattr(renderer, 'invalidate'):
-                try:
-                    renderer.invalidate()
-                except Exception:
-                    pass
-            renderer.set_scrollback_source(source)
+                renderer.set_scrollback_source(source)
+            self._transcript_scrollback_source_state = (renderer, source)
             self._reset_static_hidden_details()
             self._mark_static_transcript_printed()
         except Exception:
@@ -1170,6 +1234,7 @@ class PanelsMixin:
 
     def console_print_compaction_marker(self, marker: Dict[str, Any]) -> None:
         """Print a visible compaction boundary divider to the console."""
+        self._mark_static_transcript_changed()
         self._print_static_transcript_renderable(
             self._static_transcript_compaction_marker_renderable(marker)
         )
@@ -1876,6 +1941,7 @@ class PanelsMixin:
         hidden messages and repaint the final aggregate once without reducing
         live observability.
         """
+        self._mark_static_transcript_changed()
         hidden_details = self._ensure_static_hidden_details_state()
         before_hidden = self._has_static_hidden_details_activity(hidden_details)
         items = self._static_transcript_message_renderables(m, hidden_details)
@@ -1974,14 +2040,23 @@ class PanelsMixin:
         except Exception:
             pass
 
-    def redraw_static_view(self, *, reason: str = '') -> None:
+    def redraw_static_view(
+        self,
+        *,
+        reason: str = '',
+        reuse_transcript_source: bool = False,
+    ) -> None:
         """Clear terminal and reprint static transcript for current thread."""
         renderer = getattr(self, '_renderer', None)
         if self._is_full_screen_scrollback_renderer(renderer):
+            source = None
+            if reuse_transcript_source:
+                source = self._coherent_transcript_scrollback_source(renderer)
             self._install_transcript_scrollback_source(
                 renderer,
                 reset_session_scrollback=True,
                 repaint=True,
+                source=source,
             )
             return
 

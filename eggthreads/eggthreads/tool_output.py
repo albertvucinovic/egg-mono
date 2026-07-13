@@ -142,6 +142,17 @@ def output_decision_payload_priority(payload: Mapping[str, Any] | None) -> int:
     return OUTPUT_DECISION_SOURCE_PRIORITIES["manual"]
 
 
+def _artifact_is_ready(path: str) -> bool:
+    artifact = Path(str(path or "").strip())
+    if not str(path or "").strip():
+        return False
+    return artifact.is_file() or (
+        artifact.is_dir()
+        and (artifact / "metadata.json").is_file()
+        and any(artifact.glob("chunk-*.txt"))
+    )
+
+
 def _validate_plan(
     thread_id: str,
     tool_call_id: str,
@@ -163,18 +174,76 @@ def _validate_plan(
                 tool_call_id,
                 "Partial publication requires a recoverable raw-output artifact",
             )
-        artifact = Path(artifact_path)
-        artifact_ready = artifact.is_file() or (
-            artifact.is_dir()
-            and (artifact / "metadata.json").is_file()
-            and any(artifact.glob("chunk-*.txt"))
-        )
-        if not artifact_ready:
+        if not _artifact_is_ready(artifact_path):
             raise ToolOutputPlanError(
                 thread_id,
                 tool_call_id,
                 f"Tool output artifact is unavailable: {artifact_path}",
             )
+
+
+def _route_long_whole_output(
+    db: ThreadsDB,
+    thread_id: str,
+    tool_call_id: str,
+    *,
+    full_output: str,
+    plan: ToolOutputPublicationPlan,
+) -> ToolOutputPublicationPlan:
+    """Apply the canonical long-output policy to every ``whole`` plan.
+
+    Output decisions can originate from the runner, Terminal Egg, EggW REST,
+    EggW WebSocket, or recovery/interrupt code.  Keeping the size check at the
+    shared TC4 -> TC5 authority prevents any of those callers from publishing
+    an unbounded tool message merely by requesting ``whole``.  Short outputs
+    and already-bounded decisions retain their caller-supplied plan.
+    """
+
+    if plan.decision != "whole":
+        return plan
+
+    output = full_output if isinstance(full_output, str) else str(full_output or "")
+    try:
+        from .builtin_plugins.output_policies import DefaultOutputPolicy
+        from .output_policy import OutputPolicyRequest
+
+        routed = DefaultOutputPolicy().decide(
+            OutputPolicyRequest(
+                db=db,
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                output=output,
+                origin="output_finalization",
+                metadata={
+                    "original_line_count": len(output.splitlines()),
+                    "original_char_count": len(output),
+                },
+            )
+        )
+    except Exception as exc:
+        raise ToolOutputPlanError(
+            thread_id,
+            tool_call_id,
+            f"Long-output routing failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    if routed.decision == "whole":
+        return plan
+
+    reason = str(plan.reason or "").strip()
+    routed_reason = str(routed.reason or "").strip()
+    if reason and routed_reason:
+        reason = f"{reason}; {routed_reason}"
+    else:
+        reason = reason or routed_reason
+    return ToolOutputPublicationPlan(
+        decision=routed.decision,
+        preview=routed.preview,
+        reason=reason,
+        artifact_path=routed.artifact_path,
+        channels={**dict(plan.channels or {}), **dict(routed.channels or {})},
+        metadata=dict(plan.metadata or {}),
+    )
 
 
 def _manual_plan(
@@ -494,15 +563,50 @@ def finalize_tool_output(
                 actual_event_seq=actual_event_seq,
             )
 
-        plan = publication_plan or _manual_plan(
+        full_output = str(tc.finished_output or "")
+        existing_payload = dict(tc.last_output_approval_payload or {})
+        existing_artifact_path = str(existing_payload.get("artifact_path") or "")
+        if (
+            publication_plan is None
+            and superseding
+            and normalized_decision == "whole"
+            and existing_payload.get("decision") == "partial"
+            and _artifact_is_ready(existing_artifact_path)
+        ):
+            # An interrupt may supersede an automatic partial decision before
+            # its tool message is published. Reuse that already-authoritative
+            # raw artifact rather than creating a duplicate during the higher-
+            # priority cancellation decision.
+            plan = ToolOutputPublicationPlan(
+                decision="partial",
+                preview=str(existing_payload.get("preview") or ""),
+                reason=reason,
+                artifact_path=existing_artifact_path,
+                channels=dict(existing_payload.get("channels") or {}),
+                metadata={
+                    key: existing_payload[key]
+                    for key in ("line_count", "char_count", "original_char_count", "output_capped")
+                    if key in existing_payload
+                },
+            )
+        else:
+            plan = publication_plan or _manual_plan(
+                db,
+                normalized_thread_id,
+                normalized_tool_call_id,
+                decision=normalized_decision,
+                full_output=full_output,
+                reason=reason,
+            )
+        plan = _route_long_whole_output(
             db,
             normalized_thread_id,
             normalized_tool_call_id,
-            decision=normalized_decision,
-            full_output=str(tc.finished_output or ""),
-            reason=reason,
+            full_output=full_output,
+            plan=plan,
         )
-        if plan.decision != normalized_decision:
+        auto_routed_whole = normalized_decision == "whole" and plan.decision == "partial"
+        if plan.decision != normalized_decision and not auto_routed_whole:
             raise ToolOutputPlanError(
                 normalized_thread_id,
                 normalized_tool_call_id,
@@ -522,6 +626,8 @@ def finalize_tool_output(
             "expected_state": tc.state,
             "expected_event_seq": actual_event_seq,
         }
+        if auto_routed_whole:
+            payload["requested_decision"] = normalized_decision
         if superseding:
             payload["supersedes_event_seq"] = getattr(tc, "output_decision_event_seq", None)
             payload["supersedes_source"] = str(
