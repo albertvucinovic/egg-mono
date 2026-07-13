@@ -88,8 +88,32 @@ BUILTIN_TOOL_HELP_DETAILS: dict[str, dict[str, Any]] = {
         "notes": [
             "Use the short artifact id shown in the preview, not arbitrary paths.",
             "Read only the chunks needed for the task.",
+            "Pass `line_numbers: true` to number only chunk-body lines with absolute original-output coordinates; metadata headers remain unnumbered.",
         ],
-        "examples": ['{"artifact_id": "abc123", "chunk_number": 1}'],
+        "examples": [
+            '{"artifact_id": "abc123", "chunk_number": 1}',
+            '{"artifact_id": "abc123", "chunk_number": 2, "line_numbers": true}',
+        ],
+    },
+    "extract_tool_output": {
+        "details": "Extract an exact 1-based half-open canonical line range from an approved, published prior tool output into a thread-owned provider-output file artifact.",
+        "use_when": [
+            "You need exact source lines without copying a long preview into context.",
+            "A long `skill` or ordinary tool result was artifact-routed, but its full canonical finished output should be sliced directly.",
+        ],
+        "notes": [
+            "`start_line` is inclusive and `end_line` is exclusive: `[17, 38)` stores canonical lines 17 through 37.",
+            "Omitting `source_tool_call_id` selects the immediately preceding completed, approved, visible, published tool-message event in persisted order; it fails only if the latest eligible publication boundary is genuinely ambiguous.",
+            "Extraction reads full sanitized canonical `tool_call.finished.output`, not the published preview or long-output artifact, so partial publication does not lose lines.",
+            "Line-number prefixes are presentation only. `skill(line_numbers=true)` followed by extraction returns unnumbered canonical text.",
+            "A `read_long_tool_output` call has its own canonical coordinate space (unnumbered metadata header plus chunk body), not the artifact's displayed absolute labels. For original producer coordinates, pass that original tool's `source_tool_call_id`.",
+            "Denied, pending, omitted, hidden, future/current, cross-thread, non-text, empty, and out-of-range sources/selections are rejected. Extracted content is stored, never executed.",
+            "The result is a provider-output artifact compatible with `save_provider_artifact_to_file` and `add_provider_artifact_to_model_context`.",
+        ],
+        "examples": [
+            '{"start_line": 17, "end_line": 38}',
+            '{"start_line": 1, "end_line": 6, "source_tool_call_id": "call_abc", "filename": "excerpt.txt"}',
+        ],
     },
     "bash": {
         "details": "Execute a non-interactive bash script in the project working directory and return combined stdout/stderr.",

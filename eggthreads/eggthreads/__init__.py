@@ -377,6 +377,21 @@ from .attachment_staging import (
     save_local_attachment_for_thread,
 )
 
+from .tool_output_contract import (
+    HARD_BYPASS_TOOL_NAMES,
+    ToolOutputContract,
+    canonical_terminal_safe_output,
+    is_hard_bypass_tool,
+    tool_output_contract,
+)
+from .tool_output_presentation import (
+    TextLineRange,
+    apply_output_presentation,
+    extract_text_line_range,
+    line_number_presentation,
+    number_text_lines,
+    split_text_lines,
+)
 from .tools import ToolCapabilities, ToolContext, ToolExecutionResult, ToolRegistry, ToolStreamContext, create_default_tools, create_tool_registry
 from .skills import Skill, get_skill, list_skills, load_skill_text, render_skill_index, render_skill_tool_output, search_skills
 
@@ -435,6 +450,8 @@ __all__ = [
     'wrap_argv_for_sandbox_with_settings', 'get_sandbox_status',
     'set_sandbox_globally_enabled', 'set_sandbox_config',
     'get_thread_sandbox_config', 'set_thread_sandbox_config', 'set_subtree_sandbox_config', 'get_thread_sandbox_status',
+    'HARD_BYPASS_TOOL_NAMES', 'ToolOutputContract', 'canonical_terminal_safe_output', 'is_hard_bypass_tool', 'tool_output_contract',
+    'TextLineRange', 'apply_output_presentation', 'extract_text_line_range', 'line_number_presentation', 'number_text_lines', 'split_text_lines',
     'ToolCapabilities', 'ToolContext', 'ToolExecutionResult', 'ToolRegistry', 'ToolStreamContext', 'create_default_tools', 'create_tool_registry',
     'Skill', 'get_skill', 'list_skills', 'load_skill_text', 'render_skill_index', 'render_skill_tool_output', 'search_skills',
     'create_llm_client',

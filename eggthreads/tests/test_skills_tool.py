@@ -63,3 +63,45 @@ def test_eggtools_exposes_skill_helper_in_memory_repl(tmp_path, monkeypatch) -> 
     )
 
     assert "True" in out
+
+
+def test_skill_commands_defensively_unwrap_shared_structured_render(monkeypatch) -> None:
+    from eggthreads.builtin_plugins import skills as skills_plugin
+    from eggthreads.tools import ToolExecutionResult
+
+    blocks: list[tuple[str, str]] = []
+
+    class Context:
+        log_system = staticmethod(lambda _message: None)
+        console_print_block = staticmethod(
+            lambda title, text, **_kwargs: blocks.append((title, text))
+        )
+
+    monkeypatch.setattr(
+        skills_plugin,
+        "render_skill_request",
+        lambda _args: ToolExecutionResult(
+            "canonical\ntext\n",
+            publication_presentation=ts.line_number_presentation(),
+        ),
+    )
+
+    result = skills_plugin.skills_command(Context(), "")
+
+    assert result.clear_input is True
+    assert blocks == [("Skills", "1: canonical\n2: text\n")]
+
+
+def test_direct_numbered_skill_is_presented_but_structured_result_is_canonical() -> None:
+    from eggthreads.builtin_plugins.skills import render_skill_request
+    from eggthreads.tools import ToolExecutionResult
+
+    registry = ts.create_default_tools()
+    direct = registry.execute("skill", {"name": "rlm", "line_numbers": True})
+    structured = render_skill_request({"name": "rlm", "line_numbers": True})
+
+    assert direct.startswith("1: # Skill: rlm\n2: ")
+    assert isinstance(structured, ToolExecutionResult)
+    assert structured.output.startswith("# Skill: rlm\n\n")
+    assert not structured.output.startswith("1: ")
+    assert structured.presented_output().startswith("1: # Skill: rlm\n2: ")

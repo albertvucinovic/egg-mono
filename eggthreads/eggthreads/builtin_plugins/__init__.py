@@ -19,10 +19,11 @@ from .skills import SkillsPlugin
 from .subagents import SubagentsPlugin
 from .thread_ui import ThreadUiPlugin
 from .tool_help import ToolHelpPlugin
+from .tool_output_extraction import ToolOutputExtractionPlugin
 from .tools_admin import ToolsAdminPlugin
 from .web import WebPlugin
 
-__all__ = ["AnswerUserPlugin", "ApprovalPoliciesPlugin", "AttachmentToolsPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ImageGenerationPlugin", "LongOutputPlugin", "ModelPlugin", "OutputOptimizerAdminPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolHelpPlugin", "ToolsAdminPlugin", "WebPlugin"]
+__all__ = ["AnswerUserPlugin", "ApprovalPoliciesPlugin", "AttachmentToolsPlugin", "AuthPlugin", "CompactionPlugin", "DiagnosticsPlugin", "DisplayInputPlugin", "ExecutionPlugin", "ImageGenerationPlugin", "LongOutputPlugin", "ModelPlugin", "OutputOptimizerAdminPlugin", "OutputPoliciesPlugin", "SandboxAdminPlugin", "SandboxProvidersPlugin", "SessionPlugin", "SessionProvidersPlugin", "SkillsPlugin", "SubagentsPlugin", "ThreadUiPlugin", "ToolHelpPlugin", "ToolOutputExtractionPlugin", "ToolsAdminPlugin", "WebPlugin"]
 
 
 def __getattr__(name: str):

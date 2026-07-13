@@ -9,7 +9,8 @@ from typing import Any, Dict
 
 from ..output_paths import _ARTIFACT_ID_ALPHABET, safe_thread_dir_name
 from ..plugins import PluginContext
-from ..tools import ToolContext, ToolRegistry
+from ..tool_output_presentation import line_number_presentation
+from ..tools import ToolContext, ToolExecutionResult, ToolRegistry
 
 
 def _context_db(ctx: ToolContext):
@@ -101,7 +102,47 @@ def read_long_tool_output_tool(args: Dict[str, Any], ctx: ToolContext) -> str:
         header.append(f"stored_char_count: {metadata.get('stored_char_count')}")
     if "original_char_count" in metadata:
         header.append(f"original_char_count: {metadata.get('original_char_count')}")
-    return "\n".join(header) + "\n\n" + chunk
+    from ..tool_output_contract import bounded_bypass_publication, canonical_terminal_safe_output
+    from ..tool_output_presentation import apply_output_presentation
+
+    header_text = canonical_terminal_safe_output("\n".join(header) + "\n\n")
+    chunk = canonical_terminal_safe_output(chunk)
+    output = header_text + chunk
+    if args.get("line_numbers") is True:
+        start_lines = metadata.get("chunk_start_lines")
+        source_start_line = None
+        if isinstance(start_lines, list) and len(start_lines) >= chunk_number:
+            try:
+                source_start_line = int(start_lines[chunk_number - 1])
+            except (TypeError, ValueError):
+                source_start_line = None
+        if source_start_line is None:
+            # Backward compatibility for artifacts created before start-line
+            # coordinates were persisted. Newline counts are the exact source
+            # coordinate and do not inspect or parse output content.
+            source_start_line = 1
+            try:
+                for prior_number in range(1, chunk_number):
+                    prior = (artifact_dir / f"chunk-{prior_number:04d}.txt").read_text(encoding="utf-8")
+                    source_start_line += prior.count("\n")
+            except Exception as e:
+                return _artifact_error(f"could not resolve absolute source line coordinates: {e}")
+        presentation = line_number_presentation(
+            start_line=source_start_line,
+            body_offset=len(header_text),
+        )
+        _bounded, violated = bounded_bypass_publication(
+            "read_long_tool_output",
+            output,
+            apply_output_presentation(output, presentation),
+        )
+        if violated:
+            return _bounded
+        return ToolExecutionResult(output, publication_presentation=presentation)
+    bounded, _violated = bounded_bypass_publication(
+        "read_long_tool_output", output, output
+    )
+    return bounded
 
 
 def register_long_output_tools(registry: ToolRegistry) -> None:
@@ -119,6 +160,11 @@ def register_long_output_tools(registry: ToolRegistry) -> None:
                 "artifact_id": {"type": "string", "description": "Short lower-case alphanumeric artifact id from the preview."},
                 "chunk_number": {"type": "integer", "description": "1-based chunk number to read."},
                 "descendant_thread_id": {"type": "string", "description": "Optional descendant thread id whose artifact namespace should be read."},
+                "line_numbers": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Number only chunk-body lines with absolute 1-based original-output line numbers; metadata stays unnumbered.",
+                },
             },
             "required": ["artifact_id", "chunk_number"],
         },

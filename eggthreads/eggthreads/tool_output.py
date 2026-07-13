@@ -182,6 +182,38 @@ def _validate_plan(
             )
 
 
+def _tool_name_for_call(db: ThreadsDB, thread_id: str, tool_call_id: str) -> str:
+    try:
+        from .tool_state import _reduce_thread_events
+
+        tc = _reduce_thread_events(db, thread_id).tool_call_states.get(str(tool_call_id))
+        return str(getattr(tc, "name", "") or "")
+    except Exception:
+        return ""
+
+
+def _validate_bounded_bypass_plan(
+    thread_id: str,
+    tool_call_id: str,
+    *,
+    tool_name: str,
+    full_output: str,
+    plan: ToolOutputPublicationPlan,
+) -> None:
+    from .tool_output_contract import validate_bounded_tool_output
+
+    if plan.decision != "whole" or plan.artifact_path:
+        raise ToolOutputPlanError(
+            thread_id,
+            tool_call_id,
+            f"{tool_name} must publish one bounded whole result without a long-output artifact",
+        )
+    try:
+        validate_bounded_tool_output(tool_name, full_output, plan.preview)
+    except ValueError as exc:
+        raise ToolOutputPlanError(thread_id, tool_call_id, str(exc)) from exc
+
+
 def _route_long_whole_output(
     db: ThreadsDB,
     thread_id: str,
@@ -199,6 +231,34 @@ def _route_long_whole_output(
     and already-bounded decisions retain their caller-supplied plan.
     """
 
+    from .tool_output_contract import tool_output_contract
+
+    tool_name = _tool_name_for_call(db, thread_id, tool_call_id)
+    contract = tool_output_contract(tool_name)
+    if contract.bypass_long_output_routing:
+        from .tool_output_contract import bounded_bypass_publication
+
+        bounded_preview, violated = bounded_bypass_publication(
+            tool_name,
+            full_output,
+            plan.preview,
+        )
+        if violated:
+            plan = ToolOutputPublicationPlan(
+                decision="whole",
+                preview=bounded_preview,
+                reason=f"{tool_name} bounded safe-output contract violation",
+                channels=dict(plan.channels or {}),
+                metadata={**dict(plan.metadata or {}), "bounded_contract_violation": True},
+            )
+        _validate_bounded_bypass_plan(
+            thread_id,
+            tool_call_id,
+            tool_name=tool_name,
+            full_output=full_output,
+            plan=plan,
+        )
+        return plan
     if plan.decision != "whole":
         return plan
 
