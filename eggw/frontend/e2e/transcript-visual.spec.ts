@@ -164,3 +164,13 @@ test("details and message actions are keyboard reachable", async ({ page }) => {
   await id.focus();
   await expect(id).toBeFocused();
 });
+
+test("visible mobile transcript interactions meet the WCAG minimum target size", async ({ page }) => {
+  await openFixture(page, "light-mono", { width: 390, height: 844 });
+  const targets = page.getByTestId("chat-panel").locator("button:visible, a[href]:visible, summary:visible");
+  const undersized = await targets.evaluateAll((elements) => elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return { label: element.getAttribute("aria-label") || element.textContent?.trim() || element.tagName, width: rect.width, height: rect.height };
+  }).filter(({ width, height }) => width < 24 || height < 24));
+  expect(undersized, JSON.stringify(undersized, null, 2)).toEqual([]);
+});
