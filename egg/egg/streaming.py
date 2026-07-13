@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from eggthreads import create_snapshot, EventWatcher, ThreadsDB
+from eggdisplay import ChunkedText
 
 from .panels import (
     CHILDREN_PANEL_RELEVANT_EVENT_TYPES,
@@ -51,6 +52,26 @@ def _new_tool_summary() -> Dict[str, Any]:
     return {"active": False, "name": "", "text": ""}
 
 
+def _new_stream_text(value: str = "") -> ChunkedText:
+    return ChunkedText(value)
+
+
+def _append_stream_text(container: Dict[str, Any], key: str, value: str) -> ChunkedText:
+    current = container.get(key)
+    if not isinstance(current, ChunkedText):
+        current = _new_stream_text(current if isinstance(current, str) else "")
+        container[key] = current
+    current.append(value)
+    return current
+
+
+def _iter_stream_text(value: Any):
+    if isinstance(value, ChunkedText):
+        yield from value.iter_chunks()
+    elif isinstance(value, str) and value:
+        yield value
+
+
 def _new_live_state(
     *,
     active_invoke: Optional[str] = None,
@@ -72,8 +93,8 @@ def _new_live_state(
         "provider_started_at": None,
         "provider_last_activity_at": None,
         "provider_timeout_sec": None,
-        "content": "",
-        "reason": "",
+        "content": _new_stream_text(),
+        "reason": _new_stream_text(),
         "reasoning_summary": _new_reasoning_summary(),
         "tools": {},
         "tool_stream_indicator": _new_tool_stream_indicator(),
@@ -135,7 +156,7 @@ def _positive_timeout(value: Any) -> Optional[float]:
 
 
 def _new_reasoning_summary() -> Dict[str, Any]:
-    return {"active": False, "text": ""}
+    return {"active": False, "text": _new_stream_text()}
 
 
 class StreamingMixin:
@@ -440,17 +461,17 @@ class StreamingMixin:
                 payload = {}
             txt = payload.get('text') or payload.get('content') or payload.get('delta')
             if isinstance(txt, str) and txt:
-                self._live_state['content'] = (self._live_state.get('content') or '') + txt
+                _append_stream_text(self._live_state, 'content', txt)
                 self._stream_append_on_renderer(txt, style=_assistant_stream_style(self))
             rs = payload.get('reason')
             if isinstance(rs, str) and rs:
-                self._live_state['reason'] = (self._live_state.get('reason') or '') + rs
+                _append_stream_text(self._live_state, 'reason', rs)
                 self._stream_append_on_renderer(rs, style=STREAM_STYLE_REASON)
             rsum = payload.get('reasoning_summary')
             if isinstance(rsum, str) and rsum:
                 summary_state = self._live_state.setdefault('reasoning_summary', _new_reasoning_summary())
                 summary_state['active'] = True
-                summary_state['text'] = str(summary_state.get('text') or '') + rsum
+                _append_stream_text(summary_state, 'text', rsum)
                 self._stream_append_on_renderer(rsum, style=STREAM_STYLE_REASONING_SUMMARY)
             tl = payload.get('tool')
             if isinstance(tl, dict):
@@ -466,7 +487,7 @@ class StreamingMixin:
                     if name not in self._live_state['tools']:
                         self._live_state['tools'][name] = self._live_state['tools'].get(name, '')
                 else:
-                    self._live_state['tools'][name] = self._live_state['tools'].get(name, '') + tout
+                    _append_stream_text(self._live_state['tools'], name, tout)
                     if tout:
                         self._stream_append_on_renderer(tout, style=STREAM_STYLE_TOOL_OUTPUT)
             tcd = payload.get('tool_call')
@@ -484,7 +505,7 @@ class StreamingMixin:
                         order.append(raw_key)
                         label = name_map.get(raw_key) or raw_key
                         self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=_tool_call_args_stream_style(self))
-                    text_map[raw_key] = text_map.get(raw_key, '') + frag
+                    _append_stream_text(text_map, raw_key, frag)
                     self._stream_append_on_renderer(frag, style=_tool_call_args_stream_style(self))
         elif t == 'msg.create':
             try:
@@ -830,20 +851,19 @@ class StreamingMixin:
         if renderer is None or not hasattr(renderer, 'stream_begin'):
             return
         self._stream_begin_on_renderer(ls.get('stream_kind'))
-        reason = ls.get('reason') or ''
-        if isinstance(reason, str) and reason:
-            self._stream_append_on_renderer(reason, style=STREAM_STYLE_REASON)
-        content = ls.get('content') or ''
-        if isinstance(content, str) and content:
-            self._stream_append_on_renderer(content, style=_assistant_stream_style(self))
-        for name, txt in (ls.get('tools') or {}).items():
-            if isinstance(txt, str) and txt:
-                self._stream_append_on_renderer(txt, style=STREAM_STYLE_TOOL_OUTPUT)
+        for chunk in _iter_stream_text(ls.get('reason')):
+            self._stream_append_on_renderer(chunk, style=STREAM_STYLE_REASON)
+        for chunk in _iter_stream_text(ls.get('content')):
+            self._stream_append_on_renderer(chunk, style=_assistant_stream_style(self))
+        for _name, text in (ls.get('tools') or {}).items():
+            for chunk in _iter_stream_text(text):
+                self._stream_append_on_renderer(chunk, style=STREAM_STYLE_TOOL_OUTPUT)
         indicator = ls.get('tool_stream_indicator') or {}
         for k in ls.get('tc_order') or []:
-            t = (ls.get('tc_text') or {}).get(k, '')
-            if isinstance(t, str) and t:
+            text = (ls.get('tc_text') or {}).get(k, '')
+            if text:
                 label = (ls.get('tc_names') or {}).get(k) or k
                 self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=_tool_call_args_stream_style(self))
-                self._stream_append_on_renderer(t, style=_tool_call_args_stream_style(self))
+                for chunk in _iter_stream_text(text):
+                    self._stream_append_on_renderer(chunk, style=_tool_call_args_stream_style(self))
         self._flush_stream_render_buffer_now(force=True)

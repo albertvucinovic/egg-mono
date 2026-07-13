@@ -1035,3 +1035,33 @@ class TestFormatChildrenPanel:
         assert parent[-8:] not in text
         assert child[-8:] in text
         assert grandchild[-8:] in text
+
+
+def test_inline_stream_panel_materializes_only_bounded_chunked_tail(egg_app, monkeypatch):
+    from eggdisplay import ChunkedText
+    from egg.formatting import LIVE_PANEL_TEXT_MAX_CHARS
+
+    class CountingText(ChunkedText):
+        def __init__(self):
+            self.full_materializations = 0
+            super().__init__()
+
+        def to_string(self):
+            self.full_materializations += 1
+            raise AssertionError("bounded live panel must not join the whole stream")
+
+    content = CountingText()
+    content.append("old" * 100_000)
+    content.append("visible-tail")
+    egg_app._display_is_inline = True
+    egg_app._live_state = egg_app._make_live_state(
+        active_invoke="invoke", stream_kind="llm"
+    )
+    egg_app._live_state["content"] = content
+    monkeypatch.setattr(egg_app, "current_token_stats", lambda **kwargs: (None, {}))
+
+    panel = egg_app.compose_chat_panel_text()
+
+    assert "visible-tail" in panel
+    assert len(panel) < LIVE_PANEL_TEXT_MAX_CHARS + 10_000
+    assert content.full_materializations == 0

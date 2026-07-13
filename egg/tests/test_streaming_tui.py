@@ -642,7 +642,7 @@ def test_bracketed_tool_output_streams_literally_in_fullscreen_renderer(tmp_path
     app._stream_append_on_renderer("[literal tool output]\n", style=None)
     app._flush_stream_render_buffer_now(force=True)
 
-    assert "[literal tool output]" in _strip_ansi(renderer._stream_buffer)
+    assert "[literal tool output]" in _strip_ansi(str(renderer._stream_buffer))
     assert any("[literal tool output]" in _strip_ansi(row) for row in renderer._prev_viewport)
 
 
@@ -1044,3 +1044,82 @@ def test_stream_close_then_final_message_prints_once_after_stream_end(tmp_path, 
         (final_msg_id,),
     ).fetchone()["event_seq"]
     assert app._last_printed_seq_by_thread[tid] == final_seq
+
+
+def test_live_state_stream_append_does_not_materialize_prior_content(tmp_path, monkeypatch):
+    """Per-delta live state append must not read all accumulated chunks."""
+    from eggdisplay import ChunkedText
+
+    app = _make_app(tmp_path, monkeypatch)
+    app._live_state = app._make_live_state(active_invoke="invoke", stream_kind="llm")
+
+    class CountingText(ChunkedText):
+        def __init__(self, value):
+            self.chunk_iterations = 0
+            super().__init__(value, block_size=1024)
+
+        def iter_chunks(self):
+            for chunk in super().iter_chunks():
+                self.chunk_iterations += 1
+                yield chunk
+
+    content = CountingText("x" * 1_000_000)
+    app._live_state["content"] = content
+    app._renderer = None
+
+    asyncio.run(app.ingest_event_for_live({
+        "type": "stream.delta",
+        "invoke_id": "invoke",
+        "ts": None,
+        "payload_json": json.dumps({"text": "tail"}),
+    }, app.current_thread))
+
+    assert content.chunk_iterations == 0
+    assert len(content) == 1_000_004
+
+
+def test_stream_wheel_up_continued_delta_and_typing_preserve_anchor_and_input(tmp_path, monkeypatch):
+    """Actual input dispatch stays live while a scrolled-up stream continues."""
+    from eggdisplay import FullScreenDiffRenderer
+
+    class TestRenderer(FullScreenDiffRenderer):
+        def _term_width(self):
+            return 20
+
+        def _term_height(self):
+            return 8
+
+        def _paint(self, width):
+            self._prev_viewport = self._compose_visible_viewport(width)
+            self._viewport_w = width
+            self._viewport_h = self._term_height()
+
+    app = _make_app(tmp_path, monkeypatch)
+    renderer = TestRenderer()
+    renderer._scrollback = [f"history-{i}" for i in range(20)]
+    renderer._live_lines = ["LIVE"]
+    renderer._paint(20)
+    app._renderer = renderer
+    app._live_state = app._make_live_state(active_invoke="invoke", stream_kind="llm")
+
+    # Dispatch the real SGR wheel-up path through the bounded app input queue.
+    app.input_panel.editor.input_queue.put("\x1b[<64;4;4M")
+    app._drain_input_queue(limit=32)
+    assert renderer._scroll_offset > 0
+    before = list(renderer._prev_viewport)
+
+    asyncio.run(app.ingest_event_for_live({
+        "type": "stream.delta",
+        "invoke_id": "invoke",
+        "ts": None,
+        "payload_json": json.dumps({"text": "continued streaming text"}),
+    }, app.current_thread))
+    app._flush_stream_render_buffer_now(force=True)
+
+    assert renderer._prev_viewport == before
+
+    app.input_panel.editor.input_queue.put("x")
+    app._drain_input_queue(limit=32)
+
+    assert app.input_panel.get_text() == "x"
+    assert renderer._scroll_offset > 0

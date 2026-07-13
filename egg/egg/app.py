@@ -331,16 +331,7 @@ class EggDisplayApp(
         self._resize_dirty_since: Optional[float] = None
 
         # Streaming/watch state
-        self._live_state: Dict[str, Any] = {
-            "active_invoke": None,
-            "stream_kind": None,
-            "started_at": None,
-            "content": "",
-            "reason": "",
-            "tools": {},  # name -> text
-            "tc_text": {},  # key -> text
-            "tc_order": [],
-        }
+        self._live_state: Dict[str, Any] = self._make_live_state()
         self._watch_task: Optional[asyncio.Task] = None
         self._user_command_tasks: set[asyncio.Task] = set()
         self._input_thread: Optional[Any] = None

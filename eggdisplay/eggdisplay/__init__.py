@@ -9,6 +9,8 @@ This package provides a multi-line text editor with support for:
 - Event listeners/hooks
 """
 
+from .streams import ChunkedText
+
 from .eggdisplay import (
     TextEditor,
     Cursor,
@@ -35,5 +37,6 @@ __all__ = [
     'DiffRenderer',
     'InlineDiffRenderer',
     'FullScreenDiffRenderer',
+    'ChunkedText',
 ]
 __version__ = "0.1.0"
