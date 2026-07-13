@@ -1868,14 +1868,23 @@ class PanelsMixin:
         panel(Text(content, no_wrap=False, overflow='fold', style='blue'), title, 'blue')
         return items
 
-    def console_print_message(self, m: Dict[str, Any]) -> None:
-        """Print a single message to the console with rich formatting."""
+    def console_print_message(self, m: Dict[str, Any], *, defer_min_summary: bool = False) -> None:
+        """Print a message, optionally deferring a growing min-run repaint.
+
+        Streaming content was already visible before its completed message is
+        published.  A watcher batch can therefore accumulate consecutive
+        hidden messages and repaint the final aggregate once without reducing
+        live observability.
+        """
         hidden_details = self._ensure_static_hidden_details_state()
         before_hidden = self._has_static_hidden_details_activity(hidden_details)
         items = self._static_transcript_message_renderables(m, hidden_details)
 
         if not items:
-            if before_hidden or self._has_static_hidden_details_activity(hidden_details):
+            if (
+                not defer_min_summary
+                and (before_hidden or self._has_static_hidden_details_activity(hidden_details))
+            ):
                 self._update_full_screen_static_min_summary()
             return
 
@@ -1886,6 +1895,11 @@ class PanelsMixin:
             else:
                 self._print_static_transcript_renderable(item)
             self._reset_static_min_run_tracking()
+
+    def flush_deferred_min_summary(self) -> bool:
+        """Publish the aggregate for a watcher batch's completed hidden run."""
+
+        return self._update_full_screen_static_min_summary()
 
     def console_print_block(self, title: str, text: str, border_style: str = 'blue', markup: bool = True) -> None:
         """Print a titled block to the console."""

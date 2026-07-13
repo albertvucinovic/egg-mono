@@ -389,10 +389,14 @@ class StreamingMixin:
                                 payload.setdefault('event_seq', ev_seq)
                                 if ts is not None:
                                     payload.setdefault('ts', ts)
-                                self.console_print_message(payload)
+                                self.console_print_message(payload, defer_min_summary=True)
                             self._last_printed_seq_by_thread[self.current_thread] = ev_seq
                         except Exception:
                             pass
+                    try:
+                        self.flush_deferred_min_summary()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 

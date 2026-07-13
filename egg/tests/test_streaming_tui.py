@@ -1126,6 +1126,61 @@ def test_watch_thread_reuses_runner_snapshot_for_final_batch(tmp_path, monkeypat
     ).fetchone()[0] == 1
 
 
+def test_watch_thread_publishes_min_hidden_run_once_per_batch(tmp_path, monkeypatch):
+    """Completed hidden messages do not rerender a growing summary N times."""
+
+    app = _make_app(tmp_path, monkeypatch)
+    tid = app.current_thread
+    app._display_is_inline = False
+    app._display_verbosity = "min"
+
+    class Renderer:
+        def __init__(self):
+            self.sources = []
+            self.replacements = []
+
+        def set_scrollback_source(self, source):
+            self.sources.append(source)
+
+        def replace_recent_scrollback(self, row_count, *args, **kwargs):
+            self.replacements.append((row_count, args, kwargs))
+            return len(args)
+
+        def print_above(self, *args, **kwargs):
+            raise AssertionError("hidden min messages should use the aggregate row")
+
+    app._renderer = Renderer()
+    start_after = app.db.max_event_seq(tid)
+    from eggthreads import append_message
+
+    for index in range(50):
+        append_message(
+            app.db,
+            tid,
+            "tool",
+            f"result-{index}",
+            extra={"name": "bash", "tool_call_id": f"call-{index}"},
+        )
+    batch = list(app.db.events_since(tid, start_after))
+
+    import egg.streaming as streaming_mod
+
+    class _OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield batch
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", _OneBatchWatcher)
+    asyncio.run(app.watch_thread(tid))
+
+    assert len(app._renderer.replacements) == 1
+    renderable = app._renderer.replacements[0][1][0]
+    body = str(getattr(getattr(renderable, "renderable", None), "plain", renderable))
+    assert "got 50 tool results" in body
+
+
 def test_live_state_stream_append_does_not_materialize_prior_content(tmp_path, monkeypatch):
     """Per-delta live state append must not read all accumulated chunks."""
     from eggdisplay import ChunkedText
