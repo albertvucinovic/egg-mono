@@ -37,31 +37,29 @@ exec(compile(_script, "<skill:compaction-checkpoint>", "exec"), globals(), globa
 
 Use the extraction fallback documented after the script only when direct transfer or the in-REPL loader is unavailable or unreliable.
 
-The renderer deliberately:
+The renderer deliberately separates two kinds of evidence:
 
-- separates the synthetic compaction `CONTROL` request from actionable `USER` messages;
-- treats Assistant Notes as first-class rows and correlates legacy hydrated notes with their note-producing tool calls;
-- expands persisted tool declarations/results into `CALL` and `RESULT` evidence rows;
-- includes post-boundary or error-like operational `SYSTEM` rows while excluding the standing system prompt;
-- prefers current, post-boundary, recent, and error-bearing evidence under pressure;
-- emits omission markers, full message IDs, a hydration watermark, and exact current-prompt/boundary scope;
-- uses readable `content_text` for structured attachment content when available;
-- enforces hard character and line limits on the complete output.
+1. **Historical conversation — user-centered.** It retains most actionable user messages, plus a small selection of useful Assistant messages and Assistant Notes. Historical tool calls/results and synthetic compaction controls are excluded.
+2. **Active turn — continuation-centered.** It starts with the latest consecutive actionable user-message burst and retains subsequent Assistant messages, Assistant Notes, operational system messages, and tool calls/results. A later synthetic compaction-control request and the checkpoint machinery it starts are outside this turn.
+
+The visible map favors readable conversation over database indexing. Exact message/tool identifiers and search cues remain available in the persistent `compaction_narrative_skeleton_index`; use `search_thread(...)` for ordinary expansion. The renderer also uses readable `content_text` for structured attachment content and enforces hard character/line limits.
 
 Do not summarize only the current provider-prompt tail. Hidden/local-only, deleted, and `/continue`-erased content is intentionally absent from the hydrated view; do not bypass that visibility boundary with raw database inspection during ordinary checkpointing.
 
 ```python
 # egg-compaction-narrative-skeleton
 import re
-import sys
-from collections import Counter
 from itertools import islice
 
 MAX_OUTPUT_CHARS = 48_000
 MAX_OUTPUT_LINES = 700
-MAX_SELECTED_ROWS = 520
 MAX_CAPTURED_TEXT = 12_000
-SKELETON_END_MARKER = "END THREAD NARRATIVE SKELETON FOR COMPACTION v2"
+MAX_HISTORY_USERS = 360
+MAX_HISTORY_CONTEXT = 48
+MAX_ACTIVE_ENTRIES = 220
+SKELETON_VERSION = 3
+SKELETON_START_MARKER = "THREAD NARRATIVE SKELETON FOR COMPACTION v3"
+SKELETON_END_MARKER = "END THREAD NARRATIVE SKELETON FOR COMPACTION v3"
 NOTE_TOOLS = {
     "answer_user_while_preserving_llm_turn",
     "get_user_message_while_preserving_llm_turn",
@@ -72,7 +70,8 @@ CONTROL_RE = re.compile(
 IMPORTANT_RE = re.compile(
     r"\b(error|fail(?:ed|ure)?|traceback|interrupt(?:ed)?|cancel(?:led|ed)?|"
     r"commit(?:ted)?|test(?:s|ed|ing)?|pass(?:ed)?|skip(?:ped)?|warning|risk|"
-    r"todo|next step|unresolved|dirty|clean|branch|sha|artifact)\b",
+    r"todo|next step|unresolved|dirty|clean|branch|sha|artifact|decid(?:e|ed|ing)|"
+    r"must|should|constraint|require(?:d|ment)?|do not|don't)\b",
     re.IGNORECASE,
 )
 
@@ -187,15 +186,6 @@ def _call_parts(call):
     return str(name), str(call_id), arguments
 
 
-def _current_compaction(context):
-    current = [
-        item
-        for item in (context.get("compactions") or [])
-        if isinstance(item, dict) and item.get("is_current")
-    ]
-    return current[-1] if current else {}
-
-
 def _control_mode(message, text):
     if message.get("message_kind") == "compaction_control" or message.get("compaction_summary_request"):
         if message.get("compaction_mode") in {"summary_only", "checkpoint_and_resume"}:
@@ -230,37 +220,137 @@ def _preview(text, limit, *, tail_worthy=False):
     return text[:head].rstrip() + " … " + text[-tail:].lstrip()
 
 
-def _counter_text(counter):
-    return ",".join(f"{key}:{counter[key]}" for key in sorted(counter)) or "none"
-
-
-def _main():
-    reloader = globals().get("reload_thread_context")
-    if callable(reloader):
-        try:
-            context = reloader()
-        except Exception:
-            context = globals().get("thread_context", {})
+def _allocate_previews(records, budget, minimum, desired, *, recent_count=0):
+    """Allocate readable text fairly, then spend remaining space on recent entries."""
+    if not records:
+        return {}, 0
+    label_cost = sum(len(record["label"]) + 2 for record in records)
+    text_budget = max(len(records), budget - label_cost - len(records))
+    base = max(24, min(minimum, text_budget // len(records)))
+    limits = {id(record): min(len(record["text"]), base) for record in records}
+    spent = sum(limits.values())
+    order = list(records)
+    if recent_count:
+        recent = order[-recent_count:]
+        older = order[:-recent_count]
+        order = list(reversed(recent)) + list(reversed(older))
     else:
-        context = globals().get("thread_context", {})
-    context = context if isinstance(context, dict) else {}
+        order = list(reversed(order))
+    remaining = max(0, text_budget - spent)
+    for record in order:
+        target = min(len(record["text"]), desired(record))
+        extra = min(remaining, max(0, target - limits[id(record)]))
+        limits[id(record)] += extra
+        remaining -= extra
+        if remaining <= 0:
+            break
+    previews = {
+        id(record): _preview(
+            record["text"],
+            limits[id(record)],
+            tail_worthy=record["kind"] == "RESULT",
+        )
+        for record in records
+    }
+    shortened = sum(previews[id(record)] != record["text"] for record in records)
+    return previews, shortened
+
+
+def _index_record(record):
+    return {
+        "kind": record["kind"],
+        "msg_id": record["msg_id"],
+        "event_seq": record["seq"],
+        "message_index": record["message_index"],
+        "tool_name": record.get("tool_name", ""),
+        "call_id": record.get("call_id", ""),
+        "source_truncated": record["source_truncated"],
+        "search_cue": _preview(record["text"], 160),
+    }
+
+
+def _select_history_users(history_users):
+    if len(history_users) <= MAX_HISTORY_USERS:
+        return list(history_users)
+    first_count = min(24, MAX_HISTORY_USERS // 6)
+    return list(history_users[:first_count]) + list(history_users[-(MAX_HISTORY_USERS - first_count):])
+
+
+def _select_history_context(episodes):
+    candidates = []
+    recent_start = max(0, len(episodes) - 24)
+    for episode_index, episode in enumerate(episodes):
+        assistant = next((item for item in reversed(episode["context"]) if item["kind"] == "ASST"), None)
+        note = next((item for item in reversed(episode["context"]) if item["kind"] == "NOTE"), None)
+        recent = episode_index >= recent_start
+        for record in (assistant, note):
+            if not record or not record["text"]:
+                continue
+            important = bool(IMPORTANT_RE.search(record["text"]))
+            if not recent and not important:
+                continue
+            priority = (2000 if recent else 0) + (700 if record["kind"] == "NOTE" else 500)
+            if important:
+                priority += 800
+            priority += episode_index
+            candidates.append((priority, record))
+    selected = [record for _priority, record in sorted(candidates, key=lambda item: item[0], reverse=True)[:MAX_HISTORY_CONTEXT]]
+    return sorted(selected, key=lambda record: (record["message_index"], record["suborder"]))
+
+
+def _select_active(active_records):
+    if len(active_records) <= MAX_ACTIVE_ENTRIES:
+        return list(active_records), 0
+
+    mandatory = [record for record in active_records if record["kind"] not in {"CALL", "RESULT"}]
+    if len(mandatory) >= MAX_ACTIVE_ENTRIES:
+        users = [record for record in mandatory if record["kind"] == "USER"]
+        others = [record for record in mandatory if record["kind"] != "USER"]
+        selected = users + others[-max(0, MAX_ACTIVE_ENTRIES - len(users)):]
+        selected_ids = {id(record) for record in selected}
+        return (
+            [record for record in active_records if id(record) in selected_ids],
+            len(active_records) - len(selected_ids),
+        )
+
+    capacity = MAX_ACTIVE_ENTRIES - len(mandatory)
+    groups = {}
+    group_order = []
+    for record in active_records:
+        if record["kind"] not in {"CALL", "RESULT"}:
+            continue
+        key = record["call_id"] or f"orphan:{record['message_index']}:{record['suborder']}"
+        if key not in groups:
+            groups[key] = []
+            group_order.append(key)
+        groups[key].append(record)
+
+    ranked = []
+    for order, key in enumerate(group_order):
+        group = groups[key]
+        important = any(IMPORTANT_RE.search(record["text"]) for record in group)
+        ranked.append(((100_000 if important else 0) + order, key, group))
+
+    chosen = []
+    used = 0
+    for _priority, _key, group in sorted(ranked, reverse=True):
+        if used + len(group) > capacity:
+            continue
+        chosen.extend(group)
+        used += len(group)
+        if used >= capacity:
+            break
+    selected_ids = {id(record) for record in mandatory + chosen}
+    selected = [record for record in active_records if id(record) in selected_ids]
+    return selected, len(active_records) - len(selected)
+
+
+def _build_output(context):
     messages = [
         message
         for message in (context.get("all_messages") or globals().get("all_messages", []) or [])
         if isinstance(message, dict)
     ]
-    prompt_messages = [
-        message
-        for message in (context.get("current_prompt_messages") or globals().get("current_prompt_messages", []) or [])
-        if isinstance(message, dict)
-    ]
-    compaction = _current_compaction(context)
-    boundary_seq = _as_int(compaction.get("current_prompt_starts_at_event_seq"))
-    prompt_ids = {_msg_id(message) for message in prompt_messages if _msg_id(message)}
-    prompt_seqs = {
-        seq for seq in (_as_int(message.get("event_seq")) for message in prompt_messages)
-        if seq is not None
-    }
 
     call_names = {}
     note_call_ids = set()
@@ -274,354 +364,282 @@ def _main():
                 if name in NOTE_TOOLS:
                     note_call_ids.add(call_id)
 
-    rows = []
-    excluded_system_messages = 0
+    records = []
+    control_records = []
     omitted_empty_assistant = 0
     valid_sequences = []
 
-    def add_row(message, kind, text, source_truncated=False, *, tool_name="", call_id=""):
+    def add_record(message, message_index, suborder, kind, text, source_truncated=False, *, tool_name="", call_id="", control_mode=None):
         seq = _as_int(message.get("event_seq"))
         if seq is not None:
             valid_sequences.append(seq)
-        mid = _msg_id(message)
-        in_prompt = bool((mid and mid in prompt_ids) or (not mid and seq is not None and seq in prompt_seqs))
-        if boundary_seq is None or seq is None:
-            boundary = "UNK"
-        else:
-            boundary = "POST" if seq >= boundary_seq else "PRE"
-        rows.append({
-            "ordinal": len(rows) + 1,
+        record = {
             "kind": kind,
-            "msg_id": mid,
+            "msg_id": _msg_id(message),
             "seq": seq,
-            "in_prompt": in_prompt,
-            "boundary": boundary,
+            "message_index": message_index,
+            "suborder": suborder,
             "text": text,
             "source_truncated": bool(source_truncated),
             "tool_name": str(tool_name or ""),
             "call_id": str(call_id or ""),
-            "priority": 0,
-            "preview": "",
-        })
+            "control_mode": control_mode,
+            "label": "",
+        }
+        records.append(record)
+        if kind == "CONTROL":
+            control_records.append(record)
 
-    for message in messages:
+    for message_index, message in enumerate(messages):
         role = str(message.get("role") or "")
         text, source_truncated = _message_text(message)
-        seq = _as_int(message.get("event_seq"))
-        boundary = "UNK" if boundary_seq is None or seq is None else ("POST" if seq >= boundary_seq else "PRE")
-        special_kind = message.get("message_kind")
-
+        suborder = 0
         if role == "user":
             mode = _control_mode(message, text)
-            add_row(message, "CONTROL" if mode else "USER", text, source_truncated)
-            if mode:
-                rows[-1]["control_mode"] = mode
+            add_record(
+                message,
+                message_index,
+                suborder,
+                "CONTROL" if mode else "USER",
+                text or "(no readable text)",
+                source_truncated,
+                control_mode=mode,
+            )
         elif role == "assistant":
             if _is_note(message, note_call_ids):
-                add_row(message, "NOTE", text, source_truncated, call_id=message.get("tool_call_id", ""))
+                add_record(message, message_index, suborder, "NOTE", text, source_truncated, call_id=message.get("tool_call_id", ""))
+                suborder += 1
             elif text:
-                add_row(message, "ASST", text, source_truncated)
+                add_record(message, message_index, suborder, "ASST", text, source_truncated)
+                suborder += 1
             elif not _tool_calls(message):
                 omitted_empty_assistant += 1
             for call in _tool_calls(message):
                 name, call_id, arguments = _call_parts(call)
                 call_text, call_truncated = _one_line(arguments)
-                add_row(message, "CALL", call_text, call_truncated, tool_name=name, call_id=call_id)
+                add_record(message, message_index, suborder, "CALL", call_text, call_truncated, tool_name=name, call_id=call_id)
+                suborder += 1
         elif role == "tool":
             call_id = str(message.get("tool_call_id") or "")
-            add_row(
+            add_record(
                 message,
+                message_index,
+                suborder,
                 "RESULT",
                 text,
                 source_truncated,
                 tool_name=message.get("name") or call_names.get(call_id, ""),
                 call_id=call_id,
             )
-        elif role == "system":
-            looks_operational = bool(
-                special_kind in {"provider_failure", "recovery_notice"}
-                or boundary == "POST"
-                or re.search(r"\b(error|failed|failure|interrupt|retry|unavailable|context limit)\b", text, re.I)
-            )
-            if looks_operational:
-                add_row(message, "SYSTEM", text, source_truncated)
-            else:
-                excluded_system_messages += 1
+        elif role == "system" and re.search(
+            r"\b(error|failed|failure|interrupt|retry|unavailable|context limit|recovery)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            add_record(message, message_index, suborder, "SYSTEM", text, source_truncated)
 
-    nonmonotonic = any(left > right for left, right in zip(valid_sequences, valid_sequences[1:]))
-    latest_by_kind = {}
-    for row in rows:
-        latest_by_kind[row["kind"]] = row
-    user_rows = [row for row in rows if row["kind"] == "USER"]
-    latest_actionable = user_rows[-1] if user_rows else None
-    post_users = [row for row in user_rows if row["boundary"] == "POST"]
-    actionable_candidates = post_users or user_rows[-8:]
-    controls = [row for row in rows if row["kind"] == "CONTROL"]
-    latest_control = controls[-1] if controls else None
+    actionable = [record for record in records if record["kind"] == "USER"]
+    latest_actionable = actionable[-1] if actionable else None
+    latest_control = control_records[-1] if control_records else None
 
-    important_kinds = {"USER", "CONTROL", "NOTE", "ASST", "SYSTEM"}
-    row_total = max(1, len(rows))
-    recent_cutoff = max(0, len(rows) - 100)
-    latest_ordinals = {row["ordinal"] for row in latest_by_kind.values()}
-    actionable_ordinals = {row["ordinal"] for row in actionable_candidates}
-    for row in rows:
-        kind = row["kind"]
-        priority = {
-            "USER": 820,
-            "CONTROL": 500,
-            "NOTE": 800,
-            "ASST": 720,
-            "SYSTEM": 740,
-            "CALL": 390,
-            "RESULT": 450,
-        }.get(kind, 300)
-        if row is latest_actionable:
-            priority = 2_200
-        elif row["ordinal"] in actionable_ordinals:
-            # Candidate IDs in the header are not enough: retain their text in
-            # the bounded body even when noisy error-bearing tool rows compete.
-            priority = max(priority, 1_800)
-        elif row is latest_control:
-            priority = max(priority, 2_000)
-        if row["boundary"] == "POST":
-            priority += {
-                "USER": 900,
-                "NOTE": 850,
-                "SYSTEM": 800,
-                "RESULT": 720,
-                "CALL": 680,
-                "ASST": 650,
-                "CONTROL": 700,
-            }.get(kind, 500)
-        elif row["in_prompt"] and kind != "SYSTEM":
-            priority += 420
-        if row["ordinal"] > recent_cutoff:
-            priority += 360
-        if row["ordinal"] in latest_ordinals:
-            priority += 180
-        if IMPORTANT_RE.search(row["text"]):
-            priority += 500 if kind == "RESULT" else (230 if kind in {"SYSTEM", "NOTE", "ASST"} else 100)
-        priority += int(100 * row["ordinal"] / row_total)
-        row["priority"] = priority
-
-    # Keep correlated calls/results at nearly the same priority. A cutoff can
-    # still split a pair, so body_lines also marks omitted/missing counterparts.
-    rows_by_call = {}
-    for row in rows:
-        if row["call_id"] and row["kind"] in {"CALL", "RESULT"}:
-            rows_by_call.setdefault(row["call_id"], []).append(row)
-    for correlated in rows_by_call.values():
-        kinds = {row["kind"] for row in correlated}
-        if kinds == {"CALL", "RESULT"}:
-            pair_priority = max(row["priority"] for row in correlated)
-            for row in correlated:
-                row["priority"] = max(row["priority"], pair_priority - 1)
-
-    thread_meta = context.get("thread") if isinstance(context.get("thread"), dict) else {}
-    kind_counts = Counter(row["kind"] for row in rows)
-
-    def row_label(row, preview=""):
-        prompt = "P" if row["in_prompt"] else "N"
-        seq = row["seq"] if row["seq"] is not None else "?"
-        mid = _clip_field(row["msg_id"], 64) or "-"
-        line = f"{row['ordinal']:05d} {prompt}/{row['boundary']:<4} {row['kind']:<7} seq={seq} msg={mid}"
-        if row["tool_name"]:
-            line += f" tool={_clip_field(row['tool_name'], 48)}"
-        if row["call_id"]:
-            line += f" call={_clip_field(row['call_id'], 52)}"
-        if preview:
-            line += " | " + preview
-        return line
-
-    def gap_line(gap_rows):
-        counts = Counter(row["kind"] for row in gap_rows)
-        first = gap_rows[0]["ordinal"]
-        last = gap_rows[-1]["ordinal"]
-        return f"..... omitted rows={len(gap_rows)} ordinals={first}-{last} kinds={_counter_text(counts)} ....."
-
-    def body_lines(selected, with_previews):
-        selected_ordinals = {row["ordinal"] for row in selected}
-        selected_call_kinds = {}
-        for row in selected:
-            if row["call_id"] and row["kind"] in {"CALL", "RESULT"}:
-                selected_call_kinds.setdefault(row["call_id"], set()).add(row["kind"])
-        lines = []
-        gap = []
-        for row in rows:
-            if row["ordinal"] not in selected_ordinals:
-                gap.append(row)
-                continue
-            if gap:
-                lines.append(gap_line(gap))
-                gap = []
-            line = row_label(row, row["preview"] if with_previews else "")
-            if row["call_id"] and row["kind"] in {"CALL", "RESULT"}:
-                counterpart = "RESULT" if row["kind"] == "CALL" else "CALL"
-                all_kinds = {item["kind"] for item in rows_by_call.get(row["call_id"], [])}
-                selected_kinds = selected_call_kinds.get(row["call_id"], set())
-                if counterpart in all_kinds and counterpart not in selected_kinds:
-                    line += f" [{counterpart} omitted]"
-                elif counterpart not in all_kinds:
-                    line += f" [{counterpart} missing]"
-            lines.append(line)
-        if gap:
-            lines.append(gap_line(gap))
-        return lines
-
-    inspect_ids = []
-    inspect_more = 0
-
-    def latest_ref(kind):
-        row = latest_by_kind.get(kind)
-        if not row:
-            return "-"
-        return f"{_clip_field(row['msg_id'], 64) or '-'}@{row['seq'] if row['seq'] is not None else '?'}"
-
-    def header_lines(selected):
-        selected_set = {row["ordinal"] for row in selected}
-        selected_counts = Counter(row["kind"] for row in selected)
-        omitted_counts = Counter(row["kind"] for row in rows if row["ordinal"] not in selected_set)
-        modes = [str(row.get("control_mode")) for row in controls if row.get("control_mode")]
-        candidate_refs = [
-            f"{_clip_field(row['msg_id'], 64) or '-'}@{row['seq'] if row['seq'] is not None else '?'}"
-            for row in actionable_candidates[-8:]
-        ]
-        current_start = compaction.get("current_prompt_starts_at_msg_id") or "-"
-        lines = [
-            "THREAD NARRATIVE SKELETON FOR COMPACTION v2",
-            (
-                f"watermark_event_seq={thread_meta.get('loaded_through_event_seq', '?')} "
-                f"loaded_at={_clip_field(thread_meta.get('loaded_at', '?'), 40)} "
-                f"usable_messages={len(messages)} expanded_rows={len(rows)} selected_rows={len(selected)}"
-            ),
-            (
-                f"row_counts={_counter_text(kind_counts)} selected={_counter_text(selected_counts)} "
-                f"omitted={_counter_text(omitted_counts)} excluded_standing_system={excluded_system_messages} "
-                f"omitted_empty_assistant={omitted_empty_assistant}"
-            ),
-            (
-                f"compactions={len(context.get('compactions') or [])} "
-                f"current_marker_seq={compaction.get('marker_event_seq', '-')} "
-                f"current_start_seq={boundary_seq if boundary_seq is not None else '-'} "
-                f"current_start_msg={_clip_field(current_start, 64)}"
-            ),
-            (
-                f"control_mode={modes[-1] if modes else '-'} "
-                f"control_msg={_clip_field(latest_control['msg_id'], 64) if latest_control else '-'} "
-                f"latest_actionable_user={latest_ref('USER')}"
-            ),
-            "actionable_user_candidates=" + (", ".join(candidate_refs) if candidate_refs else "none"),
-            (
-                "latest_rows="
-                f"NOTE:{latest_ref('NOTE')} ASST:{latest_ref('ASST')} "
-                f"CALL:{latest_ref('CALL')} RESULT:{latest_ref('RESULT')} SYSTEM:{latest_ref('SYSTEM')}"
-            ),
-            "inspect_full_msg_ids=" + (", ".join(_clip_field(item, 64) for item in inspect_ids) if inspect_ids else "none"),
-            f"inspect_full_additional={inspect_more}",
-            "warnings=" + ("nonmonotonic_event_sequences" if nonmonotonic else "none"),
-            (
-                f"hard_limits=chars:{MAX_OUTPUT_CHARS},lines:{MAX_OUTPUT_LINES}; "
-                "Legend P/N=in/not in current provider prompt; PRE/POST/UNK=relative to current compaction start."
-            ),
-            "Kinds USER=actionable user, CONTROL=compaction instruction, NOTE=Assistant Note, ASST=normal assistant, SYSTEM=operational system, CALL/RESULT=tool evidence.",
-            "Rows are a prioritized chronological map, not proof. Inspect truncated/important rows by full msg_id before checkpointing claims.",
-            "\n--- selected rows in canonical chronology ---",
-        ]
-        return lines
-
-    ranked = sorted(rows, key=lambda row: (-row["priority"], -row["ordinal"]))
-    selected_count = min(MAX_SELECTED_ROWS, len(ranked))
-
-    def base_fits(count):
-        chosen = sorted(ranked[:count], key=lambda row: row["ordinal"])
-        lines = header_lines(chosen) + body_lines(chosen, False)
-        text = "\n".join(lines).rstrip() + "\n"
-        return len(text) <= int(MAX_OUTPUT_CHARS * 0.66) and len(text.splitlines()) <= MAX_OUTPUT_LINES
-
-    while selected_count > 1 and not base_fits(selected_count):
-        selected_count = max(1, selected_count - max(1, selected_count // 10))
-    selected = sorted(ranked[:selected_count], key=lambda row: row["ordinal"])
-
-    def render():
-        lines = header_lines(selected) + body_lines(selected, True)
-        lines.extend(["", SKELETON_END_MARKER])
-        return "\n".join(lines).rstrip() + "\n"
-
-    base_output = render()
-    # Reserve room for the inspection list, which is finalized only after
-    # snippet allocation reveals which selected rows were actually truncated.
-    remaining = MAX_OUTPUT_CHARS - len(base_output) - 700
-    allocation_order = sorted(selected, key=lambda row: (-row["priority"], -row["ordinal"]))
-
-    def desired_limit(row):
-        kind = row["kind"]
-        if row is latest_actionable:
-            return 1_800
-        if row["boundary"] == "POST":
-            return {
-                "USER": 1_400,
-                "NOTE": 1_200,
-                "SYSTEM": 1_100,
-                "RESULT": 1_000,
-                "ASST": 900,
-                "CALL": 800,
-                "CONTROL": 320,
-            }.get(kind, 600)
-        if row["in_prompt"]:
-            return 700 if kind in important_kinds else 520
-        return 260 if kind in important_kinds else 180
-
-    def allocate(target_for):
-        nonlocal remaining
-        for row in allocation_order:
-            if remaining <= 3:
-                return
-            target = min(len(row["text"]), max(0, int(target_for(row))))
-            if target <= len(row["preview"]):
-                continue
-            old = row["preview"]
-            overhead = 3 if not old and row["text"] else 0
-            affordable = len(old) + max(0, remaining - overhead)
-            target = min(target, affordable)
-            if target <= len(old):
-                continue
-            new = _preview(
-                row["text"],
-                target,
-                tail_worthy=row["kind"] in {"NOTE", "ASST", "SYSTEM", "RESULT"},
-            )
-            delta = len(new) - len(old) + overhead
-            if delta <= remaining:
-                row["preview"] = new
-                remaining -= delta
-
-    allocate(lambda row: min(desired_limit(row), 600) if row["priority"] >= 1_400 else 0)
-    allocate(lambda row: min(desired_limit(row), 90))
-    allocate(desired_limit)
-
-    inspect_candidates = [
-        row
-        for row in sorted(selected, key=lambda item: (-item["priority"], -item["ordinal"]))
-        if row["msg_id"]
-        and (row["source_truncated"] or len(row["preview"]) < len(row["text"]))
+    content_end_index = len(messages)
+    if latest_actionable and latest_control and latest_control["message_index"] > latest_actionable["message_index"]:
+        content_end_index = latest_control["message_index"]
+    scoped_actionable = [
+        record for record in actionable if record["message_index"] < content_end_index
     ]
-    for row in inspect_candidates:
-        if row["msg_id"] not in inspect_ids:
-            inspect_ids.append(row["msg_id"])
-        if len(inspect_ids) >= 8:
-            break
-    inspect_more = len({row["msg_id"] for row in inspect_candidates}) - len(inspect_ids)
+    latest_actionable = scoped_actionable[-1] if scoped_actionable else None
 
-    output = render()
-    if len(output) > MAX_OUTPUT_CHARS or len(output.splitlines()) > MAX_OUTPUT_LINES:
-        raise AssertionError(
-            f"compaction skeleton exceeded hard bound: chars={len(output)} lines={len(output.splitlines())}"
+    active_start_index = content_end_index
+    if latest_actionable:
+        active_start_index = latest_actionable["message_index"]
+        cursor = active_start_index - 1
+        while cursor >= 0:
+            message = messages[cursor]
+            if str(message.get("role") or "") != "user":
+                break
+            cursor_text, _truncated = _message_text(message)
+            if _control_mode(message, cursor_text):
+                cursor -= 1
+                continue
+            active_start_index = cursor
+            cursor -= 1
+
+    scoped_records = [
+        record
+        for record in records
+        if record["kind"] != "CONTROL" and record["message_index"] < content_end_index
+    ]
+    history_records = [record for record in scoped_records if record["message_index"] < active_start_index]
+    active_records = [record for record in scoped_records if record["message_index"] >= active_start_index]
+    history_users = [record for record in history_records if record["kind"] == "USER"]
+    selected_history_users = _select_history_users(history_users)
+
+    episodes = []
+    current_episode = None
+    for record in history_records:
+        if record["kind"] == "USER":
+            current_episode = {"user": record, "context": []}
+            episodes.append(current_episode)
+        elif current_episode is not None and record["kind"] in {"ASST", "NOTE"} and record["text"]:
+            current_episode["context"].append(record)
+    selected_history_context = _select_history_context(episodes)
+
+    shown_history_ids = {id(record) for record in selected_history_users + selected_history_context}
+    history_items = [record for record in history_records if id(record) in shown_history_ids]
+    for record in history_items:
+        record["label"] = {
+            "USER": "User",
+            "ASST": "Assistant",
+            "NOTE": "Assistant Note",
+        }[record["kind"]]
+
+    selected_active, omitted_active = _select_active(active_records)
+    operation_numbers = {}
+    next_operation = 1
+    for record in active_records:
+        if record["kind"] not in {"CALL", "RESULT"}:
+            continue
+        key = record["call_id"] or f"orphan:{record['message_index']}:{record['suborder']}"
+        if key not in operation_numbers:
+            operation_numbers[key] = next_operation
+            next_operation += 1
+    for record in selected_active:
+        if record["kind"] in {"CALL", "RESULT"}:
+            key = record["call_id"] or f"orphan:{record['message_index']}:{record['suborder']}"
+            operation = operation_numbers[key]
+            direction = "call" if record["kind"] == "CALL" else "result"
+            tool = f" [{record['tool_name']}]" if record["tool_name"] else ""
+            record["label"] = f"Tool {operation} {direction}{tool}"
+        else:
+            record["label"] = {
+                "USER": "User (active)",
+                "ASST": "Assistant",
+                "NOTE": "Assistant Note",
+                "SYSTEM": "Operational System",
+            }.get(record["kind"], record["kind"].title())
+
+    # Reserve the active turn first, then give most remaining space to historical users.
+    active_previews, active_shortened = _allocate_previews(
+        selected_active,
+        19_000,
+        180,
+        lambda record: 3200 if record["kind"] == "USER" else (1800 if record["kind"] in {"ASST", "NOTE"} else 1100),
+        recent_count=36,
+    )
+    active_lines = [f"{record['label']}: {active_previews[id(record)] or '(no readable text)'}" for record in selected_active]
+    active_chars = sum(len(line) + 1 for line in active_lines)
+
+    history_budget = max(10_000, min(26_000, 44_000 - active_chars))
+    user_items = [record for record in history_items if record["kind"] == "USER"]
+    context_items = [record for record in history_items if record["kind"] != "USER"]
+    user_budget = int(history_budget * 0.72) if context_items else history_budget
+    context_budget = history_budget - user_budget
+    user_previews, user_shortened = _allocate_previews(
+        user_items,
+        user_budget,
+        150,
+        lambda _record: 1100,
+        recent_count=24,
+    )
+    context_previews, context_shortened = _allocate_previews(
+        context_items,
+        context_budget,
+        120,
+        lambda record: 650 if record["kind"] == "NOTE" else 800,
+        recent_count=20,
+    )
+    history_lines = []
+    for record in history_items:
+        preview = user_previews.get(id(record), context_previews.get(id(record), ""))
+        history_lines.append(f"{record['label']}: {preview or '(no readable text)'}")
+
+    history_tool_events = sum(record["kind"] in {"CALL", "RESULT"} for record in history_records)
+    active_users = [record for record in active_records if record["kind"] == "USER"]
+    control_mode = latest_control.get("control_mode") if latest_control else None
+    watermark = max(valid_sequences) if valid_sequences else None
+    nonmonotonic = any(left > right for left, right in zip(valid_sequences, valid_sequences[1:]))
+
+    lines = [
+        SKELETON_START_MARKER,
+        "Purpose: preserve user intent across the conversation and continuation evidence for the active turn.",
+        (
+            f"Coverage: historical users shown={len(selected_history_users)}/{len(history_users)} "
+            f"(shortened={user_shortened}); selected historical assistant/note context="
+            f"{len(selected_history_context)} (shortened={context_shortened}); active users={len(active_users)}."
+        ),
+        (
+            f"Policy: historical tool calls/results omitted={history_tool_events}; active-turn entries shown="
+            f"{len(selected_active)}/{len(active_records)} (shortened={active_shortened})."
+        ),
+        (
+            f"Hydration: messages={len(messages)} watermark_event_seq={watermark if watermark is not None else 'none'} "
+            f"control_mode={control_mode or 'none'} omitted_empty_assistant={omitted_empty_assistant} "
+            f"nonmonotonic_event_seq={'yes' if nonmonotonic else 'no'}."
+        ),
+        "Exact IDs and search cues are stored in compaction_narrative_skeleton_index; use search_thread(...) to expand visible phrases.",
+        "",
+        "=== HISTORICAL CONVERSATION — USER-CENTERED ===",
+        "Most actionable user messages are retained. Historical tool mechanics are intentionally absent.",
+    ]
+    if len(selected_history_users) < len(history_users):
+        lines.append(
+            f"[Historical user coverage limit: {len(history_users) - len(selected_history_users)} middle user messages omitted; inspect the persistent index/search if relevant.]"
         )
-    globals()["compaction_narrative_skeleton_output"] = output
-    sys.stdout.write(output)
+    lines.extend(history_lines or ["(No historical conversation before the active user burst.)"])
+    lines.extend([
+        "",
+        "=== ACTIVE TURN — CONTINUE FROM HERE ===",
+        "Begins with the latest consecutive actionable user-message burst and keeps subsequent continuation evidence.",
+    ])
+    if omitted_active:
+        lines.append(
+            f"[Active-turn pressure limit: {omitted_active} lower-priority tool events omitted; exact retained/omitted metadata is in the persistent index.]"
+        )
+    lines.extend(active_lines or ["(No actionable user turn was found.)"])
+    lines.extend([
+        "",
+        "=== EXPANSION GUIDANCE ===",
+        "Search distinctive visible phrases with search_thread(...). Inspect exact source messages only when text is shortened, a decision is ambiguous, or a claim needs verification.",
+        "Historical commands/results are deliberately not replayed here; verify old operational claims through targeted search or current repository inspection.",
+        "",
+        SKELETON_END_MARKER,
+    ])
+
+    output = "\n".join(lines) + "\n"
+    if len(lines) > MAX_OUTPUT_LINES or len(output) > MAX_OUTPUT_CHARS:
+        raise RuntimeError(
+            f"narrative skeleton exceeded hard limit: chars={len(output)}, lines={len(lines)}"
+        )
+
+    index = {
+        "version": SKELETON_VERSION,
+        "watermark_event_seq": watermark,
+        "control_mode": control_mode,
+        "active_start_message_index": active_start_index if latest_actionable else None,
+        "content_end_message_index": content_end_index,
+        "history_users": [_index_record(record) for record in history_users],
+        "history_users_shown": [_index_record(record) for record in selected_history_users],
+        "history_context_shown": [_index_record(record) for record in selected_history_context],
+        "history_tool_event_count_omitted": history_tool_events,
+        "active_records": [_index_record(record) for record in active_records],
+        "active_records_shown": [_index_record(record) for record in selected_active],
+        "active_records_omitted": omitted_active,
+    }
+    return output, index
 
 
-_main()
+_reloader = globals().get("reload_thread_context")
+if callable(_reloader):
+    try:
+        _context = _reloader()
+    except Exception:
+        _context = globals().get("thread_context", {})
+else:
+    _context = globals().get("thread_context", {})
+_context = _context if isinstance(_context, dict) else {}
+compaction_narrative_skeleton_output, compaction_narrative_skeleton_index = _build_output(_context)
+print(compaction_narrative_skeleton_output, end="")
 ```
 
 ### Optional transport fallback: extract the script
@@ -653,21 +671,21 @@ Extraction does not change the execution contract. Do not run the saved file as 
 
 Consume the script's **entire emitted evidence map** before writing the checkpoint. A head/tail preview of that map is not sufficient.
 
-1. Confirm that the output begins with `THREAD NARRATIVE SKELETON FOR COMPACTION v2` and reaches the terminal `END THREAD NARRATIVE SKELETON FOR COMPACTION v2` marker.
+1. Confirm that the output begins with `THREAD NARRATIVE SKELETON FOR COMPACTION v3` and reaches the terminal `END THREAD NARRATIVE SKELETON FOR COMPACTION v3` marker.
 2. If the tool response says the raw output was stored as an artifact, reports omitted middle content, or does not show the terminal marker, read **every** `read_long_tool_output` chunk in order before continuing. This is result consumption and is separate from the optional `extract_tool_output` script-transport fallback above.
 3. If chunk reading is unavailable, inspect `compaction_narrative_skeleton_output` from the same persistent REPL in bounded, non-overlapping line slices until the terminal marker is reached.
 
-Reading the complete map does not mean expanding every source message in the thread. The map is the bounded index; the next section determines which underlying messages require full inspection.
+Reading the complete map does not mean expanding every source message in the thread. The readable map is the bounded index; the next section determines which underlying messages require full inspection.
 
 ### Required follow-up inspection
 
 After the first pass:
 
-1. Identify `latest_actionable_user` and all plausible `actionable_user_candidates`; never treat `CONTROL` as the task.
-2. Inspect every truncated or decision-critical row that supports the active task, a test/command result, a design decision, or the latest stable tool state. Start with `inspect_full_msg_ids` and use `get_message(...)` / `print_message(...)`.
-3. Correlate `CALL` with `RESULT`. A call proves intent, not success. Never claim a test passed, a file changed, or a commit exists without a result or independent verification.
-4. Treat `NOTE` rows as reported progress, not automatically verified fact. Preserve manager/worker Assistant Notes because they may contain the only durable handoff.
-5. Scan relevant older `PRE` rows for accepted/rejected designs, earlier failures, commits, and constraints. Omission markers mean the interval was not shown; use `search_thread(...)`, `messages_by_id`, or the sanitized `context_files` caches when needed.
+1. Read the historical user messages and the separately marked `ACTIVE TURN — CONTINUE FROM HERE`; never treat the synthetic compaction control as the task.
+2. Inspect shortened or decision-critical messages with `search_thread(...)`, `get_message(...)`, or `print_message(...)`. `compaction_narrative_skeleton_index` contains exact IDs, tool correlations, coverage, and search cues without crowding the visible narrative.
+3. In the active turn, correlate each tool call with its result. A call proves intent, not success. Never claim a test passed, a file changed, or a commit exists without a result or independent verification.
+4. Treat Assistant Notes as reported progress, not automatically verified fact. Preserve manager/worker notes because they may contain the only durable handoff.
+5. Historical tool traffic is intentionally absent. If an older operational claim is decision-critical, locate it with a distinctive visible phrase/search cue or independently inspect the current repository state rather than replaying every old tool event.
 6. If the watermark may be stale because a concurrent user message arrived, run a fresh `python_repl` evaluation. Memory-session `reload_thread_context()` refreshes in-eval; Docker hydration refreshes at the start of a new evaluation.
 7. Only then write the checkpoint.
 
