@@ -245,7 +245,7 @@ class FormattingMixin:
                 rendered = f"{rendered} +{hidden} more" if rendered else f"+{hidden} more"
             return rendered or "none"
 
-        root = self.db.get_thread(root_tid)
+        root = self.db.get_thread_metadata(root_tid)
         root_name = one_line(root.name if root else '', 'Unnamed')
         root_description = one_line(
             root.short_recap if root else '', 'No description'

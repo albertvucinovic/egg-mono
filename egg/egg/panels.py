@@ -40,6 +40,18 @@ CHILDREN_PANEL_RELEVANT_EVENT_TYPES = (
     'tool_call.approval',
     'tool_call.output_approval',
 )
+GET_USER_INPUT_RELEVANT_EVENT_TYPES = frozenset({
+    'msg.create',
+    'msg.edit',
+    'msg.delete',
+    'stream.open',
+    'stream.close',
+    'control.interrupt',
+    'tool_call.approval',
+    'tool_call.execution_started',
+    'tool_call.finished',
+    'tool_call.output_approval',
+})
 
 
 @dataclass(frozen=True)
@@ -533,7 +545,12 @@ class PanelsMixin:
         )
 
     def _compute_children_panel_status_key(self) -> Any:
-        """Return a set-based key for Children panel topology and status."""
+        """Return an indexed monotonic key for Children topology and status.
+
+        Relevant event history can contain millions of rows.  For each subtree
+        thread, ask the ``events_thread_type`` index only for the latest matching
+        sequence rather than counting/scanning every historical event.
+        """
         placeholders = ', '.join('?' for _ in CHILDREN_PANEL_RELEVANT_EVENT_TYPES)
         cur = self.db.conn.execute(
             f"""
@@ -543,17 +560,22 @@ class PanelsMixin:
                 SELECT c.child_id
                 FROM children c
                 JOIN subtree s ON c.parent_id=s.thread_id
-            ), relevant_events AS (
-                SELECT
-                    COALESCE(MAX(e.event_seq), -1) AS event_max,
-                    COUNT(e.event_seq) AS event_count
-                FROM events e
-                JOIN subtree s ON s.thread_id=e.thread_id
-                WHERE e.type IN ({placeholders})
             ), topology AS (
                 SELECT COUNT(*) AS child_count, COALESCE(MAX(c.rowid), 0) AS child_max
                 FROM children c
                 JOIN subtree s ON s.thread_id=c.parent_id
+            ), relevant_event_heads AS (
+                SELECT COALESCE(GROUP_CONCAT(event_head, '|'), '') AS event_key
+                FROM (
+                    SELECT s.thread_id || ':' || COALESCE((
+                        SELECT MAX(e.event_seq)
+                        FROM events e INDEXED BY events_thread_type
+                        WHERE e.thread_id=s.thread_id
+                          AND e.type IN ({placeholders})
+                    ), -1) AS event_head
+                    FROM subtree s
+                    ORDER BY s.thread_id
+                )
             ), active_streams AS (
                 SELECT
                     COUNT(*) AS open_count,
@@ -569,13 +591,12 @@ class PanelsMixin:
             SELECT
                 topology.child_count,
                 topology.child_max,
-                relevant_events.event_count,
-                relevant_events.event_max,
+                relevant_event_heads.event_key,
                 active_streams.open_count,
                 active_streams.open_key,
                 COALESCE(t.name, ''),
                 COALESCE(t.short_recap, '')
-            FROM topology, relevant_events, active_streams
+            FROM topology, relevant_event_heads, active_streams
             LEFT JOIN threads t ON t.thread_id=?
             """,
             (
@@ -586,17 +607,16 @@ class PanelsMixin:
         )
         row = cur.fetchone()
         if not row:
-            return (self.current_thread, 0, 0, 0, -1, 0, '', '', '')
+            return (self.current_thread, 0, 0, '', 0, '', '', '')
         return (
             self.current_thread,
             int(row[0] or 0),
             int(row[1] or 0),
-            int(row[2] or 0),
-            int(row[3] if row[3] is not None else -1),
-            int(row[4] or 0),
+            str(row[2] or ''),
+            int(row[3] or 0),
+            str(row[4] or ''),
             str(row[5] or ''),
             str(row[6] or ''),
-            str(row[7] or ''),
         )
 
     def _mark_children_panel_dirty(self) -> None:
@@ -614,7 +634,7 @@ class PanelsMixin:
 
     def update_panels(self) -> None:
         """Update all UI panels with current state."""
-        self._update_get_user_message_input_mode()
+        self._apply_get_user_message_input_mode()
 
         try:
             input_active = (
@@ -846,22 +866,36 @@ class PanelsMixin:
             # Empty content makes the panel effectively invisible
             self.approval_panel.set_content("")
 
-    def _update_get_user_message_input_mode(self) -> None:
-        """Style input when the current thread is answering get-user tool."""
-
+    def _refresh_get_user_message_input_mode(self) -> None:
+        """Refresh cached get-user waiting state after relevant durable events."""
         try:
             from eggthreads import get_active_get_user_message_waiting_note
 
-            waiting_note = get_active_get_user_message_waiting_note(self.db, self.current_thread)
+            waiting_note = get_active_get_user_message_waiting_note(
+                self.db, self.current_thread
+            )
         except Exception:
             waiting_note = None
+        self._get_user_input_mode_thread = self.current_thread
+        self._get_user_input_waiting = waiting_note is not None
+        self._apply_get_user_message_input_mode()
 
+    def _update_get_user_message_input_mode(self) -> None:
+        """Compatibility wrapper for explicit callers that require a refresh."""
+        self._refresh_get_user_message_input_mode()
+
+    def _apply_get_user_message_input_mode(self) -> None:
+        """Apply cached input styling without projecting tool state."""
         try:
             if not hasattr(self, '_normal_input_panel_title'):
                 self._normal_input_panel_title = self.input_panel.title
                 self._normal_input_border_style = self.input_panel.style.border_style
                 self._normal_input_title_style = self.input_panel.style.title_style
-            if waiting_note is not None:
+            waiting = (
+                getattr(self, '_get_user_input_mode_thread', None) == self.current_thread
+                and bool(getattr(self, '_get_user_input_waiting', False))
+            )
+            if waiting:
                 title = "Message Input (get answer tool)"
                 border = "magenta"
                 title_style = ""

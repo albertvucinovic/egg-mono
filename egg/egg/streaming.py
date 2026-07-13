@@ -9,7 +9,10 @@ from typing import Any, Dict, Optional
 
 from eggthreads import create_snapshot, EventWatcher, ThreadsDB
 
-from .panels import CHILDREN_PANEL_RELEVANT_EVENT_TYPES
+from .panels import (
+    CHILDREN_PANEL_RELEVANT_EVENT_TYPES,
+    GET_USER_INPUT_RELEVANT_EVENT_TYPES,
+)
 
 
 # Per-source style for streaming content. Used by both the live delta
@@ -194,6 +197,10 @@ class StreamingMixin:
             self.compute_pending_prompt()
         except Exception:
             pass
+        try:
+            self._refresh_get_user_message_input_mode()
+        except Exception:
+            pass
         self._watch_task = asyncio.create_task(self.watch_thread(self.current_thread))
 
     async def watch_thread(self, thread_id: str):
@@ -271,6 +278,7 @@ class StreamingMixin:
             saw_non_stream_msg = False
             saw_compaction_marker = False
             saw_children_status_event = False
+            saw_get_user_input_event = False
             saw_approval_event = False
             for idx, e in enumerate(batch):
                 try:
@@ -283,6 +291,8 @@ class StreamingMixin:
                         saw_approval_event = True
                     if event_type in CHILDREN_PANEL_RELEVANT_EVENT_TYPES:
                         saw_children_status_event = True
+                    if event_type in GET_USER_INPUT_RELEVANT_EVENT_TYPES:
+                        saw_get_user_input_event = True
                 except Exception:
                     pass
                 await self.ingest_event_for_live(e, thread_id)
@@ -298,6 +308,12 @@ class StreamingMixin:
             if saw_children_status_event:
                 try:
                     self._mark_children_panel_dirty()
+                except Exception:
+                    pass
+
+            if saw_get_user_input_event:
+                try:
+                    self._refresh_get_user_message_input_mode()
                 except Exception:
                     pass
 
