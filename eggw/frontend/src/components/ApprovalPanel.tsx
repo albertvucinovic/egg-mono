@@ -5,6 +5,8 @@ import { Check, X, AlertTriangle, CheckCheck, FileText } from "lucide-react";
 import { fetchToolCalls, approveTool } from "@/lib/api";
 import { useAppStore, ToolCall } from "@/lib/store";
 import { createClientOperationId } from "@/lib/messageOperations";
+import { Button, StatusChip } from "@/components/ui/primitives";
+import clsx from "clsx";
 
 interface ApprovalPanelProps {
   threadId: string;
@@ -71,10 +73,9 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
 
   return (
     <div
-      className={`p-4 ${showBorders ? 'border-t' : ''}`}
-      style={{ borderColor: "var(--tool-call-border)", background: "var(--tool-call-bg)" }}
+      className={clsx("eggw-approval-panel", showBorders && "eggw-approval-panel-bordered")}
     >
-      <div className="flex items-center gap-2 mb-3" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>
+      <div className="eggw-approval-heading">
         <AlertTriangle className="w-5 h-5" />
         <span className="font-medium">Pending Approvals</span>
       </div>
@@ -83,41 +84,28 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
         {pendingTools.map((tc) => (
           <div
             key={tc.id}
-            className={`rounded p-3 ${showBorders ? 'border' : ''}`}
-            style={{ background: "var(--panel-bg)", borderColor: "var(--tool-call-border)" }}
+            className={clsx("eggw-approval-card", !showBorders && "eggw-approval-card-borderless")}
           >
-            <div className="flex items-center justify-between mb-2">
+            <div className="eggw-approval-card-header">
               <div className="flex items-center gap-2">
-                <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name}</span>
-                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                <span className="eggw-approval-tool-name">{tc.name}</span>
+                <span className="eggw-ui-muted text-xs font-mono">
                   {tc.id.slice(-8)}
                 </span>
-                <span
-                  className="text-xs px-2 py-0.5 rounded border"
-                  style={{
-                    borderColor: tc.state === "TC1" ? "var(--tool-call-border)" : "var(--reasoning-border)",
-                    color: tc.state === "TC1" ? "var(--tool-call-text, var(--tool-call-border))" : "var(--reasoning-text, var(--reasoning-border))",
-                  }}
-                >
+                <StatusChip tone={tc.state === "TC1" ? "warning" : "special"}>
                   {tc.state === "TC1" ? "Exec Approval" : "Output Approval"}
-                </span>
+                </StatusChip>
               </div>
             </div>
 
             {tc.summary && (
-              <div
-                className="text-xs mb-3 px-2 py-1 rounded border animate-pulse"
-                style={{ borderColor: "var(--tool-call-border)", color: "var(--tool-call-text, var(--tool-call-border))" }}
-              >
+              <div className="eggw-approval-summary" role="status">
                 {tc.summary}
               </div>
             )}
 
             {/* Arguments preview */}
-            <pre
-              className="text-xs mb-3 max-h-32 overflow-auto p-2 rounded"
-              style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
-            >
+            <pre className="eggw-code-block mb-3 max-h-32">
               {typeof tc.arguments === "string"
                 ? tc.arguments.slice(0, 500)
                 : JSON.stringify(tc.arguments, null, 2).slice(0, 500)}
@@ -125,17 +113,11 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
 
             {/* Output preview for TC4 */}
             {tc.state === "TC4" && tc.output && (
-              <details className="mb-3">
-                <summary
-                  className="cursor-pointer text-sm"
-                  style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}
-                >
+              <details className="eggw-detail-block eggw-role-tool mb-3">
+                <summary className="eggw-detail-summary">
                   View Output ({tc.output.length} chars)
                 </summary>
-                <pre
-                  className="mt-2 text-xs max-h-40 overflow-auto p-2 rounded"
-                  style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
-                >
+                <pre className="eggw-code-block max-h-40">
                   {tc.output.slice(0, 2000)}
                   {tc.output.length > 2000 && "\n... (truncated)"}
                 </pre>
@@ -146,27 +128,25 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
             <div className="flex gap-2 flex-wrap">
               {tc.state === "TC1" ? (
                 <>
-                  <button
+                  <Button
                     onClick={() =>
                       approveMutation.mutate({ threadId, operationId: createClientOperationId("approval"), toolCallId: tc.id, approved: true })
                     }
-                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                    variant="primary"
                     title="Approve this tool call (y)"
                   >
                     <Check className="w-4 h-4" /> Approve
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     onClick={() =>
                       approveMutation.mutate({ threadId, operationId: createClientOperationId("approval"), toolCallId: tc.id, approved: false })
                     }
-                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--user-msg-border))" }}
+                    variant="danger"
                     title="Deny this tool call (n)"
                   >
                     <X className="w-4 h-4" /> Deny
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     onClick={() =>
                       approveMutation.mutate({
                         threadId,
@@ -176,16 +156,15 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
                         decision: "all-in-turn",
                       })
                     }
-                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--accent)", color: "var(--accent)" }}
+                    variant="secondary"
                     title="Approve all tool calls in this turn (a)"
                   >
                     <CheckCheck className="w-4 h-4" /> Approve All
-                  </button>
+                  </Button>
                 </>
               ) : (
                 <>
-                  <button
+                  <Button
                     onClick={() =>
                       approveMutation.mutate({
                         threadId,
@@ -195,13 +174,12 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
                         outputDecision: "whole",
                       })
                     }
-                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                    variant="primary"
                     title="Include full output (y)"
                   >
                     <Check className="w-4 h-4" /> Whole
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     onClick={() =>
                       approveMutation.mutate({
                         threadId,
@@ -211,13 +189,12 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
                         outputDecision: "partial",
                       })
                     }
-                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--reasoning-border)", color: "var(--reasoning-text, var(--reasoning-border))" }}
+                    variant="warning"
                     title="Include shortened preview (n)"
                   >
                     <FileText className="w-4 h-4" /> Partial
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     onClick={() =>
                       approveMutation.mutate({
                         threadId,
@@ -227,12 +204,11 @@ export function ApprovalPanel({ threadId, showBorders = true }: ApprovalPanelPro
                         outputDecision: "omit",
                       })
                     }
-                    className="flex items-center gap-1 px-3 py-1 rounded text-sm border font-medium"
-                    style={{ borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--user-msg-border))" }}
+                    variant="danger"
                     title="Omit output entirely (o)"
                   >
                     <X className="w-4 h-4" /> Omit
-                  </button>
+                  </Button>
                 </>
               )}
             </div>

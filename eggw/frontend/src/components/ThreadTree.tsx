@@ -25,6 +25,7 @@ import {
 import { useAppStore, Thread } from "@/lib/store";
 import { createClientOperationId } from "@/lib/messageOperations";
 import clsx from "clsx";
+import { Button, IconButton } from "@/components/ui/primitives";
 
 interface TreeNodeProps {
   thread: Thread;
@@ -122,38 +123,68 @@ function TreeNode({ thread, level }: TreeNodeProps) {
   return (
     <div>
       <div
+        role="treeitem"
+        aria-level={level + 1}
+        aria-selected={isSelected}
+        aria-expanded={thread.has_children ? expanded : undefined}
+        tabIndex={0}
         className={clsx(
-          "flex items-center gap-1 px-2 py-1 cursor-pointer rounded group",
-          isSelected && "border-l-2"
+          "eggw-tree-row group",
+          isSelected && "eggw-tree-row-selected"
         )}
         style={{
           paddingLeft: `${level * 16 + 8}px`,
-          background: isSelected ? "var(--code-bg)" : undefined,
-          borderColor: isSelected ? "var(--accent)" : undefined,
         }}
         onClick={() => {
           router.push(`/${thread.id}`);
         }}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          const tree = event.currentTarget.closest('[role="tree"]');
+          const items = tree ? Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"]')) : [];
+          const index = items.indexOf(event.currentTarget);
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            router.push(`/${thread.id}`);
+          } else if (event.key === "ArrowDown" && index >= 0) {
+            event.preventDefault();
+            items[Math.min(index + 1, items.length - 1)]?.focus();
+          } else if (event.key === "ArrowUp" && index >= 0) {
+            event.preventDefault();
+            items[Math.max(index - 1, 0)]?.focus();
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            items[0]?.focus();
+          } else if (event.key === "End") {
+            event.preventDefault();
+            items.at(-1)?.focus();
+          } else if (thread.has_children && event.key === "ArrowRight") {
+            event.preventDefault(); setExpanded(true);
+          } else if (thread.has_children && event.key === "ArrowLeft") {
+            event.preventDefault(); setExpanded(false);
+          }
+        }}
       >
         {thread.has_children ? (
-          <button
+          <IconButton
             onClick={(e) => {
               e.stopPropagation();
               setExpanded(!expanded);
             }}
-            className="p-0.5 rounded"
+            className="eggw-tree-icon-button"
+            aria-label={expanded ? `Collapse ${thread.name || thread.id}` : `Expand ${thread.name || thread.id}`}
           >
             {expanded ? (
               <ChevronDown className="w-4 h-4" />
             ) : (
               <ChevronRight className="w-4 h-4" />
             )}
-          </button>
+          </IconButton>
         ) : (
           <span className="w-5" />
         )}
 
-        <MessageSquare className="w-4 h-4" style={{ color: "var(--muted)" }} />
+        <MessageSquare className="eggw-tree-icon h-4 w-4" aria-hidden="true" />
 
         {isEditing ? (
           <>
@@ -164,26 +195,25 @@ function TreeNode({ thread, level }: TreeNodeProps) {
               onChange={(e) => setEditName(e.target.value)}
               onKeyDown={handleKeyDown}
               onClick={(e) => e.stopPropagation()}
-              className="flex-1 border rounded px-1 text-sm outline-none"
-              style={{ background: "var(--code-bg)", borderColor: "var(--accent)", color: "var(--foreground)" }}
+              className="eggw-form-control flex-1 px-2 text-sm"
               placeholder="Thread name"
             />
-            <button
+            <IconButton
               onClick={handleSaveEdit}
-              className="p-1 rounded"
-              style={{ color: "var(--tool-msg-border)" }}
+              className="eggw-tree-icon-button"
+              aria-label="Save thread name"
               title="Save"
             >
               <Check className="w-3 h-3" />
-            </button>
-            <button
+            </IconButton>
+            <IconButton
               onClick={handleCancelEdit}
-              className="p-1 rounded"
-              style={{ color: "var(--user-msg-border)" }}
+              className="eggw-tree-icon-button"
+              aria-label="Cancel thread rename"
               title="Cancel"
             >
               <X className="w-3 h-3" />
-            </button>
+            </IconButton>
           </>
         ) : (
           <>
@@ -191,42 +221,45 @@ function TreeNode({ thread, level }: TreeNodeProps) {
               {thread.name || thread.id.slice(-8)}
             </span>
 
-            <span className="text-xs" style={{ color: "var(--muted)" }}>
+            <span className="eggw-ui-muted text-xs">
               {thread.model_key?.split(":")[0]}
             </span>
 
             {/* Actions (visible on hover) */}
-            <div className="hidden group-hover:flex gap-1">
-              <button
+            <div className="eggw-tree-actions">
+              <IconButton
                 onClick={handleStartEdit}
-                className="p-1 rounded"
+                className="eggw-tree-icon-button"
+                aria-label={`Rename ${thread.name || thread.id}`}
                 title="Rename"
               >
                 <Pencil className="w-3 h-3" />
-              </button>
-              <button
+              </IconButton>
+              <IconButton
                 onClick={(e) => {
                   e.stopPropagation();
                   duplicateMutation.mutate({ threadId: thread.id, operationId: createClientOperationId("duplicate") });
                 }}
-                className="p-1 rounded"
+                className="eggw-tree-icon-button"
+                aria-label={`Duplicate ${thread.name || thread.id}`}
                 title="Duplicate"
               >
                 <Copy className="w-3 h-3" />
-              </button>
-              <button
+              </IconButton>
+              <IconButton
+                variant="danger"
                 onClick={(e) => {
                   e.stopPropagation();
                   if (confirm("Delete this thread?")) {
                     deleteMutation.mutate({ threadId: thread.id, operationId: createClientOperationId("delete") });
                   }
                 }}
-                className="p-1 rounded"
-                style={{ color: "var(--user-msg-border)" }}
+                className="eggw-tree-icon-button"
+                aria-label={`Delete ${thread.name || thread.id}`}
                 title="Delete"
               >
                 <Trash2 className="w-3 h-3" />
-              </button>
+              </IconButton>
             </div>
           </>
         )}
@@ -234,7 +267,7 @@ function TreeNode({ thread, level }: TreeNodeProps) {
 
       {/* Children */}
       {expanded && children && (
-        <div>
+        <div role="group">
           {children.map((child: Thread) => (
             <TreeNode key={child.id} thread={child} level={level + 1} />
           ))}
@@ -276,32 +309,33 @@ export function ThreadTree() {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="p-2 border-b border-[var(--panel-border)] flex items-center justify-between">
+      <div className="eggw-tree-header">
         <span className="text-sm font-medium">Threads</span>
-        <button
+        <IconButton
           onClick={() => createMutation.mutate({ operationId: createClientOperationId("create-thread") })}
-          className="p-1 rounded"
+          className="eggw-tree-icon-button"
+          aria-label="New thread"
           title="New thread"
           data-testid="new-thread-btn"
         >
           <Plus className="w-4 h-4" />
-        </button>
+        </IconButton>
       </div>
 
       {/* Thread list */}
-      <div className="flex-1 overflow-auto py-1">
+      <div className="flex-1 overflow-auto py-1" role="tree" aria-label="Threads">
         {isLoading ? (
-          <div className="p-4 text-center" style={{ color: "var(--muted)" }}>Loading...</div>
+          <div className="eggw-compact-state" role="status">Loading threads…</div>
         ) : threads?.length === 0 ? (
-          <div className="p-4 text-center" style={{ color: "var(--muted)" }}>
+          <div className="eggw-compact-state text-center">
             <p>No threads yet</p>
-            <button
+            <Button
+              variant="primary"
               onClick={() => createMutation.mutate({ operationId: createClientOperationId("create-thread") })}
-              className="mt-2 px-3 py-1 rounded text-sm"
-              style={{ background: "var(--accent)", color: "var(--background)" }}
+              className="mt-2"
             >
               Create first thread
-            </button>
+            </Button>
           </div>
         ) : (
           threads?.map((thread: Thread) => (

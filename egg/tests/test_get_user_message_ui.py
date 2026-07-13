@@ -102,6 +102,7 @@ def test_input_panel_marks_active_get_user_answer_mode_and_restores_after_reply(
     normal_border = egg_app.input_panel.style.border_style
 
     _start_get_user_wait(egg_app)
+    egg_app._refresh_get_user_message_input_mode()
     egg_app.update_panels()
 
     assert egg_app.input_panel.title == "Message Input (get answer tool)"
@@ -109,6 +110,7 @@ def test_input_panel_marks_active_get_user_answer_mode_and_restores_after_reply(
 
     ts.append_message(egg_app.db, egg_app.current_thread, "user", "The Practical Guide")
     ts.create_snapshot(egg_app.db, egg_app.current_thread)
+    egg_app._refresh_get_user_message_input_mode()
     egg_app.update_panels()
 
     assert egg_app.input_panel.title == normal_title
@@ -144,6 +146,7 @@ def test_shell_command_during_active_get_user_wait_does_not_answer_tool(egg_app)
 
 def test_ctrl_c_cancels_active_get_user_wait_with_keep_user_turn(egg_app):
     _start_get_user_wait(egg_app)
+    egg_app._refresh_get_user_message_input_mode()
     egg_app.update_panels()
     assert egg_app.input_panel.title == "Message Input (get answer tool)"
 
@@ -158,6 +161,7 @@ def test_ctrl_c_cancels_active_get_user_wait_with_keep_user_turn(egg_app):
     assert not any(msg.get("role") == "user" and "User interrupted" in str(msg.get("content")) for msg in messages)
     assert ts.discover_runner_actionable(egg_app.db, egg_app.current_thread) is None
 
+    egg_app._refresh_get_user_message_input_mode()
     egg_app.update_panels()
     assert egg_app.input_panel.title == "Message Input"
 
@@ -171,3 +175,68 @@ def test_normal_active_tool_ctrl_c_does_not_use_get_user_special_message(egg_app
     messages = _messages(egg_app)
     assert not any("get_user_message_while_preserving_llm_turn" in str(msg.get("content")) for msg in messages if msg.get("role") == "tool")
     assert not any(msg.get("role") == "tool" and msg.get("keep_user_turn") for msg in messages)
+
+
+def test_update_panels_uses_cached_get_user_state_without_tool_projection(egg_app, monkeypatch):
+    calls = {"count": 0}
+
+    def waiting_note(_db, _thread_id):
+        calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(ts, "get_active_get_user_message_waiting_note", waiting_note)
+
+    egg_app._refresh_get_user_message_input_mode()
+    assert calls["count"] == 1
+
+    for _ in range(5):
+        egg_app.update_panels()
+
+    assert calls["count"] == 1
+
+
+def test_get_user_cache_refreshes_on_initial_load_and_relevant_watcher_events(egg_app, monkeypatch):
+    import asyncio
+    import egg.streaming as streaming_mod
+
+    calls = []
+    monkeypatch.setattr(
+        egg_app,
+        "_refresh_get_user_message_input_mode",
+        lambda: calls.append("refresh"),
+    )
+
+    async def initial_load():
+        egg_app._watch_task = None
+        await egg_app.start_watching_current()
+        assert calls == ["refresh"]
+        egg_app._watch_task.cancel()
+        try:
+            await egg_app._watch_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(initial_load())
+
+    class OneBatchWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aiter(self):
+            yield [{
+                "type": "stream.delta",
+                "payload_json": json.dumps({"text": "not state"}),
+                "invoke_id": "invoke",
+            }]
+            yield [{
+                "type": "msg.create",
+                "payload_json": json.dumps({"role": "user", "content": "reply"}),
+                "msg_id": "reply",
+                "event_seq": 999,
+                "ts": None,
+            }]
+
+    monkeypatch.setattr(streaming_mod, "EventWatcher", OneBatchWatcher)
+    asyncio.run(egg_app.watch_thread(egg_app.current_thread))
+
+    assert calls == ["refresh", "refresh"]

@@ -7,6 +7,16 @@ from typing import Any, Dict, List, Optional, Set
 
 
 CHILDREN_PANEL_MAXIMAL_LIMIT = 4
+LIVE_PANEL_TEXT_MAX_CHARS = 64_000
+
+
+def _live_panel_text(value: Any) -> str:
+    """Materialize only the tail that a bounded inline panel can display."""
+    tail = getattr(value, "tail", None)
+    if callable(tail):
+        return str(tail(LIVE_PANEL_TEXT_MAX_CHARS))
+    return str(value or "")
+
 
 from eggthreads import (
     COMPACTION_EVENT_TYPE,
@@ -245,7 +255,7 @@ class FormattingMixin:
                 rendered = f"{rendered} +{hidden} more" if rendered else f"+{hidden} more"
             return rendered or "none"
 
-        root = self.db.get_thread(root_tid)
+        root = self.db.get_thread_metadata(root_tid)
         root_name = one_line(root.name if root else '', 'Unnamed')
         root_description = one_line(
             root.short_recap if root else '', 'No description'
@@ -816,9 +826,9 @@ class FormattingMixin:
         ctx_tokens: Optional[int] = None
         api_usage: Dict[str, Any] = {}
         try:
-            from eggthreads import thread_token_stats
+            from eggthreads import header_token_stats
 
-            ts = thread_token_stats(self.db, self.current_thread, llm=self.llm_client)
+            ts = header_token_stats(self.db, self.current_thread, llm=self.llm_client)
             if isinstance(ts, dict):
                 ct = ts.get('context_tokens')
                 if isinstance(ct, int):
@@ -866,21 +876,21 @@ class FormattingMixin:
             if provider_duration:
                 parts.append(f"\n[Provider status]\n{provider_duration}")
             if ls.get('reason'):
-                parts.append(f"\n[Reasoning (streaming){live_tps_text}]\n{ls['reason']}")
+                parts.append(f"\n[Reasoning (streaming){live_tps_text}]\n{_live_panel_text(ls['reason'])}")
             reasoning_summary = ls.get('reasoning_summary') or {}
             if isinstance(reasoning_summary, dict) and reasoning_summary.get('active') and reasoning_summary.get('text'):
                 parts.append(
                     f"\n[Reasoning Summary (streaming){live_tps_text}]\n"
-                    f"{reasoning_summary.get('text')}"
+                    f"{_live_panel_text(reasoning_summary.get('text'))}"
                 )
             for pk in ls.get('tc_order') or []:
                 delta = (ls.get('tc_text') or {}).get(pk, '')
                 if delta:
                     label = (ls.get('tc_names') or {}).get(pk) or pk
-                    parts.append(f"\n[Tool Call Args: {label}]\n{delta}")
+                    parts.append(f"\n[Tool Call Args: {label}]\n{_live_panel_text(delta)}")
             for name, txt in (ls.get('tools') or {}).items():
                 if txt:
-                    parts.append(f"\n[Tool: {name} (streaming)]\n{txt}")
+                    parts.append(f"\n[Tool: {name} (streaming)]\n{_live_panel_text(txt)}")
             countdown = ""
             try:
                 countdown = self._current_tool_timeout_countdown()
@@ -907,7 +917,7 @@ class FormattingMixin:
                     f"{text}"
                 )
             if ls.get('content'):
-                parts.append(f"\n[Assistant (streaming){live_tps_text}]\n{ls['content']}")
+                parts.append(f"\n[Assistant (streaming){live_tps_text}]\n{_live_panel_text(ls['content'])}")
 
         # Build header with model and approximate token usage.
         head_parts: List[str] = []

@@ -5,6 +5,7 @@ import { Editor, loader, useMonaco, type BeforeMount, type Monaco, type OnMount 
 import * as monacoPackage from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { useAppStore } from "@/lib/store";
+import { monacoBaseTheme } from "@/lib/themes";
 import { PlainDraftEditor, type DraftEditorProps } from "@/components/PlainDraftEditor";
 
 loader.config({ monaco: monacoPackage as unknown as Monaco });
@@ -31,10 +32,6 @@ function withAlpha(hex: string, alpha: string, fallback: string): string {
   const normalized = normalizeHexColor(hex, fallback);
   if (/^#[0-9a-f]{6}$/i.test(normalized)) return `${normalized}${alpha}`;
   return normalized;
-}
-
-function monacoBaseTheme(themeName: string): "vs" | "vs-dark" {
-  return themeName.includes("light") ? "vs" : "vs-dark";
 }
 
 function safeThemeName(themeName: string): string {
@@ -72,23 +69,29 @@ export function MonacoDraftEditor(props: MonacoDraftEditorProps) {
   }, [isReady]);
 
   const defineEggwMonacoTheme = useCallback((monacoInstance: Monaco) => {
-    const foreground = normalizeHexColor(cssVariable("--foreground", "#d1d5db"), "#d1d5db");
-    const background = normalizeHexColor(cssVariable("--code-bg", cssVariable("--panel-bg", "#0d1117")), "#0d1117");
-    const border = normalizeHexColor(cssVariable("--panel-border", "#30363d"), "#30363d");
-    const muted = normalizeHexColor(cssVariable("--muted", "#8b949e"), "#8b949e");
-    const accent = normalizeHexColor(cssVariable("--accent", "#58a6ff"), "#58a6ff");
+    const foreground = normalizeHexColor(cssVariable("--code-text", "#d1d5db"), "#d1d5db");
+    const background = normalizeHexColor(cssVariable("--code-surface", "#0d1117"), "#0d1117");
+    const border = normalizeHexColor(cssVariable("--border-default", "#66707b"), "#66707b");
+    const muted = normalizeHexColor(cssVariable("--text-secondary", "#aab4bf"), "#aab4bf");
+    const accent = normalizeHexColor(cssVariable("--focus-ring", "#58a6ff"), "#58a6ff");
+    const selection = normalizeHexColor(cssVariable("--selection-bg", "#264f78"), "#264f78");
 
     monacoInstance.editor.defineTheme(monacoThemeName, {
       base: monacoBaseTheme(theme),
       inherit: true,
-      rules: [],
+      rules: [
+        { token: "comment", foreground: normalizeHexColor(cssVariable("--syntax-comment", muted), muted).slice(1) },
+        { token: "keyword", foreground: normalizeHexColor(cssVariable("--syntax-keyword", accent), accent).slice(1) },
+        { token: "string", foreground: normalizeHexColor(cssVariable("--syntax-string", foreground), foreground).slice(1) },
+        { token: "number", foreground: normalizeHexColor(cssVariable("--syntax-number", foreground), foreground).slice(1) },
+      ],
       colors: {
         "editor.background": background,
         "editor.foreground": foreground,
         "editorCursor.foreground": accent,
         "editorLineNumber.foreground": muted,
         "editorLineNumber.activeForeground": accent,
-        "editor.selectionBackground": withAlpha(accent, "55", "#264f78"),
+        "editor.selectionBackground": selection,
         "editor.inactiveSelectionBackground": withAlpha(accent, "33", "#3a3d41"),
         "editor.lineHighlightBackground": withAlpha(border, "55", "#1f2937"),
         "editorWidget.background": background,
@@ -134,8 +137,7 @@ export function MonacoDraftEditor(props: MonacoDraftEditorProps) {
 
   return (
     <div
-      className="overflow-hidden rounded border"
-      style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)" }}
+      className="eggw-monaco-editor"
       data-testid="edit-answer-draft"
       data-editor="monaco"
       aria-label="Quoted assistant markdown draft"
@@ -150,7 +152,7 @@ export function MonacoDraftEditor(props: MonacoDraftEditorProps) {
         beforeMount={beforeMount}
         onMount={handleMount}
         onChange={(nextValue) => onChange(nextValue ?? "")}
-        loading={<div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--muted)" }}>Loading Monaco editor…</div>}
+        loading={<div className="eggw-editor-state h-full">Loading Monaco editor…</div>}
         options={{
           automaticLayout: true,
           bracketPairColorization: { enabled: true },

@@ -12,34 +12,20 @@ export default function Home() {
   useEffect(() => {
     if (didInitialize.current) return;
     didInitialize.current = true;
-
-    const createAndRedirect = async () => {
-      try {
-        const thread = await createThread({});
-        router.replace(`/${thread.id}`);
-      } catch (err) {
-        console.error("Failed to create startup thread:", err);
+    void createThread({})
+      .then((thread) => router.replace(`/${thread.id}`))
+      .catch((reason) => {
+        console.error("Failed to create startup thread:", reason);
         setError("Failed to create a new thread. Is the backend running?");
-      }
-    };
-
-    createAndRedirect();
+      });
   }, [router]);
 
-  if (error) {
-    return (
-      <div className="h-screen flex items-center justify-center" style={{ background: "var(--background)", color: "var(--foreground)" }}>
-        <div className="text-center">
-          <div className="text-lg mb-2">Error</div>
-          <div className="text-sm" style={{ color: "var(--muted)" }}>{error}</div>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="h-screen flex items-center justify-center" style={{ background: "var(--background)", color: "var(--foreground)" }}>
-      <div className="text-lg">Loading...</div>
-    </div>
+    <main className="eggw-gate-shell">
+      <div className={error ? "eggw-gate-state eggw-gate-error" : "eggw-gate-state"} role={error ? "alert" : "status"}>
+        <h1>{error ? "Could not start EggW" : "Starting EggW"}</h1>
+        <p>{error || "Creating a conversation thread…"}</p>
+      </div>
+    </main>
   );
 }

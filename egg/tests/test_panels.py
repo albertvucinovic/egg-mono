@@ -335,6 +335,110 @@ class TestUpdatePanels:
         selects = [statement for statement in statements if statement.lstrip().upper().startswith("WITH")]
         assert len(selects) == 1
 
+    def test_children_status_key_tracks_descendant_event_and_stream_identity(self, egg_app):
+        """Cross-process fallback keys include descendant state transitions."""
+        import uuid
+
+        parent = egg_app.current_thread
+        parent_row = egg_app.db.get_thread(parent)
+        child = "status-key-transition-child"
+        egg_app.db.create_thread(
+            thread_id=child,
+            name="Child",
+            parent_id=parent,
+            initial_model_key=parent_row.initial_model_key,
+            depth=parent_row.depth + 1,
+        )
+        key_before = egg_app._compute_children_panel_status_key()
+
+        egg_app.db.append_event(
+            event_id=uuid.uuid4().hex,
+            thread_id=child,
+            type_="msg.create",
+            payload={"role": "assistant", "content": "done"},
+            msg_id=uuid.uuid4().hex,
+        )
+        key_after_message = egg_app._compute_children_panel_status_key()
+        assert key_after_message != key_before
+
+        assert egg_app.db.try_open_stream(
+            child,
+            "descendant-invoke",
+            "2999-01-01 00:00:00",
+            owner="other-process",
+            purpose="tool",
+        )
+        key_after_stream = egg_app._compute_children_panel_status_key()
+
+        assert key_after_stream != key_after_message
+        assert "descendant-invoke" in key_after_stream[5]
+
+    def test_children_status_key_work_is_independent_of_event_history_size(self, egg_app):
+        """Status invalidation seeks event heads instead of scanning history."""
+        import uuid
+
+        def vm_steps() -> int:
+            steps = {"count": 0}
+
+            def progress():
+                steps["count"] += 1
+                return 0
+
+            egg_app.db.conn.set_progress_handler(progress, 1)
+            try:
+                egg_app._compute_children_panel_status_key()
+            finally:
+                egg_app.db.conn.set_progress_handler(None, 0)
+            return steps["count"]
+
+        tid = egg_app.current_thread
+        rows = [
+            (uuid.uuid4().hex, tid, "msg.create", uuid.uuid4().hex, "{}")
+            for _ in range(10)
+        ]
+        egg_app.db.conn.executemany(
+            "INSERT INTO events(event_id, thread_id, type, msg_id, payload_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        small_history_steps = vm_steps()
+
+        rows = [
+            (uuid.uuid4().hex, tid, "msg.create", uuid.uuid4().hex, "{}")
+            for _ in range(5000)
+        ]
+        egg_app.db.conn.executemany(
+            "INSERT INTO events(event_id, thread_id, type, msg_id, payload_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        large_history_steps = vm_steps()
+
+        assert large_history_steps <= small_history_steps + 20
+
+    def test_children_formatter_reads_metadata_without_snapshot_blob(self, egg_app, monkeypatch):
+        """Current identity must not load snapshot_json merely for name/recap."""
+        metadata_calls = []
+        original = egg_app.db.get_thread_metadata
+
+        def metadata(thread_id):
+            row = original(thread_id)
+            metadata_calls.append(row)
+            return row
+
+        monkeypatch.setattr(egg_app.db, "get_thread_metadata", metadata)
+        monkeypatch.setattr(
+            egg_app.db,
+            "get_thread",
+            lambda _thread_id: pytest.fail("Children formatter loaded snapshot_json"),
+        )
+
+        text = egg_app.format_children_panel(egg_app.current_thread)
+
+        assert "Current:" in text
+        assert len(metadata_calls) == 1
+        assert metadata_calls[0].snapshot_json is None
+
     def test_children_status_key_tracks_current_name_and_description(self, egg_app):
         """Current-thread metadata changes must invalidate cached panel text."""
         key_1 = egg_app._compute_children_panel_status_key()
@@ -1648,7 +1752,7 @@ class TestTranscriptScrollbackSource:
 
         rendered = []
 
-        def fake_message_renderables(message, hidden_details=None):
+        def fake_message_renderables(message, hidden_details=None, **kwargs):
             content = str(message.get("content") or "")
             rendered.append(content)
             return [_StaticTranscriptRenderable(content, content)]
@@ -1676,7 +1780,7 @@ class TestTranscriptScrollbackSource:
 
         rendered = []
 
-        def fake_message_renderables(message, hidden_details=None):
+        def fake_message_renderables(message, hidden_details=None, **kwargs):
             content = str(message.get("content") or "")
             rendered.append((egg_app._display_verbosity, content))
             return [_StaticTranscriptRenderable(content, content)]
@@ -1847,6 +1951,38 @@ class TestTranscriptScrollbackSource:
 
         assert "visible-4" in "\n".join(rows)
         assert calls["count"] <= 2
+
+    def test_min_lazy_render_uses_source_local_token_metadata(self, egg_app, monkeypatch):
+        """Paging old blocks does no per-message snapshot watermark lookup."""
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        for i in range(100):
+            append_message(
+                egg_app.db,
+                egg_app.current_thread,
+                "tool",
+                f"hidden-result-{i}",
+                extra={"name": "bash", "tool_call_id": f"call-{i}"},
+            )
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "visible-tail")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        watermark_reads = []
+
+        def fail_watermark_read(*args, **kwargs):
+            watermark_reads.append(True)
+            raise AssertionError("scrollback source must reuse captured snapshot metadata")
+
+        monkeypatch.setattr(egg_app, "_snapshot_last_event_seq", fail_watermark_read)
+        rows = list(source.rows_from_bottom(100, bottom_offset=0, height=200))
+
+        assert "visible-tail" in "\n".join(rows)
+        assert watermark_reads == []
+        assert source._snapshot_seq == egg_app.db.get_thread(egg_app.current_thread).snapshot_last_event_seq
+        assert len(source._per_message_token_stats) >= 100
 
 
 class TestRedrawStaticView:

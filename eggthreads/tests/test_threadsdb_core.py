@@ -188,3 +188,22 @@ def test_delete_thread_cascades_to_children_events_and_open_streams(tmp_path) ->
         == 0
     )
     assert db.conn.execute("SELECT COUNT(*) FROM open_streams WHERE thread_id=?", (child,)).fetchone()[0] == 0
+
+
+def test_get_thread_metadata_does_not_load_snapshot_json(tmp_path):
+    from eggthreads import ThreadsDB, create_root_thread
+
+    db = ThreadsDB(tmp_path / "metadata.sqlite")
+    db.init_schema()
+    tid = create_root_thread(db, name="Metadata")
+    db.conn.execute(
+        "UPDATE threads SET short_recap=?, snapshot_json=? WHERE thread_id=?",
+        ("recap", '{"messages":[{"content":"large"}]}', tid),
+    )
+
+    row = db.get_thread_metadata(tid)
+
+    assert row is not None
+    assert row.name == "Metadata"
+    assert row.short_recap == "recap"
+    assert row.snapshot_json is None

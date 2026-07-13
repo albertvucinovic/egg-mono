@@ -26,6 +26,8 @@ from typing import Any, List, Optional, Protocol, Sequence
 
 from rich.console import Console
 
+from .streams import ChunkedText
+
 try:
     from rich.cells import split_graphemes
 except ImportError:  # pragma: no cover - compatibility with older Rich
@@ -59,6 +61,55 @@ class _StreamRowsState:
     logical_start_rows_len: int = 0
     logical_has_content: bool = False
     render_empty_current: bool = False
+
+
+class _StreamRowsView(Sequence[str]):
+    """Zero-copy sequence view over completed rows plus the current row."""
+
+    __slots__ = ("_state", "_include_current")
+
+    def __init__(self, state: _StreamRowsState) -> None:
+        self._state = state
+        self._include_current = bool(
+            state.render_empty_current
+            or (state.logical_has_content and state.col > 0)
+        )
+
+    def __len__(self) -> int:
+        return len(self._state.rows) + int(self._include_current)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Sequence):
+            return list(self) == list(other)
+        return False
+
+    def __iter__(self):
+        yield from self._state.rows
+        if self._include_current:
+            yield self._state.current + ("\x1b[0m" if self._state.active_sgr else "")
+
+    def __getitem__(self, index):
+        length = len(self)
+        if isinstance(index, slice):
+            start, stop, step = index.indices(length)
+            if step != 1:
+                return [self[i] for i in range(start, stop, step)]
+            rows = self._state.rows[start:min(stop, len(self._state.rows))]
+            result = list(rows)
+            if self._include_current and stop > len(self._state.rows) and start < length:
+                result.append(
+                    self._state.current
+                    + ("\x1b[0m" if self._state.active_sgr else "")
+                )
+            return result
+        index = int(index)
+        if index < 0:
+            index += length
+        if index < 0 or index >= length:
+            raise IndexError(index)
+        if index < len(self._state.rows):
+            return self._state.rows[index]
+        return self._state.current + ("\x1b[0m" if self._state.active_sgr else "")
 
 
 class FullScreenScrollbackSource(Protocol):
@@ -401,7 +452,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         # stream_end so the final formatted message (added via print_above)
         # takes its visual slot with no residue.
         self._scrollback: List[str] = []
-        self._stream_buffer: str = ""  # ANSI-rendered bytes so far
+        self._stream_buffer = ChunkedText()  # ANSI-rendered chunks for width rebuilds
         self._live_lines: List[str] = []
         # Last painted viewport: list of exactly `_viewport_h` rows that
         # are currently on the terminal. Used as the diff baseline.
@@ -603,7 +654,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
 
     def stream_begin(self) -> None:
         """Start a new streaming session; clear any prior in-flight buffer."""
-        self._stream_buffer = ""
+        self._stream_buffer.clear()
         self._stream_rows_state = _StreamRowsState(width=self._viewport_w or self._term_width())
         self._paint(self._viewport_w or self._term_width())
 
@@ -624,7 +675,7 @@ class FullScreenDiffRenderer(_DiffRendererBase):
             ansi = self._rich_print_to_str(text, end="")
         if not ansi:
             return
-        self._stream_buffer += ansi
+        self._stream_buffer.append(ansi)
         self._append_stream_rows(ansi, self._viewport_w or self._term_width())
         # When the user is scrolled up, stream growth is intentionally hidden
         # below the current viewport.  Repainting every token still forces a
@@ -644,23 +695,22 @@ class FullScreenDiffRenderer(_DiffRendererBase):
         formatted message so the viewport slot previously occupied by the
         live stream is replaced with the finalized rendering.
         """
-        self._stream_buffer = ""
+        self._stream_buffer.clear()
         self._stream_rows_state = _StreamRowsState(width=self._viewport_w or self._term_width())
         self._paint(self._viewport_w or self._term_width())
 
     # -- internal -----------------------------------------------------------
 
-    def _stream_rows(self, width: int) -> List[str]:
-        """Split the in-flight stream buffer into terminal-width visual rows."""
+    def _stream_rows(self, width: int) -> Sequence[str]:
+        """Return a zero-copy view of incrementally wrapped stream rows."""
         width = int(width or 0)
         state = self._stream_rows_state
         if state.width != width:
             state = _StreamRowsState(width=width)
             self._stream_rows_state = state
-            self._append_stream_rows(self._stream_buffer, width)
-        if not state.render_empty_current and (not state.logical_has_content or state.col <= 0):
-            return list(state.rows)
-        return state.rows + [state.current + ("\x1b[0m" if state.active_sgr else "")]
+            for chunk in self._stream_buffer.iter_chunks():
+                self._append_stream_rows(chunk, width)
+        return _StreamRowsView(state)
 
     def _append_stream_rows(self, ansi_text: str, width: int) -> None:
         """Append ANSI-rendered stream text to the cached wrapped rows."""

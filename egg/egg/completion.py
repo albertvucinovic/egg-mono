@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, List, Dict, Mapping, Optional
+from typing import Any, Callable, Iterable, List, Dict, Mapping, Optional
 
+from dataclasses import dataclass
 import re
+import threading
 
 try:
     from prompt_toolkit.completion import Completer, Completion
@@ -46,6 +48,103 @@ from eggthreads.artifact_completion import (
     is_provider_artifact_id_position,
     provider_artifact_completion_items,
 )
+
+
+@dataclass(frozen=True)
+class CompletionRequest:
+    """Immutable identity for one asynchronous editor completion request."""
+
+    generation: int
+    line: str
+    row: int
+    col: int
+    thread_id: str
+    snapshot_seq: int
+
+
+class AsyncCompletionWorker:
+    """Latest-request-wins completion worker with a thread-owned database.
+
+    SQLite connections are thread-affine, so the worker opens its own
+    :class:`ThreadsDB` inside the worker thread rather than borrowing the UI
+    connection.  At most one request waits behind the currently running one; a
+    newer request replaces that pending request.
+    """
+
+    def __init__(
+        self,
+        db_path: Any,
+        llm: Any,
+        command_registry: Any,
+        loop: Any,
+        on_result: Callable[[CompletionRequest, List[Dict[str, str]]], None],
+    ) -> None:
+        self._db_path = db_path
+        self._llm = llm
+        self._command_registry = command_registry
+        self._loop = loop
+        self._on_result = on_result
+        self._condition = threading.Condition()
+        self._pending: Optional[CompletionRequest] = None
+        self._stopping = False
+        self._thread = threading.Thread(
+            target=self._run, name="egg-completion", daemon=True
+        )
+        self._thread.start()
+
+    def request(self, request: CompletionRequest) -> None:
+        with self._condition:
+            if self._stopping:
+                return
+            self._pending = request
+            self._condition.notify()
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stopping = True
+            self._pending = None
+            self._condition.notify()
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        self._thread.join(timeout)
+
+    def _run(self) -> None:
+        from eggthreads import ThreadsDB
+
+        db = ThreadsDB(self._db_path)
+        try:
+            while True:
+                with self._condition:
+                    while self._pending is None and not self._stopping:
+                        self._condition.wait()
+                    if self._stopping:
+                        return
+                    request = self._pending
+                    self._pending = None
+                if request is None:
+                    continue
+                try:
+                    items = get_autocomplete_items(
+                        request.line,
+                        request.col,
+                        db,
+                        lambda request=request: request.thread_id,
+                        self._llm,
+                        self._command_registry,
+                    )
+                except Exception:
+                    items = []
+                try:
+                    self._loop.call_soon_threadsafe(
+                        self._on_result, request, items
+                    )
+                except RuntimeError:
+                    return
+        finally:
+            try:
+                db.conn.close()
+            except Exception:
+                pass
 
 
 class ModelCompleter(Completer):
@@ -705,7 +804,7 @@ def get_autocomplete_items(line: str, col: int, db: Any, get_current_thread, llm
                 id_short = tid[-8:]
                 cur_tag = '[bold cyan][CUR][/bold cyan] ' if tid_cur and tid == tid_cur else ''
                 sflag = '[bold yellow]STREAMING[/bold yellow] ' if streaming else ''
-                status = (db.get_thread(tid).status if db.get_thread(tid) else 'unknown')
+                status = getattr(r, 'status', None) or 'unknown'
                 if status == 'active':
                     status_tag = f"[bold green]{status}[/]"
                 elif status == 'paused':

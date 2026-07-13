@@ -3,6 +3,7 @@ from __future__ import annotations
 from rich.text import Text
 
 from eggdisplay.eggdisplay.renderers import FullScreenDiffRenderer
+from eggdisplay import ChunkedText
 
 
 def test_rendered_output_strips_terminal_controls_but_keeps_sgr() -> None:
@@ -99,20 +100,20 @@ def test_fullscreen_replace_recent_scrollback_preserves_scrolled_view() -> None:
 def test_stream_rows_uses_terminal_cell_width_for_wide_and_combining_text() -> None:
     r = FullScreenDiffRenderer()
 
-    r._stream_buffer = "ab中de"
+    r._stream_buffer = ChunkedText("ab中de")
     assert r._stream_rows(4) == ["ab中", "de"]
 
-    r._stream_buffer = "e\u0301e\u0301e\u0301"
+    r._stream_buffer = ChunkedText("e\u0301e\u0301e\u0301")
     assert r._stream_rows(2) == ["e\u0301e\u0301", "e\u0301"]
 
-    r._stream_buffer = "a🙂b"
+    r._stream_buffer = ChunkedText("a🙂b")
     assert r._stream_rows(3) == ["a🙂", "b"]
 
 
 def test_stream_rows_reopens_sgr_style_after_wrap() -> None:
     r = FullScreenDiffRenderer()
 
-    r._stream_buffer = "\x1b[31mabcdef\x1b[0m"
+    r._stream_buffer = ChunkedText("\x1b[31mabcdef\x1b[0m")
 
     assert r._stream_rows(3) == [
         "\x1b[31mabc\x1b[0m",
@@ -203,7 +204,7 @@ def test_fullscreen_can_scroll_during_stream_without_prior_paint() -> None:
     # Simulate a fast stream growing before the main UI loop has repainted the
     # live panels. This happens easily while reasoning streams in read-only /
     # NO_API_CALLS scenarios. The scroll call must still see the stream rows.
-    r._stream_buffer = "\n".join(f"reason-{i}" for i in range(8))
+    r._stream_buffer = ChunkedText("\n".join(f"reason-{i}" for i in range(8)))
     assert r._scroll_offset == 0
 
     r.scroll(3)
@@ -252,7 +253,7 @@ def test_fullscreen_incremental_stream_rows_match_full_rebuild_for_markup() -> N
     r.stream_append("[red]abcd[/red]\n")
     r.stream_append("ef")
 
-    assert r._stream_rows(4) == r._stream_rows_from_ansi(r._stream_buffer, 4)
+    assert r._stream_rows(4) == r._stream_rows_from_ansi(str(r._stream_buffer), 4)
 
 
 class RecordingScrollbackSource:
@@ -343,8 +344,8 @@ def test_fullscreen_virtual_source_composes_before_scrollback_stream_and_live() 
     source = RecordingScrollbackSource(["s0", "s1", "s2"], total=3)
     r.set_scrollback_source(source)
     r._scrollback = ["p0", "p1"]
-    r._stream_buffer = "t0\nt1"
-    r._append_stream_rows(r._stream_buffer, 20)
+    r._stream_buffer = ChunkedText("t0\nt1")
+    r._append_stream_rows(str(r._stream_buffer), 20)
     r._live_lines = ["LIVE"]
 
     r._paint(20)

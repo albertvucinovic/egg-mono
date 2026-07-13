@@ -2,9 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUp, ChevronRight, Plus } from "lucide-react";
+import { ArrowUp, ChevronRight, GitBranch, Plus } from "lucide-react";
 import { fetchThread, fetchThreadChildren } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+import { Button } from "@/components/ui/primitives";
+import clsx from "clsx";
 
 interface ChildThread {
   id: string;
@@ -13,87 +15,41 @@ interface ChildThread {
   has_children: boolean;
 }
 
-interface ChildrenPanelProps {
-  showBorders?: boolean;
-}
-
-export function ChildrenPanel({ showBorders = true }: ChildrenPanelProps) {
+export function ChildrenPanel({ showBorders = true }: { showBorders?: boolean }) {
   const router = useRouter();
   const currentThreadId = useAppStore((state) => state.currentThreadId);
-
-  const { data: currentThread } = useQuery({
-    queryKey: ["thread", currentThreadId],
-    queryFn: () => fetchThread(currentThreadId!),
-    enabled: !!currentThreadId,
-  });
-
-  const { data: children = [], isLoading } = useQuery({
-    queryKey: ["threadChildren", currentThreadId],
-    queryFn: () => fetchThreadChildren(currentThreadId!),
-    enabled: !!currentThreadId,
-  });
-
-  const navigateToThread = (threadId: string) => {
-    router.push(`/${threadId}`);
-  };
-
-  if (!currentThreadId) {
-    return null;
-  }
+  const { data: currentThread } = useQuery({ queryKey: ["thread", currentThreadId], queryFn: () => fetchThread(currentThreadId!), enabled: !!currentThreadId });
+  const { data: children = [], isLoading } = useQuery({ queryKey: ["threadChildren", currentThreadId], queryFn: () => fetchThreadChildren(currentThreadId!), enabled: !!currentThreadId });
+  if (!currentThreadId) return null;
 
   return (
-    <div className={`bg-[var(--panel-bg)] ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
-      <div className={`px-3 py-2 text-xs flex items-center justify-between ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
-        <span>Children ({children.length})</span>
+    <section className={clsx("eggw-children-panel", showBorders && "eggw-children-panel-bordered")} aria-labelledby="children-panel-heading">
+      <div className="eggw-children-heading">
+        <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />
+        <h2 id="children-panel-heading">Thread branches</h2>
+        <span>{children.length} children</span>
       </div>
-
       {currentThread?.parent_id && (
-        <button
-          type="button"
-          onClick={() => navigateToThread(currentThread.parent_id)}
-          className={`w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 group ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}
-          style={{ color: "var(--foreground)" }}
-          title={`Open parent thread ${currentThread.parent_id}`}
-        >
-          <ArrowUp className="w-3 h-3" style={{ color: "var(--muted)" }} />
-          <span className="flex-1 truncate">Parent</span>
-          <span className="text-xs font-mono" style={{ color: "var(--accent)" }}>
-            {currentThread.parent_id.slice(-8)}
-          </span>
-        </button>
+        <Button variant="ghost" onClick={() => router.push(`/${currentThread.parent_id}`)} className="eggw-thread-link" title={`Open parent thread ${currentThread.parent_id}`}>
+          <ArrowUp className="h-4 w-4" aria-hidden="true" /><span>Parent</span><code>{currentThread.parent_id.slice(-8)}</code>
+        </Button>
       )}
-
       {isLoading ? (
-        <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>Loading...</div>
+        <div className="eggw-compact-state" role="status">Loading branches…</div>
       ) : children.length === 0 ? (
-        <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>
-          No children. Use /spawnChildThread to create one.
-        </div>
+        <div className="eggw-compact-state">No children. Use /spawnChildThread to create one.</div>
       ) : (
-        <div className="max-h-32 overflow-auto">
+        <div className="eggw-children-list">
           {children.map((child: ChildThread) => (
-            <button
-              key={child.id}
-              onClick={() => navigateToThread(child.id)}
-              className="w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 group"
-              style={{ color: "var(--foreground)" }}
-            >
-              <ChevronRight className="w-3 h-3" style={{ color: "var(--muted)" }} />
-              <span className="flex-1 truncate">
-                {child.name || child.id.slice(-8)}
-              </span>
-              {child.model_key && (
-                <span className="text-xs" style={{ color: "var(--muted)" }}>
-                  {child.model_key}
-                </span>
-              )}
-              {child.has_children && (
-                <Plus className="w-3 h-3" style={{ color: "var(--muted)" }} />
-              )}
-            </button>
+            <Button key={child.id} variant="ghost" onClick={() => router.push(`/${child.id}`)} className="eggw-thread-link">
+              <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              <span>{child.name || child.id.slice(-8)}</span>
+              {child.model_key && <small>{child.model_key}</small>}
+              {child.has_children && <Plus className="h-3.5 w-3.5" aria-label="Has children" />}
+            </Button>
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 }

@@ -16,19 +16,22 @@ class EventWatcher:
     """
 
     def __init__(self, db: ThreadsDB, thread_id: str, after_seq: int = -1,
-                 poll_sec: float = 0.05, max_backoff: float = 0.2):
+                 poll_sec: float = 0.05, max_backoff: float = 0.2,
+                 batch_size: int = 256):
         self.db = db
         self.thread_id = thread_id
         self.after_seq = after_seq
         self.poll_sec = poll_sec
         self.max_backoff = max_backoff
+        self.batch_size = max(1, int(batch_size))
 
     async def aiter(self) -> AsyncIterator[List]:
         idle = 0
         while True:
             cur = self.db.conn.execute(
-                "SELECT * FROM events WHERE thread_id=? AND event_seq>? ORDER BY event_seq ASC",
-                (self.thread_id, self.after_seq)
+                "SELECT * FROM events WHERE thread_id=? AND event_seq>? "
+                "ORDER BY event_seq ASC LIMIT ?",
+                (self.thread_id, self.after_seq, self.batch_size)
             )
             rows = cur.fetchall()
             if rows:

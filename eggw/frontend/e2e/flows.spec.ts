@@ -51,7 +51,7 @@ async function ensureThread(page: Page): Promise<void> {
 
 async function showSystemPanel(page: Page): Promise<void> {
   if (await page.getByText('System Log', { exact: true }).isVisible()) return;
-  await page.getByRole('button', { name: 'Show sidebar' }).click();
+  await page.getByRole('button', { name: 'Show system panel' }).click();
   await expect(page.getByText('System Log', { exact: true })).toBeVisible();
 }
 
@@ -1712,7 +1712,7 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(dialog).toContainText('ARGUMENT_A');
     await expect(dialog).toContainText('(not found in the loaded transcript)');
     await expect(dialog).not.toContainText('RESULT_B');
-    await dialog.getByRole('button', { name: 'Close' }).click();
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
 
     await tools.nth(1).click();
     dialog = page.getByRole('dialog');
@@ -1780,8 +1780,7 @@ test.describe('Settings and Controls', () => {
   });
 
   test('shows model selector', async ({ page }) => {
-    await expect(page.locator('text=Model:')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText('Model:', { exact: true }).locator('..').getByRole('combobox')).toBeVisible();
+    await expect(page.getByLabel('Model')).toBeVisible({ timeout: 5000 });
   });
 
   test('shows token stats', async ({ page }) => {
@@ -1971,5 +1970,94 @@ test.describe('Mock LLM Tool Calls', () => {
     await expect(
       page.locator('text=Tool Result').first()
     ).toBeVisible({ timeout: 20000 });
+  });
+});
+
+test.describe('Accessible composer and approval interactions', () => {
+  test('exposes combobox/listbox semantics and preserves keyboard completion ownership', async ({ page }) => {
+    await page.goto('/');
+    await ensureThread(page);
+    const input = page.getByTestId('message-input');
+    await input.fill('/');
+    await expect(input).toHaveAttribute('role', 'combobox');
+    await expect(input).toHaveAttribute('aria-expanded', 'true');
+    const listbox = page.getByRole('listbox', { name: 'Command suggestions' });
+    await expect(listbox).toBeVisible();
+    const options = listbox.getByRole('option');
+    await expect(options.first()).toHaveAttribute('aria-selected', 'true');
+    const count = await options.count();
+    await expect(page.getByTestId('autocomplete-status')).toHaveText(`${count} suggestions available`);
+    const firstId = await options.first().getAttribute('id');
+    await expect(input).toHaveAttribute('aria-activedescendant', firstId || '');
+    await input.press('ArrowDown');
+    await expect(options.nth(1)).toHaveAttribute('aria-selected', 'true');
+    const selectedText = await options.nth(1).locator('span').first().textContent();
+    await input.press('Tab');
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue(selectedText || '');
+    await expect(listbox).toBeHidden();
+  });
+
+  test('supports keyboard-only approval details and decisions', async ({ page }) => {
+    await page.addInitScript(() => window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48)));
+    const threadId = 'keyboard-approval-thread';
+    let approval: Record<string, unknown> | undefined;
+    await mockThreadShell(page, threadId, {
+      tools: [{ id: 'keyboard-call', name: 'bash', arguments: { script: 'echo keyboard' }, state: 'TC4', output: 'keyboard output' }],
+      onApprove: (payload) => { approval = payload; },
+    });
+    await page.goto(`/${threadId}`);
+    const details = page.getByText(/View Output/).locator('..');
+    await details.locator('summary').focus();
+    await details.locator('summary').press('Enter');
+    await expect(details).toHaveAttribute('open', '');
+    const whole = page.getByRole('button', { name: 'Whole' });
+    await whole.focus();
+    await whole.press('Enter');
+    await expect.poll(() => approval).toMatchObject({ output_decision: 'whole', approved: true });
+  });
+
+  test('edit-answer reuses the shared modal focus trap and returns focus to the composer', async ({ page }) => {
+    const threadId = 'accessible-edit-answer-thread';
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'accessible-assistant', role: 'assistant', content: 'Accessible answer', content_text: 'Accessible answer' }],
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: {
+        success: true,
+        message: 'Prepared accessible answer.',
+        command_id: 'accessible-edit-command',
+        command_name: 'editAnswer',
+        started_at: new Date().toISOString(),
+        finished_at: new Date().toISOString(),
+        elapsed_sec: 0.01,
+        data: {
+          action: 'open_edit_answer_modal',
+          draft: '> Accessible answer',
+          source_msg_id: 'accessible-assistant',
+          source_kind: 'assistant_answer',
+          source_suffix: 'ssistant',
+          source_label: 'assistant answer',
+          suppress_transcript: true,
+        },
+      },
+    }));
+    await page.goto(`/${threadId}`);
+    const composer = page.getByTestId('message-input');
+    await composer.fill('/editAnswer');
+    await composer.press('Enter');
+    const dialog = page.getByRole('dialog', { name: 'Edit assistant answer' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Close edit answer modal' })).toBeFocused();
+    await expect(page.locator('header')).toHaveAttribute('inert', '');
+    await page.keyboard.press('Shift+Tab');
+    await expect(dialog.getByTestId('edit-answer-load')).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(dialog.getByRole('button', { name: 'Close edit answer modal' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(composer).toBeFocused();
   });
 });

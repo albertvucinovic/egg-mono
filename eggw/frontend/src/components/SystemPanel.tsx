@@ -8,6 +8,7 @@ import { fetchTokenStats, fetchThread, fetchThreadChildren, fetchThreadState, fe
 import { useAppStore } from "@/lib/store";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import clsx from "clsx";
+import { Button, IconButton, StatusChip, type StatusTone } from "@/components/ui/primitives";
 
 interface SystemPanelProps {
   showBorders?: boolean;
@@ -42,20 +43,20 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
   });
 
   // Helper to get state display info
-  const getStateDisplay = (state: string) => {
+  const getStateDisplay = (state: string): { label: string; tone: StatusTone; pulse: boolean } => {
     switch (state) {
       case "running":
-        return { label: "Running", color: "bg-green-500", pulse: true };
+        return { label: "Running", tone: "success", pulse: true };
       case "waiting_tool_approval":
-        return { label: "Waiting Approval", color: "bg-yellow-500", pulse: true };
+        return { label: "Waiting Approval", tone: "warning", pulse: true };
       case "waiting_output_approval":
-        return { label: "Output Approval", color: "bg-purple-500", pulse: true };
+        return { label: "Output Approval", tone: "special", pulse: true };
       case "waiting_user":
-        return { label: "Ready", color: "bg-blue-500", pulse: false };
+        return { label: "Ready", tone: "info", pulse: false };
       case "paused":
-        return { label: "Paused", color: "bg-gray-500", pulse: false };
+        return { label: "Paused", tone: "neutral", pulse: false };
       default:
-        return { label: state, color: "bg-gray-500", pulse: false };
+        return { label: state, tone: "neutral", pulse: false };
     }
   };
 
@@ -93,36 +94,22 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
     <div className="h-full flex flex-col overflow-hidden">
       {/* Thread info - scrollable if needed */}
       {currentThreadId && (
-        <div className={`p-3 overflow-auto max-h-[50%] flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
+        <div className={clsx("eggw-system-section p-3 overflow-auto max-h-[50%] flex-shrink-0", showBorders && "eggw-system-section-emphasized")}>
           <h3 className="text-sm font-medium mb-2">Thread Info</h3>
 
           <div className="text-xs space-y-1">
             <div className="flex justify-between">
-              <span style={{ color: "var(--muted)" }}>ID:</span>
+              <span className="eggw-ui-muted">ID:</span>
               <span className="font-mono">{currentThreadId.slice(-12)}</span>
             </div>
 
             {/* Thread State */}
             {threadState && (
               <div className="flex justify-between items-center">
-                <span style={{ color: "var(--muted)" }}>Status:</span>
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={clsx(
-                      "w-2 h-2 rounded-full",
-                      getStateDisplay(threadState.state).color,
-                      getStateDisplay(threadState.state).pulse && "animate-pulse"
-                    )}
-                  />
-                  <span className={clsx(
-                    threadState.state === "running" && "text-green-400",
-                    threadState.state === "waiting_tool_approval" && "text-yellow-400",
-                    threadState.state === "waiting_output_approval" && "text-purple-400",
-                    threadState.state === "waiting_user" && "text-blue-400",
-                  )}>
-                    {getStateDisplay(threadState.state).label}
-                  </span>
-                </div>
+                <span className="eggw-ui-muted">Status:</span>
+                <StatusChip tone={getStateDisplay(threadState.state).tone} className={getStateDisplay(threadState.state).pulse ? "eggw-status-pulse" : undefined}>
+                  {getStateDisplay(threadState.state).label}
+                </StatusChip>
               </div>
             )}
 
@@ -130,45 +117,45 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
 
           {/* Thread Navigation */}
           <div className="mt-3 text-xs">
-            <div className="flex items-center gap-1 mb-1" style={{ color: "var(--muted)" }}>
+            <div className="eggw-ui-muted mb-1 flex items-center gap-1">
               <GitBranch className="w-3 h-3" />
               <span>Navigation</span>
             </div>
 
             {/* Parent */}
             {currentThreadData?.parent_id && (
-              <button
+              <Button
+                variant="ghost"
                 onClick={() => navigateToThread(currentThreadData.parent_id!)}
-                className="flex items-center gap-1 w-full px-2 py-1 text-left rounded"
-                style={{ color: "var(--accent)" }}
+                className="eggw-link w-full justify-start px-2 py-1 text-left"
               >
                 <ArrowUp className="w-3 h-3" />
                 Parent: {currentThreadData.parent_id.slice(-8)}
-              </button>
+              </Button>
             )}
 
             {/* Children */}
             {children && children.length > 0 && (
               <div className="mt-1">
-                <div style={{ color: "var(--muted)" }} className="mb-1">Children ({children.length}):</div>
+                <div className="eggw-ui-muted mb-1">Children ({children.length}):</div>
                 <div className="max-h-24 overflow-auto space-y-0.5">
                   {children.map((child: any) => (
-                    <button
+                    <Button
+                      variant="ghost"
                       key={child.id}
                       onClick={() => navigateToThread(child.id)}
-                      className="flex items-center gap-1 w-full px-2 py-0.5 text-left rounded"
-                      style={{ color: "var(--accent)" }}
+                      className="eggw-link w-full justify-start px-2 py-0.5 text-left"
                     >
                       <ArrowDown className="w-3 h-3" />
                       {child.name || child.id.slice(-8)}
-                    </button>
+                    </Button>
                   ))}
                 </div>
               </div>
             )}
 
             {!currentThreadData?.parent_id && (!children || children.length === 0) && (
-              <div style={{ color: "var(--muted)" }} className="px-2">Root thread, no children</div>
+              <div className="eggw-ui-muted px-2">Root thread, no children</div>
             )}
           </div>
 
@@ -176,24 +163,25 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
           {stats && (
             <div className="mt-3 text-xs">
               <div className="flex justify-between items-center mb-1">
-                <span style={{ color: "var(--muted)" }}>Token Stats</span>
-                <button
+                <span className="eggw-ui-muted">Token Stats</span>
+                <IconButton
                   onClick={() => refetchStats()}
-                  className="p-0.5 rounded"
-                  style={{ color: "var(--muted)" }}
+                  aria-label="Refresh token stats"
+                  title="Refresh token stats"
+                  className="eggw-icon-button-compact"
                 >
                   <RefreshCw className="w-3 h-3" />
-                </button>
+                </IconButton>
               </div>
-              <div className="grid grid-cols-2 gap-1" style={{ color: "var(--foreground)" }}>
+              <div className="grid grid-cols-2 gap-1" >
                 <span>Input:</span>
                 <span className="text-right">{formatTokenCount(stats.input_tokens || 0)}</span>
                 <span>Output:</span>
                 <span className="text-right">{formatTokenCount(stats.output_tokens || 0)}</span>
                 <span>Reasoning:</span>
                 <span className="text-right">{formatTokenCount(stats.reasoning_tokens || 0)}</span>
-                <span style={{ color: "var(--tool-msg-border)" }}>Cached:</span>
-                <span className="text-right" style={{ color: "var(--tool-msg-border)" }}>{formatTokenCount(stats.cached_tokens || 0)}</span>
+                <span className="eggw-status-success-text">Cached:</span>
+                <span className="eggw-status-success-text text-right">{formatTokenCount(stats.cached_tokens || 0)}</span>
                 <span>Context:</span>
                 <span className="text-right">{formatTokenCount(stats.context_tokens || 0)}</span>
                 <span>Full Thread:</span>
@@ -206,8 +194,8 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
                 )}
                 <span className="font-medium">Total:</span>
                 <span className="text-right font-medium">{formatTokenCount(stats.total_tokens || 0)}</span>
-                <span className="font-medium" style={{ color: "var(--reasoning-border)" }}>Cost:</span>
-                <span className="text-right font-medium" style={{ color: "var(--reasoning-border)" }}>
+                <span className="eggw-status-special-text font-medium">Cost:</span>
+                <span className="eggw-status-special-text text-right font-medium">
                   ${Number(stats.cost_usd || 0).toFixed(4)} cost
                 </span>
               </div>
@@ -217,36 +205,28 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
       )}
 
       {/* System log header */}
-      <div className={`p-2 flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`}>
+      <div className={clsx("eggw-system-section p-2 flex items-center justify-between flex-shrink-0", showBorders && "eggw-system-section-emphasized")}>
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">System Log</span>
           {threadSettings && (
-            <span
-              className="text-xs px-1.5 py-0.5 rounded border"
-              style={{
-                color: threadSettings.auto_approval ? "#fca5a5" : "#86efac",
-                borderColor: threadSettings.auto_approval ? "#7f1d1d" : "#14532d",
-                background: threadSettings.auto_approval ? "rgba(127,29,29,0.25)" : "rgba(20,83,45,0.25)",
-              }}
-            >
+            <StatusChip tone={threadSettings.auto_approval ? "warning" : "success"}>
               Autoapproval[{threadSettings.auto_approval ? "On" : "Off"}]
-            </span>
+            </StatusChip>
           )}
         </div>
-        <button
+        <IconButton
           onClick={clearSystemLogs}
-          className="p-1 rounded"
-          style={{ color: "var(--muted)" }}
           title="Clear logs"
+          aria-label="Clear logs"
         >
           <Trash2 className="w-4 h-4" />
-        </button>
+        </IconButton>
       </div>
 
       {/* Log entries */}
       <div ref={scrollRef} className="flex-1 overflow-auto p-2 min-h-0">
         {systemLogs.length === 0 ? (
-          <div className="text-center text-sm py-4" style={{ color: "var(--muted)" }}>
+          <div className="eggw-ui-muted py-4 text-center text-sm">
             No log entries
           </div>
         ) : (
@@ -254,13 +234,13 @@ export function SystemPanel({ showBorders = true }: SystemPanelProps) {
             {systemLogs.map((log, idx) => (
               <div
                 key={idx}
-                className="text-xs p-1 rounded"
-                style={{
-                  background: log.type === "error" ? "var(--user-msg-bg)" : log.type === "success" ? "var(--tool-msg-bg)" : undefined,
-                  color: log.type === "error" ? "var(--user-msg-border)" : log.type === "success" ? "var(--tool-msg-border)" : "var(--muted)",
-                }}
+                className={clsx(
+                  "eggw-system-log-entry",
+                  log.type === "error" && "eggw-system-log-error",
+                  log.type === "success" && "eggw-system-log-success",
+                )}
               >
-                <span style={{ color: "var(--muted)" }}>
+                <span className="eggw-ui-muted">
                   {log.timestamp.toLocaleTimeString()}
                 </span>{" "}
                 {log.message}

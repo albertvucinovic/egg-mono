@@ -660,11 +660,11 @@ class TestCurrentTokenStats:
         """Repeated idle panel ticks should not rescan token stats by TTL."""
         calls = {"count": 0}
 
-        def fake_thread_token_stats(db, thread_id, llm=None):
+        def fake_header_token_stats(db, thread_id, llm=None):
             calls["count"] += 1
             return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
 
-        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr("eggthreads.header_token_stats", fake_header_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 3)
         ticks = iter([100.0, 10000.0])
         monkeypatch.setattr("egg.formatting.time.monotonic", lambda: next(ticks))
@@ -678,11 +678,11 @@ class TestCurrentTokenStats:
         calls = {"count": 0}
         snapshot_seq = {"value": 1}
 
-        def fake_thread_token_stats(db, thread_id, llm=None):
+        def fake_header_token_stats(db, thread_id, llm=None):
             calls["count"] += 1
             return {"context_tokens": calls["count"], "api_usage": {"total_input_tokens": 1}}
 
-        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr("eggthreads.header_token_stats", fake_header_token_stats)
         monkeypatch.setattr(egg_app, "_snapshot_last_event_seq", lambda tid: snapshot_seq["value"])
 
         assert egg_app.current_token_stats()[0] == 1
@@ -694,11 +694,11 @@ class TestCurrentTokenStats:
         """Idle token stats should not rescan for config-only event changes."""
         calls = {"count": 0}
 
-        def fake_thread_token_stats(db, thread_id, llm=None):
+        def fake_header_token_stats(db, thread_id, llm=None):
             calls["count"] += 1
             return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
 
-        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr("eggthreads.header_token_stats", fake_header_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", lambda tid: 999)
 
         egg_app.current_token_stats()
@@ -717,7 +717,7 @@ class TestCurrentTokenStats:
         calls = {"stats": 0, "max_seq": 0}
         egg_app._live_state = {"active_invoke": "invoke-live"}
 
-        def fake_thread_token_stats(db, thread_id, llm=None):
+        def fake_header_token_stats(db, thread_id, llm=None):
             calls["stats"] += 1
             return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
 
@@ -725,7 +725,7 @@ class TestCurrentTokenStats:
             calls["max_seq"] += 1
             return calls["max_seq"]
 
-        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr("eggthreads.header_token_stats", fake_header_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", fake_max_event_seq)
         ticks = iter([100.0, 100.1])
         monkeypatch.setattr("egg.formatting.time.monotonic", lambda: next(ticks))
@@ -740,7 +740,7 @@ class TestCurrentTokenStats:
         calls = {"stats": 0, "max_seq": 0}
         egg_app._live_state = {"active_invoke": "invoke-llm", "stream_kind": "llm"}
 
-        def fake_thread_token_stats(db, thread_id, llm=None):
+        def fake_header_token_stats(db, thread_id, llm=None):
             calls["stats"] += 1
             return {"context_tokens": calls["stats"], "api_usage": {"total_input_tokens": 1}}
 
@@ -748,7 +748,7 @@ class TestCurrentTokenStats:
             calls["max_seq"] += 1
             return 100 + calls["max_seq"]
 
-        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr("eggthreads.header_token_stats", fake_header_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", fake_max_event_seq)
 
         assert egg_app.current_token_stats()[0] == 1
@@ -764,7 +764,7 @@ class TestCurrentTokenStats:
         calls = {"stats": 0, "max_seq": 0}
         egg_app._live_state = {"active_invoke": "invoke-tool", "stream_kind": "tool"}
 
-        def fake_thread_token_stats(db, thread_id, llm=None):
+        def fake_header_token_stats(db, thread_id, llm=None):
             calls["stats"] += 1
             return {"context_tokens": 7, "api_usage": {"total_input_tokens": 1}}
 
@@ -772,7 +772,7 @@ class TestCurrentTokenStats:
             calls["max_seq"] += 1
             return 100 + calls["max_seq"]
 
-        monkeypatch.setattr("eggthreads.thread_token_stats", fake_thread_token_stats)
+        monkeypatch.setattr("eggthreads.header_token_stats", fake_header_token_stats)
         monkeypatch.setattr(egg_app.db, "max_event_seq", fake_max_event_seq)
 
         assert egg_app.current_token_stats()[0] == 7
@@ -1035,3 +1035,33 @@ class TestFormatChildrenPanel:
         assert parent[-8:] not in text
         assert child[-8:] in text
         assert grandchild[-8:] in text
+
+
+def test_inline_stream_panel_materializes_only_bounded_chunked_tail(egg_app, monkeypatch):
+    from eggdisplay import ChunkedText
+    from egg.formatting import LIVE_PANEL_TEXT_MAX_CHARS
+
+    class CountingText(ChunkedText):
+        def __init__(self):
+            self.full_materializations = 0
+            super().__init__()
+
+        def to_string(self):
+            self.full_materializations += 1
+            raise AssertionError("bounded live panel must not join the whole stream")
+
+    content = CountingText()
+    content.append("old" * 100_000)
+    content.append("visible-tail")
+    egg_app._display_is_inline = True
+    egg_app._live_state = egg_app._make_live_state(
+        active_invoke="invoke", stream_kind="llm"
+    )
+    egg_app._live_state["content"] = content
+    monkeypatch.setattr(egg_app, "current_token_stats", lambda **kwargs: (None, {}))
+
+    panel = egg_app.compose_chat_panel_text()
+
+    assert "visible-tail" in panel
+    assert len(panel) < LIVE_PANEL_TEXT_MAX_CHARS + 10_000
+    assert content.full_materializations == 0

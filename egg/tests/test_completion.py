@@ -607,3 +607,24 @@ class TestEggCompleterHelpers:
 
         assert 'testing' in matches
         assert 'temperature' not in matches  # doesn't start with 'test'
+
+
+def test_thread_selector_completion_uses_lightweight_list_rows(isolated_db, monkeypatch):
+    """Thread completion must not reload snapshot blobs to read row status."""
+    from eggthreads import create_root_thread, create_snapshot
+
+    current = create_root_thread(isolated_db, name="Current")
+    other = create_root_thread(isolated_db, name="Other")
+    create_snapshot(isolated_db, current)
+    create_snapshot(isolated_db, other)
+
+    def fail_get_thread(_thread_id):
+        raise AssertionError("thread completion should use list_threads row metadata")
+
+    monkeypatch.setattr(isolated_db, "get_thread", fail_get_thread)
+
+    items = get_autocomplete_items(
+        "/thread ", 8, isolated_db, lambda: current, None
+    )
+
+    assert {item["insert"] for item in items} >= {current, other}

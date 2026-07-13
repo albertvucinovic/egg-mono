@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -35,6 +34,9 @@ import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } 
 import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
 import { expandedTranscriptStartId, transcriptWindow } from "@/lib/transcriptWindow";
 import clsx from "clsx";
+import { eggwSyntaxTheme } from "@/lib/syntaxTheme";
+import { Button, IconButton, StatusChip } from "@/components/ui/primitives";
+import { OverlayPanel } from "@/components/ui/OverlayPanel";
 
 const STICKY_BOTTOM_THRESHOLD_PX = 16;
 const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
@@ -417,20 +419,18 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
   const toolDetails = hiddenToolDetails(details);
   return (
     <div
-      className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
-      style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" }}
+      className={clsx("eggw-message-card eggw-role-card eggw-role-tool", !showBorders && "eggw-role-card-borderless")}
       data-testid="hidden-details"
     >
-      <div className="whitespace-pre-wrap text-sm font-medium">{hiddenSummaryCountsText(details)}</div>
+      <div className="eggw-hidden-summary">{hiddenSummaryCountsText(details)}</div>
       {toolDetails.length > 0 && (
-        <div className="mt-1 text-sm font-mono" style={{ color: "var(--tool-msg-text, var(--foreground))" }}>
+        <div className="eggw-hidden-tools">
           <span>Tools: </span>
           {toolDetails.map((detail, index) => (
             <span key={`${detail.kind}-${index}-${detail.name || "tool"}`}>
               <button
                 type="button"
-                className="underline-offset-2 hover:underline"
-                style={{ color: "var(--accent)" }}
+                className="eggw-link"
                 title={detail.body ? `Show ${detail.header}` : detail.header}
                 onClick={() => setSelectedDetail(detail)}
               >
@@ -442,44 +442,21 @@ function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDe
         </div>
       )}
       {selectedDetail && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: "rgba(0, 0, 0, 0.45)" }}
-          role="presentation"
-          onClick={() => setSelectedDetail(null)}
+        <OverlayPanel
+          open
+          onClose={() => setSelectedDetail(null)}
+          title={selectedDetail.header}
+          description={selectedDetail.name || "Hidden transcript detail"}
+          closeLabel="Close hidden detail"
+          testId="hidden-detail-dialog"
+          portal
         >
-          <div
-            className="w-full max-w-3xl rounded-lg border p-4 shadow-xl"
-            style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-            role="dialog"
-            aria-modal="true"
-            aria-label={selectedDetail.header}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold">{selectedDetail.header}</div>
-                {selectedDetail.name && (
-                  <div className="text-xs font-mono" style={{ color: "var(--muted)" }}>{selectedDetail.name}</div>
-                )}
-              </div>
-              <button
-                type="button"
-                className="rounded px-2 py-1 text-xs"
-                style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
-                onClick={() => setSelectedDetail(null)}
-              >
-                Close
-              </button>
-            </div>
-            <pre
-              className="max-h-[70vh] overflow-auto rounded p-3 text-xs whitespace-pre-wrap break-words"
-              style={{ background: "var(--code-bg)", color: "var(--foreground)" }}
-            >
-              {selectedDetail.body || selectedDetail.header}
-            </pre>
-          </div>
-        </div>
+          {selectedDetail.body ? (
+            <pre className="eggw-code-block max-h-[70vh] whitespace-pre-wrap break-words">{selectedDetail.body}</pre>
+          ) : (
+            <div className="eggw-transcript-state eggw-status-neutral">No detail body is available.</div>
+          )}
+        </OverlayPanel>
       )}
     </div>
   );
@@ -525,8 +502,7 @@ function ThreadCommandOutput({ content, threadIds }: { content: string; threadId
         <Link
           key={`${lineIndex}-${match.index}-${token}`}
           href={`/${fullThreadId}`}
-          className="font-semibold underline-offset-2 hover:underline"
-          style={{ color: "var(--accent)" }}
+          className="eggw-link font-semibold"
           title={`Open thread ${fullThreadId}`}
         >
           {token}
@@ -539,7 +515,7 @@ function ThreadCommandOutput({ content, threadIds }: { content: string; threadId
   };
 
   return (
-    <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
+    <pre className="eggw-code-block whitespace-pre-wrap">
       {content.split("\n").map((line, lineIndex, lines) => (
         <span key={lineIndex}>
           {renderLine(line, lineIndex)}
@@ -562,15 +538,11 @@ function ContentPartsView({
   const currentThreadId = useAppStore((state) => state.currentThreadId);
   const addSystemLog = useAppStore((state) => state.addSystemLog);
   const [promotingArtifactIds, setPromotingArtifactIds] = useState<Record<string, boolean>>({});
-  const imagePreviewClassName = clsx("mx-auto block max-w-full rounded object-contain", showBorders && "border");
+  const imagePreviewClassName = "eggw-attachment-preview";
   const hasImagePart = parts.some(
     (part) => (isAttachmentPart(part) || isArtifactPart(part)) && isImageContentPart(part),
   );
-  const imagePreviewStyle = {
-    maxHeight: MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT,
-    borderColor: "var(--panel-border)",
-    background: "var(--panel-bg)",
-  };
+  const imagePreviewStyle = { maxHeight: MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT };
 
   const handleUseAsAttachment = useCallback(async (part: Extract<ContentPart, { type: "artifact" }>) => {
     if (!currentThreadId || !part.artifact_id || !onStageAttachment) return;
@@ -618,20 +590,19 @@ function ContentPartsView({
           return (
             <div
               key={`${part.input_id || "attachment"}-${idx}`}
-              className={clsx("rounded p-3 text-sm", isImage && "text-center", showBorders && "border")}
-              style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              className={clsx("eggw-attachment-card", isImage && "text-center", !showBorders && "eggw-attachment-borderless")}
               title={attachmentPlaceholder(part)}
             >
               <div className={clsx("flex flex-wrap items-center gap-2", isImage && "justify-center")}>
                 <span className="font-medium">Attachment</span>
                 <span>{attachmentFilename(part)}</span>
-                <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "var(--panel-bg)", color: "var(--muted)" }}>
+                <span className="eggw-attachment-kind">
                   {part.presentation || "file"}
                 </span>
-                <span className="text-xs" style={{ color: "var(--muted)" }}>{part.mime_type || "application/octet-stream"}</span>
-                <span className="text-xs" style={{ color: "var(--muted)" }}>{formatBytes(part.size_bytes)}</span>
+                <span className="eggw-attachment-meta">{part.mime_type || "application/octet-stream"}</span>
+                <span className="eggw-attachment-meta">{formatBytes(part.size_bytes)}</span>
               </div>
-              <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
+              <div className="eggw-attachment-description">
                 {attachmentPlaceholder(part)}
               </div>
               {openUrl && isImage && (
@@ -652,10 +623,10 @@ function ContentPartsView({
               )}
               {openUrl && downloadUrl && (
                 <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
-                  <ProtectedFileLink url={openUrl} newWindow className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={openUrl} newWindow className="eggw-link">
                     Open
                   </ProtectedFileLink>
-                  <ProtectedFileLink url={downloadUrl} filename={attachmentFilename(part)} className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={downloadUrl} filename={attachmentFilename(part)} className="eggw-link">
                     Download
                   </ProtectedFileLink>
                 </div>
@@ -679,20 +650,19 @@ function ContentPartsView({
           return (
             <div
               key={`${part.artifact_id || "artifact"}-${idx}`}
-              className={clsx("rounded p-3 text-sm", isImage && "text-center", showBorders && "border")}
-              style={{ background: "var(--code-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
+              className={clsx("eggw-attachment-card", isImage && "text-center", !showBorders && "eggw-attachment-borderless")}
               title={artifactPlaceholder(part)}
             >
               <div className={clsx("flex flex-wrap items-center gap-2", isImage && "justify-center")}>
                 <span className="font-medium">Provider artifact</span>
                 <span>{artifactFilename(part)}</span>
-                <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "var(--panel-bg)", color: "var(--muted)" }}>
+                <span className="eggw-attachment-kind">
                   {part.presentation || "file"}
                 </span>
-                <span className="text-xs" style={{ color: "var(--muted)" }}>{part.mime_type || "application/octet-stream"}</span>
-                <span className="text-xs" style={{ color: "var(--muted)" }}>{formatBytes(part.size_bytes)}</span>
+                <span className="eggw-attachment-meta">{part.mime_type || "application/octet-stream"}</span>
+                <span className="eggw-attachment-meta">{formatBytes(part.size_bytes)}</span>
               </div>
-              <div className="mt-1 font-mono text-xs" style={{ color: "var(--muted)" }}>
+              <div className="eggw-attachment-description">
                 {artifactPlaceholder(part)}
               </div>
               {openUrl && isImage && (
@@ -713,10 +683,10 @@ function ContentPartsView({
               )}
               {openUrl && downloadUrl && (
                 <div className={clsx("mt-2 flex flex-wrap gap-3 text-xs", isImage && "justify-center")}>
-                  <ProtectedFileLink url={openUrl} newWindow className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={openUrl} newWindow className="eggw-link">
                     Open
                   </ProtectedFileLink>
-                  <ProtectedFileLink url={downloadUrl} filename={artifactFilename(part)} className="underline" style={{ color: "var(--accent)" }}>
+                  <ProtectedFileLink url={downloadUrl} filename={artifactFilename(part)} className="eggw-link">
                     Download
                   </ProtectedFileLink>
                   {canPromote && (
@@ -724,8 +694,7 @@ function ContentPartsView({
                       type="button"
                       onClick={() => handleUseAsAttachment(part)}
                       disabled={Boolean(promotingArtifactIds[part.artifact_id])}
-                      className="underline disabled:cursor-not-allowed disabled:opacity-50"
-                      style={{ color: "var(--accent)" }}
+                      className="eggw-link disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {promotingArtifactIds[part.artifact_id] ? "Staging…" : "Use as attachment"}
                     </button>
@@ -736,7 +705,7 @@ function ContentPartsView({
           );
         }
         return (
-          <pre key={`unknown-${idx}`} className="text-xs p-2 rounded overflow-auto" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+          <pre key={`unknown-${idx}`} className="eggw-code-block">
             {JSON.stringify(part, null, 2)}
           </pre>
         );
@@ -755,7 +724,6 @@ interface MessageBlockProps {
 function CompactionMarker({ message }: { message: Message }) {
   const startId = message.start_msg_id || "";
   const startShort = startId.length >= 8 ? startId.slice(-8) : startId;
-  const markerColor = "#ef4444";
   const details = [
     message.marker_event_seq ? `marker #${message.marker_event_seq}` : null,
     message.start_event_seq ? `start event #${message.start_event_seq}` : null,
@@ -764,21 +732,16 @@ function CompactionMarker({ message }: { message: Message }) {
   ].filter(Boolean).join(" · ");
 
   return (
-    <div className="my-4 flex items-center gap-3" data-testid="compaction-marker">
-      <div className="h-px flex-1" style={{ background: markerColor }} />
+    <div className="eggw-compaction-marker" data-testid="compaction-marker" role="separator" aria-label="Compaction boundary">
+      <div className="eggw-compaction-line" />
       <div
-        className="rounded-full px-3 py-1 text-xs font-medium text-center"
-        style={{
-          color: markerColor,
-          border: `1px solid ${markerColor}`,
-          background: "rgba(239, 68, 68, 0.10)",
-        }}
+        className="eggw-compaction-label"
         title={contentToPlainText(message.content, message.content_text || "") || undefined}
       >
         Compaction boundary: API context now starts at {startShort ? `msg_${startShort}` : "the selected message"}
-        {details && <span className="ml-2 font-normal" style={{ color: "var(--muted)" }}>({details})</span>}
+        {details && <span className="eggw-compaction-detail">({details})</span>}
       </div>
-      <div className="h-px flex-1" style={{ background: markerColor }} />
+      <div className="eggw-compaction-line" />
     </div>
   );
 }
@@ -839,16 +802,6 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
     return <CompactionMarker message={message} />;
   }
 
-  // Use CSS variables for theme-aware colors
-  // Text colors use fallback to --foreground for themes that don't define *-text vars
-  const roleStyles: Record<string, React.CSSProperties> = {
-    user: { background: "var(--user-msg-bg)", borderColor: "var(--user-msg-border)", color: "var(--user-msg-text, var(--foreground))" },
-    assistant: { background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" },
-    assistant_note: { background: "var(--assistant-msg-bg)", borderColor: "#d946ef", color: "#f0abfc" },
-    system: { background: "var(--system-msg-bg)", borderColor: "var(--system-msg-border)", color: "var(--system-msg-text, var(--foreground))" },
-    tool: { background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)", color: "var(--tool-msg-text, var(--foreground))" },
-  };
-
   const roleLabels: Record<string, string> = {
     user: "User",
     assistant: "Assistant",
@@ -876,7 +829,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
   const isCommandOutput = message.role === "system";
   const isThreadsCommandOutput = isCommandOutput && message.command_name === "threads";
 
-  const shellStyle: React.CSSProperties = { background: "var(--code-bg)", borderColor: "var(--panel-border)" };
+  const roleClass = displayRole === "assistant_note" ? "eggw-role-assistant-note" : `eggw-role-${displayRole}`;
 
   const messageTps = formatStreamingTps(message.tps);
   const tokenText = formatTokenCount(message.tokens);
@@ -900,25 +853,30 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
 
   return (
     <div
-      className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
-      style={isShellCommand ? shellStyle : (roleStyles[displayRole] || shellStyle)}
+      className={clsx(
+        "eggw-message-card eggw-role-card",
+        isShellCommand ? "eggw-role-shell" : roleClass,
+        !showBorders && "eggw-role-card-borderless",
+      )}
+      data-message-role={displayRole}
     >
       {/* Header */}
-      <div className="flex items-center gap-2 mb-2 text-xs flex-wrap" style={{ color: "var(--muted)" }}>
-        <span className="font-medium" style={roleStyles[displayRole] ? { color: roleStyles[displayRole].color } : { color: "var(--foreground)" }}>
+      <div className="eggw-message-header">
+        <span className="eggw-role-marker" aria-hidden="true" />
+        <span className="eggw-role-label">
           {isShellCommand ? "Shell" : roleLabel}
         </span>
         {displayVerbosity !== "min" && message.model_key && (
-          <span style={{ color: "var(--muted)" }}>({message.model_key})</span>
+          <span className="eggw-message-meta">{message.model_key}</span>
         )}
         {displayVerbosity !== "min" && tokenText && (
-          <span style={{ color: "var(--muted)" }}>({tokenText})</span>
+          <span className="eggw-message-meta">{tokenText}</span>
         )}
         {displayVerbosity !== "min" && messageTps && (
-          <span style={{ color: "var(--muted)" }}>({messageTps})</span>
+          <span className="eggw-message-meta">{messageTps}</span>
         )}
         {displayVerbosity === "max" && message.timestamp && (
-          <span className="font-mono" style={{ color: "var(--muted)" }}>
+          <span className="eggw-message-meta font-mono">
             {new Date(message.timestamp).toLocaleString(undefined, {
               year: 'numeric',
               month: '2-digit',
@@ -930,9 +888,9 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
           </span>
         )}
         {displayVerbosity === "max" && message.id && message.id.length >= 8 && !message.id.startsWith('temp-') && (
-          <span
-            className="font-mono cursor-pointer hover:underline"
-            style={{ color: "var(--muted)" }}
+          <button
+            type="button"
+            className="eggw-message-id font-mono"
             title={`Click to copy: ${message.id}`}
             aria-label={`Message id ${message.id}; click to copy`}
             data-testid="message-id"
@@ -941,41 +899,39 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             }}
           >
             [msg_id: {message.id}]
-          </span>
+          </button>
         )}
         {displayVerbosity === "max" && message.tool_call_id && (
-          <span className="font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+          <span className="eggw-message-meta font-mono">
             ← {message.tool_call_id.slice(-8)}
           </span>
         )}
         {displayVerbosity !== "min" && optimizerSummary && (
-          <span
-            className="rounded px-1.5 py-0.5 text-[11px] font-medium"
-            style={{ background: "var(--code-bg)", color: "var(--accent)", border: "1px solid var(--panel-border)" }}
+          <StatusChip
+            tone="info"
             title={optimizerRawHint ? `Raw output: ${optimizerRawHint}` : optimizerSummary}
             data-testid="output-optimizer-badge"
           >
             {optimizerSummary}
-          </span>
+          </StatusChip>
         )}
         {canQuoteEdit && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={handleQuoteEdit}
             disabled={isPreparingEditAnswer}
-            className="rounded border px-1.5 py-0.5 text-[11px] font-medium disabled:cursor-wait disabled:opacity-60"
-            style={{ borderColor: "var(--panel-border)", color: "var(--accent)", background: "var(--panel-bg)" }}
+            className="eggw-message-action"
             aria-label={`Quote/Edit ${roleLabel} ${message.id}`}
             title={`Quote/Edit ${roleLabel}${message.id ? ` ${message.id.slice(-8)}` : ""}`}
             data-testid="quote-edit-button"
           >
             {isPreparingEditAnswer ? "Preparing…" : "Quote/Edit"}
-          </button>
+          </Button>
         )}
       </div>
 
       {optimizerRawHint && displayVerbosity !== "min" && (
-        <div className="mb-2 text-xs font-mono" style={{ color: "var(--muted)" }} data-testid="raw-output-affordance">
+        <div className="eggw-message-meta mb-2 font-mono" data-testid="raw-output-affordance">
           Raw output: {optimizerRawHint}
         </div>
       )}
@@ -984,18 +940,17 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
       {showReasoningBlock && (
         <details
           open={displayVerbosity === "max" ? true : undefined}
-          className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-          style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)" }}
+          className={clsx("eggw-detail-block eggw-role-reasoning", !showBorders && "eggw-detail-borderless")}
         >
-          <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+          <summary className="eggw-detail-summary">
             Reasoning
             {displayVerbosity === "medium" && message.reasoning && (
-              <span className="ml-2 text-xs font-mono" style={{ color: "var(--muted)" }}>
+              <span className="eggw-message-meta ml-2 font-mono">
                 {message.reasoning.length.toLocaleString()} chars
               </span>
             )}
           </summary>
-          <div className="mt-2 text-sm whitespace-pre-wrap" style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}>
+          <div className="eggw-detail-content whitespace-pre-wrap">
             {message.reasoning}
           </div>
         </details>
@@ -1006,7 +961,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
         <>
           {/* Shell command display */}
           {isShellCommand ? (
-            <pre className="text-sm font-mono p-2 rounded overflow-auto" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
+            <pre className="eggw-code-block eggw-shell-command">
               {stringContent}
             </pre>
           ) : isCommandOutput ? (
@@ -1014,7 +969,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             isThreadsCommandOutput ? (
               <ThreadCommandOutput content={contentText} threadIds={message.command_data?.thread_ids} />
             ) : (
-              <pre className="text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--system-msg-text, var(--foreground))" }}>
+              <pre className="eggw-code-block whitespace-pre-wrap">
                 {contentText}
               </pre>
             )
@@ -1022,22 +977,22 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             <ContentPartsView parts={message.content} showBorders={showBorders} onStageAttachment={onStageAttachment} />
           ) : message.role === "tool" ? (
             displayVerbosity === "medium" ? (
-              <details className={`rounded ${showBorders ? 'border' : ''}`} style={{ background: "var(--code-bg)", borderColor: "var(--tool-msg-border)" }}>
-                <summary className="cursor-pointer p-2 text-sm" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+              <details className={clsx("eggw-detail-block eggw-role-tool", !showBorders && "eggw-detail-borderless")}>
+                <summary className="eggw-detail-summary">
                   {oneLinePreview(contentText) || `Output (${contentText.length.toLocaleString()} chars)`}
                 </summary>
-                <pre className="p-2 text-xs overflow-auto max-h-96 whitespace-pre-wrap" style={{ color: "var(--tool-msg-text, var(--foreground))" }}>
+                <pre className="eggw-code-block max-h-96 whitespace-pre-wrap">
                   {contentText}
                 </pre>
               </details>
             ) : (
-              <pre className="text-xs p-2 rounded overflow-auto max-h-96 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
+              <pre className="eggw-code-block max-h-96 whitespace-pre-wrap">
                 {contentText}
               </pre>
             )
           ) : (
             /* Regular markdown content with GFM tables and LaTeX support */
-            <div className="prose prose-sm max-w-none" style={{ color: "inherit" }}>
+            <div className="prose eggw-prose max-w-none">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
                 rehypePlugins={[rehypeRaw, rehypeKatex]}
@@ -1047,7 +1002,7 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                     const inline = !match;
                     return !inline ? (
                       <SyntaxHighlighter
-                        style={oneDark}
+                        style={eggwSyntaxTheme}
                         language={match[1]}
                         PreTag="div"
                       >
@@ -1062,25 +1017,25 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
                   table({ children }) {
                     return (
                       <div className="overflow-x-auto my-4">
-                        <table className="min-w-full border-collapse border" style={{ borderColor: "var(--panel-border)" }}>
+                        <table className="min-w-full border-collapse border">
                           {children}
                         </table>
                       </div>
                     );
                   },
                   thead({ children }) {
-                    return <thead style={{ background: "var(--panel-bg)" }}>{children}</thead>;
+                    return <thead>{children}</thead>;
                   },
                   th({ children }) {
                     return (
-                      <th className="px-4 py-2 text-left border font-semibold" style={{ borderColor: "var(--panel-border)", color: "var(--heading-color)" }}>
+                      <th className="px-4 py-2 text-left border font-semibold">
                         {children}
                       </th>
                     );
                   },
                   td({ children }) {
                     return (
-                      <td className="px-4 py-2 border" style={{ borderColor: "var(--panel-border)" }}>
+                      <td className="px-4 py-2 border">
                         {children}
                       </td>
                     );
@@ -1110,29 +1065,28 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
               <details
                 key={toolCallId || idx}
                 open={displayVerbosity === "max" ? true : undefined}
-                className={`rounded p-2 ${showBorders ? 'border' : ''}`}
-                style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
+                className={clsx("eggw-detail-block eggw-role-tool-call", !showBorders && "eggw-detail-borderless")}
               >
-                <summary className="flex cursor-pointer items-center gap-2 text-sm flex-wrap">
-                  <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{toolName}</span>
+                <summary className="eggw-detail-summary flex-wrap">
+                  <span className="font-medium">{toolName}</span>
                   {toolCallId && (
-                    <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                    <span className="eggw-message-meta font-mono">
                       {toolCallId.slice(-8)}
                     </span>
                   )}
                   {displayVerbosity === "medium" && (
-                    <span className="text-xs font-mono" style={{ color: "var(--foreground)" }}>
+                    <span className="eggw-message-meta font-mono">
                       {oneLinePreview(args)}
                     </span>
                   )}
                 </summary>
                 {/* Special display for bash scripts */}
                 {isBash && script ? (
-                  <pre className="mt-1 text-sm font-mono p-2 rounded overflow-auto whitespace-pre-wrap break-all" style={{ background: "var(--code-bg)", color: "var(--accent)" }}>
+                  <pre className="eggw-code-block eggw-shell-command whitespace-pre-wrap break-all">
                     $ {String(script)}
                   </pre>
                 ) : (
-                  <pre className="mt-1 text-xs p-1 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+                  <pre className="eggw-code-block max-h-40 whitespace-pre-wrap break-words">
                     {typeof args === "string"
                       ? args
                       : JSON.stringify(args, null, 2)}
@@ -1151,16 +1105,15 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             <details
               key={`tool-stream-${name}`}
               open={displayVerbosity === "max" ? true : undefined}
-              className={`rounded p-2 ${showBorders ? 'border' : ''}`}
-              style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
+              className={clsx("eggw-detail-block eggw-role-tool", !showBorders && "eggw-detail-borderless")}
             >
-              <summary className="cursor-pointer text-sm font-medium font-mono" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+              <summary className="eggw-detail-summary font-mono">
                 {displayVerbosity === "medium"
                   ? `Tool Output: ${name} · ${text.length.toLocaleString()} chars`
                   : `Tool Output: ${name}`}
               </summary>
               {displayVerbosity === "medium" && <div className="mt-1 text-xs font-mono">{oneLinePreview(text)}</div>}
-              <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap" style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}>
+              <pre className="eggw-code-block max-h-64 whitespace-pre-wrap">
                 {text}
               </pre>
             </details>
@@ -1170,20 +1123,19 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
             <details
               key={`tool-call-stream-${streamKey}`}
               open={displayVerbosity === "max" ? true : undefined}
-              className={`rounded p-2 ${showBorders ? 'border' : ''}`}
-              style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
+              className={clsx("eggw-detail-block eggw-role-tool-call", !showBorders && "eggw-detail-borderless")}
             >
-              <summary className="cursor-pointer text-sm font-medium font-mono" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>
+              <summary className="eggw-detail-summary font-mono">
                 {displayVerbosity === "medium"
                   ? `Tool Call Args: ${streamKey} · ${text.length.toLocaleString()} chars`
                   : `Tool Call Args: ${streamKey}`}
               </summary>
               {displayVerbosity === "medium" && (
-                <div className="mt-1 text-xs font-mono" style={{ color: "var(--foreground)" }}>
+                <div className="eggw-detail-content font-mono">
                   {oneLinePreview(text)}
                 </div>
               )}
-              <pre className="mt-1 text-xs p-2 rounded overflow-auto max-h-40 whitespace-pre-wrap break-words" style={{ background: "var(--code-bg)", color: "var(--foreground)" }}>
+              <pre className="eggw-code-block max-h-40 whitespace-pre-wrap break-words">
                 {text}
               </pre>
             </details>
@@ -1888,7 +1840,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
 
   if (!currentThreadId) {
     return (
-      <div className="flex-1 flex items-center justify-center" style={{ color: "var(--muted)" }}>
+      <div className="eggw-transcript-state m-auto max-w-xl">
         Select a thread to view messages
       </div>
     );
@@ -1905,7 +1857,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
 
   const panel = (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className={`eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0 ${showBorders ? 'border-b border-[var(--panel-border)]' : ''}`} style={{ color: "var(--muted)" }}>
+      <div className={clsx("eggw-section-header px-4 py-2 text-xs flex items-center justify-between flex-shrink-0", showBorders && "border-b border-[var(--border-default)]")}>
         <span>
               Chat Messages · {messages.length.toLocaleString()} loaded{transcriptQuery.hasNextPage ? " · scroll up for older" : ""}{formattedStreamingTps ? ` | ${formattedStreamingTps}` : ""}
           {isStreaming && providerTimeText ? ` | ${providerTimeText}` : ""}
@@ -1920,55 +1872,52 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
         onTouchMove={handleTouchMove}
         onPointerDown={handlePointerDown}
         onKeyDown={handleKeyDown}
+        aria-label="Conversation transcript"
+        aria-busy={isLoading || isStreaming}
         tabIndex={0}
         className="eggw-transcript-scroll flex-1 overflow-auto px-4 py-6 md:px-8"
         data-testid="chat-panel"
       >
         <div className="eggw-transcript-inner" data-testid="chat-panel-content">
           {isLoading ? (
-            <div className="eggw-empty-state text-center" style={{ color: "var(--muted)" }}>Loading messages...</div>
+            <div className="eggw-transcript-state" role="status" aria-live="polite">Loading messages…</div>
           ) : isError ? (
-            <div className="eggw-empty-state text-center space-y-2">
-              <div style={{ color: "var(--error, #ef4444)" }}>Failed to load messages</div>
-              <button
+            <div className="eggw-transcript-state eggw-transcript-state-error space-y-2" role="alert">
+              <div>Failed to load messages</div>
+              <Button
+                variant="danger"
                 onClick={() => refetch()}
-                className="px-3 py-1 rounded text-sm"
-                style={{ background: "var(--accent)", color: "var(--background)" }}
               >
                 Retry
-              </button>
+              </Button>
             </div>
           ) : messages.length === 0 ? (
-            <div className="eggw-empty-state text-center" style={{ color: "var(--muted)" }}>
+            <div className="eggw-transcript-state">
               No messages yet. Start a conversation!
             </div>
           ) : (
             <>
               {messages.length > 0 && renderedTranscript.hiddenCount === 0 && transcriptQuery.hasNextPage && (
                 <div className="mb-4 flex justify-center">
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
                     onClick={() => void loadOlderMessages()}
                     disabled={isLoadingOlder}
-                    className="rounded-full border px-3 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-60"
-                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)", color: "var(--muted)" }}
                     data-testid="load-older-messages"
                   >
                     {isLoadingOlder ? "Loading older messages…" : "Load older messages"}
-                  </button>
+                  </Button>
                 </div>
               )}
               {renderedTranscript.hiddenCount > 0 && (
                 <div className="mb-4 flex justify-center">
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
                     onClick={expandLoadedTranscript}
-                    className="rounded-full border px-3 py-1 text-xs"
-                    style={{ borderColor: "var(--panel-border)", background: "var(--panel-bg)", color: "var(--muted)" }}
                     data-testid="show-more-loaded-messages"
                   >
                     Show 60 older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
-                  </button>
+                  </Button>
                 </div>
               )}
               <StaticTranscript
@@ -1981,25 +1930,28 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
               {/* Streaming content */}
               {showLiveCard && (
                 <div
-                  className={`eggw-message-card rounded p-4 mb-4 ${showBorders ? 'border' : ''}`}
-                  style={{ background: "var(--assistant-msg-bg)", borderColor: "var(--assistant-msg-border)", color: "var(--assistant-msg-text, var(--foreground))" }}
+                  className={clsx("eggw-message-card eggw-role-card eggw-role-assistant", !showBorders && "eggw-role-card-borderless")}
+                  role="status"
+                  aria-live="polite"
+                  aria-label={`${streamingRoleLabel} streaming`}
                 >
-                  <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-                    <span className="font-medium" style={{ color: "var(--assistant-msg-text, var(--foreground))" }}>{streamingRoleLabel}</span>
+                  <div className="eggw-message-header">
+                    <span className="eggw-role-marker" aria-hidden="true" />
+                    <span className="eggw-role-label">{streamingRoleLabel}</span>
                     {displayVerbosity !== "min" && streamingModelKey && (
-                      <span style={{ color: "var(--muted)" }}> ({streamingModelKey})</span>
+                      <span className="eggw-message-meta">{streamingModelKey}</span>
                     )}
                     {isStreaming && (
-                      <span className="ml-2 animate-pulse" style={{ color: "var(--accent)" }}>streaming...</span>
+                      <StatusChip tone="info">Streaming…</StatusChip>
                     )}
                     {providerTimeText && (
-                      <span className="ml-2" style={{ color: "var(--accent)" }}>{providerTimeText}</span>
+                      <span className="eggw-message-meta">{providerTimeText}</span>
                     )}
                     {!providerTimeText && genericStreamingTimeText && (
-                      <span className="ml-2" style={{ color: "var(--accent)" }}>{genericStreamingTimeText}</span>
+                      <span className="eggw-message-meta">{genericStreamingTimeText}</span>
                     )}
                     {streamingKind === "tool" && primaryToolTimeoutText && (
-                      <span data-testid="streaming-tool-timeout-header" className="ml-2" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+                      <span data-testid="streaming-tool-timeout-header" className="eggw-message-meta ml-2">
                         {primaryToolTimeoutText}
                       </span>
                     )}
@@ -2009,34 +1961,30 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                       {/* Streaming reasoning - direct DOM updates via ref */}
                       <details
                       open={displayVerbosity === "max" ? true : undefined}
-                      className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-                      style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: displayVerbosity === "min" ? "none" : undefined }}
+                      className={clsx("eggw-detail-block eggw-role-reasoning", !showBorders && "eggw-detail-borderless", displayVerbosity === "min" && "hidden")}
                       id="streaming-reasoning-container"
                       >
-                      <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+                      <summary className="eggw-detail-summary">
                         Reasoning <span className="text-xs animate-pulse">(streaming...)</span>
                       </summary>
                       <div
                         ref={streamingReasoningRef}
-                        className="mt-2 text-sm whitespace-pre-wrap"
-                        style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
+                        className="eggw-detail-content whitespace-pre-wrap"
                       />
                       </details>
 
                       {/* Streaming reasoning summary - display-only, not persisted as reasoning */}
                       <details
                       open={displayVerbosity === "max" ? true : undefined}
-                      className={`mb-2 rounded p-2 ${showBorders ? 'border' : ''}`}
-                      style={{ background: "var(--reasoning-bg)", borderColor: "var(--reasoning-border)", display: "none" }}
+                      className={clsx("eggw-detail-block eggw-role-reasoning hidden", !showBorders && "eggw-detail-borderless")}
                       id="streaming-reasoning-summary-container"
                       >
-                      <summary className="cursor-pointer text-sm" style={{ color: "var(--reasoning-text, var(--reasoning-border))" }}>
+                      <summary className="eggw-detail-summary">
                         Reasoning Summary <span className="text-xs animate-pulse">(streaming...)</span>
                       </summary>
                       <div
                         ref={streamingReasoningSummaryRef}
-                        className="mt-2 text-sm whitespace-pre-wrap"
-                        style={{ color: "var(--reasoning-text, var(--foreground))", opacity: 0.9 }}
+                        className="eggw-detail-content whitespace-pre-wrap"
                       />
                       </details>
 
@@ -2044,12 +1992,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                       <div
                       ref={streamingContentRef}
                       data-testid="streaming-content"
-                      className="text-sm"
-                      style={{
-                        color: "var(--assistant-msg-text, var(--foreground))",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                      }}
+                      className="eggw-streaming-content"
                       />
 
                       {/* Streaming tool calls */}
@@ -2060,24 +2003,22 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                             <details
                               key={tcId}
                               open={streamingToolDetailsOpen}
-                              className={`rounded ${showBorders ? 'border' : ''}`}
-                              style={{ background: "var(--tool-call-bg)", borderColor: "var(--tool-call-border)" }}
+                              className={clsx("eggw-detail-block eggw-role-tool-call", !showBorders && "eggw-detail-borderless")}
                             >
-                              <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm">
-                                <span className="font-medium" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>{tc.name || "tool"}</span>
-                                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                              <summary className="eggw-detail-summary">
+                                <span className="font-medium">{tc.name || "tool"}</span>
+                                <span className="eggw-message-meta font-mono">
                                   {tcId.slice(-8)}
                                 </span>
-                                <span className="text-xs animate-pulse" style={{ color: "var(--tool-call-text, var(--tool-call-border))" }}>streaming...</span>
+                                <span className="eggw-streaming-label">streaming...</span>
                                 {displayVerbosity === "medium" && (
                                   <span
                                     ref={(element) => { streamingToolCallPreviewRefs.current[tcId] = element; }}
-                                    className="text-xs font-mono"
-                                    style={{ color: "var(--foreground)" }}
+                                    className="eggw-message-meta font-mono"
                                   />
                                 )}
                                 {displayVerbosity === "medium" && (
-                                  <span className="text-xs" style={{ color: "var(--muted)" }}>
+                                  <span className="eggw-attachment-meta">
                                     expand to inspect args
                                   </span>
                                 )}
@@ -2086,8 +2027,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 <pre
                                   ref={(element) => attachStreamingToolCallArgs(tcId, element)}
                                   data-testid="streaming-tool-arguments"
-                                  className="text-xs p-2 rounded overflow-auto whitespace-pre-wrap break-all"
-                                  style={{ background: "var(--code-bg)", color: tc.name === "bash" ? "var(--accent)" : "var(--foreground)" }}
+                                  className="eggw-code-block whitespace-pre-wrap break-all"
                                 >
                                   ...
                                 </pre>
@@ -2108,27 +2048,26 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                             <details
                               key={toolId}
                               open={streamingToolDetailsOpen}
-                              className={`rounded ${showBorders ? 'border' : ''}`}
-                              style={{ background: "var(--tool-msg-bg)", borderColor: "var(--tool-msg-border)" }}
+                              className={clsx("eggw-detail-block eggw-role-tool", !showBorders && "eggw-detail-borderless")}
                             >
-                              <summary className="cursor-pointer p-2 flex items-center gap-2 text-sm flex-wrap">
-                                <span className="font-medium" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>{tool.name || "tool"}</span>
-                                <span className="text-xs font-mono" style={{ color: "var(--muted)" }}>
+                              <summary className="eggw-detail-summary flex-wrap">
+                                <span className="font-medium">{tool.name || "tool"}</span>
+                                <span className="eggw-message-meta font-mono">
                                   {toolId.slice(-8)}
                                 </span>
-                                <span className="text-xs animate-pulse" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>streaming output...</span>
+                                <span className="eggw-streaming-label">streaming output...</span>
                                 {displayVerbosity === "medium" && (
-                                  <span className="text-xs" style={{ color: "var(--muted)" }}>
+                                  <span className="eggw-attachment-meta">
                                     expand to inspect output
                                   </span>
                                 )}
                                 {elapsedText && (
-                                  <span data-testid="streaming-tool-elapsed-summary" className="text-xs" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+                                  <span data-testid="streaming-tool-elapsed-summary" className="eggw-message-meta">
                                     {elapsedText}
                                   </span>
                                 )}
                                 {timeoutText && (
-                                  <span data-testid="streaming-tool-timeout-summary" className="text-xs" style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}>
+                                  <span data-testid="streaming-tool-timeout-summary" className="eggw-message-meta">
                                     {timeoutText}
                                   </span>
                                 )}
@@ -2137,8 +2076,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 {elapsedText && (
                                   <div
                                     data-testid="streaming-tool-elapsed"
-                                    className="mb-2 text-xs"
-                                    style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                                    className="eggw-message-meta mb-2"
                                   >
                                     {elapsedText}
                                   </div>
@@ -2146,8 +2084,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 {timeoutText && (
                                   <div
                                     data-testid="streaming-tool-timeout"
-                                    className="mb-2 text-xs"
-                                    style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                                    className="eggw-message-meta mb-2"
                                   >
                                     {timeoutText}
                                   </div>
@@ -2155,8 +2092,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 {tool.summary && (
                                   <div
                                     data-testid="streaming-tool-summary"
-                                    className="mb-2 text-xs animate-pulse"
-                                    style={{ color: "var(--tool-msg-text, var(--tool-msg-border))" }}
+                                    className="eggw-streaming-label mb-2"
                                   >
                                     {tool.summary}
                                   </div>
@@ -2164,14 +2100,12 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 <pre
                                   ref={(element) => attachStreamingToolOutput(toolId, element)}
                                   data-testid="streaming-tool-output"
-                                  className="text-xs p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words"
-                                  style={{ background: "var(--code-bg)", color: "var(--tool-msg-text, var(--foreground))" }}
+                                  className="eggw-code-block max-h-64 whitespace-pre-wrap break-words"
                                 />
                                 {tool.suppressed && (
                                   <div
                                     data-testid="streaming-tool-output-suppressed"
-                                    className="mt-2 text-xs animate-pulse"
-                                    style={{ color: "var(--muted)" }}
+                                    className="eggw-message-meta mt-2"
                                   >
                                     {toolStreamSavingText(tool.name, tool.suppressedFrames)}
                                   </div>

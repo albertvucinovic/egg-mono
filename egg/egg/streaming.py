@@ -8,8 +8,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from eggthreads import create_snapshot, EventWatcher, ThreadsDB
+from eggdisplay import ChunkedText
 
-from .panels import CHILDREN_PANEL_RELEVANT_EVENT_TYPES
+from .panels import (
+    CHILDREN_PANEL_RELEVANT_EVENT_TYPES,
+    GET_USER_INPUT_RELEVANT_EVENT_TYPES,
+)
 
 
 # Per-source style for streaming content. Used by both the live delta
@@ -48,6 +52,26 @@ def _new_tool_summary() -> Dict[str, Any]:
     return {"active": False, "name": "", "text": ""}
 
 
+def _new_stream_text(value: str = "") -> ChunkedText:
+    return ChunkedText(value)
+
+
+def _append_stream_text(container: Dict[str, Any], key: str, value: str) -> ChunkedText:
+    current = container.get(key)
+    if not isinstance(current, ChunkedText):
+        current = _new_stream_text(current if isinstance(current, str) else "")
+        container[key] = current
+    current.append(value)
+    return current
+
+
+def _iter_stream_text(value: Any):
+    if isinstance(value, ChunkedText):
+        yield from value.iter_chunks()
+    elif isinstance(value, str) and value:
+        yield value
+
+
 def _new_live_state(
     *,
     active_invoke: Optional[str] = None,
@@ -69,8 +93,8 @@ def _new_live_state(
         "provider_started_at": None,
         "provider_last_activity_at": None,
         "provider_timeout_sec": None,
-        "content": "",
-        "reason": "",
+        "content": _new_stream_text(),
+        "reason": _new_stream_text(),
         "reasoning_summary": _new_reasoning_summary(),
         "tools": {},
         "tool_stream_indicator": _new_tool_stream_indicator(),
@@ -132,7 +156,7 @@ def _positive_timeout(value: Any) -> Optional[float]:
 
 
 def _new_reasoning_summary() -> Dict[str, Any]:
-    return {"active": False, "text": ""}
+    return {"active": False, "text": _new_stream_text()}
 
 
 class StreamingMixin:
@@ -192,6 +216,10 @@ class StreamingMixin:
         # this on every UI tick in update_panels() for performance.
         try:
             self.compute_pending_prompt()
+        except Exception:
+            pass
+        try:
+            self._refresh_get_user_message_input_mode()
         except Exception:
             pass
         self._watch_task = asyncio.create_task(self.watch_thread(self.current_thread))
@@ -270,7 +298,9 @@ class StreamingMixin:
         async for batch in ew.aiter():
             saw_non_stream_msg = False
             saw_compaction_marker = False
+            snapshot_required_through = -1
             saw_children_status_event = False
+            saw_get_user_input_event = False
             saw_approval_event = False
             for idx, e in enumerate(batch):
                 try:
@@ -283,6 +313,10 @@ class StreamingMixin:
                         saw_approval_event = True
                     if event_type in CHILDREN_PANEL_RELEVANT_EVENT_TYPES:
                         saw_children_status_event = True
+                    if event_type in GET_USER_INPUT_RELEVANT_EVENT_TYPES:
+                        saw_get_user_input_event = True
+                    if event_type in ("msg.create", "msg.edit", "msg.delete", "thread.compaction"):
+                        snapshot_required_through = max(snapshot_required_through, int(e["event_seq"]))
                 except Exception:
                     pass
                 await self.ingest_event_for_live(e, thread_id)
@@ -301,13 +335,26 @@ class StreamingMixin:
                 except Exception:
                     pass
 
+            if saw_get_user_input_event:
+                try:
+                    self._refresh_get_user_message_input_mode()
+                except Exception:
+                    pass
+
             # If we saw message-level events or compaction markers, refresh the
             # snapshot/console transcript.  Compaction markers are non-message
             # control events, so the UI must explicitly render them without
             # hiding the surrounding messages.
             if saw_non_stream_msg or saw_compaction_marker:
                 try:
-                    create_snapshot(self.db, self.current_thread)
+                    # The in-process runner normally publishes first. Avoid
+                    # decoding/revalidating that same large snapshot on the UI
+                    # loop; an external writer without a snapshot still gets a
+                    # single watcher publication for the semantic batch.
+                    row = self.db.get_thread_metadata(thread_id)
+                    snapshot_seq = int(row.snapshot_last_event_seq) if row is not None else -1
+                    if thread_id == self.current_thread and snapshot_seq < snapshot_required_through:
+                        create_snapshot(self.db, thread_id)
                 except Exception:
                     pass
                 # Print any new messages and compaction dividers to console
@@ -342,10 +389,14 @@ class StreamingMixin:
                                 payload.setdefault('event_seq', ev_seq)
                                 if ts is not None:
                                     payload.setdefault('ts', ts)
-                                self.console_print_message(payload)
+                                self.console_print_message(payload, defer_min_summary=True)
                             self._last_printed_seq_by_thread[self.current_thread] = ev_seq
                         except Exception:
                             pass
+                    try:
+                        self.flush_deferred_min_summary()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -424,17 +475,17 @@ class StreamingMixin:
                 payload = {}
             txt = payload.get('text') or payload.get('content') or payload.get('delta')
             if isinstance(txt, str) and txt:
-                self._live_state['content'] = (self._live_state.get('content') or '') + txt
+                _append_stream_text(self._live_state, 'content', txt)
                 self._stream_append_on_renderer(txt, style=_assistant_stream_style(self))
             rs = payload.get('reason')
             if isinstance(rs, str) and rs:
-                self._live_state['reason'] = (self._live_state.get('reason') or '') + rs
+                _append_stream_text(self._live_state, 'reason', rs)
                 self._stream_append_on_renderer(rs, style=STREAM_STYLE_REASON)
             rsum = payload.get('reasoning_summary')
             if isinstance(rsum, str) and rsum:
                 summary_state = self._live_state.setdefault('reasoning_summary', _new_reasoning_summary())
                 summary_state['active'] = True
-                summary_state['text'] = str(summary_state.get('text') or '') + rsum
+                _append_stream_text(summary_state, 'text', rsum)
                 self._stream_append_on_renderer(rsum, style=STREAM_STYLE_REASONING_SUMMARY)
             tl = payload.get('tool')
             if isinstance(tl, dict):
@@ -450,7 +501,7 @@ class StreamingMixin:
                     if name not in self._live_state['tools']:
                         self._live_state['tools'][name] = self._live_state['tools'].get(name, '')
                 else:
-                    self._live_state['tools'][name] = self._live_state['tools'].get(name, '') + tout
+                    _append_stream_text(self._live_state['tools'], name, tout)
                     if tout:
                         self._stream_append_on_renderer(tout, style=STREAM_STYLE_TOOL_OUTPUT)
             tcd = payload.get('tool_call')
@@ -468,7 +519,7 @@ class StreamingMixin:
                         order.append(raw_key)
                         label = name_map.get(raw_key) or raw_key
                         self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=_tool_call_args_stream_style(self))
-                    text_map[raw_key] = text_map.get(raw_key, '') + frag
+                    _append_stream_text(text_map, raw_key, frag)
                     self._stream_append_on_renderer(frag, style=_tool_call_args_stream_style(self))
         elif t == 'msg.create':
             try:
@@ -531,10 +582,6 @@ class StreamingMixin:
             self._live_state['provider_started_at'] = None
             self._live_state['provider_last_activity_at'] = None
             self._live_state['provider_timeout_sec'] = None
-            try:
-                create_snapshot(self.db, self.current_thread)
-            except Exception:
-                pass
             self._stream_end_on_renderer()
             self.log_system('Streaming finished.')
 
@@ -814,20 +861,19 @@ class StreamingMixin:
         if renderer is None or not hasattr(renderer, 'stream_begin'):
             return
         self._stream_begin_on_renderer(ls.get('stream_kind'))
-        reason = ls.get('reason') or ''
-        if isinstance(reason, str) and reason:
-            self._stream_append_on_renderer(reason, style=STREAM_STYLE_REASON)
-        content = ls.get('content') or ''
-        if isinstance(content, str) and content:
-            self._stream_append_on_renderer(content, style=_assistant_stream_style(self))
-        for name, txt in (ls.get('tools') or {}).items():
-            if isinstance(txt, str) and txt:
-                self._stream_append_on_renderer(txt, style=STREAM_STYLE_TOOL_OUTPUT)
+        for chunk in _iter_stream_text(ls.get('reason')):
+            self._stream_append_on_renderer(chunk, style=STREAM_STYLE_REASON)
+        for chunk in _iter_stream_text(ls.get('content')):
+            self._stream_append_on_renderer(chunk, style=_assistant_stream_style(self))
+        for _name, text in (ls.get('tools') or {}).items():
+            for chunk in _iter_stream_text(text):
+                self._stream_append_on_renderer(chunk, style=STREAM_STYLE_TOOL_OUTPUT)
         indicator = ls.get('tool_stream_indicator') or {}
         for k in ls.get('tc_order') or []:
-            t = (ls.get('tc_text') or {}).get(k, '')
-            if isinstance(t, str) and t:
+            text = (ls.get('tc_text') or {}).get(k, '')
+            if text:
                 label = (ls.get('tc_names') or {}).get(k) or k
                 self._stream_append_on_renderer(f"\n[Tool Call Args: {label}]\n", style=_tool_call_args_stream_style(self))
-                self._stream_append_on_renderer(t, style=_tool_call_args_stream_style(self))
+                for chunk in _iter_stream_text(text):
+                    self._stream_append_on_renderer(chunk, style=_tool_call_args_stream_style(self))
         self._flush_stream_render_buffer_now(force=True)

@@ -1097,7 +1097,13 @@ def extend_snapshot_token_stats(snapshot: Dict[str, Any], tail_messages: List[Di
     return _merge_token_stats(base, tail_stats)
 
 
-def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
+def streaming_token_stats(
+    db: "ThreadsDB",
+    thread_id: str,
+    *,
+    _snapshot: Optional[Dict[str, Any]] = None,
+    _snapshot_last_event_seq: Optional[int] = None,
+) -> Dict[str, Any]:
     """Compute token stats for the portion of the thread not in the snapshot.
 
     This is meant for *live* monitoring.
@@ -1123,57 +1129,65 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
     base_prev_call_by_model: Optional[Dict[str, int]] = None
     after_seq = -1
 
-    # Read snapshot boundary and (if available) cached token stats.
-    try:
-        th = db.get_thread(thread_id)
-    except Exception:
-        th = None
-
-    if th is not None:
+    # Read snapshot boundary and (if available) cached token stats. Internal
+    # callers that already decoded the snapshot may pass it through so header
+    # accounting does not load/parse a large snapshot twice.
+    snap: Optional[Dict[str, Any]] = _snapshot
+    if snap is not None:
         try:
-            after_seq = int(getattr(th, "snapshot_last_event_seq", -1) or -1)
+            after_seq = int(_snapshot_last_event_seq if _snapshot_last_event_seq is not None else -1)
         except Exception:
             after_seq = -1
-
-        snap_raw = getattr(th, "snapshot_json", None)
-        if isinstance(snap_raw, str) and snap_raw:
+    else:
+        try:
+            th = db.get_thread(thread_id)
+        except Exception:
+            th = None
+        if th is not None:
             try:
-                snap = json.loads(snap_raw)
+                after_seq = int(getattr(th, "snapshot_last_event_seq", -1) or -1)
             except Exception:
-                snap = None
-            if isinstance(snap, dict):
-                ts = snap.get("token_stats")
-                if isinstance(ts, dict):
-                    try:
-                        base_ctx_tokens = int(ts.get("context_tokens") or 0)
-                    except Exception:
-                        base_ctx_tokens = 0
-                    try:
-                        base_image_tokens = int(ts.get("image_tokens") or 0)
-                    except Exception:
-                        base_image_tokens = 0
-                    au = ts.get("api_usage")
-                    if isinstance(au, dict):
-                        lci = au.get("last_call_input_tokens")
-                        if isinstance(lci, int) and lci >= 0:
-                            base_prev_call_input_tokens = lci
-                        lmk = au.get("last_call_model_key")
-                        if isinstance(lmk, str) and lmk.strip():
-                            base_prev_call_model_key = lmk.strip()
-                        lcbm = au.get('last_call_input_tokens_by_model')
-                        if isinstance(lcbm, dict):
-                            # Coerce values to ints.
-                            bm: Dict[str, int] = {}
-                            for k, v in lcbm.items():
-                                if not isinstance(k, str) or not k:
-                                    continue
-                                try:
-                                    iv = int(v)
-                                except Exception:
-                                    continue
-                                if iv >= 0:
-                                    bm[k] = iv
-                            base_prev_call_by_model = bm
+                after_seq = -1
+            snap_raw = getattr(th, "snapshot_json", None)
+            if isinstance(snap_raw, str) and snap_raw:
+                try:
+                    decoded = json.loads(snap_raw)
+                except Exception:
+                    decoded = None
+                snap = decoded if isinstance(decoded, dict) else None
+
+    if isinstance(snap, dict):
+        ts = snap.get("token_stats")
+        if isinstance(ts, dict):
+            try:
+                base_ctx_tokens = int(ts.get("context_tokens") or 0)
+            except Exception:
+                base_ctx_tokens = 0
+            try:
+                base_image_tokens = int(ts.get("image_tokens") or 0)
+            except Exception:
+                base_image_tokens = 0
+            au = ts.get("api_usage")
+            if isinstance(au, dict):
+                lci = au.get("last_call_input_tokens")
+                if isinstance(lci, int) and lci >= 0:
+                    base_prev_call_input_tokens = lci
+                lmk = au.get("last_call_model_key")
+                if isinstance(lmk, str) and lmk.strip():
+                    base_prev_call_model_key = lmk.strip()
+                lcbm = au.get('last_call_input_tokens_by_model')
+                if isinstance(lcbm, dict):
+                    bm: Dict[str, int] = {}
+                    for k, v in lcbm.items():
+                        if not isinstance(k, str) or not k:
+                            continue
+                        try:
+                            iv = int(v)
+                        except Exception:
+                            continue
+                        if iv >= 0:
+                            bm[k] = iv
+                    base_prev_call_by_model = bm
 
     # Resolve active invoke (if any).
     open_invoke: Optional[str] = None
@@ -1354,8 +1368,16 @@ def streaming_token_stats(db: "ThreadsDB", thread_id: str) -> Dict[str, Any]:
                 }
             )
 
+    effective_messages = [m for m in messages if isinstance(m, dict)]
+    if not effective_messages:
+        return _token_stats_for_messages([]) if _snapshot is None else {
+            "per_message": {},
+            "context_tokens": 0,
+            "image_tokens": 0,
+            "api_usage": {},
+        }
     return _token_stats_for_messages(
-        [m for m in messages if isinstance(m, dict)],
+        effective_messages,
         base_context_tokens=base_ctx_tokens,
         base_context_image_tokens=base_image_tokens,
         base_prev_call_input_tokens=base_prev_call_input_tokens,
@@ -1931,6 +1953,94 @@ def total_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Di
     return total
 
 
+def header_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Dict[str, Any]:
+    """Return bounded cached-snapshot/live-tail stats for periodic UI headers.
+
+    Unlike :func:`thread_token_stats`, this intentionally does not recompute
+    historical usage by compaction epoch or retokenize the filtered provider
+    view. Explicit diagnostics keep using the full helper. The header reuses
+    snapshot per-message token metadata to sum the current provider context.
+    """
+
+    try:
+        th = db.get_thread(thread_id)
+    except Exception:
+        th = None
+    snapshot: Dict[str, Any] = {}
+    snapshot_seq = -1
+    if th is not None:
+        try:
+            snapshot_seq = int(getattr(th, "snapshot_last_event_seq", -1) or -1)
+        except Exception:
+            snapshot_seq = -1
+        raw = getattr(th, "snapshot_json", None)
+        if isinstance(raw, str) and raw:
+            try:
+                decoded = json.loads(raw)
+            except Exception:
+                decoded = None
+            if isinstance(decoded, dict):
+                snapshot = decoded
+
+    cached = snapshot.get("token_stats") if isinstance(snapshot.get("token_stats"), dict) else {}
+    tail = streaming_token_stats(
+        db,
+        thread_id,
+        _snapshot=snapshot,
+        _snapshot_last_event_seq=snapshot_seq,
+    )
+    total = _merge_token_stats_with_boundary(cached, tail, include_snapshot_boundary=True)
+    if llm is not None:
+        total = _attach_costs(total, llm=llm)
+
+    provider_context_tokens = int(total.get("context_tokens") or 0)
+    try:
+        from .api import current_effective_compaction_start_event_seq
+
+        start_seq = current_effective_compaction_start_event_seq(db, thread_id)
+    except Exception:
+        start_seq = None
+    if start_seq is not None and isinstance(cached, dict):
+        per_message = cached.get("per_message")
+        messages = snapshot.get("messages")
+        if isinstance(per_message, dict) and isinstance(messages, list):
+            provider_context_tokens = 0
+            for message in messages:
+                if (
+                    not isinstance(message, dict)
+                    or message.get("no_api")
+                    or message.get("answer_user_preserve_turn")
+                ):
+                    continue
+                role = message.get("role")
+                if role not in ("system", "user", "assistant", "tool"):
+                    continue
+                try:
+                    event_seq = int(message.get("event_seq"))
+                except Exception:
+                    continue
+                if role != "system" and event_seq < int(start_seq):
+                    continue
+                info = per_message.get(str(message.get("msg_id") or ""))
+                if isinstance(info, dict):
+                    try:
+                        provider_context_tokens += int(info.get("total_tokens") or 0)
+                    except Exception:
+                        pass
+            try:
+                provider_context_tokens += max(
+                    0,
+                    int(total.get("context_tokens") or 0) - int(cached.get("context_tokens") or 0),
+                )
+            except Exception:
+                pass
+
+    out = dict(total)
+    out["full_thread_tokens"] = int(total.get("context_tokens") or 0)
+    out["context_tokens"] = int(provider_context_tokens)
+    return out
+
+
 def thread_token_stats(db: "ThreadsDB", thread_id: str, *, llm: Any = None) -> Dict[str, Any]:
     """Return token stats with explicit full-history and provider-context counts.
 
@@ -2029,6 +2139,7 @@ __all__ = [
     "snapshot_token_stats",
     "extend_snapshot_token_stats",
     "streaming_token_stats",
+    "header_token_stats",
     "total_token_stats",
     "thread_token_stats",
     "provider_context_token_stats",

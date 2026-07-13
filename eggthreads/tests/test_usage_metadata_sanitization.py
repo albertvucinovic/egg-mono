@@ -71,3 +71,30 @@ def test_usage_metadata_is_persisted_but_not_sent_to_next_provider_call(tmp_path
     assert previous_assistant
     assert all("api_usage" not in m for m in second_call_messages)
     assert all("provider_usage" not in m for m in second_call_messages)
+
+
+class _ShortRecapLLM:
+    current_model_key = "test-model"
+
+    def set_model(self, model_key):
+        self.current_model_key = model_key
+
+    def set_model_with_config(self, model_key, config):
+        self.current_model_key = model_key
+
+    async def astream_chat(self, messages, tools=None, tool_choice=None, timeout=None, **kwargs):
+        content = "completed\n<short_recap>Focused recap</short_recap>"
+        yield {"type": "done", "message": {"role": "assistant", "content": content}}
+
+
+def test_runner_updates_short_recap_from_its_completed_message(tmp_path):
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="root")
+    ts.append_message(db, tid, "user", "hello")
+    ts.create_snapshot(db, tid)
+
+    runner = ts.ThreadRunner(db, tid, llm=_ShortRecapLLM())
+    assert asyncio.run(runner.run_once()) is True
+
+    assert db.get_thread(tid).short_recap == "Focused recap"

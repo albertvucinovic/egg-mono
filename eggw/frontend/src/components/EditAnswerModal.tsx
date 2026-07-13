@@ -2,17 +2,10 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
-import { X } from "lucide-react";
 import { useAppStore } from "@/lib/store";
-import clsx from "clsx";
 import { PlainDraftEditor, type DraftEditorProps } from "@/components/PlainDraftEditor";
-
-function focusComposerSoon() {
-  window.setTimeout(() => {
-    const composer = document.querySelector<HTMLTextAreaElement>('[data-testid="message-input"]');
-    composer?.focus();
-  }, 0);
-}
+import { OverlayPanel } from "@/components/ui/OverlayPanel";
+import { Button } from "@/components/ui/primitives";
 
 function sourceTitle(sourceLabel: string, sourceSuffix: string) {
   const label = sourceLabel || "assistant answer";
@@ -30,12 +23,7 @@ function isQuotedAssistantSource(sourceKind: string) {
 function DraftEditorLoading() {
   return (
     <div
-      className="flex min-h-[45vh] w-full items-center justify-center rounded border p-3 text-sm"
-      style={{
-        background: "var(--code-bg)",
-        borderColor: "var(--panel-border)",
-        color: "var(--muted)",
-      }}
+      className="eggw-editor-state min-h-[45vh]"
       data-testid="edit-answer-draft"
       aria-label="Quoted assistant markdown draft"
     >
@@ -93,7 +81,6 @@ export function EditAnswerModal() {
       "success",
     );
     closeEditAnswerModal();
-    focusComposerSoon();
   };
 
   const loadReplace = () => {
@@ -114,16 +101,11 @@ export function EditAnswerModal() {
       if (!discard) return;
     }
     closeEditAnswerModal();
-    focusComposerSoon();
   };
 
   useEffect(() => {
     if (!isVisible) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeWithDirtyCheck();
-      }
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && canLoadDirectly && draftHasText) {
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest('[data-testid="edit-answer-draft"]')) return;
@@ -138,111 +120,60 @@ export function EditAnswerModal() {
 
   if (!isVisible) return null;
 
+  const title = isInputMessage ? "Edit input message" : "Edit assistant answer";
+  const footer = (
+    <>
+      <Button variant="secondary" onClick={closeWithDirtyCheck}>Cancel</Button>
+      {canLoadDirectly ? (
+        <Button variant="primary" onClick={loadReplace} disabled={!draftHasText} data-testid="edit-answer-load">
+          Load into composer
+        </Button>
+      ) : (
+        <>
+          <Button variant="secondary" onClick={loadAppend} disabled={!draftHasText} data-testid="edit-answer-append">
+            Append to composer
+          </Button>
+          <Button variant="warning" onClick={loadReplace} disabled={!draftHasText} data-testid="edit-answer-replace">
+            Replace existing draft
+          </Button>
+        </>
+      )}
+    </>
+  );
+
   return (
-    <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) closeWithDirtyCheck();
-      }}
-      data-testid="edit-answer-modal"
+    <OverlayPanel
+      open
+      onClose={closeWithDirtyCheck}
+      title={title}
+      description={`Source: ${source}${modal.sourceMsgId ? ` · ${modal.sourceMsgId}` : ""}`}
+      closeLabel="Close edit answer modal"
+      testId="edit-answer-modal"
+      returnFocusSelector="[data-testid='message-input']"
+      panelClassName="eggw-edit-dialog"
+      footerClassName="eggw-edit-footer"
+      footer={footer}
+      portal
     >
-      <div
-        className="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-lg border shadow-2xl"
-        style={{ background: "var(--panel-bg)", borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-        role="dialog"
-        aria-modal="true"
-        aria-label={isInputMessage ? "Edit input message" : "Edit assistant answer"}
-      >
-        <div className="flex items-start justify-between gap-3 border-b p-4" style={{ borderColor: "var(--panel-border)" }}>
-          <div className="min-w-0">
-            <h2 className="text-lg font-semibold">{isInputMessage ? "Edit input message" : "Edit assistant answer"}</h2>
-            <div className="mt-1 text-xs font-mono" style={{ color: "var(--muted)" }}>
-              Source: {source}{modal.sourceMsgId ? ` · ${modal.sourceMsgId}` : ""}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={closeWithDirtyCheck}
-            className="rounded p-1 hover:bg-slate-700/60"
-            aria-label="Close edit answer modal"
-          >
-            <X className="h-5 w-5" />
-          </button>
+      <p className="eggw-ui-muted mb-3 text-sm">
+        {isInputMessage
+          ? "Write an input message in Monaco. This will load into the composer; it will not send automatically."
+          : isQuotedAssistant
+            ? "Editing raw quoted assistant markdown in Monaco. This will load into the composer; it will not send automatically."
+            : "Editing raw message text in Monaco. This will load into the composer; it will not send automatically."}
+      </p>
+      <DraftEditor
+        value={modal.draft}
+        onChange={setEditAnswerDraft}
+        sourceMsgId={modal.sourceMsgId}
+        canSubmitShortcut={canLoadDirectly && draftHasText}
+        onSubmitShortcut={loadReplace}
+      />
+      {hasExistingComposerDraft && (
+        <div className="eggw-edit-warning" role="alert" data-testid="edit-answer-overwrite-warning">
+          The composer already has text. Choose Replace or Append; EggW will not overwrite it silently.
         </div>
-
-        <div className="min-h-0 flex-1 overflow-auto p-4">
-          <p className="mb-3 text-sm" style={{ color: "var(--muted)" }}>
-            {isInputMessage
-              ? "Write an input message in Monaco. This will load into the composer; it will not send automatically."
-              : isQuotedAssistant
-                ? "Editing raw quoted assistant markdown in Monaco. This will load into the composer; it will not send automatically."
-                : "Editing raw message text in Monaco. This will load into the composer; it will not send automatically."}
-          </p>
-          <DraftEditor
-            value={modal.draft}
-            onChange={setEditAnswerDraft}
-            sourceMsgId={modal.sourceMsgId}
-            canSubmitShortcut={canLoadDirectly && draftHasText}
-            onSubmitShortcut={loadReplace}
-          />
-          {hasExistingComposerDraft && (
-            <div
-              className="mt-3 rounded border p-3 text-sm"
-              style={{ borderColor: "#f59e0b", background: "rgba(245, 158, 11, 0.12)", color: "var(--foreground)" }}
-              data-testid="edit-answer-overwrite-warning"
-            >
-              The composer already has text. Choose Replace or Append; EggW will not overwrite it silently.
-            </div>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center justify-end gap-2 border-t p-4" style={{ borderColor: "var(--panel-border)" }}>
-          <button
-            type="button"
-            onClick={closeWithDirtyCheck}
-            className="rounded border px-3 py-2 text-sm"
-            style={{ borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-          >
-            Cancel
-          </button>
-          {canLoadDirectly ? (
-            <button
-              type="button"
-              onClick={loadReplace}
-              disabled={!draftHasText}
-              className={clsx("rounded px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50")}
-              style={{ background: "var(--accent)", color: "var(--background)" }}
-              data-testid="edit-answer-load"
-            >
-              Load into composer
-            </button>
-          ) : (
-            <>
-              <button
-                type="button"
-                onClick={loadAppend}
-                disabled={!draftHasText}
-                className="rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-                style={{ borderColor: "var(--panel-border)", color: "var(--foreground)" }}
-                data-testid="edit-answer-append"
-              >
-                Append to composer
-              </button>
-              <button
-                type="button"
-                onClick={loadReplace}
-                disabled={!draftHasText}
-                className="rounded px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
-                style={{ background: "#f59e0b", color: "#111827" }}
-                data-testid="edit-answer-replace"
-              >
-                Replace existing draft
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+      )}
+    </OverlayPanel>
   );
 }

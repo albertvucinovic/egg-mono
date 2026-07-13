@@ -143,6 +143,17 @@ class ThreadsDB:
         row = cur.fetchone()
         return ThreadRow(**dict(row)) if row else None
 
+    def get_thread_metadata(self, thread_id: str) -> Optional[ThreadRow]:
+        """Return thread row metadata without loading the snapshot JSON blob."""
+        cur = self.conn.execute(
+            "SELECT thread_id, name, short_recap, status, NULL AS snapshot_json, "
+            "snapshot_last_event_seq, initial_model_key, depth, created_at "
+            "FROM threads WHERE thread_id=?",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        return ThreadRow(**dict(row)) if row else None
+
     def set_thread_status(self, thread_id: str, status: str) -> None:
         self.conn.execute("UPDATE threads SET status=? WHERE thread_id=?", (status, thread_id))
 

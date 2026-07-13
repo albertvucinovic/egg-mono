@@ -1,0 +1,530 @@
+{
+  "version": 1,
+  "defaultTheme": "dark",
+  "families": {
+    "dark": {
+      "polarity": "dark",
+      "background": "#0d1117",
+      "panel": "#161b22",
+      "raised": "#21262d",
+      "code": "#090d12",
+      "text": "#e6edf3",
+      "secondary": "#aab4bf",
+      "tertiary": "#9aa6b2",
+      "heading": "#f0f6fc",
+      "boundary": "#66707b",
+      "accent": "#58a6ff",
+      "roles": {
+        "user": "#7cc7ff",
+        "assistant": "#d8e2ec",
+        "system": "#88c0d0",
+        "tool": "#a3e635",
+        "reasoning": "#d8b4fe",
+        "tool-call": "#fde047"
+      }
+    },
+    "cyberpunk": {
+      "polarity": "dark",
+      "background": "#0d0221",
+      "panel": "#190b32",
+      "raised": "#251047",
+      "code": "#090117",
+      "text": "#f8eaff",
+      "secondary": "#c9a9da",
+      "tertiary": "#b796cc",
+      "heading": "#67f7ff",
+      "boundary": "#8a5aa1",
+      "accent": "#ff4da6",
+      "roles": {
+        "user": "#ff5cad",
+        "assistant": "#67f7ff",
+        "system": "#f1fa75",
+        "tool": "#63f59a",
+        "reasoning": "#e879f9",
+        "tool-call": "#ffad5c"
+      }
+    },
+    "forest": {
+      "polarity": "dark",
+      "background": "#0b1a0b",
+      "panel": "#132713",
+      "raised": "#1b351b",
+      "code": "#081408",
+      "text": "#e0f2df",
+      "secondary": "#a8c8a8",
+      "tertiary": "#94b594",
+      "heading": "#b7e4b5",
+      "boundary": "#6d8b6d",
+      "accent": "#8bd17a",
+      "roles": {
+        "user": "#a7f070",
+        "assistant": "#9be5a1",
+        "system": "#c5f467",
+        "tool": "#b6df62",
+        "reasoning": "#d7ad7f",
+        "tool-call": "#f6c453"
+      }
+    },
+    "ocean": {
+      "polarity": "dark",
+      "background": "#041c2c",
+      "panel": "#0a2a40",
+      "raised": "#103852",
+      "code": "#021824",
+      "text": "#d9f7ff",
+      "secondary": "#9fc6d4",
+      "tertiary": "#8bb3c2",
+      "heading": "#71e1ee",
+      "boundary": "#648797",
+      "accent": "#43c6db",
+      "roles": {
+        "user": "#62cfff",
+        "assistant": "#67e8f9",
+        "system": "#52d9e8",
+        "tool": "#5ee1d2",
+        "reasoning": "#aaa5ff",
+        "tool-call": "#ff9baa"
+      }
+    },
+    "sunset": {
+      "polarity": "dark",
+      "background": "#1a0f0a",
+      "panel": "#2d1810",
+      "raised": "#3b2117",
+      "code": "#140a06",
+      "text": "#fff1e6",
+      "secondary": "#d2ab99",
+      "tertiary": "#be9787",
+      "heading": "#ffc0aa",
+      "boundary": "#956b58",
+      "accent": "#ff8a65",
+      "roles": {
+        "user": "#ff9f6e",
+        "assistant": "#fdba74",
+        "system": "#facc15",
+        "tool": "#ff985c",
+        "reasoning": "#d8a2ef",
+        "tool-call": "#ffe082"
+      }
+    },
+    "mono": {
+      "polarity": "dark",
+      "background": "#000000",
+      "panel": "#121212",
+      "raised": "#202020",
+      "code": "#080808",
+      "text": "#eeeeee",
+      "secondary": "#bdbdbd",
+      "tertiary": "#a6a6a6",
+      "heading": "#ffffff",
+      "boundary": "#777777",
+      "accent": "#ffffff",
+      "roles": {
+        "user": "#ffffff",
+        "assistant": "#dddddd",
+        "system": "#f5f5f5",
+        "tool": "#c8c8c8",
+        "reasoning": "#b8b8b8",
+        "tool-call": "#eeeeee"
+      }
+    },
+    "midnight": {
+      "polarity": "dark",
+      "background": "#080d24",
+      "panel": "#111a3c",
+      "raised": "#192550",
+      "code": "#060a1d",
+      "text": "#e5edff",
+      "secondary": "#b0bce0",
+      "tertiary": "#9ca9d0",
+      "heading": "#dbeafe",
+      "boundary": "#7180ad",
+      "accent": "#a5b4fc",
+      "roles": {
+        "user": "#93c5fd",
+        "assistant": "#c7d2fe",
+        "system": "#78b5ff",
+        "tool": "#b5c2ff",
+        "reasoning": "#d8ccff",
+        "tool-call": "#fcd34d"
+      }
+    },
+    "disney": {
+      "polarity": "dark",
+      "background": "#0a1628",
+      "panel": "#152238",
+      "raised": "#1d304d",
+      "code": "#071120",
+      "text": "#f0f4ff",
+      "secondary": "#b4c3df",
+      "tertiary": "#a0b2d2",
+      "heading": "#ffe066",
+      "boundary": "#7189ad",
+      "accent": "#91adff",
+      "roles": {
+        "user": "#ffe066",
+        "assistant": "#89b4ff",
+        "system": "#ff8dc7",
+        "tool": "#b0f5b0",
+        "reasoning": "#e59be8",
+        "tool-call": "#fff176"
+      }
+    },
+    "fruit": {
+      "polarity": "dark",
+      "background": "#1a0a14",
+      "panel": "#2a1420",
+      "raised": "#3b1b2b",
+      "code": "#140810",
+      "text": "#ffe9ee",
+      "secondary": "#d6a4b6",
+      "tertiary": "#c18fa3",
+      "heading": "#ffb299",
+      "boundary": "#98627a",
+      "accent": "#ff806b",
+      "roles": {
+        "user": "#ffb347",
+        "assistant": "#ff7891",
+        "system": "#ffe066",
+        "tool": "#82e082",
+        "reasoning": "#d8a1f0",
+        "tool-call": "#ff9b7a"
+      }
+    },
+    "vegetables": {
+      "polarity": "dark",
+      "background": "#0f1408",
+      "panel": "#1a2410",
+      "raised": "#253217",
+      "code": "#0b1006",
+      "text": "#edf5dc",
+      "secondary": "#b4c49c",
+      "tertiary": "#9ead89",
+      "heading": "#b5f2ae",
+      "boundary": "#778a60",
+      "accent": "#a4d65e",
+      "roles": {
+        "user": "#ffad5c",
+        "assistant": "#67d17a",
+        "system": "#ff8b78",
+        "tool": "#acd95c",
+        "reasoning": "#c3a7f3",
+        "tool-call": "#e8bf55"
+      }
+    },
+    "coffee": {
+      "polarity": "dark",
+      "background": "#1a100b",
+      "panel": "#2d1d14",
+      "raised": "#3a281d",
+      "code": "#140b07",
+      "text": "#f8eadb",
+      "secondary": "#d0b29a",
+      "tertiary": "#bb9d87",
+      "heading": "#efd0ae",
+      "boundary": "#95745d",
+      "accent": "#dfa46d",
+      "roles": {
+        "user": "#e7b477",
+        "assistant": "#d9b18d",
+        "system": "#f5deb3",
+        "tool": "#caa17e",
+        "reasoning": "#d39779",
+        "tool-call": "#f1bd79"
+      }
+    },
+    "matrix": {
+      "polarity": "dark",
+      "background": "#000000",
+      "panel": "#061509",
+      "raised": "#0a2410",
+      "code": "#000000",
+      "text": "#9cffb5",
+      "secondary": "#62d881",
+      "tertiary": "#4fc56f",
+      "heading": "#b4ffc6",
+      "boundary": "#18a043",
+      "accent": "#00e63d",
+      "roles": {
+        "user": "#4dff77",
+        "assistant": "#36e968",
+        "system": "#72ff72",
+        "tool": "#45dc65",
+        "reasoning": "#5adf72",
+        "tool-call": "#9cff9c"
+      }
+    },
+    "light": {
+      "polarity": "light",
+      "background": "#ffffff",
+      "panel": "#f4f6f8",
+      "raised": "#e9edf2",
+      "code": "#eef1f5",
+      "text": "#172033",
+      "secondary": "#475467",
+      "tertiary": "#596579",
+      "heading": "#111827",
+      "boundary": "#667085",
+      "accent": "#1d4ed8",
+      "roles": {
+        "user": "#1d4ed8",
+        "assistant": "#172033",
+        "system": "#0e647d",
+        "tool": "#087451",
+        "reasoning": "#6b21a8",
+        "tool-call": "#92400e"
+      }
+    },
+    "light-mono": {
+      "polarity": "light",
+      "background": "#ffffff",
+      "panel": "#f4f4f4",
+      "raised": "#e8e8e8",
+      "code": "#ededed",
+      "text": "#000000",
+      "secondary": "#404040",
+      "tertiary": "#555555",
+      "heading": "#000000",
+      "boundary": "#666666",
+      "accent": "#000000",
+      "roles": {
+        "user": "#000000",
+        "assistant": "#202020",
+        "system": "#000000",
+        "tool": "#333333",
+        "reasoning": "#4a4a4a",
+        "tool-call": "#000000"
+      }
+    },
+    "colorful": {
+      "polarity": "dark",
+      "background": "#0a0a0a",
+      "panel": "#171717",
+      "raised": "#242424",
+      "code": "#080808",
+      "text": "#eeeeee",
+      "secondary": "#bdbdbd",
+      "tertiary": "#a8a8a8",
+      "heading": "#ffffff",
+      "boundary": "#777777",
+      "accent": "#45d6e8",
+      "roles": {
+        "user": "#55dc7d",
+        "assistant": "#45d6e8",
+        "system": "#72a7ff",
+        "tool": "#f4cf4f",
+        "reasoning": "#ef83f5",
+        "tool-call": "#ffbd59"
+      }
+    },
+    "colorful-light": {
+      "polarity": "light",
+      "background": "#ffffff",
+      "panel": "#f5f7f9",
+      "raised": "#e9eef2",
+      "code": "#edf1f4",
+      "text": "#111827",
+      "secondary": "#475467",
+      "tertiary": "#596579",
+      "heading": "#0a0a0a",
+      "boundary": "#667085",
+      "accent": "#0e7490",
+      "roles": {
+        "user": "#137333",
+        "assistant": "#0e7490",
+        "system": "#1d4ed8",
+        "tool": "#854d0e",
+        "reasoning": "#86198f",
+        "tool-call": "#9a3412"
+      }
+    }
+  },
+  "themes": [
+    {
+      "name": "dark",
+      "family": "dark",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "cyberpunk",
+      "family": "cyberpunk",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "forest",
+      "family": "forest",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "ocean",
+      "family": "ocean",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "sunset",
+      "family": "sunset",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "mono",
+      "family": "mono",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "midnight",
+      "family": "midnight",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "disney",
+      "family": "disney",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "fruit",
+      "family": "fruit",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "vegetables",
+      "family": "vegetables",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "coffee",
+      "family": "coffee",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "matrix",
+      "family": "matrix",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "light",
+      "family": "light",
+      "polarity": "light",
+      "treatment": "uniform"
+    },
+    {
+      "name": "light-mono",
+      "family": "light-mono",
+      "polarity": "light",
+      "treatment": "uniform"
+    },
+    {
+      "name": "colorful",
+      "family": "colorful",
+      "polarity": "dark",
+      "treatment": "uniform"
+    },
+    {
+      "name": "colorful-light",
+      "family": "colorful-light",
+      "polarity": "light",
+      "treatment": "uniform"
+    },
+    {
+      "name": "dark-background",
+      "family": "dark",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "cyberpunk-background",
+      "family": "cyberpunk",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "forest-background",
+      "family": "forest",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "ocean-background",
+      "family": "ocean",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "sunset-background",
+      "family": "sunset",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "mono-background",
+      "family": "mono",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "midnight-background",
+      "family": "midnight",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "disney-background",
+      "family": "disney",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "fruit-background",
+      "family": "fruit",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "vegetables-background",
+      "family": "vegetables",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "coffee-background",
+      "family": "coffee",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "matrix-background",
+      "family": "matrix",
+      "polarity": "dark",
+      "treatment": "tinted"
+    },
+    {
+      "name": "light-background",
+      "family": "light",
+      "polarity": "light",
+      "treatment": "tinted"
+    },
+    {
+      "name": "light-mono-background",
+      "family": "light-mono",
+      "polarity": "light",
+      "treatment": "tinted"
+    },
+    {
+      "name": "colorful-light-background",
+      "family": "colorful-light",
+      "polarity": "light",
+      "treatment": "tinted"
+    }
+  ]
+}
