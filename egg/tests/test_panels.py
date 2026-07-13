@@ -1752,7 +1752,7 @@ class TestTranscriptScrollbackSource:
 
         rendered = []
 
-        def fake_message_renderables(message, hidden_details=None):
+        def fake_message_renderables(message, hidden_details=None, **kwargs):
             content = str(message.get("content") or "")
             rendered.append(content)
             return [_StaticTranscriptRenderable(content, content)]
@@ -1780,7 +1780,7 @@ class TestTranscriptScrollbackSource:
 
         rendered = []
 
-        def fake_message_renderables(message, hidden_details=None):
+        def fake_message_renderables(message, hidden_details=None, **kwargs):
             content = str(message.get("content") or "")
             rendered.append((egg_app._display_verbosity, content))
             return [_StaticTranscriptRenderable(content, content)]
@@ -1951,6 +1951,38 @@ class TestTranscriptScrollbackSource:
 
         assert "visible-4" in "\n".join(rows)
         assert calls["count"] <= 2
+
+    def test_min_lazy_render_uses_source_local_token_metadata(self, egg_app, monkeypatch):
+        """Paging old blocks does no per-message snapshot watermark lookup."""
+        from egg.panels import TranscriptScrollbackSource
+        from eggthreads import append_message, create_snapshot
+
+        egg_app._display_verbosity = "min"
+        for i in range(100):
+            append_message(
+                egg_app.db,
+                egg_app.current_thread,
+                "tool",
+                f"hidden-result-{i}",
+                extra={"name": "bash", "tool_call_id": f"call-{i}"},
+            )
+        append_message(egg_app.db, egg_app.current_thread, "assistant", "visible-tail")
+        create_snapshot(egg_app.db, egg_app.current_thread)
+
+        source = TranscriptScrollbackSource(egg_app, refresh_snapshot=False)
+        watermark_reads = []
+
+        def fail_watermark_read(*args, **kwargs):
+            watermark_reads.append(True)
+            raise AssertionError("scrollback source must reuse captured snapshot metadata")
+
+        monkeypatch.setattr(egg_app, "_snapshot_last_event_seq", fail_watermark_read)
+        rows = list(source.rows_from_bottom(100, bottom_offset=0, height=200))
+
+        assert "visible-tail" in "\n".join(rows)
+        assert watermark_reads == []
+        assert source._snapshot_seq == egg_app.db.get_thread(egg_app.current_thread).snapshot_last_event_seq
+        assert len(source._per_message_token_stats) >= 100
 
 
 class TestRedrawStaticView:

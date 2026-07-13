@@ -101,6 +101,8 @@ class TranscriptScrollbackSource:
         self._thread_id = thread_id or panels.current_thread
         if refresh_snapshot:
             self._refresh_snapshot_if_safe()
+        self._snapshot_seq = -1
+        self._per_message_token_stats: Dict[str, Dict[str, Any]] = {}
         self._blocks = self._load_blocks()
         self._caches: Dict[Tuple[int, str], _TranscriptScrollbackCache] = {}
 
@@ -140,7 +142,21 @@ class TranscriptScrollbackSource:
     def _load_blocks(self) -> List[_TranscriptScrollbackBlock]:
         """Read the current snapshot/messages and compaction marker events."""
         try:
-            msgs = snapshot_messages(self._db, self._thread_id)
+            row = self._db.get_thread(self._thread_id)
+            self._snapshot_seq = int(row.snapshot_last_event_seq) if row is not None else -1
+            raw_snapshot = getattr(row, 'snapshot_json', None) if row is not None else None
+            snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) and raw_snapshot else {}
+            msgs = snapshot.get('messages') if isinstance(snapshot, dict) else []
+            if not isinstance(msgs, list):
+                msgs = []
+            token_stats = snapshot.get('token_stats') if isinstance(snapshot, dict) else None
+            per_message = token_stats.get('per_message') if isinstance(token_stats, dict) else None
+            if isinstance(per_message, dict):
+                self._per_message_token_stats = {
+                    str(msg_id): info
+                    for msg_id, info in per_message.items()
+                    if isinstance(msg_id, str) and isinstance(info, dict)
+                }
         except Exception:
             msgs = []
         try:
@@ -278,6 +294,7 @@ class TranscriptScrollbackSource:
                 items.extend(self._panels._static_transcript_message_renderables(
                     block.payload,
                     own_details,
+                    per_message_token_stats=self._per_message_token_stats,
                 ))
             except Exception:
                 items = []
@@ -1500,6 +1517,8 @@ class PanelsMixin:
         self,
         m: Dict[str, Any],
         hidden_details: Optional[Dict[str, Any]] = None,
+        *,
+        per_message_token_stats: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[_StaticTranscriptRenderable]:
         """Build rich renderables for one static transcript message without printing.
 
@@ -1520,7 +1539,16 @@ class PanelsMixin:
         ts_str = self._static_transcript_ts_text(m.get('ts'))
         verbosity = self._panel_display_verbosity_level()
         msg_tps = self._fmt_header_metric(m.get('tps'), 'tps')
-        pm_tokens = self._static_transcript_message_token_counts(msg_id)
+        if per_message_token_stats is None:
+            pm_tokens = self._static_transcript_message_token_counts(msg_id)
+        else:
+            info = per_message_token_stats.get(str(msg_id), {}) if msg_id else {}
+            pm_tokens = {
+                "content": int(info.get('content_tokens') or 0),
+                "reasoning": int(info.get('reasoning_tokens') or 0),
+                "tool_calls": int(info.get('tool_calls_tokens') or 0),
+                "total": int(info.get('total_tokens') or 0),
+            }
 
         def full_title_for(title: str) -> str:
             # Build a unified title with optional timestamp and msg_id.
