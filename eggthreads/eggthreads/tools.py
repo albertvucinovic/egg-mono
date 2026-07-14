@@ -926,10 +926,10 @@ class ToolRegistry:
                 result = self._run_awaitable_sync(result)
             return self._present_result(result, context)
 
-        started_at = time.monotonic()
+        deadline = time.monotonic() + timeout_sec
         admission = _SYNC_TOOL_ADMISSION
         admission_result = admission.acquire(
-            timeout=timeout_sec,
+            timeout=max(0.0, deadline - time.monotonic()),
             cancel_check=controller.cancelled,
         )
         if admission_result == "timeout":
@@ -952,7 +952,8 @@ class ToolRegistry:
             )
         except BaseException:
             raise
-        if not call.wait(timeout_sec):
+        remaining = max(0.0, deadline - time.monotonic())
+        if not call.wait(remaining):
             controller.cancel()
             if call.wait(_TOOL_DEADLINE_CLEANUP_GRACE_SEC):
                 try:
@@ -969,7 +970,7 @@ class ToolRegistry:
 
         result = call.result()
         if inspect.isawaitable(result):
-            remaining = max(0.0, timeout_sec - (time.monotonic() - started_at))
+            remaining = max(0.0, deadline - time.monotonic())
             try:
                 asyncio.get_running_loop()
             except RuntimeError:

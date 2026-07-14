@@ -914,3 +914,85 @@ def test_timed_context_tool_rejects_memory_db_without_relaxing_affinity() -> Non
     thread.join()
     assert errors
     assert "same thread" in str(errors[0]).lower()
+
+
+def test_direct_execute_admission_and_execution_share_one_deadline(monkeypatch) -> None:
+    import eggthreads.tools as tools_module
+
+    registry = ToolRegistry()
+    release_slot = threading.Event()
+    original_admission = tools_module._SYNC_TOOL_ADMISSION
+    tools_module._SYNC_TOOL_ADMISSION = tools_module._SyncToolAdmission(1)
+    admission = tools_module._SYNC_TOOL_ADMISSION
+    assert admission.try_acquire() is True
+
+    def delayed_release() -> None:
+        release_slot.wait(0.04)
+        admission.completed(was_detached=False)
+
+    releaser = threading.Thread(target=delayed_release)
+    releaser.start()
+    registry.register(
+        "slow_after_admission",
+        "Slow after admission",
+        {"type": "object", "properties": {}},
+        lambda args: __import__("time").sleep(0.04) or "too-late",
+    )
+
+    started_at = __import__("time").monotonic()
+    try:
+        result = registry.execute(
+            "slow_after_admission",
+            {},
+            tool_timeout_sec=0.06,
+            preserve_tool_result=True,
+        )
+        elapsed = __import__("time").monotonic() - started_at
+    finally:
+        release_slot.set()
+        releaser.join()
+        deadline = __import__("time").monotonic() + 0.5
+        while admission.counts() != (0, 0):
+            if __import__("time").monotonic() >= deadline:
+                raise AssertionError("worker accounting did not clean up")
+            __import__("time").sleep(0.001)
+        tools_module._SYNC_TOOL_ADMISSION = original_admission
+
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "timeout"
+    assert elapsed < 0.2  # deadline plus the 250 ms grace is not spent twice
+
+
+def test_execute_async_rejects_timed_sync_tool_with_memory_db() -> None:
+    registry = ToolRegistry()
+    memory_db = ts.ThreadsDB(":memory:")
+    memory_db.init_schema()
+    called = False
+
+    def impl(args: dict[str, object], ctx: ToolContext) -> str:
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    registry.register(
+        "async_memory_db_context_tool",
+        "Async memory DB context tool",
+        {"type": "object", "properties": {}},
+        impl,
+        accepts_context=True,
+    )
+
+    result = asyncio.run(
+        registry.execute_async(
+            "async_memory_db_context_tool",
+            {},
+            db=memory_db,
+            tool_timeout_sec=1,
+            preserve_tool_result=True,
+        )
+    )
+
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "unsupported"
+    assert "in-memory ThreadsDB" in result.output
+    assert called is False
