@@ -1720,6 +1720,64 @@ test.describe('SSE reconnect integration', () => {
 });
 
 test.describe('Live Tool Streaming', () => {
+  test('keeps simultaneous live tools separated by exact call identity', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'simultaneous-live-tool-identity';
+    await mockThreadShell(page, threadId, { messages: [{ id: 'live-tools-user', role: 'user', content: 'run both' }] });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-live-pairing', live_replay_cursor: 0 },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const ts = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>) => JSON.stringify({
+        event_id: `live-pairing-${eventSeq}`,
+        event_seq: eventSeq,
+        type,
+        ts,
+        msg_id: null,
+        invoke_id: 'invoke-live-pairing',
+        chunk_seq: type === 'stream.delta' ? eventSeq : null,
+        payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload)}`, '',
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          ...block(1, 'stream.open', { stream_kind: 'tool' }),
+          ...block(2, 'tool_call.execution_started', { tool_call_id: 'call-live-bash', name: 'bash', arguments: '{"script":"echo LIVE_BASH"}' }),
+          ...block(3, 'tool_call.execution_started', { tool_call_id: 'call-live-python', name: 'python', arguments: '{"script":"print(1)"}' }),
+          ...block(4, 'stream.delta', { tool: { id: 'call-live-python', name: 'python', text: 'OUTPUT_PYTHON' } }),
+          ...block(5, 'stream.delta', { tool: { id: 'call-live-bash', name: 'bash', text: 'OUTPUT_BASH' } }),
+          ...block(6, 'stream.delta', { tool: { name: 'bash', text: 'MALFORMED_ORPHAN' } }),
+          '',
+        ].join('\n'),
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    for (const verbosity of ['max', 'medium', 'min'] as const) {
+      await page.locator('select[title="Transcript display verbosity"]').selectOption(verbosity);
+      await expect(page.getByTestId('streaming-tool-arguments')).toHaveCount(2);
+      await expect(page.getByTestId('streaming-tool-output')).toHaveCount(2);
+      await expect(page.getByTestId('chat-panel')).toContainText('LIVE_BASH');
+      await expect(page.getByTestId('chat-panel')).toContainText('print(1)');
+      await expect(page.getByTestId('chat-panel')).toContainText('OUTPUT_BASH');
+      await expect(page.getByTestId('chat-panel')).toContainText('OUTPUT_PYTHON');
+      await expect(page.getByTestId('chat-panel')).not.toContainText('MALFORMED_ORPHAN');
+      await expect(page.getByText('bash', { exact: true }).last()).toBeVisible();
+      await expect(page.getByText('python', { exact: true }).last()).toBeVisible();
+    }
+  });
+
   test('keeps tool arguments visible while the tool is running', async ({ page }) => {
     await page.addInitScript(() => {
       window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
@@ -2008,6 +2066,61 @@ test.describe('Atomic Live Tool Continuity', () => {
     await expect(chat).toContainText('private provider setup instructions');
     await expect(chat).not.toContainText('provider-model');
     await expect(chat).not.toContainText('raw private reasoning body');
+  });
+
+  test('keeps simultaneous durable tools named and paired by ID after reload at every verbosity', async ({ page }) => {
+    const threadId = 'durable-simultaneous-tool-pairing';
+    await mockThreadShell(page, threadId, {
+      messages: [
+        { id: 'durable-tools-user', role: 'user', content: 'run both tools' },
+        {
+          id: 'durable-tools-calls',
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            { id: 'call-bash', name: 'bash', arguments: { script: 'echo ARG_BASH' } },
+            { id: 'call-python', function: { name: 'python', arguments: '{"script":"print(\"ARG_PYTHON\")"}' } },
+          ],
+        },
+        // Runner transcripts before this fix omitted result names. The loaded
+        // transcript must recover each name from exact call identity only.
+        { id: 'durable-result-python', role: 'tool', tool_call_id: 'call-python', content: 'RESULT_PYTHON' },
+        { id: 'durable-result-bash', role: 'tool', tool_call_id: 'call-bash', content: 'RESULT_BASH' },
+        { id: 'durable-result-orphan', role: 'tool', tool_call_id: 'call-orphan-1234567890', content: 'RESULT_ORPHAN' },
+      ],
+    });
+    await page.goto(`/${threadId}`);
+    await page.reload();
+    const chat = page.getByTestId('chat-panel');
+    const select = page.locator('select[title="Transcript display verbosity"]');
+
+    for (const verbosity of ['max', 'medium'] as const) {
+      await select.selectOption(verbosity);
+      await expect(chat).toContainText('Tool Result: bash');
+      await expect(chat).toContainText('Tool Result: python');
+      await expect(chat).toContainText('Tool result · n-1234567890');
+      await expect(chat).not.toContainText('Tool Result: tool');
+    }
+
+    await select.selectOption('min');
+    const hidden = page.getByTestId('hidden-details');
+    await expect(hidden.getByRole('button', { name: 'bash', exact: true })).toHaveCount(1);
+    await expect(hidden.getByRole('button', { name: 'python', exact: true })).toHaveCount(1);
+    await expect(hidden.getByRole('button', { name: 'Tool result · n-1234567890', exact: true })).toHaveCount(1);
+    await expect(hidden.getByRole('button', { name: 'tool', exact: true })).toHaveCount(0);
+
+    await hidden.getByRole('button', { name: 'bash', exact: true }).click();
+    let dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('ARG_BASH');
+    await expect(dialog).toContainText('RESULT_BASH');
+    await expect(dialog).not.toContainText('RESULT_PYTHON');
+    await dialog.getByRole('button', { name: 'Close hidden detail' }).click();
+
+    await hidden.getByRole('button', { name: 'python', exact: true }).click();
+    dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('ARG_PYTHON');
+    await expect(dialog).toContainText('RESULT_PYTHON');
+    await expect(dialog).not.toContainText('RESULT_BASH');
   });
 
   test('pairs Assistant Note tool popups only by matching tool call identity', async ({ page }) => {

@@ -195,6 +195,7 @@ def test_attachment_tool_outputs_publish_attachment_content_parts_in_runner_tran
 
     messages = ts.create_snapshot(db, tid)["messages"]
     tool_message = next(msg for msg in messages if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id)
+    assert tool_message["name"] == "add_local_file_to_model_context"
     content = tool_message["content"]
     assert isinstance(content, list)
     assert content[0]["type"] == "text"

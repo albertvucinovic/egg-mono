@@ -29,6 +29,15 @@ import {
   type ContentPart,
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
+import {
+  correlateHiddenToolDetails,
+  resolveToolResultNames,
+  toolCallId,
+  toolCallName,
+  toolDisplayName,
+  type HiddenToolDetail,
+  type HiddenDetailKind,
+} from "@/lib/toolPresentation";
 import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcript";
 import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
 import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
@@ -163,17 +172,7 @@ function providerTimingText(
   return `streaming ${elapsedSec.toFixed(0)}s`;
 }
 
-type HiddenDetailKind = "reasoning" | "tool_calls" | "tool_results";
-
-interface HiddenDetail {
-  kind: HiddenDetailKind;
-  header: string;
-  name?: string;
-  tool_call_id?: string;
-  tokens?: number;
-  body?: string;
-  source?: "reasoning" | "tool_call" | "tool_result" | "tool_stream" | "tool_call_stream";
-}
+type HiddenDetail = HiddenToolDetail;
 
 function oneLinePreview(value: unknown, maxChars = 160): string {
   let raw: string;
@@ -213,9 +212,6 @@ function streamedMetadataHiddenHeader(message: Message, label: string, text: str
   return `${messageMetadataText(message, label)} | ${text.length.toLocaleString()} chars`;
 }
 
-function toolCallName(tc: any): string {
-  return tc?.name || tc?.function?.name || "unknown";
-}
 
 function toolCallArgs(tc: any): unknown {
   const args = tc?.arguments ?? tc?.function?.arguments;
@@ -311,118 +307,10 @@ function hiddenSummaryCountsText(details: HiddenDetail[]): string {
   return parts.join(", ") || "Hidden details";
 }
 
-function hiddenToolDetails(details: HiddenDetail[]): HiddenDetail[] {
-  const structuredCalls = details.filter((detail) => detail.source === "tool_call" && Boolean(detail.name));
-  const structuredIds = new Set(structuredCalls.map((detail) => detail.tool_call_id).filter(Boolean));
-  const calls = [
-    ...structuredCalls,
-    ...details.filter((detail) => (
-      detail.source === "tool_call_stream"
-      && Boolean(detail.name)
-      && (!detail.tool_call_id || !structuredIds.has(detail.tool_call_id))
-    )),
-  ];
-  const finalResults = details.filter((detail) => detail.source === "tool_result");
-  const streamResults = details.filter((detail) => detail.source === "tool_stream");
-  if (calls.length === 0) return [...finalResults, ...streamResults].filter((detail) => Boolean(detail.name));
-
-  const usedFinalResults = new Set<number>();
-  const usedStreamResults = new Set<number>();
-  const resultByCall = new Map<number, HiddenDetail>();
-  const exactResultQueues = new Map<string, number[]>();
-  finalResults.forEach((result, resultIndex) => {
-    if (!result.tool_call_id) return;
-    const queue = exactResultQueues.get(result.tool_call_id) || [];
-    queue.push(resultIndex);
-    exactResultQueues.set(result.tool_call_id, queue);
-  });
-
-  // Identity is authoritative. Consume exact-ID results before considering any
-  // legacy inference, and never let a call with an ID steal a differently
-  // identified result merely because both tools have the same name.
-  calls.forEach((call, callIndex) => {
-    if (!call.tool_call_id) return;
-    const queue = exactResultQueues.get(call.tool_call_id);
-    const resultIndex = queue?.shift();
-    if (resultIndex === undefined) return;
-    usedFinalResults.add(resultIndex);
-    resultByCall.set(callIndex, finalResults[resultIndex]);
-  });
-
-  // Old/imported transcripts can lack IDs. Pair only when the relationship is
-  // unambiguous inside this hidden run: one unmatched ID-less call and one
-  // unmatched ID-less final result with the same tool name.
-  const unmatchedIdlessCallsByName = new Map<string, number[]>();
-  calls.forEach((call, callIndex) => {
-    if (resultByCall.has(callIndex) || call.tool_call_id || !call.name) return;
-    const indexes = unmatchedIdlessCallsByName.get(call.name) || [];
-    indexes.push(callIndex);
-    unmatchedIdlessCallsByName.set(call.name, indexes);
-  });
-  const unmatchedIdlessResultsByName = new Map<string, number[]>();
-  finalResults.forEach((result, resultIndex) => {
-    if (usedFinalResults.has(resultIndex) || result.tool_call_id || !result.name) return;
-    const indexes = unmatchedIdlessResultsByName.get(result.name) || [];
-    indexes.push(resultIndex);
-    unmatchedIdlessResultsByName.set(result.name, indexes);
-  });
-  unmatchedIdlessCallsByName.forEach((callIndexes, name) => {
-    const resultIndexes = unmatchedIdlessResultsByName.get(name) || [];
-    if (callIndexes.length !== 1 || resultIndexes.length !== 1) return;
-    resultByCall.set(callIndexes[0], finalResults[resultIndexes[0]]);
-    usedFinalResults.add(resultIndexes[0]);
-  });
-
-  // A persisted streamed preview has no stable result ID. Use it only when a
-  // single still-unmatched call and a single preview share a name; otherwise
-  // expose it separately instead of fabricating a lifecycle.
-  const unmatchedCallsByName = new Map<string, number[]>();
-  calls.forEach((call, callIndex) => {
-    if (resultByCall.has(callIndex) || !call.name) return;
-    const indexes = unmatchedCallsByName.get(call.name) || [];
-    indexes.push(callIndex);
-    unmatchedCallsByName.set(call.name, indexes);
-  });
-  const streamResultsByName = new Map<string, number[]>();
-  streamResults.forEach((result, resultIndex) => {
-    if (!result.name) return;
-    const indexes = streamResultsByName.get(result.name) || [];
-    indexes.push(resultIndex);
-    streamResultsByName.set(result.name, indexes);
-  });
-  unmatchedCallsByName.forEach((callIndexes, name) => {
-    const resultIndexes = streamResultsByName.get(name) || [];
-    if (callIndexes.length !== 1 || resultIndexes.length !== 1) return;
-    resultByCall.set(callIndexes[0], streamResults[resultIndexes[0]]);
-    usedStreamResults.add(resultIndexes[0]);
-  });
-
-  const pairedCalls = calls.map((call, callIndex) => {
-    const result = resultByCall.get(callIndex);
-    const callHeader = [
-      `Tool call: ${call.name || "tool"}`,
-      call.tool_call_id ? `tool_call_id: ${call.tool_call_id}` : "",
-    ].filter(Boolean).join("\n");
-    const bodyParts = [callHeader, "", "Arguments:", call.body || "(none)"];
-    bodyParts.push(
-      "",
-      "Result:",
-      result?.body || (result ? "(empty)" : "(not found in the loaded transcript)"),
-    );
-    return { ...call, body: bodyParts.join("\n") };
-  });
-
-  const unmatchedResults = [
-    ...finalResults.filter((_, index) => !usedFinalResults.has(index)),
-    ...streamResults.filter((_, index) => !usedStreamResults.has(index)),
-  ].filter((detail) => Boolean(detail.name));
-  return [...pairedCalls, ...unmatchedResults];
-}
-
 function HiddenDetailsBlock({ details, showBorders = true }: { details: HiddenDetail[]; showBorders?: boolean }) {
   const [selectedDetail, setSelectedDetail] = useState<HiddenDetail | null>(null);
   if (!details.length) return null;
-  const toolDetails = hiddenToolDetails(details);
+  const toolDetails = correlateHiddenToolDetails(details);
   return (
     <div
       className={clsx("eggw-message-card eggw-role-card eggw-role-tool", !showBorders && "eggw-role-card-borderless")}
@@ -822,7 +710,11 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
     : message.role === "system" && !message.command_name && !message.id?.startsWith("cmd-")
       ? "System"
       : roleLabels[displayRole] || displayRole;
-  const roleLabel = message.role === "tool" && message.name ? `${baseRoleLabel}: ${message.name}` : baseRoleLabel;
+  const roleLabel = message.role === "tool"
+    ? (message.name
+      ? `${baseRoleLabel}: ${message.name}`
+      : toolDisplayName("", message.tool_call_id, "Tool result"))
+    : baseRoleLabel;
 
   // Check if this is a shell command (starts with $ or $$)
   // Handle cases: "$ cmd", "$$ cmd", "$cmd" (no space)
@@ -1060,25 +952,25 @@ const MessageBlock = memo(function MessageBlock({ message, showBorders = true, d
       {showToolCalls && (
         <div className="mt-2 space-y-2">
           {toolCalls.map((tc: any, idx: number) => {
-            const toolName = toolCallName(tc);
+            const toolCallIdText = toolCallId(tc);
+            const toolName = toolDisplayName(toolCallName(tc), toolCallIdText, "Tool call");
             const args = toolCallArgs(tc);
             const isBash = toolName === "bash";
             const script = isBash && typeof args === "object" && args !== null && "script" in args
               ? (args as any).script
               : null;
-            const toolCallId = tc.id || tc.tool_call_id || "";
 
             return (
               <details
-                key={toolCallId || idx}
+                key={toolCallIdText || idx}
                 open={displayVerbosity === "max" ? true : undefined}
                 className={clsx("eggw-detail-block eggw-role-tool-call", !showBorders && "eggw-detail-borderless")}
               >
                 <summary className="eggw-detail-summary flex-wrap">
                   <span className="font-medium">{toolName}</span>
-                  {toolCallId && (
+                  {toolCallIdText && (
                     <span className="eggw-message-meta font-mono">
-                      {toolCallId.slice(-8)}
+                      {toolCallIdText.slice(-8)}
                     </span>
                   )}
                   {displayVerbosity === "medium" && (
@@ -1157,8 +1049,9 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   const details: HiddenDetail[] = [];
   const toolCallNameById = new Map<string, string>();
   (message.tool_calls || []).forEach((toolCall: any) => {
-    const toolCallId = String(toolCall?.id || toolCall?.tool_call_id || "");
-    if (toolCallId) toolCallNameById.set(toolCallId, toolCallName(toolCall));
+    const toolCallIdText = toolCallId(toolCall);
+    const explicitName = toolCallName(toolCall);
+    if (toolCallIdText && explicitName) toolCallNameById.set(toolCallIdText, explicitName);
   });
   let availableTokens = typeof message.tokens === "number" && Number.isFinite(message.tokens) ? message.tokens : undefined;
   const takeTokens = () => {
@@ -1171,17 +1064,17 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   }
   if (message.tool_calls?.length) {
     message.tool_calls.forEach((tc: any) => {
-      const name = toolCallName(tc);
+      const toolCallIdText = toolCallId(tc);
+      const name = toolDisplayName(toolCallName(tc), toolCallIdText, "Tool call");
       const args = toolCallArgs(tc);
-      const toolCallId = tc?.id || tc?.tool_call_id || "";
       details.push({
         kind: "tool_calls",
         name,
-        tool_call_id: toolCallId,
+        tool_call_id: toolCallIdText,
         tokens: takeTokens(),
         header: name ? `ToolCall: ${name}` : "ToolCall",
         body: formatHiddenDetailBody({
-          ...(toolCallId ? { id: toolCallId } : {}),
+          ...(toolCallIdText ? { id: toolCallIdText } : {}),
           name,
           arguments: args,
         }),
@@ -1191,7 +1084,7 @@ function collectHiddenDetailsForMessage(message: Message): HiddenDetail[] {
   }
   if (message.role === "tool") {
     const contentText = contentToPlainText(message.content, message.content_text || "");
-    const name = message.name || "tool";
+    const name = toolDisplayName(message.name, message.tool_call_id, "Tool result");
     details.push({
       kind: "tool_results",
       name,
@@ -1235,8 +1128,9 @@ function renderMessagesForVerbosity(
   showBorders: boolean,
   onStageAttachment?: (attachment: AttachmentContentPart) => void,
 ): ReactNode[] {
+  const displayMessages = resolveToolResultNames(messages);
   if (displayVerbosity !== "min") {
-    return messages.map((msg, idx) => (
+    return displayMessages.map((msg, idx) => (
       <MessageBlock key={msg.id || idx} message={msg} showBorders={showBorders} displayVerbosity={displayVerbosity} onStageAttachment={onStageAttachment} />
     ));
   }
@@ -1250,7 +1144,7 @@ function renderMessagesForVerbosity(
     nodes.push(<HiddenDetailsBlock key={`hidden-${key}-${nodes.length}`} details={details} showBorders={showBorders} />);
   };
 
-  messages.forEach((msg, idx) => {
+  displayMessages.forEach((msg, idx) => {
     if (msg.kind === "compaction_marker" || msg.role === "compaction_marker") {
       flushHidden(`marker-${idx}`);
       nodes.push(<CompactionMarker key={msg.id || `marker-${idx}`} message={msg} />);

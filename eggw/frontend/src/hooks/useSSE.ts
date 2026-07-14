@@ -5,6 +5,7 @@ import { createEventSource, fetchThreadState, type AuthenticatedEventSource } fr
 import { useAppStore } from "@/lib/store";
 import { evictStreamingBufferForThread, streamingBufferForThread, streamingBufferThreadIds } from "@/lib/streamingBuffer";
 import { applyStreamingDelta } from "@/lib/streamingDelta";
+import { toolDisplayName } from "@/lib/toolPresentation";
 import { messageFromCreateEvent } from "@/lib/messageEvents";
 import { cleanUpEvictedLiveTools, clearLiveToolsForThread, hasRetainedLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
 import { useQueryClient } from "@tanstack/react-query";
@@ -348,15 +349,15 @@ export function useSSE(threadId: string | null) {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
-        const toolId = payload.tool_call_id || payload.id || payload.name || "tool";
-        const toolName = payload.name || payload.tool_name || "tool";
+        const toolId = String(payload.tool_call_id || payload.id || "").trim();
+        const toolName = toolDisplayName(payload.name || payload.tool_name, toolId, "Tool call");
         const timeoutSec = timeoutFromPayload(payload);
         addSystemLog(`Tool executing: ${toolName || "unknown"}`, "info");
         setStreamingKind("tool");
         setIsStreaming(true);
         if (toolId) {
-          const toolIdText = String(toolId);
-          const toolNameText = String(toolName || "tool");
+          const toolIdText = toolId;
+          const toolNameText = toolName;
           liveToolsForThread(threadId).observe(toolIdText).forEach(removeStreamingTool);
           const args = toolCallArgumentsFromPayload(payload);
           markStreamingToolStarted(toolIdText, toolNameText, eventStartedAtMs(data.ts), timeoutSec);
@@ -453,8 +454,8 @@ export function useSSE(threadId: string | null) {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
-        const toolId = payload.tool_call_id || payload.id || payload.name || "tool";
-        const toolName = payload.name || "tool";
+        const toolId = String(payload.tool_call_id || payload.id || "").trim();
+        const toolName = toolDisplayName(payload.name, toolId, "Tool call");
         const summary = typeof payload.summary === "string" ? payload.summary : "";
         if (toolId && summary) {
           upsertStreamingToolOutput(toolId, toolName, false, summary);
@@ -470,9 +471,9 @@ export function useSSE(threadId: string | null) {
       try {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
-        const toolId = payload.tool_call_id || payload.id || payload.name;
+        const toolId = String(payload.tool_call_id || payload.id || "").trim();
         if (toolId) {
-          clearStreamingToolTimeout(String(toolId));
+          clearStreamingToolTimeout(toolId);
         }
         addSystemLog("Tool finished", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });

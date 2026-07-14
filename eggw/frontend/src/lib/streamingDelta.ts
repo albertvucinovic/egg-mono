@@ -1,4 +1,5 @@
 import type { StreamingBuffer } from "./streamingBuffer";
+import { toolDisplayName } from "./toolPresentation";
 
 export interface StreamingDeltaNotifications {
   toolCall?: { id: string; name: string };
@@ -23,13 +24,17 @@ export function applyStreamingDelta(
   let toolOutput: StreamingDeltaNotifications["toolOutput"];
   if (payload.tool) {
     const tool = payload.tool;
-    const id = String(tool.id || tool.name || "tool");
-    const name = String(tool.name || "tool");
-    const suppressed = Boolean(tool.suppressed);
-    const metadataChanged = buffer.registerToolOutput(id, suppressed);
-    if (tool.text) buffer.appendToolOutput(id, tool.text);
-    if (metadataChanged) {
-      toolOutput = { id, name, suppressed };
+    // Canonical tool-output deltas carry call identity. Never collapse malformed
+    // concurrent output into a shared name/"tool" bucket.
+    const id = String(tool.id || "").trim();
+    if (id) {
+      const name = toolDisplayName(tool.name, id, "Tool result");
+      const suppressed = Boolean(tool.suppressed);
+      const metadataChanged = buffer.registerToolOutput(id, suppressed);
+      if (tool.text) buffer.appendToolOutput(id, tool.text);
+      if (metadataChanged) {
+        toolOutput = { id, name, suppressed };
+      }
     }
   }
 
@@ -37,7 +42,7 @@ export function applyStreamingDelta(
   if (payload.tool_call) {
     const call = payload.tool_call;
     const id = String(call.id || "");
-    const name = String(call.name || "");
+    const name = toolDisplayName(call.name, id, "Tool call");
     const argumentsDelta = typeof call.arguments_delta === "string" ? call.arguments_delta : "";
     if (id && argumentsDelta && buffer.appendToolCallArgs(id, name, argumentsDelta)) {
       toolCall = { id, name };

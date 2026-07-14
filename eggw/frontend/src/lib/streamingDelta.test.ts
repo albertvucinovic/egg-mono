@@ -47,6 +47,17 @@ describe("high-rate streaming delta path", () => {
       .toBeUndefined();
   });
 
+  it("requires output identity and never uses a shared bare-tool bucket", () => {
+    const buffer = new StreamingBuffer();
+
+    expect(applyStreamingDelta(buffer, { tool: { name: "bash", text: "orphan" } }).toolOutput)
+      .toBeUndefined();
+    expect(buffer.toolOutputChunks.size).toBe(0);
+    expect(applyStreamingDelta(buffer, { tool: { id: "call-1234567890abcdef", text: "identified" } }).toolOutput)
+      .toEqual({ id: "call-1234567890abcdef", name: "Tool result · 567890abcdef", suppressed: false });
+    expect(buffer.getToolOutput("call-1234567890abcdef")).toBe("identified");
+  });
+
   it("publishes only tool-call identity while preserving every argument delta", () => {
     const buffer = new StreamingBuffer();
     const first = applyStreamingDelta(buffer, {
@@ -63,7 +74,7 @@ describe("high-rate streaming delta path", () => {
       tool_call: { id: "call-a", name: "bash", arguments_delta: '"}' },
     });
 
-    expect(first.toolCall).toEqual({ id: "call-a", name: "" });
+    expect(first.toolCall).toEqual({ id: "call-a", name: "Tool call · call-a" });
     expect(named.toolCall).toEqual({ id: "call-a", name: "bash" });
     expect(notifications.every((notification) => notification.toolCall === undefined)).toBe(true);
     expect(buffer.toolCalls.get("call-a")?.argumentChunks).toHaveLength(1_101);
