@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createThread } from "@/lib/api";
+import { useAppStore } from "@/lib/store";
+import { applyQuickStartThread } from "@/lib/quickStart";
 
 export default function Home() {
   const router = useRouter();
@@ -12,8 +14,11 @@ export default function Home() {
   useEffect(() => {
     if (didInitialize.current) return;
     didInitialize.current = true;
-    void createThread({})
-      .then((thread) => router.replace(`/${thread.id}`))
+    void createThread({ claim_quick_start: true })
+      .then((thread) => {
+        applyQuickStartThread(thread, useAppStore.getState());
+        router.replace(`/${thread.id}`);
+      })
       .catch((reason) => {
         console.error("Failed to create startup thread:", reason);
         setError("Failed to create a new thread. Is the backend running?");

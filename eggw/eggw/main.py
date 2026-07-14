@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
         print(f"Working directory: {resolved_egg_cwd}")
 
     core_state.configure_model_paths(resolved_egg_cwd)
+    core_state.configure_quick_start_from_env()
 
     # Initialize database - use EGG_DB_PATH if specified, else default
     db_path = os.environ.get("EGG_DB_PATH")

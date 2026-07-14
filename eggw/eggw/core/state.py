@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from eggconfig import get_all_models_path, get_image_generation_models_path, get_models_path
-from eggthreads import ThreadsDB, SubtreeScheduler
+from eggthreads import ThreadsDB, SubtreeScheduler, quick_start_args_from_json
 
 # Paths
 
@@ -96,6 +97,33 @@ default_image_generation_model_key: Optional[str] = None
 
 # Active schedulers: root_thread_id -> {"scheduler": SubtreeScheduler, "task": Task}
 active_schedulers: Dict[str, Dict[str, Any]] = {}
+
+# Launcher quick-start arguments are process-local and claim-once. They never
+# become thread messages; the claiming create-thread request maps them into the
+# existing browser composer/staged-attachment state.
+_quick_start_args: tuple[str, ...] = ()
+_quick_start_claimed = False
+_quick_start_lock = threading.Lock()
+
+
+def configure_quick_start_args(args: list[str] | tuple[str, ...]) -> None:
+    global _quick_start_args, _quick_start_claimed
+    with _quick_start_lock:
+        _quick_start_args = tuple(str(arg) for arg in args)
+        _quick_start_claimed = False
+
+
+def configure_quick_start_from_env() -> None:
+    configure_quick_start_args(quick_start_args_from_json(os.environ.get("EGGW_QUICK_START_ARGS_JSON")))
+
+
+def claim_quick_start_args() -> list[str]:
+    global _quick_start_claimed
+    with _quick_start_lock:
+        if _quick_start_claimed:
+            return []
+        _quick_start_claimed = True
+        return list(_quick_start_args)
 
 
 def init_db(path: Path = DB_PATH) -> ThreadsDB:

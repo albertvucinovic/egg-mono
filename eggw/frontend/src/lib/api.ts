@@ -70,6 +70,7 @@ export async function createThread(data: {
   parent_id?: string;
   model_key?: string;
   context?: string;
+  claim_quick_start?: boolean;
 }) {
   const res = await apiFetch(`${API_BASE}/api/threads`, {
     method: "POST",

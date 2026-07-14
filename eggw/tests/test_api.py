@@ -136,6 +136,48 @@ class TestThreadOperations:
         assert len(data["id"]) > 0
         return data["id"]
 
+    def test_landing_create_claims_quick_start_draft_once(self, client):
+        core_state.configure_quick_start_args(["Tell", "me a story"])
+
+        first = client.post("/api/threads", json={"claim_quick_start": True})
+        second = client.post("/api/threads", json={"claim_quick_start": True})
+
+        assert first.status_code == 200
+        assert first.json()["initial_draft"] == "Tell me a story"
+        assert first.json()["initial_attachment"] is None
+        assert second.status_code == 200
+        assert second.json()["initial_draft"] is None
+
+    def test_landing_create_stages_sole_existing_file_without_message(
+        self, client, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        source = tmp_path / "launch file.txt"
+        source.write_text("attachment bytes only", encoding="utf-8")
+        core_state.configure_quick_start_args([source.name])
+
+        response = client.post("/api/threads", json={"claim_quick_start": True})
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["initial_draft"] is None
+        assert payload["initial_attachment"]["type"] == "attachment"
+        assert payload["initial_attachment"]["filename"] == source.name
+        messages = client.get(f"/api/threads/{payload['id']}/messages").json()
+        assert all(message["role"] != "user" for message in messages)
+
+    def test_reload_create_does_not_claim_quick_start(self, client, monkeypatch):
+        core_state.configure_quick_start_args(["must not reapply"])
+        monkeypatch.setenv("EGGW_RELOAD_THREAD_ID", "existing-thread")
+
+        response = client.post("/api/threads", json={"claim_quick_start": True})
+
+        assert response.status_code == 200
+        assert response.json()["initial_draft"] is None
+        monkeypatch.delenv("EGGW_RELOAD_THREAD_ID")
+        later = client.post("/api/threads", json={"claim_quick_start": True})
+        assert later.json()["initial_draft"] is None
+
     def test_thread_lists_use_latest_model_switch(self, client):
         """Thread list APIs should report the event-log model source of truth."""
         from eggthreads import set_thread_model

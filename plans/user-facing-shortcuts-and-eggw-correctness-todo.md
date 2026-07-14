@@ -22,11 +22,11 @@
 
 ## Phase 2 — quick-start draft arguments
 
-- [ ] `egg.sh Tell me a story` opens with an unsent draft.
-- [ ] `eggw.sh Tell me a story` opens with an unsent draft.
-- [ ] A sole existing file is staged through existing attachment semantics where supported.
-- [ ] Preserve wrapper/reload arguments and shell quoting.
-- [ ] Add focused tests.
+- [x] `egg.sh Tell me a story` opens with an unsent draft.
+- [x] `eggw.sh Tell me a story` opens with an unsent draft.
+- [x] A sole existing file is staged through existing attachment semantics where supported.
+- [x] Preserve wrapper/reload arguments and shell quoting.
+- [x] Add focused tests.
 
 ## Phase 3 — Children-panel navigation hydration
 
@@ -61,3 +61,4 @@
 
 - 2026-07-14: Created handoff. Previous completed commit `c44415a` is clean and unrelated. Beginning Phase 1.
 - 2026-07-14: Phase 1 complete. Audited Egg/EggW handlers, stock Readline emacs bindings, stock and user tmux config, and `~/.config/sway/config` (including its Ctrl+Alt bindings). Selected mnemonic Ctrl+Alt+A (auto-approval) and Ctrl+Alt+X (sandboXing): neither is a default Readline command, tmux root/prefix binding, common browser/terminal action, nor an audited Sway chord; using X also avoids terminal XOFF on Ctrl+S. Implemented exact Ctrl+Alt terminal escape-sequence handling and layout-stable EggW `KeyboardEvent.code` handling while preserving composer drafts; disabled sandbox control remains respected. Terminal `/help` now prepends all terminal keyboard controls, and EggW Help groups all global, composer/autocomplete, focused transcript/tree, dialog, rename, and edit-answer controls. Focused tests cover exact matching, draft preservation, comprehensive help catalogs, TypeScript, and a browser flow with the composer focused. Tests passed: combined relevant Python suite (602), `npm run test:unit` (76), `npx tsc --noEmit`, `npm run build`, and focused Playwright shortcut flow (1). Next: Phase 2 only.
+- 2026-07-14: Phase 2 complete. Added one shared quick-start parser: positional argv becomes an unsent draft with quoted argument whitespace retained, while a sole existing regular file becomes an attachment request rather than inlined bytes. Terminal Egg applies it to the existing input panel or `/attach` staging path and skips reapplication on `/reload`. EggW carries argv as backend-only JSON, exposes it only through a one-shot landing-page thread claim, stages files through the existing `cmd_attach`/artifact pipeline, and hydrates the established Zustand draft/attachment owners before navigation; no launch content is appended as a user message. Fixed Egg's previously ineffective bare `export` reload variables while adding a wrapper test that proves argv survives re-exec. Validation passed: Egg plus quick-start suites (565), EggW API (113 passed, 1 skipped), EggW security/launcher (18), frontend unit tests (78), TypeScript, production build, shell syntax, compileall, and focused Playwright landing flow (1). Next: Phase 3 only.

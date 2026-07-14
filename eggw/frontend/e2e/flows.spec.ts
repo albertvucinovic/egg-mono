@@ -227,6 +227,37 @@ function mockImageAttachmentMessage(threadId: string) {
   };
 }
 
+test.describe('Launcher quick start', () => {
+  test('landing page owns returned draft and attachment without sending', async ({ page }) => {
+    const threadId = 'quick-start-thread';
+    const launchAttachment = {
+      type: 'attachment', input_id: 'quick-input', owner_thread_id: threadId,
+      presentation: 'file', mime_type: 'text/plain', filename: 'launch file.txt',
+      size_bytes: 12, sha256: 'a'.repeat(64), provenance: { kind: 'local_path' }, options: {},
+    };
+    await mockThreadShell(page, threadId);
+    await page.unroute(`${TEST_API_BASE}/api/threads`);
+    await page.route(`${TEST_API_BASE}/api/threads`, async (route, request) => {
+      expect(request.postDataJSON()).toEqual({ claim_quick_start: true });
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          id: threadId, name: 'Quick start', has_children: false,
+          initial_draft: 'Tell me a story', initial_attachment: launchAttachment,
+        },
+      });
+    });
+
+    await page.goto('/');
+
+    await expect(page).toHaveURL(new RegExp(`/${threadId}$`));
+    await expect(page.getByTestId('message-input')).toHaveValue('Tell me a story');
+    await expect(page.getByTestId('staged-attachments')).toContainText('launch file.txt');
+    expect(await page.getByTestId('chat-panel-content').innerText()).not.toContain('Tell me a story');
+  });
+});
+
 test.describe('Basic Operations', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

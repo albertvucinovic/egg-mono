@@ -26,11 +26,11 @@ fi
 
 RELOAD_EXIT_CODE=75
 RELOAD_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/egg-reload.XXXXXX")"
-export EGG_RELOAD_EXIT_CODE
-export EGG_RELOAD_STATE_FILE
+export EGG_RELOAD_EXIT_CODE="$RELOAD_EXIT_CODE"
+export EGG_RELOAD_STATE_FILE="$RELOAD_STATE_FILE"
 
 set +e
-(cd "$CALLER_CWD" && PYTHONSAFEPATH=1 python -c "from egg.app import main; main()" "$@")
+(cd "$CALLER_CWD" && PYTHONSAFEPATH=1 "${EGG_PYTHON_BIN:-python}" -c "from egg.app import main; main()" "$@")
 status=$?
 set -e
 

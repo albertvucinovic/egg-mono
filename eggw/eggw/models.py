@@ -16,6 +16,14 @@ class ThreadInfo(BaseModel):
     has_children: bool = False
 
 
+class CreateThreadResponse(ThreadInfo):
+    """New thread plus optional one-shot launcher composer state."""
+
+    initial_draft: Optional[str] = None
+    initial_attachment: Optional[Dict[str, Any]] = None
+    initial_error: Optional[str] = None
+
+
 class MessageContent(BaseModel):
     """A single message or transcript marker in a thread."""
     id: str
@@ -155,6 +163,7 @@ class CreateThreadRequest(BaseModel):
     parent_id: Optional[str] = None
     model_key: Optional[str] = None
     context: Optional[str] = None  # For child threads, context to include
+    claim_quick_start: bool = False
 
 
 class SetModelRequest(BaseModel):
