@@ -79,7 +79,9 @@ def test_context_aware_tool_receives_tool_context() -> None:
     assert ctx.origin == "test"
     assert ctx.initial_model_key == "model-1"
     assert ctx.timeout_sec == 3
-    assert ctx.cancel_check is cancel_check
+    assert ctx.cancel_check is not cancel_check
+    assert ctx.cancel_check is not None
+    assert ctx.cancel_check() is False
     assert ctx.working_dir == "/workspace"
     assert ctx.raw["tool_registry"] is registry
 
@@ -112,11 +114,15 @@ def test_legacy_tool_still_receives_private_context_args() -> None:
     )
 
     assert out == "legacy-ok"
-    assert seen["args"] == {
+    seen_args = seen["args"]
+    assert isinstance(seen_args, dict)
+    composed_cancel_check = seen_args.pop("_cancel_check")
+    assert callable(composed_cancel_check)
+    assert composed_cancel_check() is False
+    assert seen_args == {
         "_thread_id": "thread-1",
         "_initial_model_key": "model-1",
         "_tool_timeout_sec": 10,
-        "_cancel_check": cancel_check,
     }
 
 
@@ -458,7 +464,11 @@ def test_execute_async_outer_cancellation_reaches_cooperative_sync_tool() -> Non
         task.cancel()
         result = await asyncio.gather(task, return_exceptions=True)
         assert isinstance(result[0], asyncio.CancelledError)
-        await asyncio.wait_for(asyncio.to_thread(stopped.wait), timeout=0.2)
+        deadline = asyncio.get_running_loop().time() + 0.2
+        while not stopped.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("cooperative sync tool did not stop")
+            await asyncio.sleep(0.001)
 
     asyncio.run(run())
 
@@ -487,3 +497,255 @@ def test_execute_async_composes_upstream_cancellation_check() -> None:
             cancel_check=upstream_cancelled.is_set,
         )
     ) == "cancelled"
+
+
+def test_execute_async_noncooperative_sync_timeout_does_not_block_loop_shutdown() -> None:
+    registry = ToolRegistry()
+    started = threading.Event()
+    never_release = threading.Event()
+
+    def stuck(args: dict[str, object]) -> str:
+        started.set()
+        never_release.wait()
+        return "unreachable"
+
+    registry.register(
+        "never_returns",
+        "Never returns",
+        {"type": "object", "properties": {}},
+        stuck,
+    )
+
+    started_at = __import__("time").monotonic()
+    result = asyncio.run(
+        registry.execute_async(
+            "never_returns",
+            {},
+            tool_timeout_sec=0.01,
+            preserve_tool_result=True,
+        )
+    )
+    elapsed = __import__("time").monotonic() - started_at
+
+    assert started.is_set()
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "timeout"
+    assert elapsed < 0.75
+
+
+def test_stuck_sync_tools_do_not_starve_later_sync_tool() -> None:
+    registry = ToolRegistry()
+    never_release = threading.Event()
+
+    def stuck(args: dict[str, object]) -> str:
+        never_release.wait()
+        return "unreachable"
+
+    registry.register("stuck", "Stuck", {"type": "object", "properties": {}}, stuck)
+    registry.register("fast", "Fast", {"type": "object", "properties": {}}, lambda args: "fast-ok")
+
+    async def run() -> tuple[list[ToolExecutionResult], str]:
+        timed_out = await asyncio.gather(
+            *[
+                registry.execute_async(
+                    "stuck",
+                    {},
+                    tool_timeout_sec=0.01,
+                    preserve_tool_result=True,
+                )
+                for _ in range(40)
+            ]
+        )
+        fast = await asyncio.wait_for(
+            registry.execute_async("fast", {}, tool_timeout_sec=0.5),
+            timeout=0.75,
+        )
+        return timed_out, fast
+
+    started_at = __import__("time").monotonic()
+    timed_out, fast = asyncio.run(run())
+    elapsed = __import__("time").monotonic() - started_at
+
+    assert all(isinstance(item, ToolExecutionResult) and item.reason == "timeout" for item in timed_out)
+    assert fast == "fast-ok"
+    assert elapsed < 1.0
+
+
+def test_execute_async_sync_tool_propagates_contextvars() -> None:
+    import contextvars
+
+    registry = ToolRegistry()
+    marker = contextvars.ContextVar("tool-marker", default="missing")
+    registry.register(
+        "contextvar_tool",
+        "Contextvar tool",
+        {"type": "object", "properties": {}},
+        lambda args: marker.get(),
+    )
+
+    async def run() -> str:
+        marker.set("propagated")
+        return await registry.execute_async("contextvar_tool", {})
+
+    assert asyncio.run(run()) == "propagated"
+
+
+def test_execute_direct_enforces_sync_tool_deadline() -> None:
+    registry = ToolRegistry()
+    never_release = threading.Event()
+    registry.register(
+        "direct_stuck_sync",
+        "Direct stuck sync",
+        {"type": "object", "properties": {}},
+        lambda args: never_release.wait(),
+    )
+
+    started_at = __import__("time").monotonic()
+    result = registry.execute(
+        "direct_stuck_sync",
+        {},
+        tool_timeout_sec=0.01,
+        preserve_tool_result=True,
+    )
+    elapsed = __import__("time").monotonic() - started_at
+
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "timeout"
+    assert elapsed < 0.75
+
+
+def test_execute_direct_enforces_async_tool_deadline() -> None:
+    registry = ToolRegistry()
+
+    async def stuck(args: dict[str, object]) -> str:
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    registry.register(
+        "direct_stuck_async",
+        "Direct stuck async",
+        {"type": "object", "properties": {}},
+        stuck,
+    )
+
+    started_at = __import__("time").monotonic()
+    result = registry.execute(
+        "direct_stuck_async",
+        {},
+        tool_timeout_sec=0.01,
+        preserve_tool_result=True,
+    )
+    elapsed = __import__("time").monotonic() - started_at
+
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "timeout"
+    assert elapsed < 0.75
+
+
+def test_execute_direct_async_tool_inside_running_loop_keeps_existing_error() -> None:
+    registry = ToolRegistry()
+    called = False
+
+    async def impl(args: dict[str, object]) -> str:
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    registry.register(
+        "direct_async_in_loop",
+        "Direct async in loop",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    async def run() -> None:
+        try:
+            registry.execute("direct_async_in_loop", {}, tool_timeout_sec=0.01)
+        except RuntimeError as exc:
+            assert "use execute_async" in str(exc)
+        else:
+            raise AssertionError("execute() must reject async tools in an active loop")
+
+    asyncio.run(run())
+    assert called is False
+
+
+def test_timeout_result_does_not_contain_interrupted_text() -> None:
+    registry = ToolRegistry()
+
+    def cooperative(args: dict[str, object]) -> ToolExecutionResult:
+        cancel_check = args["_cancel_check"]
+        assert callable(cancel_check)
+        while not cancel_check():
+            threading.Event().wait(0.001)
+        return ToolExecutionResult(
+            "--- INTERRUPTED ---\nImplementation observed cancellation.",
+            reason="interrupted",
+        )
+
+    registry.register(
+        "contradictory_cleanup",
+        "Contradictory cleanup",
+        {"type": "object", "properties": {}},
+        cooperative,
+    )
+
+    result = asyncio.run(
+        registry.execute_async(
+            "contradictory_cleanup",
+            {},
+            tool_timeout_sec=0.01,
+            preserve_tool_result=True,
+        )
+    )
+
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "timeout"
+    assert "TIMEOUT" in result.output
+    assert "INTERRUPTED" not in result.output
+
+
+def test_daemon_thread_bridge_is_process_exit_safe() -> None:
+    import subprocess
+    import sys
+    import textwrap
+
+    package_root = str(__import__("pathlib").Path(__file__).resolve().parents[1])
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+        from eggthreads.tools import ToolRegistry
+
+        registry = ToolRegistry()
+        never_release = threading.Event()
+        registry.register(
+            "stuck",
+            "Stuck",
+            {"type": "object", "properties": {}},
+            lambda args: never_release.wait(),
+        )
+        result = asyncio.run(
+            registry.execute_async(
+                "stuck",
+                {},
+                tool_timeout_sec=0.01,
+                preserve_tool_result=True,
+            )
+        )
+        assert result.reason == "timeout"
+        print("exited-loop", flush=True)
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**__import__("os").environ, "PYTHONPATH": package_root},
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "exited-loop"

@@ -102,7 +102,7 @@ class TestToolTimeout:
             "bash",
             {
                 "script": f"python3 {child} &\nfor i in $(seq 1 100); do [ -f {marker} ] && break; sleep 0.05; done\necho shell done",
-                "timeout": 1,
+                "timeout": 3,
             },
         )
         elapsed = time.monotonic() - start

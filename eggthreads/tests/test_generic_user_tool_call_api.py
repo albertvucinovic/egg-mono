@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import pytest
 
 import eggthreads as ts
 
@@ -475,8 +476,10 @@ def test_wait_for_threads_uses_monotonic_deadline_and_bounded_sleep(tmp_path, mo
 
     results = ts.wait_for_threads(db, [tid], timeout_sec=60, poll_interval=100)
 
-    assert sleeps == [60.0]
-    assert monotonic_now[0] == 1060.0
+    assert len(sleeps) == 300
+    assert all(seconds <= 0.2 for seconds in sleeps)
+    assert sum(sleeps) == pytest.approx(60.0)
+    assert monotonic_now[0] == pytest.approx(1060.0)
     assert results[tid].finished is False
     assert results[tid].state == "running"
 
@@ -529,10 +532,96 @@ def test_wait_tool_returns_typed_timeout_result(tmp_path, monkeypatch):
 
     result = ts.create_default_tools().execute(
         "wait",
-        {"thread_ids": [tid], "timeout": 0.001},
+        {"thread_ids": [tid], "timeout": 0.05},
         preserve_tool_result=True,
     )
 
     assert isinstance(result, ts.ToolExecutionResult)
     assert result.reason == "timeout"
-    assert "not finished (state=running)" in result.output
+    assert "TIMEOUT" in result.output
+    assert "INTERRUPTED" not in result.output
+
+
+def test_wait_for_threads_contains_cancel_check_exceptions(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="active")
+    ts.append_message(db, tid, "user", "still working")
+    calls = 0
+
+    def broken_cancel_check() -> bool:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("status source unavailable")
+
+    result = ts.wait_for_threads(
+        db,
+        [tid],
+        timeout_sec=0,
+        cancel_check=broken_cancel_check,
+    )[tid]
+
+    assert calls >= 1
+    assert result.timed_out is True
+    assert result.cancelled is False
+    assert result.state == "running"
+
+
+@pytest.mark.parametrize("poll_interval", [-1, float("nan"), float("inf"), "bad", None])
+def test_wait_for_threads_normalizes_invalid_poll_interval(
+    tmp_path,
+    monkeypatch,
+    poll_interval,
+):
+    import eggthreads.api as api
+
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="active")
+    ts.append_message(db, tid, "user", "still working")
+    monotonic_now = [1000.0]
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        monotonic_now[0] += seconds
+
+    monkeypatch.setattr(api.time, "monotonic", lambda: monotonic_now[0])
+    monkeypatch.setattr(api.time, "sleep", fake_sleep)
+
+    result = ts.wait_for_threads(
+        db,
+        [tid],
+        timeout_sec=0.4,
+        poll_interval=poll_interval,
+    )[tid]
+
+    assert len(sleeps) == 2
+    assert sleeps == pytest.approx([0.2, 0.2])
+    assert result.timed_out is True
+
+
+def test_wait_for_threads_caps_poll_interval_for_responsive_cancellation(tmp_path, monkeypatch):
+    import eggthreads.api as api
+
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="active")
+    ts.append_message(db, tid, "user", "still working")
+    sleeps: list[float] = []
+    cancelled = False
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal cancelled
+        sleeps.append(seconds)
+        cancelled = True
+
+    monkeypatch.setattr(api.time, "sleep", fake_sleep)
+
+    result = ts.wait_for_threads(
+        db,
+        [tid],
+        timeout_sec=None,
+        poll_interval=3600,
+        cancel_check=lambda: cancelled,
+    )[tid]
+
+    assert sleeps == [0.2]
+    assert result.cancelled is True

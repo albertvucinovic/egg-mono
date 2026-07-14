@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -5587,7 +5588,15 @@ def wait_for_threads(
     clean_ids = [_clean_wait_thread_id(t) for t in (thread_ids or []) if isinstance(t, (str, int))]
     clean_ids = [tid for tid in clean_ids if tid]
     limit = _safe_float(timeout_sec)
-    deadline = time.monotonic() + limit if limit is not None and limit >= 0 else None
+    if limit is not None and (not math.isfinite(limit) or limit < 0):
+        limit = None
+    deadline = time.monotonic() + limit if limit is not None else None
+    interval = _safe_float(poll_interval)
+    if interval is None or not math.isfinite(interval) or interval <= 0:
+        interval = 0.2
+    # Keep cancellation/deadline observation responsive even when a caller
+    # supplies an excessively large polling interval.
+    interval = min(interval, 0.2)
     finished: Dict[str, bool] = {tid: False for tid in clean_ids}
     results: Dict[str, ThreadWaitResult] = {}
     observed: Dict[str, ThreadWaitResult] = {}
@@ -5601,7 +5610,11 @@ def wait_for_threads(
             return True
         if cancel_check is None:
             return False
-        cancellation_observed = bool(cancel_check())
+        try:
+            cancellation_observed = bool(cancel_check())
+        except Exception:
+            # A failed status probe does not establish cancellation.
+            return False
         return cancellation_observed
 
     def deadline_expired() -> bool:
@@ -5638,7 +5651,7 @@ def wait_for_threads(
         if all_done or cancelled() or deadline_expired():
             break
 
-        sleep_for = max(0.0, float(poll_interval))
+        sleep_for = interval
         if deadline is not None:
             sleep_for = min(sleep_for, max(0.0, deadline - time.monotonic()))
         if sleep_for > 0:
