@@ -1852,6 +1852,88 @@ test.describe('Live Tool Streaming', () => {
     }
   });
 
+  test('terminalizes only the exact timed-out wait card and refreshes its durable transcript', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'timed-out-wait-terminal-thread';
+    const waitId = 'call-wait-timeout-60';
+    const siblingId = 'call-sibling-live-bash';
+    let transcriptRequests = 0;
+
+    await mockThreadShell(page, threadId, {
+      messages: [{ id: 'before-timeout-wait', role: 'user', content: 'wait for child' }],
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    await page.unroute(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-wait-timeout', live_replay_cursor: 0 },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/messages(?:\\?.*)?$`), async (route) => {
+      transcriptRequests += 1;
+      const terminal = transcriptRequests > 1;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: {
+          items: terminal ? [
+            { id: 'before-timeout-wait', role: 'user', content: 'wait for child' },
+            { id: 'durable-wait-timeout', role: 'tool', name: 'wait', tool_call_id: waitId, content: '--- TIMEOUT ---\nWait timed out after 60 seconds.' },
+          ] : [{ id: 'before-timeout-wait', role: 'user', content: 'wait for child' }],
+          snapshot_cursor: terminal ? 5 : 0,
+          next_before: null,
+        },
+      });
+    });
+    let eventConnection = 0;
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      eventConnection += 1;
+      const oldStart = new Date(Date.now() - 355_000).toISOString();
+      const now = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>, ts: string) => JSON.stringify({
+        event_id: `wait-timeout-${eventSeq}`, event_seq: eventSeq, type, ts, msg_id: null,
+        invoke_id: 'invoke-wait-timeout', chunk_seq: null, payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>, ts: string) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload, ts)}`, '',
+      ];
+      const frames = eventConnection === 1 ? [
+        ...block(1, 'stream.open', { stream_kind: 'tool' }, oldStart),
+        ...block(2, 'tool_call.execution_started', { tool_call_id: waitId, name: 'wait', arguments: '{"thread_ids":["child"],"timeout":60}', timeout: 60 }, oldStart),
+        ...block(3, 'tool_call.execution_started', { tool_call_id: siblingId, name: 'bash', arguments: '{"script":"sleep 300"}', timeout: 300 }, now),
+        '',
+      ] : [
+        ...block(4, 'tool_call.finished', { tool_call_id: waitId, reason: 'timeout', output: '--- TIMEOUT ---\nWait timed out after 60 seconds.' }, now),
+        '',
+      ];
+      await route.fulfill({
+        status: 200,
+        headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: frames.join('\n'),
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const outputCards = page.getByTestId('streaming-tool-output').locator('..').locator('..');
+    const waitCard = outputCards.filter({ hasText: waitId.slice(-8) });
+    const siblingCard = outputCards.filter({ hasText: siblingId.slice(-8) });
+    await expect(waitCard).toContainText('streaming output...');
+    await expect(waitCard).toContainText('running 355s');
+    await expect(waitCard).toContainText('timeout in 0s (limit 60s)');
+    await expect(siblingCard).toContainText('streaming output...');
+
+    await expect(waitCard).toContainText('finished');
+    await expect(waitCard).not.toContainText('streaming output...');
+    await expect(waitCard).not.toContainText('running ');
+    await expect(waitCard).not.toContainText('timeout in ');
+    await expect(siblingCard).toContainText('streaming output...');
+    await expect.poll(() => transcriptRequests).toBeGreaterThan(1);
+    await expect(page.getByTestId('chat-panel')).toContainText('Wait timed out after 60 seconds.');
+  });
+
   test('keeps tool arguments visible while the tool is running', async ({ page }) => {
     await page.addInitScript(() => {
       window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
