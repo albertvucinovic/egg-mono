@@ -1,7 +1,9 @@
 import type { Message } from "./store";
 
-export const INITIAL_RENDERED_TRANSCRIPT_MESSAGES = 5;
-export const TRANSCRIPT_WINDOW_EXPANSION_MESSAGES = 60;
+// Sixty messages is the smallest useful launch/navigation context promised by
+// EggW. It remains a strict DOM-performance window even though the query cache
+// hydrates a larger 300-entry page for pagination and live reconciliation.
+export const TRANSCRIPT_WINDOW_MESSAGES = 60;
 
 export interface TranscriptWindow {
   messages: Message[];
@@ -13,7 +15,7 @@ export interface TranscriptWindow {
 export function transcriptWindow(
   messages: Message[],
   startMessageId: string | null,
-  initialLimit = INITIAL_RENDERED_TRANSCRIPT_MESSAGES,
+  initialLimit = TRANSCRIPT_WINDOW_MESSAGES,
 ): TranscriptWindow {
   const anchoredIndex = startMessageId
     ? messages.findIndex((message) => message.id === startMessageId)
@@ -31,7 +33,7 @@ export function transcriptWindow(
 export function expandedTranscriptStartId(
   messages: Message[],
   currentStartIndex: number,
-  expansion = TRANSCRIPT_WINDOW_EXPANSION_MESSAGES,
+  expansion = TRANSCRIPT_WINDOW_MESSAGES,
 ): string | null {
   if (currentStartIndex <= 0) return messages[0]?.id || null;
   return messages[Math.max(0, currentStartIndex - expansion)]?.id || null;

@@ -1244,7 +1244,7 @@ test.describe('Scroll intent state machines', () => {
               next_before: null,
             }
           : {
-              items: Array.from({ length: 70 }, (_, index) => ({
+              items: Array.from({ length: 180 }, (_, index) => ({
                 id: `loaded-history-${index}`,
                 role: index % 2 ? 'assistant' : 'user',
                 content: `loaded ${index}`,
@@ -1257,7 +1257,7 @@ test.describe('Scroll intent state machines', () => {
 
     await page.goto(`/${threadId}`);
     const chat = page.getByTestId('chat-panel');
-    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(60);
     await chat.evaluate((element) => {
       const filler = document.createElement('div');
       filler.dataset.testid = 'top-demand-filler';
@@ -1267,7 +1267,7 @@ test.describe('Scroll intent state machines', () => {
     });
     await page.waitForTimeout(100);
     expect(messageRequests).toBe(1);
-    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(60);
     await chat.evaluate((element) => { element.scrollTop = 500; });
     await expect.poll(() => chat.evaluate((element) => element.scrollTop)).toBeGreaterThan(240);
     await chat.hover();
@@ -1275,7 +1275,7 @@ test.describe('Scroll intent state machines', () => {
     // One explicit upward input begins above the threshold and lands at top.
     // The post-input boundary check must demand history without a second input.
     await page.mouse.wheel(0, -900);
-    await expect(page.locator('.eggw-message-card')).toHaveCount(65);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(120);
     expect(messageRequests).toBe(1);
     await expect(chat).not.toContainText('NETWORK OLDER PAGE');
     await expect(page.locator('[data-message-id="loaded-history-65"]')).toBeVisible();
@@ -1287,7 +1287,7 @@ test.describe('Scroll intent state machines', () => {
     // The restoration leaves the scrollport clamped at top. A second upward
     // wheel still carries demand even though it need not emit a scroll event.
     await page.mouse.wheel(0, -900);
-    await expect(page.locator('.eggw-message-card')).toHaveCount(70);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(180);
     expect(messageRequests).toBe(1);
     await chat.evaluate((element) => { element.scrollTop = 0; });
 
@@ -1513,6 +1513,51 @@ test.describe('Per-thread transcript state', () => {
     await expect(page.getByTestId('chat-panel')).not.toContainText('thread b only');
   });
 
+  test('hydrates a 60-message window when a Children panel click changes routes', async ({ page }) => {
+    const parentId = 'click-hydration-parent';
+    const childId = 'click-hydration-child';
+    const childMessages = Array.from({ length: 140 }, (_, index) => ({
+      id: `child-context-${index}`,
+      role: index % 2 ? 'assistant' : 'user',
+      content: `child context ${index}`,
+    }));
+    for (const threadId of [parentId, childId]) {
+      await mockThreadShell(page, threadId, { messages: threadId === childId ? childMessages : [] });
+    }
+    await page.unroute(`${TEST_API_BASE}/api/threads/${parentId}/children`);
+    await page.route(`${TEST_API_BASE}/api/threads/${parentId}/children`, (route) => route.fulfill({
+      status: 200,
+      headers: mockApiHeaders,
+      json: [{ id: childId, name: 'Hydration child', parent_id: parentId, has_children: false }],
+    }));
+    const childRequests: string[] = [];
+    await page.unroute(new RegExp(`/api/threads/${childId}/messages(?:\\?.*)?$`));
+    await page.route(new RegExp(`/api/threads/${childId}/messages(?:\\?.*)?$`), async (route, request) => {
+      childRequests.push(request.url());
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { items: childMessages, snapshot_cursor: 140, next_before: null },
+      });
+    });
+
+    await page.goto(`/${parentId}`);
+    await page.getByRole('button', { name: /Hydration child/ }).click();
+
+    await expect(page).toHaveURL(new RegExp(`/${childId}$`));
+    await expect(page.getByText(/Chat Messages · 140 loaded/)).toBeVisible();
+    await expect(page.locator('.eggw-message-card')).toHaveCount(60);
+    await expect(page.locator('[data-message-id="child-context-80"]')).toBeVisible();
+    await expect(page.locator('[data-message-id="child-context-139"]')).toBeVisible();
+    await expect(page.locator('[data-message-id="child-context-79"]')).toHaveCount(0);
+    expect(childRequests).toHaveLength(1);
+    expect(new URL(childRequests[0]).searchParams.get('limit')).toBe('300');
+
+    await page.getByTestId('show-more-loaded-messages').click();
+    await expect(page.locator('.eggw-message-card')).toHaveCount(120);
+    expect(childRequests).toHaveLength(1);
+  });
+
   test('reveals loaded min history before pagination and reaches the system prompt', async ({ page }) => {
     const threadId = 'min-system-prompt-history';
     let messageRequests = 0;
@@ -1559,12 +1604,9 @@ test.describe('Per-thread transcript state', () => {
 
     await page.goto(`/${threadId}`);
     await page.locator('select[title="Transcript display verbosity"]').selectOption('min');
-    await expect(page.locator('.eggw-message-card')).toHaveCount(5);
+    await expect(page.locator('.eggw-message-card')).toHaveCount(60);
 
-    // Expose the already-loaded 65-message prefix before requesting older data.
-    await page.getByTestId('show-more-loaded-messages').click();
-    await expect(page.getByTestId('show-more-loaded-messages')).toContainText('5 earlier');
-    expect(messageRequests).toBe(1);
+    // Expose the already-loaded 10-message prefix before requesting older data.
     await page.getByTestId('show-more-loaded-messages').click();
     await expect(page.getByTestId('load-older-messages')).toBeVisible();
     expect(messageRequests).toBe(1);

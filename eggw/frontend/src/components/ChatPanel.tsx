@@ -32,7 +32,7 @@ import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import { flattenTranscript, transcriptInfiniteQueryOptions } from "@/lib/transcript";
 import { AnimationFrameCoalescer, IntervalCoalescer, streamingBufferForThread } from "@/lib/streamingBuffer";
 import { recordReactCommit, recordStreamingFlush } from "@/lib/performanceInstrumentation";
-import { expandedTranscriptStartId, transcriptWindow } from "@/lib/transcriptWindow";
+import { expandedTranscriptStartId, transcriptWindow, TRANSCRIPT_WINDOW_MESSAGES } from "@/lib/transcriptWindow";
 import {
   IDLE_HISTORY_DEMAND,
   reduceHistoryDemand,
@@ -47,7 +47,6 @@ import { OverlayPanel } from "@/components/ui/OverlayPanel";
 
 const STICKY_BOTTOM_THRESHOLD_PX = 16;
 const MESSAGE_IMAGE_PREVIEW_MAX_HEIGHT = "min(70vh, 720px)";
-const INITIAL_TRANSCRIPT_MESSAGE_LIMIT = 300;
 const TRANSCRIPT_SCROLLBACK_THRESHOLD_PX = 240;
 const THREAD_LINK_SUFFIX_LENGTH = 8;
 const TOOL_ARGUMENT_PREVIEW_INTERVAL_MS = 100;
@@ -2067,7 +2066,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                     onClick={demandOlderHistory}
                     data-testid="show-more-loaded-messages"
                   >
-                    Show 60 older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
+                    Show {TRANSCRIPT_WINDOW_MESSAGES} older loaded messages ({renderedTranscript.hiddenCount.toLocaleString()} earlier)
                   </Button>
                 </div>
               )}
