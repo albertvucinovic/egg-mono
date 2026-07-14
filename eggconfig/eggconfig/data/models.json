@@ -261,6 +261,19 @@
             "output_tokens": 30
           }
         },
+        "Pro: GPT-5.6 Sol max": {
+          "model_name": "gpt-5.6-sol",
+          "max_tokens": 300000,
+          "api_type": "responses",
+          "parameters": {
+            "reasoning_effort": "max"
+          },
+          "cost": {
+            "input_tokens": 5,
+            "cached_input": 0.5,
+            "output_tokens": 30
+          }
+        },
         "Pro: GPT-5.6 Terra xhigh": {
           "model_name": "gpt-5.6-terra",
           "max_tokens": 300000,
