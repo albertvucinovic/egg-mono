@@ -4039,6 +4039,7 @@ class SubtreeScheduler:
 
         scheduler_work_since_yield = 0
         last_scheduler_yield_at = time.monotonic()
+        last_session_reap_at = 0.0
 
         async def checkpoint_scheduler_fairness(*, force: bool = False) -> None:
             """Yield so scheduler bookkeeping cannot monopolize the TUI loop."""
@@ -4088,6 +4089,16 @@ class SubtreeScheduler:
                     reserved_slots.add(tid)
 
         while True:
+            now = time.monotonic()
+            if (now - last_session_reap_at) >= 30.0:
+                try:
+                    from .session import start_idle_auto_docker_reaper
+
+                    start_idle_auto_docker_reaper(self.db)
+                except Exception:
+                    # Resource maintenance must not stop scheduler progress.
+                    pass
+                last_session_reap_at = now
             all_threads = self._collect_subtree(self.root)
             known_threads = set(all_threads)
             stale_scheduler_threads = (

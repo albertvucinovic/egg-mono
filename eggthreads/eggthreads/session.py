@@ -8,12 +8,15 @@ thread used as the execution/audit container for programmatic REPL tool calls.
 """
 
 import json
+import math
 import os
 import subprocess
 import tempfile
+import threading
 import uuid
 import time
 import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
@@ -131,6 +134,99 @@ class SessionProvider(Protocol):
 
 
 _DOCKER_MOUNT_POLICY = "thread-workdir-mask-egg-sandbox-v2"
+_SESSION_ACTIVITY_LOCKS: Dict[str, threading.RLock] = {}
+_SESSION_ACTIVITY_LOCK_USERS: Dict[str, int] = {}
+_SESSION_ACTIVITY_LOCKS_GUARD = threading.Lock()
+_SESSION_ACTIVITY_LOCAL = threading.local()
+
+
+def _session_activity_lock(session_id: str) -> threading.RLock:
+    with _SESSION_ACTIVITY_LOCKS_GUARD:
+        lock = _SESSION_ACTIVITY_LOCKS.setdefault(session_id, threading.RLock())
+        _SESSION_ACTIVITY_LOCK_USERS[session_id] = _SESSION_ACTIVITY_LOCK_USERS.get(session_id, 0) + 1
+        return lock
+
+
+def _release_session_activity_lock(session_id: str, lock: threading.RLock) -> None:
+    lock.release()
+    with _SESSION_ACTIVITY_LOCKS_GUARD:
+        users = _SESSION_ACTIVITY_LOCK_USERS.get(session_id, 1) - 1
+        if users <= 0:
+            _SESSION_ACTIVITY_LOCK_USERS.pop(session_id, None)
+            if _SESSION_ACTIVITY_LOCKS.get(session_id) is lock:
+                _SESSION_ACTIVITY_LOCKS.pop(session_id, None)
+        else:
+            _SESSION_ACTIVITY_LOCK_USERS[session_id] = users
+
+
+@contextmanager
+def _session_activity_guard(session_id: str, *, blocking: bool = True):
+    """Serialize host eval/reference activity with idle reclamation.
+
+    The in-process lock makes the guard re-entrant for one host.  ``flock`` on
+    the session bridge lock extends the exclusion to other Egg processes that
+    share this physical session directory.  Nonblocking acquisition is used by
+    maintenance so it never waits behind an active eval.
+    """
+
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        yield False
+        return
+    held = getattr(_SESSION_ACTIVITY_LOCAL, "held", None)
+    if held is None:
+        held = {}
+        _SESSION_ACTIVITY_LOCAL.held = held
+    if held.get(session_id, 0):
+        held[session_id] += 1
+        try:
+            yield True
+        finally:
+            held[session_id] -= 1
+        return
+
+    thread_lock = _session_activity_lock(session_id)
+    acquired = thread_lock.acquire(blocking=blocking)
+    if not acquired:
+        yield False
+        return
+    held[session_id] = 1
+    lock_file = None
+    file_locked = False
+    try:
+        lock_path = _session_bridge_dir(session_id).parent / "activity.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_path.open("a+")
+        try:
+            import fcntl
+
+            operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), operation)
+            file_locked = True
+        except BlockingIOError:
+            yield False
+            return
+        except (ImportError, OSError):
+            if not blocking:
+                # Reclamation must fail closed if cross-process exclusion is
+                # unavailable. Foreground eval/config activity may continue
+                # under the in-process lock on unsupported platforms.
+                yield False
+                return
+            file_locked = False
+        yield True
+    finally:
+        if lock_file is not None:
+            if file_locked:
+                try:
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            lock_file.close()
+        held.pop(session_id, None)
+        _release_session_activity_lock(session_id, thread_lock)
 
 
 def _clean_runtime_part(value: Any, default: str) -> str:
@@ -1065,7 +1161,7 @@ def get_thread_session_config(db: ThreadsDB, thread_id: str) -> SessionConfig:
     )
 
 
-def set_thread_session_config(
+def _set_thread_session_config_unlocked(
     db: ThreadsDB,
     thread_id: str,
     *,
@@ -1112,6 +1208,51 @@ def set_thread_session_config(
     return sid or ""
 
 
+def set_thread_session_config(
+    db: ThreadsDB,
+    thread_id: str,
+    *,
+    enabled: bool,
+    provider: str = "docker",
+    image: str = "egg-rlm-session",
+    share: str = "private",
+    session_id: Optional[str] = None,
+    owner_thread_id: Optional[str] = None,
+    workspace: str = "/workspace",
+    network: str = "none",
+    share_with_children_default: bool = False,
+    share_repl: bool = False,
+    reason: str = "user",
+) -> str:
+    """Append session config while excluding idle reclamation for its session."""
+
+    effective_session_id = session_id
+    if enabled and not effective_session_id:
+        effective_session_id = _session_id_for_thread(owner_thread_id or thread_id)
+    if not effective_session_id:
+        try:
+            effective_session_id = get_thread_session_config(db, thread_id).session_id
+        except Exception:
+            effective_session_id = None
+    guard_id = effective_session_id or f"thread:{thread_id}"
+    with _session_activity_guard(guard_id):
+        return _set_thread_session_config_unlocked(
+            db,
+            thread_id,
+            enabled=enabled,
+            provider=provider,
+            image=image,
+            share=share,
+            session_id=effective_session_id,
+            owner_thread_id=owner_thread_id,
+            workspace=workspace,
+            network=network,
+            share_with_children_default=share_with_children_default,
+            share_repl=share_repl,
+            reason=reason,
+        )
+
+
 def enable_thread_session(db: ThreadsDB, thread_id: str, **kwargs: Any) -> str:
     """Enable a persistent session for a thread and return its session_id."""
 
@@ -1156,6 +1297,280 @@ def _parse_duration_seconds(value: Any) -> Optional[float]:
         return float(text) * mult
     except Exception:
         return None
+
+
+def auto_session_idle_timeout_sec(value: Any = None) -> Optional[float]:
+    """Resolve the opt-in idle timeout for auto-created Docker sessions."""
+
+    raw = os.environ.get("EGG_RLM_AUTO_SESSION_IDLE_TIMEOUT") if value is None else value
+    timeout = _parse_duration_seconds(raw)
+    if timeout is None or not math.isfinite(timeout) or timeout <= 0:
+        return None
+    return float(timeout)
+
+
+def _local_session_config_payload(db: ThreadsDB, thread_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        row = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='session.config' "
+            "ORDER BY event_seq DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _auto_docker_session_candidate(db: ThreadsDB, thread_id: str) -> Optional[SessionConfig]:
+    payload = _local_session_config_payload(db, thread_id)
+    reason = str((payload or {}).get("reason") or "")
+    if not reason.startswith("auto:"):
+        return None
+    cfg = get_thread_session_config(db, thread_id)
+    if (
+        not cfg.enabled
+        or cfg.provider != "docker"
+        or not cfg.session_id
+        or cfg.source != f"event:{thread_id}"
+        or cfg.share != "private"
+        or cfg.share_with_children_default
+    ):
+        return None
+    return cfg
+
+
+def _strict_effective_session_reference(
+    db: ThreadsDB,
+    thread_id: str,
+) -> tuple[bool, Optional[str]]:
+    current: Optional[str] = thread_id
+    seen: set[str] = set()
+    source_thread_id: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+    while current and current not in seen:
+        seen.add(current)
+        row = db.conn.execute(
+            "SELECT payload_json FROM events WHERE thread_id=? AND type='session.config' "
+            "ORDER BY event_seq DESC LIMIT 1",
+            (current,),
+        ).fetchone()
+        if row is not None:
+            loaded = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            if not isinstance(loaded, dict):
+                raise ValueError(f"session.config for {current} is not a JSON object")
+            source_thread_id = current
+            payload = loaded
+            break
+        parent = db.conn.execute(
+            "SELECT parent_id FROM children WHERE child_id=? LIMIT 1",
+            (current,),
+        ).fetchone()
+        current = str(parent[0]) if parent and parent[0] else None
+    if payload is None or source_thread_id is None:
+        return False, None
+    if source_thread_id != thread_id:
+        runtime = db.conn.execute(
+            "SELECT 1 FROM events WHERE thread_id=? AND type='runtime.thread' LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        if runtime is None and not bool(payload.get("share_with_children_default", False)):
+            return False, None
+    if not bool(payload.get("enabled", False)):
+        return False, None
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        owner = str(payload.get("owner_thread_id") or source_thread_id or thread_id)
+        session_id = _session_id_for_thread(owner)
+    return True, session_id
+
+
+def _session_reference_thread_ids(
+    db: ThreadsDB,
+    session_id: str,
+) -> tuple[Optional[List[str]], str]:
+    """Resolve every existing thread's effective config, failing closed."""
+
+    try:
+        rows = db.conn.execute("SELECT thread_id FROM threads ORDER BY thread_id").fetchall()
+        references: List[str] = []
+        for row in rows:
+            thread_id = str(row[0])
+            enabled, effective_session_id = _strict_effective_session_reference(db, thread_id)
+            if enabled and effective_session_id == session_id:
+                references.append(thread_id)
+        return references, ""
+    except Exception as e:
+        return None, f"session reference scan failed: {type(e).__name__}: {e}"
+
+
+def reap_idle_auto_docker_sessions(
+    db: ThreadsDB,
+    *,
+    idle_timeout_sec: Any = None,
+    now: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Stop safely reclaimable auto-created Docker sessions.
+
+    This is deliberately conservative: only fresh Phase 4 ``ready`` status can
+    authorize reclamation. The function never removes containers or channels.
+    """
+
+    threshold = auto_session_idle_timeout_sec(idle_timeout_sec)
+    if threshold is None:
+        return []
+    observed_at = time.time() if now is None else float(now)
+    try:
+        thread_ids = [str(row[0]) for row in db.conn.execute(
+            "SELECT thread_id FROM threads ORDER BY thread_id"
+        ).fetchall()]
+    except Exception:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    processed_sessions: set[str] = set()
+    for thread_id in thread_ids:
+        cfg = _auto_docker_session_candidate(db, thread_id)
+        if cfg is None or not cfg.session_id or cfg.session_id in processed_sessions:
+            continue
+        session_id = cfg.session_id
+        processed_sessions.add(session_id)
+        item: Dict[str, Any] = {
+            "thread_id": thread_id,
+            "session_id": session_id,
+            "idle_timeout_sec": threshold,
+            "reclaimed": False,
+        }
+        with _session_activity_guard(session_id, blocking=False) as acquired:
+            if not acquired:
+                item.update(status="skipped", reason="host_activity")
+                results.append(item)
+                continue
+            # Re-read eligibility and references inside the same cross-process
+            # activity boundary used by config writes and Docker evals.
+            current = _auto_docker_session_candidate(db, thread_id)
+            if current is None or current.session_id != session_id:
+                item.update(status="skipped", reason="configuration_changed")
+                results.append(item)
+                continue
+            references, reference_error = _session_reference_thread_ids(db, session_id)
+            if references is None:
+                item.update(status="skipped", reason="reference_scan_failed", error=reference_error)
+                results.append(item)
+                continue
+            other_references = [ref for ref in references if ref != thread_id]
+            if other_references:
+                item.update(
+                    status="skipped",
+                    reason="shared_references",
+                    reference_thread_ids=references,
+                )
+                results.append(item)
+                continue
+
+            try:
+                status = get_thread_session_status(db, thread_id)
+            except Exception as e:
+                item.update(
+                    status="skipped",
+                    reason="status_unavailable",
+                    error=f"{type(e).__name__}: {e}",
+                )
+                results.append(item)
+                continue
+            item["observed_status"] = status.status
+            if status.active_requests:
+                item.update(status="skipped", reason="active_requests")
+                results.append(item)
+                continue
+            if status.status != "ready":
+                item.update(status="skipped", reason=f"session_{status.status}")
+                results.append(item)
+                continue
+            if not isinstance(status.last_activity, (int, float)) or not math.isfinite(float(status.last_activity)):
+                item.update(status="skipped", reason="last_activity_unavailable")
+                results.append(item)
+                continue
+            idle_for = max(0.0, observed_at - float(status.last_activity))
+            item["idle_for_sec"] = idle_for
+            item["last_activity_at"] = float(status.last_activity)
+            if idle_for <= threshold:
+                item.update(status="skipped", reason="below_idle_threshold")
+                results.append(item)
+                continue
+
+            stop_reason = f"idle_reap:{threshold:g}s"
+            try:
+                stopped = stop_thread_session(db, thread_id, reason=stop_reason)
+            except Exception as e:
+                item.update(
+                    status="unhealthy",
+                    reason=stop_reason,
+                    error=f"{type(e).__name__}: {e}",
+                )
+                results.append(item)
+                continue
+            item.update(
+                status=stopped.status,
+                reason=stop_reason,
+                reclaimed=stopped.status == "stopped",
+                message=stopped.message,
+            )
+            results.append(item)
+    return results
+
+
+_IDLE_REAPER_THREADS_LOCK = threading.Lock()
+_IDLE_REAPER_DATABASES: set[str] = set()
+
+
+def start_idle_auto_docker_reaper(db: ThreadsDB) -> bool:
+    """Start one daemon maintenance pass for a file-backed database."""
+
+    if auto_session_idle_timeout_sec() is None:
+        return False
+    raw_path = str(getattr(db, "path", "") or "")
+    if not raw_path or raw_path == ":memory:":
+        return False
+    db_path = str(Path(raw_path).expanduser().resolve())
+    with _IDLE_REAPER_THREADS_LOCK:
+        if db_path in _IDLE_REAPER_DATABASES:
+            return False
+        _IDLE_REAPER_DATABASES.add(db_path)
+
+    def run() -> None:
+        worker_db: Optional[ThreadsDB] = None
+        try:
+            worker_db = ThreadsDB(db_path)
+            try:
+                reap_idle_auto_docker_sessions(worker_db)
+            except Exception:
+                pass
+        finally:
+            if worker_db is not None:
+                try:
+                    worker_db.conn.close()
+                except Exception:
+                    pass
+            with _IDLE_REAPER_THREADS_LOCK:
+                _IDLE_REAPER_DATABASES.discard(db_path)
+
+    try:
+        threading.Thread(
+            target=run,
+            name=f"egg-session-reaper-{hashlib.sha256(db_path.encode()).hexdigest()[:8]}",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _IDLE_REAPER_THREADS_LOCK:
+            _IDLE_REAPER_DATABASES.discard(db_path)
+        return False
+    return True
 
 
 def ensure_thread_session_for_repl(
@@ -1249,6 +1664,15 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
     cfg = get_thread_session_config(db, thread_id)
     if not cfg.enabled or cfg.provider != "docker" or not cfg.session_id:
         return get_thread_session_status(db, thread_id)
+    with _session_activity_guard(cfg.session_id):
+        return _get_or_start_docker_session_locked(db, thread_id, cfg)
+
+
+def _get_or_start_docker_session_locked(
+    db: ThreadsDB,
+    thread_id: str,
+    cfg: SessionConfig,
+) -> SessionStatus:
     status = get_thread_session_status(db, thread_id)
     if status.status == "unhealthy" and status.reason == "docker_unavailable":
         append_session_lifecycle_event(
@@ -2682,11 +3106,13 @@ class DockerSessionProvider:
         timeout_sec: Optional[float],
         cancel_check: Any = None,
     ) -> str:
-        if language == "python":
-            return _execute_python_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec, cancel_check=cancel_check)
-        if language == "bash":
-            return _execute_bash_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec, cancel_check=cancel_check)
-        return f"Error: unknown session language: {language}"
+        session_id = cfg.session_id or _session_id_for_thread(runtime_thread_id)
+        with _session_activity_guard(session_id):
+            if language == "python":
+                return _execute_python_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec, cancel_check=cancel_check)
+            if language == "bash":
+                return _execute_bash_docker(db, runtime_thread_id, code, repl_name=repl_channel, eval_token=eval_token, timeout_sec=timeout_sec, cancel_check=cancel_check)
+            return f"Error: unknown session language: {language}"
 
     def stop(self, db: ThreadsDB, thread_id: str, cfg: SessionConfig, *, reason: str = "user") -> SessionStatus:
         container_name = docker_session_container_name(db, cfg.session_id or _session_id_for_thread(thread_id))
@@ -3340,6 +3766,9 @@ __all__ = [
     "list_docker_session_containers",
     "cleanup_docker_sessions",
     "cleanup_thread_sessions",
+    "auto_session_idle_timeout_sec",
+    "reap_idle_auto_docker_sessions",
+    "start_idle_auto_docker_reaper",
     "get_or_start_docker_session",
     "get_or_start_docker_session_handle",
     "set_thread_session_config",

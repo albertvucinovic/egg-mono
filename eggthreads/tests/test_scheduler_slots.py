@@ -2396,3 +2396,28 @@ def test_late_tool_completion_after_takeover_is_fenced(tmp_path):
     assert "late tool result" not in (state.finished_output or "")
     assert state.published is False
     assert db_runner.current_open(root)["invoke_id"] == "replacement-invoke"
+
+
+def test_scheduler_triggers_session_reaper_maintenance(monkeypatch, tmp_path):
+    db = _make_db(tmp_path)
+    root = ts.create_root_thread(db, name="root")
+    calls = []
+    monkeypatch.setattr(
+        "eggthreads.session.start_idle_auto_docker_reaper",
+        lambda seen_db: calls.append(seen_db) or False,
+    )
+
+    async def run_test():
+        scheduler = SubtreeScheduler(db, root, llm=MagicMock(), config=RunnerConfig())
+        task = asyncio.create_task(scheduler.run_forever(poll_sec=3600))
+        try:
+            deadline = asyncio.get_running_loop().time() + 1
+            while not calls and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.001)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run_test())
+    assert calls == [db]
