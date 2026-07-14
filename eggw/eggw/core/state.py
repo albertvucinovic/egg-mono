@@ -114,7 +114,10 @@ def configure_quick_start_args(args: list[str] | tuple[str, ...]) -> None:
 
 
 def configure_quick_start_from_env() -> None:
-    configure_quick_start_args(quick_start_args_from_json(os.environ.get("EGGW_QUICK_START_ARGS_JSON")))
+    # Capture once, then remove launcher text before any tool/command subprocess
+    # can inherit it. The claim-once in-memory copy is the sole runtime owner.
+    raw = os.environ.pop("EGGW_QUICK_START_ARGS_JSON", None)
+    configure_quick_start_args(quick_start_args_from_json(raw))
 
 
 def claim_quick_start_args() -> list[str]:

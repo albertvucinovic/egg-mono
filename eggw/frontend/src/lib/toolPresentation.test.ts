@@ -34,6 +34,23 @@ describe("tool transcript presentation", () => {
     expect(details[1].body).toContain("RESULT_B");
   });
 
+  it("refuses FIFO pairing when an identical tool_call_id is duplicated", () => {
+    const details = correlateHiddenToolDetails([
+      call("call-duplicate", "bash", "ARG_FIRST"),
+      call("call-duplicate", "bash", "ARG_SECOND"),
+      result("call-duplicate", "bash", "RESULT_FIRST"),
+      result("call-duplicate", "bash", "RESULT_SECOND"),
+    ]);
+
+    expect(details).toHaveLength(4);
+    expect(details[0].body).toContain("ARG_FIRST");
+    expect(details[0].body).toContain("(not found in the loaded transcript)");
+    expect(details[0].body).not.toContain("RESULT_FIRST");
+    expect(details[1].body).toContain("ARG_SECOND");
+    expect(details[1].body).not.toContain("RESULT_SECOND");
+    expect(details.slice(2).map((detail) => detail.body)).toEqual(["RESULT_FIRST", "RESULT_SECOND"]);
+  });
+
   it("keeps missing halves and ID-less legacy previews separate", () => {
     const details = correlateHiddenToolDetails([
       call("call-pending", "python", "ARG_PENDING"),

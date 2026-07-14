@@ -408,9 +408,10 @@ export const useAppStore = create<AppState>((set) => ({
       let streamingToolOutputs = streaming.streamingToolOutputs;
       if (existingOutput) {
         const { timeout: _timeout, ...withoutTimeout } = existingOutput;
+        const { startedAtMs: _startedAtMs, ...finishedOutput } = withoutTimeout;
         streamingToolOutputs = {
           ...streaming.streamingToolOutputs,
-          [id]: { ...withoutTimeout, finished: true },
+          [id]: { ...finishedOutput, finished: true },
         };
       }
       return {

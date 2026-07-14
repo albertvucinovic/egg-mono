@@ -29,6 +29,7 @@ import {
   type ContentPart,
 } from "@/lib/contentParts";
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
+import { shouldUpdateLiveTiming } from "@/lib/liveTiming";
 import {
   correlateHiddenToolDetails,
   getUserAnswerToolCallId,
@@ -1277,8 +1278,11 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
   const visibleStreamingToolOutputs = streamingToolOutputs || {};
   const hasLiveTools = Object.keys(visibleStreamingToolCalls).length > 0 || Object.keys(visibleStreamingToolOutputs).length > 0;
   const showLiveCard = isStreaming || hasLiveTools;
-  const hasActiveToolTiming = Object.values(visibleStreamingToolOutputs).some((tool) => Boolean(tool.startedAtMs || tool.timeout));
-  const shouldUpdateTiming = isStreaming || hasActiveToolTiming || Boolean(streamingProviderRequest);
+  const shouldUpdateTiming = shouldUpdateLiveTiming(
+    isStreaming,
+    visibleStreamingToolOutputs,
+    streamingProviderRequest,
+  );
   const primaryToolTimeoutText = Object.values(visibleStreamingToolOutputs)
     .map((tool) => toolTimeoutCountdown(tool.timeout, nowMs))
     .find((text): text is string => Boolean(text));

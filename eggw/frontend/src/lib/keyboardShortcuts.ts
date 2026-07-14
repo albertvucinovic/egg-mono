@@ -70,7 +70,7 @@ export const EGGW_SHORTCUT_GROUPS: readonly ShortcutHelpGroup[] = [
 
 type ModifierKeyEvent = Pick<
   KeyboardEvent,
-  "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "code"
+  "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "code" | "getModifierState"
 >;
 
 function isCtrlAltCode(
@@ -82,6 +82,7 @@ function isCtrlAltCode(
     event.ctrlKey &&
     !event.metaKey &&
     !event.shiftKey &&
+    !event.getModifierState("AltGraph") &&
     event.code === code
   );
 }

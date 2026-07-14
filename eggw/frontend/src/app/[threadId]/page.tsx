@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChatPanel } from "@/components/ChatPanel";
@@ -123,10 +123,18 @@ export default function ThreadPage() {
     },
   });
 
+  // Auto-approval owns an explicit synchronous gate because React mutation
+  // state updates after the key event; two same-tick events must not race.
+  const autoApprovalPendingRef = useRef(false);
+
   // Auto-approval toggle mutation
   const autoApprovalMutation = useMutation({
     mutationFn: ({ threadId: sourceThreadId, enabled }: { threadId: string; operationId: string; enabled: boolean }) => setAutoApproval(sourceThreadId, enabled),
     onSuccess: (data, variables) => {
+      queryClient.setQueryData(["threadSettings", variables.threadId], (previous: Record<string, unknown> | undefined) => ({
+        ...(previous || {}),
+        auto_approval: Boolean(data.auto_approval),
+      }));
       addSystemLog(
         `Auto-approval ${data.auto_approval ? "enabled" : "disabled"}`,
         "success"
@@ -137,7 +145,20 @@ export default function ThreadPage() {
       queryClient.invalidateQueries({ queryKey: ["threadSettings", variables.threadId] });
       addSystemLog("Failed to toggle auto-approval", "error");
     },
+    onSettled: () => {
+      autoApprovalPendingRef.current = false;
+    },
   });
+
+  const toggleAutoApproval = useCallback((operationPrefix: string) => {
+    if (!threadId || autoApprovalPendingRef.current || !threadSettings || autoApprovalMutation.isPending) return;
+    autoApprovalPendingRef.current = true;
+    autoApprovalMutation.mutate({
+      threadId,
+      operationId: createClientOperationId(operationPrefix),
+      enabled: !Boolean(threadSettings.auto_approval),
+    });
+  }, [autoApprovalMutation.isPending, autoApprovalMutation.mutate, threadId, threadSettings]);
 
   // Sandbox toggle mutation
   const sandboxMutation = useMutation({
@@ -179,13 +200,7 @@ export default function ThreadPage() {
     // avoid common browser/terminal shortcuts and audited Readline/tmux/Sway bindings.
     if (!document.querySelector('[role="dialog"][aria-modal="true"]') && isToggleAutoApprovalShortcut(e)) {
       e.preventDefault();
-      if (threadId && !autoApprovalMutation.isPending) {
-        autoApprovalMutation.mutate({
-          threadId,
-          operationId: createClientOperationId("auto-approval-shortcut"),
-          enabled: !threadSettings?.auto_approval,
-        });
-      }
+      toggleAutoApproval("auto-approval-shortcut");
       return;
     }
     if (!document.querySelector('[role="dialog"][aria-modal="true"]') && isToggleSandboxingShortcut(e)) {
@@ -314,7 +329,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router, interruptThreadStreaming, autoApprovalMutation.mutate, autoApprovalMutation.isPending, sandboxMutation.mutate, sandboxMutation.isPending, threadSettings?.auto_approval, sandboxStatus?.user_control_enabled]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router, interruptThreadStreaming, toggleAutoApproval, sandboxMutation.mutate, sandboxMutation.isPending, sandboxStatus?.user_control_enabled]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
@@ -393,8 +408,8 @@ export default function ThreadPage() {
               <span>Auto-approve</span>
               <Switch
                 checked={Boolean(threadSettings?.auto_approval)}
-                onClick={() => autoApprovalMutation.mutate({ threadId, operationId: createClientOperationId("auto-approval"), enabled: !threadSettings?.auto_approval })}
-                disabled={autoApprovalMutation.isPending}
+                onClick={() => toggleAutoApproval("auto-approval")}
+                disabled={!threadSettings || autoApprovalMutation.isPending}
                 label={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"}
                 title={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"}
               />
@@ -454,7 +469,7 @@ export default function ThreadPage() {
               </Select>
             </ControlGroup>
           )}
-          <div className="eggw-drawer-setting"><span>Auto-approval</span><Switch checked={Boolean(threadSettings?.auto_approval)} onClick={() => threadId && autoApprovalMutation.mutate({ threadId, operationId: createClientOperationId("auto-approval"), enabled: !threadSettings?.auto_approval })} disabled={autoApprovalMutation.isPending} label={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"} /></div>
+          <div className="eggw-drawer-setting"><span>Auto-approval</span><Switch checked={Boolean(threadSettings?.auto_approval)} onClick={() => toggleAutoApproval("auto-approval")} disabled={!threadSettings || autoApprovalMutation.isPending} label={threadSettings?.auto_approval ? "Auto-approval ON" : "Auto-approval OFF"} /></div>
           {sandboxStatus && <div className="eggw-drawer-setting"><StatusChip tone={sandboxStatus.effective ? "success" : sandboxStatus.enabled ? "warning" : "danger"}>Sandbox {sandboxStatus.effective ? "on" : sandboxStatus.enabled ? "limited" : "off"}</StatusChip><Switch checked={sandboxStatus.enabled} onClick={() => threadId && sandboxMutation.mutate({ threadId, operationId: createClientOperationId("sandbox") })} disabled={sandboxMutation.isPending || sandboxStatus.user_control_enabled === false} label="Toggle sandboxing" /></div>}
           <ControlGroup className="eggw-drawer-control"><label htmlFor="drawer-verbosity">Verbosity</label><Select id="drawer-verbosity" value={displayVerbosity} onChange={(event) => setDisplayVerbosity(event.target.value as "max" | "medium" | "min")}><option value="max">max</option><option value="medium">medium</option><option value="min">min</option></Select></ControlGroup>
           {tokenStats && <div className="eggw-drawer-usage"><span>Context <strong>{contextHeaderText}</strong></span><span>Cost <strong>{costHeaderText}</strong></span></div>}

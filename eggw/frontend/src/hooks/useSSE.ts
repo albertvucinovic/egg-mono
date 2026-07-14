@@ -71,7 +71,9 @@ function eventStartedAtMs(value: unknown): number {
 
 export function useSSE(threadId: string | null) {
   const eventSourceRef = useRef<AuthenticatedEventSource | null>(null);
+  const eventSourceThreadIdRef = useRef<string | null>(null);
   const syncStateRef = useRef<ThreadEventSyncState | null>(null);
+  const setupGenerationRef = useRef(0);
   const queryClient = useQueryClient();
   const upsertThreadStreamingToolOutput = useAppStore((state) => state.upsertThreadStreamingToolOutput);
   const markThreadStreamingToolStarted = useAppStore((state) => state.markThreadStreamingToolStarted);
@@ -161,14 +163,26 @@ export function useSSE(threadId: string | null) {
     });
   }, [evictThreadEphemeralState, threadId]);
 
+  const invalidateSetup = useCallback(() => {
+    setupGenerationRef.current += 1;
+    syncStateRef.current = null;
+  }, []);
+
+  const closeOwnedEventSource = useCallback(() => {
+    if (!eventSourceRef.current) return;
+    eventSourceRef.current.close();
+    eventSourceRef.current = null;
+    eventSourceThreadIdRef.current = null;
+  }, []);
+
   const connect = useCallback(async () => {
     if (!threadId) return null;
+    const generation = ++setupGenerationRef.current;
+    const ownsSetup = () => setupGenerationRef.current === generation;
     evictInactiveThreadState(threadId);
 
     // Close existing connection
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
+    closeOwnedEventSource();
 
     // Establish the durable transcript snapshot first. React Query deduplicates
     // this with ChatPanel; /state then resolves a distinct live replay cursor
@@ -181,7 +195,9 @@ export function useSSE(threadId: string | null) {
         transcriptInfiniteQueryOptions(threadId, queryClient),
       );
       snapshotCursor = transcriptSnapshotCursor(snapshot);
+      if (!ownsSetup()) return null;
       const threadState = await fetchThreadState(threadId, snapshotCursor);
+      if (!ownsSetup()) return null;
       replayCursor = Number.isSafeInteger(threadState.live_replay_cursor)
         ? Number(threadState.live_replay_cursor)
         : snapshotCursor;
@@ -209,14 +225,23 @@ export function useSSE(threadId: string | null) {
       syncStateRef.current = createThreadEventSyncState(threadId, replayCursor, activeInvokeId);
       setThreadConnection(threadId, "connecting");
     } catch (error) {
-      addSystemLog("Unable to establish message synchronization cursor", "error");
-      setThreadConnection(threadId, "disconnected");
+      if (ownsSetup()) {
+        addSystemLog("Unable to establish message synchronization cursor", "error");
+        setThreadConnection(threadId, "disconnected");
+      }
       return null;
     }
+    if (!ownsSetup()) return null;
     const es = createEventSource(threadId, replayCursor);
+    if (!ownsSetup()) {
+      es.close();
+      return null;
+    }
     eventSourceRef.current = es;
+    eventSourceThreadIdRef.current = threadId;
 
     es.onopen = (openEvent) => {
+      if (!ownsSetup()) return;
       setThreadConnection(threadId, "connected");
       addSystemLog("SSE connected", "info");
       const isReconnect = openEvent instanceof CustomEvent && Boolean(openEvent.detail?.reconnect);
@@ -230,12 +255,14 @@ export function useSSE(threadId: string | null) {
     };
 
     es.onerror = () => {
+      if (!ownsSetup()) return;
       setThreadConnection(threadId, "reconnecting");
       addSystemLog("SSE connection error; reconnecting from cursor", "error");
     };
 
     const addThreadEventListener = (type: string, listener: (event: MessageEvent<string>) => void) => {
       es.addEventListener(type, (event) => {
+        if (!ownsSetup()) return;
         const current = syncStateRef.current || createThreadEventSyncState(threadId, replayCursor, activeInvokeId);
         const reduced = reduceThreadEvent(current, event.data, type);
         if (!reduced.accepted) return;
@@ -600,6 +627,7 @@ export function useSSE(threadId: string | null) {
     return es;
   }, [
     threadId,
+    closeOwnedEventSource,
     evictInactiveThreadState,
     refreshMessagesNow,
     upsertStreamingToolOutput,
@@ -626,14 +654,12 @@ export function useSSE(threadId: string | null) {
   ]);
 
   const disconnect = useCallback(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
+    invalidateSetup();
+    closeOwnedEventSource();
     if (threadId) {
       setThreadConnection(threadId, "disconnected");
     }
-  }, [setThreadConnection, threadId]);
+  }, [closeOwnedEventSource, invalidateSetup, setThreadConnection, threadId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -647,10 +673,21 @@ export function useSSE(threadId: string | null) {
     });
     return () => {
       cancelled = true;
+      invalidateSetup();
       es?.close();
+      if (eventSourceRef.current === es) {
+        eventSourceRef.current = null;
+        eventSourceThreadIdRef.current = null;
+      }
       if (threadId) {
-        setThreadConnection(threadId, "disconnected");
+        // A replacement setup for the same thread may already own the shared
+        // connection. Do not let this stale effect downgrade its status.
+        const replacementOwnsThread = eventSourceThreadIdRef.current === threadId;
+        if (!replacementOwnsThread) {
+          setThreadConnection(threadId, "disconnected");
+        }
         queueMicrotask(() => {
+          if (replacementOwnsThread || eventSourceThreadIdRef.current === threadId) return;
           const state = useAppStore.getState();
           const streaming = state.streamingByThread[threadId];
           if (!canEvictThreadEphemeralState({
@@ -664,7 +701,7 @@ export function useSSE(threadId: string | null) {
         });
       }
     };
-  }, [connect, evictThreadEphemeralState, setThreadConnection, threadId]);
+  }, [connect, evictThreadEphemeralState, invalidateSetup, setThreadConnection, threadId]);
 
   return { connect, disconnect };
 }

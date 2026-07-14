@@ -136,6 +136,14 @@ class TestThreadOperations:
         assert len(data["id"]) > 0
         return data["id"]
 
+    def test_quick_start_env_is_scrubbed_after_process_local_capture(self, monkeypatch):
+        monkeypatch.setenv("EGGW_QUICK_START_ARGS_JSON", '["private launch prompt"]')
+
+        core_state.configure_quick_start_from_env()
+
+        assert "EGGW_QUICK_START_ARGS_JSON" not in os.environ
+        assert core_state.claim_quick_start_args() == ["private launch prompt"]
+
     def test_landing_create_claims_quick_start_draft_once(self, client):
         core_state.configure_quick_start_args(["Tell", "me a story"])
 

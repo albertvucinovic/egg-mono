@@ -28,7 +28,8 @@ describe("StreamingBuffer tool arguments", () => {
 
     const outputs = useAppStore.getState().streamingByThread["thread-a"].streamingToolOutputs;
     expect(useAppStore.getState().streamingByThread["thread-a"].streamingToolCalls["call-get-user"].finished).toBe(true);
-    expect(outputs["call-get-user"]).toMatchObject({ finished: true, startedAtMs: 1000 });
+    expect(outputs["call-get-user"]).toMatchObject({ finished: true });
+    expect(outputs["call-get-user"].startedAtMs).toBeUndefined();
     expect(outputs["call-get-user"].timeout).toBeUndefined();
     expect(outputs["call-bash"]).toMatchObject({ name: "bash", startedAtMs: 1000 });
     expect(outputs["call-bash"].finished).toBeUndefined();

@@ -40,6 +40,16 @@ def test_missing_or_directory_argument_is_text(tmp_path: Path):
     assert parse_quick_start_args([str(tmp_path)], cwd=tmp_path).kind == "draft"
 
 
+def test_unknown_tilde_user_argument_is_text_instead_of_crashing(tmp_path: Path):
+    raw = "~egg-user-that-must-not-exist-7f31c9/file.txt"
+
+    request = parse_quick_start_args([raw], cwd=tmp_path)
+
+    assert request is not None
+    assert request.kind == "draft"
+    assert request.draft == raw
+
+
 def test_json_argv_decoder_rejects_invalid_or_non_string_payloads():
     assert quick_start_args_from_json('["Tell", "me a story"]') == ["Tell", "me a story"]
     assert quick_start_args_from_json('{"draft": "no"}') == []

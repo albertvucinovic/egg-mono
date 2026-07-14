@@ -106,17 +106,27 @@ export function correlateHiddenToolDetails(details: HiddenToolDetail[]): HiddenT
 
   const usedFinalResults = new Set<number>();
   const resultByCall = new Map<number, HiddenToolDetail>();
-  const exactResultQueues = new Map<string, number[]>();
-  finalResults.forEach((result, resultIndex) => {
-    if (!result.tool_call_id) return;
-    const queue = exactResultQueues.get(result.tool_call_id) || [];
-    queue.push(resultIndex);
-    exactResultQueues.set(result.tool_call_id, queue);
-  });
+  const callIndexesById = new Map<string, number[]>();
+  const resultIndexesById = new Map<string, number[]>();
   calls.forEach((call, callIndex) => {
     if (!call.tool_call_id) return;
-    const resultIndex = exactResultQueues.get(call.tool_call_id)?.shift();
-    if (resultIndex === undefined) return;
+    const indexes = callIndexesById.get(call.tool_call_id) || [];
+    indexes.push(callIndex);
+    callIndexesById.set(call.tool_call_id, indexes);
+  });
+  finalResults.forEach((result, resultIndex) => {
+    if (!result.tool_call_id) return;
+    const indexes = resultIndexesById.get(result.tool_call_id) || [];
+    indexes.push(resultIndex);
+    resultIndexesById.set(result.tool_call_id, indexes);
+  });
+  callIndexesById.forEach((callIndexes, id) => {
+    const resultIndexes = resultIndexesById.get(id) || [];
+    // Reused IDs are not identities. Never FIFO-pair their calls/results,
+    // because ordering cannot prove which result belongs to which call.
+    if (callIndexes.length !== 1 || resultIndexes.length !== 1) return;
+    const callIndex = callIndexes[0];
+    const resultIndex = resultIndexes[0];
     usedFinalResults.add(resultIndex);
     resultByCall.set(callIndex, finalResults[resultIndex]);
   });

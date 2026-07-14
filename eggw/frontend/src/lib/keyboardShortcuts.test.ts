@@ -7,7 +7,7 @@ import {
 
 function keyEvent(
   code: "KeyA" | "KeyX",
-  overrides: Partial<Pick<KeyboardEvent, "altKey" | "ctrlKey" | "metaKey" | "shiftKey">> = {},
+  overrides: Partial<Pick<KeyboardEvent, "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "getModifierState">> = {},
 ) {
   return {
     code,
@@ -15,6 +15,7 @@ function keyEvent(
     ctrlKey: true,
     metaKey: false,
     shiftKey: false,
+    getModifierState: () => false,
     ...overrides,
   };
 }
@@ -28,6 +29,8 @@ describe("EggW keyboard shortcuts", () => {
     expect(isToggleAutoApprovalShortcut(keyEvent("KeyA", { ctrlKey: false }))).toBe(false);
     expect(isToggleSandboxingShortcut(keyEvent("KeyX", { shiftKey: true }))).toBe(false);
     expect(isToggleAutoApprovalShortcut(keyEvent("KeyA", { altKey: false }))).toBe(false);
+    expect(isToggleAutoApprovalShortcut(keyEvent("KeyA", { getModifierState: (key) => key === "AltGraph" }))).toBe(false);
+    expect(isToggleSandboxingShortcut(keyEvent("KeyX", { getModifierState: (key) => key === "AltGraph" }))).toBe(false);
   });
 
   it("keeps every implemented shortcut family visible in Help", () => {

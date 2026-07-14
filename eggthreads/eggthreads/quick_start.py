@@ -50,12 +50,14 @@ def parse_quick_start_args(
         return None
 
     if len(values) == 1 and values[0]:
-        base = Path.cwd() if cwd is None else Path(cwd).expanduser()
-        raw = Path(values[0]).expanduser()
-        candidate = raw if raw.is_absolute() else base / raw
         try:
+            base = Path.cwd() if cwd is None else Path(cwd).expanduser()
+            raw = Path(values[0]).expanduser()
+            candidate = raw if raw.is_absolute() else base / raw
             resolved = candidate.resolve(strict=True)
         except (OSError, RuntimeError):
+            # Unknown ``~user`` forms and missing paths are ordinary draft text,
+            # not launcher failures.
             resolved = None
         if resolved is not None and resolved.is_file():
             return QuickStartRequest(kind="attachment", source_path=resolved)
