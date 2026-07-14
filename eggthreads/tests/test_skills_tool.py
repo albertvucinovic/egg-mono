@@ -312,14 +312,16 @@ def test_eggtools_exposes_skill_helper_in_memory_repl(tmp_path, monkeypatch) -> 
     out = ts.execute_python_repl(
         db,
         parent,
+        "import eggtools\n"
         "from eggtools import skill\n"
         "print('rlm' in skill())\n"
-        "print('# RLM Skill' in skill('rlm'))",
+        "print('# RLM Skill' in skill('rlm'))\n"
+        "print('# RLM Skill' in eggtools.tool('skill', name='rlm'))",
         drive_runtime_tools=True,
         timeout_sec=5,
     )
 
-    assert out.count("True") == 2
+    assert out.count("True") == 3
 
 
 def test_skill_commands_defensively_unwrap_shared_structured_render(monkeypatch) -> None:

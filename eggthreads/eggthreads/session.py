@@ -609,10 +609,51 @@ def repl_channel_name(runtime_thread_id: str, repl_name: str = "default", *, sha
     return f"{safe_tid}:{name}" if safe_tid else name
 
 
+_PYTHON_REPL_RUNTIME_FILES = (
+    "eggtools.py",
+    "_eggtools_generated.py",
+    "repl_refresh.py",
+)
+_DOCKER_REFRESHED_PYTHON_RUNTIMES: set[tuple[str, str, str]] = set()
+
+
+def _invalidate_python_runtime_refresh_cache(runtime_dir: Path) -> None:
+    runtime_key = str(runtime_dir)
+    _DOCKER_REFRESHED_PYTHON_RUNTIMES.difference_update(
+        key for key in _DOCKER_REFRESHED_PYTHON_RUNTIMES if key[0] == runtime_key
+    )
+
+
+def _python_repl_runtime_code_hash(runtime_dir: Path) -> str:
+    """Hash the Egg-owned Python code loaded inside persistent REPL workers."""
+
+    digest = hashlib.sha256()
+    for name in _PYTHON_REPL_RUNTIME_FILES:
+        data = (runtime_dir / name).read_bytes()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()[:24]
+
+
+def _python_repl_runtime_refresh_code(expected_hash: str) -> str:
+    """Build a state-preserving refresh eval understood by old session daemons."""
+
+    refresh_path = "/egg-runtime/repl_refresh.py"
+    return (
+        f"if globals().get('__egg_runtime_code_hash__') != {expected_hash!r}:\n"
+        "    exec(compile(__import__('pathlib').Path("
+        f"{refresh_path!r}).read_text(encoding='utf-8'), {refresh_path!r}, 'exec'), "
+        "{'__name__': '__egg_runtime_refresh__', 'repl_globals': globals(), "
+        f"'runtime_dir': '/egg-runtime', 'expected_hash': {expected_hash!r}" + "})\n"
+    )
+
+
 def _write_runtime_files(runtime_dir: Path) -> None:
     from importlib import resources
 
-    for name in ("eggtools.py", "sessiond.py", "eggtool"):
+    for name in ("eggtools.py", "sessiond.py", "eggtool", "repl_refresh.py"):
         try:
             data = resources.files("eggthreads.session_runtime").joinpath(name).read_text(encoding="utf-8")
         except Exception:
@@ -670,7 +711,8 @@ def _start_docker_container(
     container_name: str,
     bridge_dir: Path,
     runtime_dir: Path,
-) -> None:
+) -> bool:
+    """Ensure the session container runs; return whether its process restarted."""
     expected_policy_hash = _docker_session_policy_hash(db, runtime_thread_id, cfg)
 
     def _remove_existing_container() -> None:
@@ -681,14 +723,14 @@ def _start_docker_container(
         policy = _docker_existing_mount_policy(container_name)
         policy_hash = _docker_existing_sandbox_policy_hash(container_name)
         if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
-            return
+            return False
         _remove_existing_container()
     if existing_running is False:
         policy = _docker_existing_mount_policy(container_name)
         policy_hash = _docker_existing_sandbox_policy_hash(container_name)
         if policy == _DOCKER_MOUNT_POLICY and policy_hash == expected_policy_hash:
             subprocess.run(["docker", "start", container_name], capture_output=True, check=True, timeout=20)
-            return
+            return True
         _remove_existing_container()
 
     workspace = cfg.workspace or "/workspace"
@@ -749,6 +791,7 @@ def _start_docker_container(
         "python3", "/egg-runtime/sessiond.py", "--bridge-dir", "/egg-bridge", "--runtime-dir", "/egg-runtime",
     ]
     subprocess.run(cmd, capture_output=True, check=True, timeout=60)
+    return True
 
 
 def get_thread_session_config(db: ThreadsDB, thread_id: str) -> SessionConfig:
@@ -1001,7 +1044,9 @@ def get_or_start_docker_session(db: ThreadsDB, thread_id: str) -> SessionStatus:
     mount_dir = docker_session_mount_dir(db, thread_id, cfg)
     _write_runtime_files(runtime_dir)
     try:
-        _start_docker_container(db, thread_id, cfg, status.container_name, bridge_dir, runtime_dir)
+        restarted = _start_docker_container(db, thread_id, cfg, status.container_name, bridge_dir, runtime_dir)
+        if restarted:
+            _invalidate_python_runtime_refresh_cache(runtime_dir)
         action = "reattached" if status.status == "stopped" else "docker_started"
     except Exception as e:
         append_session_lifecycle_event(
@@ -1086,6 +1131,49 @@ def _service_tool_requests(bridge_dir: Path) -> None:
 _DOCKER_EVAL_POLL_SEC = 0.05
 
 
+def _run_docker_python_eval_request(
+    db: ThreadsDB,
+    runtime_thread_id: str,
+    bridge_dir: Path,
+    payload: Dict[str, Any],
+    timeout_sec: Optional[float],
+) -> str:
+    req_id = os.urandom(8).hex()
+    req_path = bridge_dir / f"eval_{req_id}.req.json"
+    res_path = bridge_dir / f"eval_{req_id}.res.json"
+    payload = dict(payload)
+    payload["id"] = req_id
+    _atomic_write_json(req_path, payload)
+    start = time.time()
+    while True:
+        _service_tool_requests(bridge_dir)
+        if res_path.exists():
+            try:
+                response = json.loads(res_path.read_text(encoding="utf-8"))
+            finally:
+                try:
+                    res_path.unlink()
+                except Exception:
+                    pass
+            if response.get("ok"):
+                output = str(response.get("output") or "")
+                if output.startswith("--- TIMEOUT ---"):
+                    try:
+                        stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
+                    except Exception:
+                        pass
+                    output += "\n\n[Egg stopped the Docker REPL session after timeout cleanup.]"
+                return output
+            return f"Error: Docker Python REPL failed: {response.get('error') or 'unknown error'}"
+        if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
+            try:
+                stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
+            except Exception:
+                pass
+            return "Error: Docker Python REPL timed out. The session container was stopped/reset for cleanup."
+        time.sleep(_DOCKER_EVAL_POLL_SEC)
+
+
 def _execute_python_docker(
     db: ThreadsDB,
     runtime_thread_id: str,
@@ -1096,12 +1184,32 @@ def _execute_python_docker(
     timeout_sec: Optional[float],
 ) -> str:
     handle = get_or_start_docker_session_handle(db, runtime_thread_id)
+    runtime_hash = _python_repl_runtime_code_hash(Path(handle.runtime_dir))
     bridge_dir = Path(handle.bridge_dir)
-    req_id = os.urandom(8).hex()
-    req_path = bridge_dir / f"eval_{req_id}.req.json"
-    res_path = bridge_dir / f"eval_{req_id}.res.json"
+    refresh_key = (handle.runtime_dir, repl_name, runtime_hash)
+    if refresh_key not in _DOCKER_REFRESHED_PYTHON_RUNTIMES:
+        refresh_output = _run_docker_python_eval_request(
+            db,
+            runtime_thread_id,
+            bridge_dir,
+            {
+                "language": "python",
+                "code": _python_repl_runtime_refresh_code(runtime_hash),
+                "repl_name": repl_name,
+                "token": eval_token,
+                "timeout_sec": timeout_sec,
+            },
+            timeout_sec,
+        )
+        refresh_failed = (
+            "Traceback (most recent call last):" in refresh_output
+            or refresh_output.startswith(("Error:", "--- TIMEOUT ---"))
+        )
+        if refresh_failed:
+            return "Error: Egg could not refresh the persistent Python REPL runtime code.\n" + refresh_output
+        _DOCKER_REFRESHED_PYTHON_RUNTIMES.add(refresh_key)
+
     payload = {
-        "id": req_id,
         "language": "python",
         "code": code,
         "repl_name": repl_name,
@@ -1127,35 +1235,13 @@ def _execute_python_docker(
         payload["thread_context_json"] = context_json
     except Exception:
         pass
-    _atomic_write_json(req_path, payload)
-    start = time.time()
-    while True:
-        _service_tool_requests(bridge_dir)
-        if res_path.exists():
-            try:
-                payload = json.loads(res_path.read_text(encoding="utf-8"))
-            finally:
-                try:
-                    res_path.unlink()
-                except Exception:
-                    pass
-            if payload.get("ok"):
-                output = str(payload.get("output") or "")
-                if output.startswith("--- TIMEOUT ---"):
-                    try:
-                        stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
-                    except Exception:
-                        pass
-                    output += "\n\n[Egg stopped the Docker REPL session after timeout cleanup.]"
-                return output
-            return f"Error: Docker Python REPL failed: {payload.get('error') or 'unknown error'}"
-        if timeout_sec is not None and (time.time() - start) >= float(timeout_sec):
-            try:
-                stop_thread_session(db, runtime_thread_id, reason="python_repl_timeout")
-            except Exception:
-                pass
-            return "Error: Docker Python REPL timed out. The session container was stopped/reset for cleanup."
-        time.sleep(_DOCKER_EVAL_POLL_SEC)
+    return _run_docker_python_eval_request(
+        db,
+        runtime_thread_id,
+        bridge_dir,
+        payload,
+        timeout_sec,
+    )
 
 
 def _execute_bash_docker(
@@ -1622,7 +1708,7 @@ def _make_eggtools_module(eval_token: str):
             return timeout_sec
         return None
 
-    def tool(tool_name: str, **kwargs: Any) -> str:
+    def tool(tool_name: str, /, **kwargs: Any) -> str:
         args = dict(kwargs)
         return repl_bridge.call_tool(eval_token, tool_name, args, timeout_sec=_tool_timeout(args))
 
@@ -1840,6 +1926,8 @@ def stop_thread_session(db: ThreadsDB, thread_id: str, *, reason: str = "user") 
 
     provider = get_session_provider(cfg.provider)
     if provider is not None:
+        if cfg.provider == "docker" and cfg.session_id:
+            _invalidate_python_runtime_refresh_cache(_session_runtime_dir(cfg.session_id))
         return provider.stop(db, thread_id, cfg, reason=reason)
 
     append_session_lifecycle_event(

@@ -45,7 +45,7 @@ def _coerce_positive_timeout(value: Any) -> Optional[float]:
     return timeout if timeout > 0 else None
 
 
-def tool(tool_name: str, timeout: Optional[float] = None, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
+def tool(tool_name: str, /, timeout: Optional[float] = None, timeout_sec: Optional[float] = None, **kwargs: Any) -> str:
     """Call an Egg tool through the host bridge and return its string result."""
 
     bridge = _bridge_dir()

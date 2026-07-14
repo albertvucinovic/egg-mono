@@ -172,6 +172,42 @@ def test_docker_session_status_skeleton_when_available(monkeypatch, tmp_path):
     assert payload["container_name"] == status.container_name
 
 
+def _docker_refresh_cache_test_setup(db):
+    thread_id = ts.create_root_thread(db, name="refresh-cache")
+    ts.enable_thread_session(db, thread_id, provider="docker", image="python:3.12-slim")
+    cfg = ts.get_thread_session_config(db, thread_id)
+    runtime_dir = ts.eggthreads.session._session_runtime_dir(cfg.session_id)
+    cache_key = (str(runtime_dir), "default", "runtime-hash")
+    ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES.add(cache_key)
+    return thread_id, runtime_dir, cache_key
+
+
+def test_running_docker_session_does_not_invalidate_python_refresh_cache(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id, _runtime_dir, cache_key = _docker_refresh_cache_test_setup(db)
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+    monkeypatch.setattr(ts.eggthreads.session, "_write_runtime_files", lambda _path: None)
+    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *_args: False)
+
+    ts.get_or_start_docker_session(db, thread_id)
+
+    assert cache_key in ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES
+
+
+def test_restarted_docker_session_invalidates_python_refresh_cache(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    db = _make_db(tmp_path)
+    thread_id, _runtime_dir, cache_key = _docker_refresh_cache_test_setup(db)
+    monkeypatch.setattr(ts.eggthreads.session, "docker_session_available", lambda: True)
+    monkeypatch.setattr(ts.eggthreads.session, "_write_runtime_files", lambda _path: None)
+    monkeypatch.setattr(ts.eggthreads.session, "_start_docker_container", lambda *_args: True)
+
+    ts.get_or_start_docker_session(db, thread_id)
+
+    assert cache_key not in ts.eggthreads.session._DOCKER_REFRESHED_PYTHON_RUNTIMES
+
+
 def test_docker_session_mount_dir_uses_thread_working_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db = ts.ThreadsDB()

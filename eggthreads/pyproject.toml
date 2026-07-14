@@ -26,5 +26,5 @@ exclude = ["temp*"]
 
 [tool.setuptools.package-data]
 "eggthreads.web.searxng" = ["docker-compose.yml", "settings.yml", "limiter.toml", "README.md"]
-"eggthreads.session_runtime" = ["eggtools.py", "sessiond.py", "eggtool"]
+"eggthreads.session_runtime" = ["eggtools.py", "sessiond.py", "eggtool", "repl_refresh.py"]
 "eggthreads.skills" = ["*.md"]
