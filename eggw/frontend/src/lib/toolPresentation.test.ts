@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { Message } from "./store";
 import {
   correlateHiddenToolDetails,
+  getUserAnswerToolCallId,
+  getUserToolCallIds,
   resolveToolResultNames,
   toolDisplayName,
   type HiddenToolDetail,
@@ -71,6 +73,25 @@ describe("tool transcript presentation", () => {
     expect(resolved[3].name).toBeUndefined();
     expect(resolved[4].name).toBeUndefined();
     expect(messages[1].name).toBeUndefined();
+  });
+
+  it("recognizes get-user call and answer lifecycle only from durable identity metadata", () => {
+    expect(getUserToolCallIds({
+      id: "calls",
+      role: "assistant",
+      tool_calls: [
+        { id: "call-get-user", name: "get_user_message_while_preserving_llm_turn", arguments: {} },
+        { id: "call-bash", name: "bash", arguments: {} },
+      ],
+    })).toEqual(["call-get-user"]);
+    expect(getUserAnswerToolCallId({
+      id: "answer",
+      role: "user",
+      content: "Continue",
+      consumed_by_tool_name: "get_user_message_while_preserving_llm_turn",
+      consumed_by_tool_call_id: "call-get-user",
+    })).toBe("call-get-user");
+    expect(getUserAnswerToolCallId({ id: "ordinary", role: "user", content: "Continue" })).toBe("");
   });
 
   it("uses stable identity instead of a bare tool placeholder", () => {

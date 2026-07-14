@@ -98,9 +98,30 @@ export function reconcileTranscriptTail(
   previous: TranscriptPage | undefined,
 ): TranscriptPage {
   if (!previous) return fetched;
-  const fetchedIds = new Set(fetched.items.map((message) => message.id).filter(Boolean));
+  // A stale fetch may already contain a message's msg.create projection while
+  // still predating a live msg.edit for the same stable ID. Preserve the
+  // event-installed value in the fetched position until the snapshot cursor
+  // covers that newer event; ID deduplication alone cannot distinguish these
+  // two versions of one message.
+  const newerPreviousById = new Map(
+    previous.items
+      .filter((message) => (
+        Boolean(message.id)
+        && Number.isSafeInteger(message.event_seq)
+        && message.event_seq! > fetched.snapshot_cursor
+      ))
+      .map((message) => [message.id, message]),
+  );
+  let replacedFetchedVersion = false;
+  const fetchedItems = fetched.items.map((message) => {
+    const newer = message.id ? newerPreviousById.get(message.id) : undefined;
+    if (!newer) return message;
+    replacedFetchedVersion = true;
+    return newer;
+  });
+  const fetchedIds = new Set(fetchedItems.map((message) => message.id).filter(Boolean));
   const fetchedOperations = new Set(
-    fetched.items.map(operationDedupKey).filter((key): key is string => Boolean(key)),
+    fetchedItems.map(operationDedupKey).filter((key): key is string => Boolean(key)),
   );
   const preserved = previous.items.filter((message) => {
     if (message.id && fetchedIds.has(message.id)) return false;
@@ -113,12 +134,15 @@ export function reconcileTranscriptTail(
     // authoritative and the retained envelope can be discarded.
     return Number.isSafeInteger(message.event_seq) && message.event_seq! > fetched.snapshot_cursor;
   });
-  if (!preserved.length) return fetched;
-  const commands = preserved.filter(isCommandClientMessage);
-  const otherPreserved = preserved.filter((message) => !isCommandClientMessage(message));
+  if (!preserved.length) {
+    return replacedFetchedVersion ? { ...fetched, items: fetchedItems } : fetched;
+  }
   return {
     ...fetched,
-    items: mergeMessagesByTimestamp([...fetched.items, ...otherPreserved], commands),
+    // Event-installed/edit-patched messages already carry canonical timestamps.
+    // Place all preserved entries at that chronology rather than appending a
+    // get-user answer behind later durable messages during a stale refetch.
+    items: mergeMessagesByTimestamp(fetchedItems, preserved),
   };
 }
 
@@ -219,6 +243,26 @@ export function upsertTranscriptTailMessage(
     }
     return { ...data, pages };
   });
+}
+
+/** Apply one canonical msg.edit in place without moving transcript chronology. */
+export function patchTranscriptMessage(
+  queryClient: QueryClient,
+  threadId: string,
+  messageId: string,
+  patch: Partial<Message>,
+  eventSeq: number,
+): void {
+  if (!messageId) return;
+  updateTranscript(queryClient, threadId, (data) => ({
+    ...data,
+    pages: data.pages.map((page) => ({
+      ...page,
+      items: page.items.map((message) => message.id === messageId
+        ? { ...message, ...patch, id: messageId, event_seq: eventSeq }
+        : message),
+    })),
+  }));
 }
 
 export function appendClientTranscriptMessage(

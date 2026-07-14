@@ -2217,6 +2217,121 @@ test.describe('Atomic Live Tool Continuity', () => {
   });
 });
 
+test.describe('Get-user lifecycle', () => {
+  const getUserTool = 'get_user_message_while_preserving_llm_turn';
+
+  test('renders pending, answered, manager, interrupted, reload, and multi-tool states by durable identity', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'get-user-lifecycle-thread';
+    const messages = [
+      { id: 'get-user-request', role: 'user', content: 'ask for input' },
+      {
+        id: 'get-user-calls', role: 'assistant', content: '',
+        tool_calls: [
+          { id: 'call-get-user-one', name: getUserTool, arguments: { assistant_note: 'Which option?' } },
+          { id: 'call-bash-sibling', name: 'bash', arguments: { script: 'echo sibling' } },
+          { id: 'call-get-user-two', name: getUserTool, arguments: { assistant_note: 'Manager decision?' } },
+          { id: 'call-get-user-interrupted', name: getUserTool, arguments: { assistant_note: 'Interrupt me?' } },
+          { id: 'call-get-user-pending', name: getUserTool, arguments: { assistant_note: 'Still pending?' } },
+        ],
+      },
+      { id: 'get-user-note-one', role: 'assistant', content: 'Which option?', answer_user_preserve_turn: true, tool_call_id: 'call-get-user-one' },
+      {
+        id: 'get-user-answer-one', role: 'user', content: 'Option A',
+        consumed_by_tool_name: getUserTool, consumed_by_tool_call_id: 'call-get-user-one',
+      },
+      { id: 'get-user-result-one', role: 'tool', name: getUserTool, tool_call_id: 'call-get-user-one', content: 'Option A' },
+      { id: 'sibling-result', role: 'tool', name: 'bash', tool_call_id: 'call-bash-sibling', content: 'SIBLING_RESULT' },
+      { id: 'get-user-note-two', role: 'assistant', content: 'Manager decision?', answer_user_preserve_turn: true, tool_call_id: 'call-get-user-two' },
+      {
+        id: 'get-user-answer-two', role: 'user', content: 'Continue Phase 6', origin: 'manager_message', from_thread_id: 'manager-thread',
+        consumed_by_tool_name: getUserTool, consumed_by_tool_call_id: 'call-get-user-two',
+      },
+      { id: 'get-user-result-two', role: 'tool', name: getUserTool, tool_call_id: 'call-get-user-two', content: 'Continue Phase 6' },
+      { id: 'get-user-note-interrupted', role: 'assistant', content: 'Interrupt me?', answer_user_preserve_turn: true, tool_call_id: 'call-get-user-interrupted' },
+      { id: 'get-user-result-interrupted', role: 'tool', name: getUserTool, tool_call_id: 'call-get-user-interrupted', content: 'User interrupted get_user_message_while_preserving_llm_turn.' },
+      { id: 'get-user-note-pending', role: 'assistant', content: 'Still pending?', answer_user_preserve_turn: true, tool_call_id: 'call-get-user-pending' },
+    ];
+    await mockThreadShell(page, threadId, { messages });
+    await page.goto(`/${threadId}`);
+    await page.reload();
+    const chat = page.getByTestId('chat-panel');
+    const select = page.locator('select[title="Transcript display verbosity"]');
+
+    for (const verbosity of ['max', 'medium', 'min'] as const) {
+      await select.selectOption(verbosity);
+      await expect(chat.getByText('Option A', { exact: true }).first()).toBeVisible();
+      await expect(chat.getByText('Continue Phase 6', { exact: true }).first()).toBeVisible();
+      await expect(chat.getByText('Which option?', { exact: true }).first()).toBeVisible();
+      await expect(chat.getByText('Manager decision?', { exact: true }).first()).toBeVisible();
+      await expect(chat.getByText('Still pending?', { exact: true }).first()).toBeVisible();
+      if (verbosity !== 'min') await expect(chat).toContainText('SIBLING_RESULT');
+    }
+
+    await select.selectOption('min');
+    const userCards = chat.locator('[data-message-role="user"]');
+    await expect(userCards.filter({ hasText: 'Option A' })).toHaveCount(1);
+    await expect(userCards.filter({ hasText: 'Continue Phase 6' })).toHaveCount(1);
+    const hiddenTools = page.getByTestId('hidden-details').getByRole('button');
+    await expect(hiddenTools.filter({ hasText: getUserTool })).toHaveCount(3);
+    await expect(hiddenTools.filter({ hasText: 'bash' })).toHaveCount(2);
+  });
+
+  test('stops only the answered live get-user card when canonical edit arrives', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem('eggw.apiToken', 'test-eggw-browser-token-' + 'a'.repeat(48));
+    });
+    const threadId = 'get-user-live-terminal-thread';
+    await mockThreadShell(page, threadId, { messages: [{ id: 'before-get-user', role: 'user', content: 'start' }] });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/events`);
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/state`);
+    let getUserAnswered = false;
+    await page.route(new RegExp(`/api/threads/${threadId}/state(?:\\?.*)?$`), (route) => route.fulfill({
+      status: 200, headers: mockApiHeaders,
+      json: { state: 'running', streaming_kind: 'tool', streaming_invoke_id: 'invoke-get-user-live', live_replay_cursor: 0, active_get_user_wait: !getUserAnswered },
+    }));
+    await page.route(new RegExp(`/api/threads/${threadId}/events(?:\\?.*)?$`), async (route) => {
+      const ts = new Date().toISOString();
+      const envelope = (eventSeq: number, type: string, payload: Record<string, unknown>, msgId: string | null = null) => JSON.stringify({
+        event_id: `get-user-live-${eventSeq}`, event_seq: eventSeq, type, ts, msg_id: msgId,
+        invoke_id: 'invoke-get-user-live', chunk_seq: null, payload,
+      });
+      const block = (eventSeq: number, type: string, payload: Record<string, unknown>, msgId: string | null = null) => [
+        `id: ${eventSeq}`, `event: ${type}`, `data: ${envelope(eventSeq, type, payload, msgId)}`, '',
+      ];
+      getUserAnswered = true;
+      await route.fulfill({
+        status: 200, headers: { ...mockApiHeaders, 'content-type': 'text/event-stream' },
+        body: [
+          ...block(1, 'stream.open', { stream_kind: 'tool' }),
+          ...block(2, 'tool_call.execution_started', { tool_call_id: 'call-get-user-live', name: getUserTool, arguments: '{"assistant_note":"Choose"}' }),
+          ...block(3, 'tool_call.execution_started', { tool_call_id: 'call-bash-live', name: 'bash', arguments: '{"script":"sleep 30"}' }),
+          ...block(4, 'msg.create', { role: 'user', content: 'Answer from manager', origin: 'manager_message' }, 'answer-live'),
+          ...block(5, 'msg.edit', {
+            content: 'Answer from manager', no_api: true, keep_user_turn: true,
+            consumed_by_tool_name: getUserTool, consumed_by_tool_call_id: 'call-get-user-live',
+          }, 'answer-live'),
+          '',
+        ].join('\n'),
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    await expect(page.getByTestId('chat-panel').locator('[data-message-role="user"]', { hasText: 'Answer from manager' })).toHaveCount(1);
+    const outputs = page.getByTestId('streaming-tool-output').locator('..').locator('..');
+    await expect(outputs.filter({ hasText: getUserTool })).toContainText('finished');
+    await expect(outputs.filter({ hasText: getUserTool })).not.toContainText('streaming output...');
+    const calls = page.getByTestId('streaming-tool-arguments').locator('..').locator('..');
+    await expect(calls.filter({ hasText: getUserTool })).toContainText('finished');
+    await expect(calls.filter({ hasText: getUserTool })).not.toContainText('streaming...');
+    await expect(calls.filter({ hasText: 'bash' })).toContainText('streaming...');
+    await expect(outputs.filter({ hasText: 'bash' })).toContainText('streaming output...');
+    await expect(page.getByTestId('message-composer')).toContainText('Streaming; new messages will queue...');
+  });
+});
+
 test.describe('Settings and Controls', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');

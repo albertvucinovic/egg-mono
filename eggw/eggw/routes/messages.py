@@ -408,6 +408,10 @@ def _get_messages_sync(
                 tokens=total_tokens,
                 tps=float(msg.get("tps")) if isinstance(msg.get("tps"), (int, float)) and float(msg.get("tps")) > 0 else None,
                 answer_user_preserve_turn=bool(msg.get("answer_user_preserve_turn")),
+                consumed_by_tool_call_id=msg.get("consumed_by_tool_call_id"),
+                consumed_by_tool_name=msg.get("consumed_by_tool_name"),
+                origin=msg.get("origin"),
+                from_thread_id=msg.get("from_thread_id"),
                 recovery_notice=bool(msg.get("recovery_notice")),
             ))
 

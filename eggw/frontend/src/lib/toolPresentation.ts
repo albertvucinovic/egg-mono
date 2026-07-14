@@ -37,6 +37,22 @@ export function toolDisplayName(name: unknown, id: unknown, fallback: "Tool call
   return suffix ? `${fallback} · ${suffix}` : fallback;
 }
 
+export const GET_USER_MESSAGE_TOOL_NAME = "get_user_message_while_preserving_llm_turn";
+
+export function getUserAnswerToolCallId(message: Message): string {
+  if (message.role !== "user") return "";
+  if (message.consumed_by_tool_name !== GET_USER_MESSAGE_TOOL_NAME) return "";
+  return cleanedText(message.consumed_by_tool_call_id);
+}
+
+export function getUserToolCallIds(message: Message): string[] {
+  if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) return [];
+  return message.tool_calls
+    .filter((call: any) => toolCallName(call) === GET_USER_MESSAGE_TOOL_NAME)
+    .map((call: any) => toolCallId(call))
+    .filter(Boolean);
+}
+
 /**
  * Fill missing result names only from an exact call identity in the same
  * loaded transcript. Conflicting reused IDs are deliberately left unresolved.

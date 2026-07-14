@@ -48,6 +48,10 @@ class MessageContent(BaseModel):
     tps: Optional[float] = None
     model_key: Optional[str] = None
     answer_user_preserve_turn: bool = False
+    consumed_by_tool_call_id: Optional[str] = None
+    consumed_by_tool_name: Optional[str] = None
+    origin: Optional[str] = None
+    from_thread_id: Optional[str] = None
     recovery_notice: bool = False
 
 

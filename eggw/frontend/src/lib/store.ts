@@ -34,6 +34,10 @@ export interface Message {
   tokens?: number;     // Per-message token count
   tps?: number;
   answer_user_preserve_turn?: boolean;
+  consumed_by_tool_call_id?: string;
+  consumed_by_tool_name?: string;
+  origin?: string;
+  from_thread_id?: string;
   recovery_notice?: boolean;
   command_name?: string;
   command_data?: Record<string, any>;
@@ -68,6 +72,7 @@ export interface StreamingToolOutput {
   suppressedFrames: number;
   summary?: string;
   startedAtMs?: number;
+  finished?: boolean;
   timeout?: StreamingToolTimeout;
 }
 
@@ -95,7 +100,7 @@ export interface ThreadStreamingState {
   streamingStartedAtMs: number | null;
   streamingProviderRequest: StreamingProviderRequest | null;
   activeUserCommand: ActiveUserCommand | null;
-  streamingToolCalls: Record<string, { name: string }>;
+  streamingToolCalls: Record<string, { name: string; finished?: boolean }>;
   streamingToolOutputs: Record<string, StreamingToolOutput>;
 }
 
@@ -184,12 +189,12 @@ interface AppState {
   patchThreadStreaming: (threadId: string, patch: Partial<ThreadStreamingState>) => void;
   resetThreadStreaming: (threadId: string) => void;
   setThreadConnection: (threadId: string, status: SSEConnectionStatus) => void;
-  setThreadStreamingToolCalls: (threadId: string, calls: Record<string, { name: string }>) => void;
+  setThreadStreamingToolCalls: (threadId: string, calls: Record<string, { name: string; finished?: boolean }>) => void;
   upsertThreadStreamingToolCall: (threadId: string, tcId: string, name: string) => void;
   setThreadStreamingToolOutputs: (threadId: string, outputs: Record<string, StreamingToolOutput>) => void;
   upsertThreadStreamingToolOutput: (threadId: string, id: string, name: string, suppressed?: boolean, summary?: string) => void;
   markThreadStreamingToolStarted: (threadId: string, id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => void;
-  clearThreadStreamingToolTimeout: (threadId: string, id: string) => void;
+  markThreadStreamingToolFinished: (threadId: string, id: string) => void;
   removeThreadStreamingToolCall: (threadId: string, id: string) => void;
   removeThreadStreamingTool: (threadId: string, id: string) => void;
   clearThreadStreamingAssistant: (threadId: string) => void;
@@ -388,19 +393,30 @@ export const useAppStore = create<AppState>((set) => ({
         },
       };
     }),
-  clearThreadStreamingToolTimeout: (threadId, id) =>
+  markThreadStreamingToolFinished: (threadId, id) =>
     set((state) => {
-      const streaming = state.streamingByThread[threadId] || emptyThreadStreamingState();
-      const existing = streaming.streamingToolOutputs[id];
-      if (!existing?.timeout) return {};
-      const { timeout: _timeout, ...withoutTimeout } = existing;
+      const streaming = state.streamingByThread[threadId];
+      if (!streaming) return state;
+      const existingCall = streaming.streamingToolCalls[id];
+      const existingOutput = streaming.streamingToolOutputs[id];
+      if (!existingCall && !existingOutput) return state;
+      const outputAlreadyFinished = !existingOutput || (existingOutput.finished && !existingOutput.timeout);
+      if (existingCall?.finished && outputAlreadyFinished) return state;
+      const streamingToolCalls = existingCall
+        ? { ...streaming.streamingToolCalls, [id]: { ...existingCall, finished: true } }
+        : streaming.streamingToolCalls;
+      let streamingToolOutputs = streaming.streamingToolOutputs;
+      if (existingOutput) {
+        const { timeout: _timeout, ...withoutTimeout } = existingOutput;
+        streamingToolOutputs = {
+          ...streaming.streamingToolOutputs,
+          [id]: { ...withoutTimeout, finished: true },
+        };
+      }
       return {
         streamingByThread: {
           ...state.streamingByThread,
-          [threadId]: {
-            ...streaming,
-            streamingToolOutputs: { ...streaming.streamingToolOutputs, [id]: withoutTimeout },
-          },
+          [threadId]: { ...streaming, streamingToolCalls, streamingToolOutputs },
         },
       };
     }),

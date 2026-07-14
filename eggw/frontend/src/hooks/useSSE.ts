@@ -5,12 +5,12 @@ import { createEventSource, fetchThreadState, type AuthenticatedEventSource } fr
 import { useAppStore } from "@/lib/store";
 import { evictStreamingBufferForThread, streamingBufferForThread, streamingBufferThreadIds } from "@/lib/streamingBuffer";
 import { applyStreamingDelta } from "@/lib/streamingDelta";
-import { toolDisplayName } from "@/lib/toolPresentation";
+import { getUserAnswerToolCallId, toolDisplayName } from "@/lib/toolPresentation";
 import { messageFromCreateEvent } from "@/lib/messageEvents";
 import { cleanUpEvictedLiveTools, clearLiveToolsForThread, hasRetainedLiveToolsForThread, liveToolRegistryForThread } from "@/lib/liveToolContinuity";
 import { useQueryClient } from "@tanstack/react-query";
 import { createThreadEventSyncState, reduceThreadEvent, type ThreadEventSyncState } from "@/lib/eventSync";
-import { transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor, upsertTranscriptTailMessage } from "@/lib/transcript";
+import { patchTranscriptMessage, transcriptInfiniteQueryOptions, transcriptQueryKey, transcriptSnapshotCursor, upsertTranscriptTailMessage } from "@/lib/transcript";
 import { emptyThreadStreamingState } from "@/lib/store";
 import { canEvictThreadEphemeralState } from "@/lib/threadEphemeral";
 
@@ -75,7 +75,7 @@ export function useSSE(threadId: string | null) {
   const queryClient = useQueryClient();
   const upsertThreadStreamingToolOutput = useAppStore((state) => state.upsertThreadStreamingToolOutput);
   const markThreadStreamingToolStarted = useAppStore((state) => state.markThreadStreamingToolStarted);
-  const clearThreadStreamingToolTimeout = useAppStore((state) => state.clearThreadStreamingToolTimeout);
+  const markThreadStreamingToolFinished = useAppStore((state) => state.markThreadStreamingToolFinished);
   const removeThreadStreamingToolCall = useAppStore((state) => state.removeThreadStreamingToolCall);
   const removeThreadStreamingTool = useAppStore((state) => state.removeThreadStreamingTool);
   const clearThreadStreamingAssistant = useAppStore((state) => state.clearThreadStreamingAssistant);
@@ -92,9 +92,9 @@ export function useSSE(threadId: string | null) {
   const markStreamingToolStarted = useCallback((id: string, name: string, startedAtMs: number, timeoutSec?: number | null) => {
     if (threadId) markThreadStreamingToolStarted(threadId, id, name, startedAtMs, timeoutSec);
   }, [markThreadStreamingToolStarted, threadId]);
-  const clearStreamingToolTimeout = useCallback((id: string) => {
-    if (threadId) clearThreadStreamingToolTimeout(threadId, id);
-  }, [clearThreadStreamingToolTimeout, threadId]);
+  const markStreamingToolFinished = useCallback((id: string) => {
+    if (threadId) markThreadStreamingToolFinished(threadId, id);
+  }, [markThreadStreamingToolFinished, threadId]);
   const removeStreamingTool = useCallback((id: string) => {
     if (!threadId) return;
     streamingBufferForThread(threadId).removeTool(id);
@@ -334,6 +334,8 @@ export function useSSE(threadId: string | null) {
         // any subsequent lifecycle event can remove its live representation.
         upsertTranscriptTailMessage(queryClient, threadId, message);
         reconcileDurableToolMessage(message);
+        const answeredGetUserId = getUserAnswerToolCallId(message);
+        if (answeredGetUserId) markStreamingToolFinished(answeredGetUserId);
         addSystemLog(`Message created: ${message.role}`, "info");
         // The event carries canonical identity/content. Refetch only to fill
         // projection-derived metadata such as content_text, tokens, and TPS.
@@ -341,6 +343,29 @@ export function useSSE(threadId: string | null) {
         queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
       } catch (err) {
         console.error("Failed to parse msg.create:", err);
+      }
+    });
+
+    // Canonical edits retain the original message position. Get-user answers
+    // use this event to acquire display-only consumed-by identity after their
+    // normal user msg.create, while provider-facing semantics remain no_api.
+    addThreadEventListener("msg.edit", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const payload = data.payload || {};
+        if (typeof data.msg_id === "string" && data.msg_id) {
+          patchTranscriptMessage(queryClient, threadId, data.msg_id, payload, Number(data.event_seq));
+        }
+        const answeredGetUserId = getUserAnswerToolCallId({
+          id: String(data.msg_id || ""),
+          role: "user",
+          ...payload,
+        });
+        if (answeredGetUserId) markStreamingToolFinished(answeredGetUserId);
+        refreshMessagesNow();
+        queryClient.invalidateQueries({ queryKey: ["threadState", threadId] });
+      } catch (err) {
+        console.error("Failed to parse msg.edit:", err);
       }
     });
 
@@ -473,7 +498,7 @@ export function useSSE(threadId: string | null) {
         const payload = data.payload || {};
         const toolId = String(payload.tool_call_id || payload.id || "").trim();
         if (toolId) {
-          clearStreamingToolTimeout(toolId);
+          markStreamingToolFinished(toolId);
         }
         addSystemLog("Tool finished", "info");
         queryClient.invalidateQueries({ queryKey: ["toolCalls", threadId] });
@@ -557,6 +582,10 @@ export function useSSE(threadId: string | null) {
         const data = JSON.parse(e.data);
         const payload = data.payload || {};
         const purpose = payload.purpose || "";
+        if (purpose === "tool" && typeof payload.old_invoke_id === "string") {
+          const streaming = useAppStore.getState().streamingByThread[threadId];
+          Object.keys(streaming?.streamingToolOutputs || {}).forEach(markStreamingToolFinished);
+        }
         if (purpose === "continue") {
           addSystemLog("Continue applied - refreshing", "info");
           refreshMessagesNow();
@@ -575,7 +604,7 @@ export function useSSE(threadId: string | null) {
     refreshMessagesNow,
     upsertStreamingToolOutput,
     markStreamingToolStarted,
-    clearStreamingToolTimeout,
+    markStreamingToolFinished,
     removeStreamingTool,
     liveToolsForThread,
     clearRetainedTools,

@@ -31,6 +31,8 @@ import {
 import { formatStreamingTps, formatTokenCount } from "@/lib/tps";
 import {
   correlateHiddenToolDetails,
+  getUserAnswerToolCallId,
+  getUserToolCallIds,
   resolveToolResultNames,
   toolCallId,
   toolCallName,
@@ -1136,6 +1138,7 @@ function renderMessagesForVerbosity(
   }
 
   const nodes: ReactNode[] = [];
+  const answeredGetUserIds = new Set(displayMessages.map(getUserAnswerToolCallId).filter(Boolean));
   let hidden: HiddenDetail[] = [];
   const flushHidden = (key: string) => {
     if (!hidden.length) return;
@@ -1151,7 +1154,12 @@ function renderMessagesForVerbosity(
       return;
     }
 
-    const hiddenDetails = collectHiddenDetailsForMessage(msg);
+    const getUserCallIds = new Set(getUserToolCallIds(msg));
+    const hiddenDetails = collectHiddenDetailsForMessage(msg).filter((detail) => !(
+      detail.tool_call_id
+      && answeredGetUserIds.has(detail.tool_call_id)
+      && (getUserCallIds.has(detail.tool_call_id) || detail.source === "tool_result" || detail.source === "tool_call_stream")
+    ));
     const hasVisibleConversationBody = (msg.role === "user" || msg.role === "assistant") && Boolean(contentToPlainText(msg.content, msg.content_text || "").trim());
     if (msg.role === "assistant" && msg.answer_user_preserve_turn && hasVisibleConversationBody) {
       // A preserve-turn note is inserted while its ordinary tool lifecycle is
@@ -2054,7 +2062,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 <span className="eggw-message-meta font-mono">
                                   {tcId.slice(-8)}
                                 </span>
-                                <span className="eggw-streaming-label">streaming...</span>
+                                <span className="eggw-streaming-label">{tc.finished ? "finished" : "streaming..."}</span>
                                 {displayVerbosity === "medium" && (
                                   <span
                                     ref={(element) => { streamingToolCallPreviewRefs.current[tcId] = element; }}
@@ -2087,7 +2095,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                       <div className="mt-2 space-y-2">
                         {Object.entries(visibleStreamingToolOutputs).map(([toolId, tool]) => {
                           const timeoutText = toolTimeoutCountdown(tool.timeout, nowMs);
-                          const elapsedText = tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
+                          const elapsedText = !tool.finished && tool.startedAtMs ? elapsedSecondsText(tool.startedAtMs, nowMs, "running") : null;
                           return (
                             <details
                               key={toolId}
@@ -2099,7 +2107,7 @@ export function ChatPanel({ threadId, showBorders = true, streamingTps = null, o
                                 <span className="eggw-message-meta font-mono">
                                   {toolId.slice(-8)}
                                 </span>
-                                <span className="eggw-streaming-label">streaming output...</span>
+                                <span className="eggw-streaming-label">{tool.finished ? "finished" : "streaming output..."}</span>
                                 {displayVerbosity === "medium" && (
                                   <span className="eggw-attachment-meta">
                                     expand to inspect output

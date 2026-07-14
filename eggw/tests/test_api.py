@@ -588,6 +588,31 @@ class TestThreadOperations:
         assert payload.get("keep_user_turn") is not True
         assert payload.get("no_api") is not True
 
+        # The async get-user tool later edits this same durable User message.
+        # EggW's transcript projection must retain the display-only lifecycle
+        # metadata even though provider semantics hide/consume the answer.
+        from eggthreads import edit_message
+        edit_message(
+            core_state.db,
+            thread_id,
+            answer_msg_id,
+            "Continue with the next slice.",
+            extra={
+                "no_api": True,
+                "keep_user_turn": True,
+                "consumed_by_tool_call_id": tool_call_id,
+                "consumed_by_tool_name": get_user_tool_name,
+            },
+        )
+        projected_answer = next(
+            message for message in client.get(f"/api/threads/{thread_id}/messages").json()
+            if message["id"] == answer_msg_id
+        )
+        assert projected_answer["role"] == "user"
+        assert projected_answer["content"] == "Continue with the next slice."
+        assert projected_answer["consumed_by_tool_call_id"] == tool_call_id
+        assert projected_answer["consumed_by_tool_name"] == get_user_tool_name
+
         state_after_answer = client.get(f"/api/threads/{thread_id}/state").json()
         assert state_after_answer["active_get_user_wait"] is False
 
@@ -2238,6 +2263,39 @@ class TestEventStreaming:
             "chunk_seq",
             "payload",
         }
+
+    def test_consumed_get_user_edit_streams_exact_display_identity(self, client):
+        from eggthreads import append_message, edit_message
+
+        thread_id = client.post("/api/threads", json={"name": "get-user edit"}).json()["id"]
+        answer_id = append_message(core_state.db, thread_id, "user", "Continue")
+        cursor = core_state.db.max_event_seq(thread_id)
+        edit_message(
+            core_state.db,
+            thread_id,
+            answer_id,
+            "Continue",
+            extra={
+                "no_api": True,
+                "keep_user_turn": True,
+                "consumed_by_tool_call_id": "call-get-user",
+                "consumed_by_tool_name": "get_user_message_while_preserving_llm_turn",
+            },
+        )
+
+        response = self._finite_get(
+            client,
+            f"/api/threads/{thread_id}/events?after_seq={cursor}",
+        )
+        events = self._sse_events(response)
+
+        assert len(events) == 1
+        envelope = events[0]["data"]
+        assert envelope["type"] == "msg.edit"
+        assert envelope["msg_id"] == answer_id
+        assert envelope["payload"]["consumed_by_tool_call_id"] == "call-get-user"
+        assert envelope["payload"]["consumed_by_tool_name"] == "get_user_message_while_preserving_llm_turn"
+        assert envelope["payload"]["no_api"] is True
 
     def test_after_seq_precedes_last_event_id_and_reconnect_has_no_duplicates(self, client):
         from eggthreads import append_message
