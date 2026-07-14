@@ -14,15 +14,7 @@ SQLITE_PATH = Path('.egg/threads.sqlite')
 
 def _ensure_db(path: Path = SQLITE_PATH) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # An in-memory database cannot be cloned by path for worker ownership.
-    # SQLite is built in serialized mode; explicitly allow that one connection
-    # to move to a bounded tool worker while direct execute blocks its caller.
-    conn = sqlite3.connect(
-        str(path),
-        timeout=10,
-        isolation_level=None,
-        check_same_thread=str(path) != ":memory:",
-    )  # autocommit
+    conn = sqlite3.connect(str(path), timeout=10, isolation_level=None)  # autocommit
     conn.row_factory = sqlite3.Row
     # WAL for concurrency
     conn.execute("PRAGMA foreign_keys=ON;")

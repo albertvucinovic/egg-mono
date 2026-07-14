@@ -500,56 +500,101 @@ def test_execute_async_composes_upstream_cancellation_check() -> None:
     ) == "cancelled"
 
 
-def test_sync_tool_admission_cap_rejects_overload_and_recovers() -> None:
+def test_sync_tool_admission_queues_healthy_concurrency() -> None:
+    import eggthreads.tools as tools_module
+
+    registry = ToolRegistry()
+    release = threading.Event()
+    started = 0
+    started_lock = threading.Lock()
+    original_admission = tools_module._SYNC_TOOL_ADMISSION
+    tools_module._SYNC_TOOL_ADMISSION = tools_module._SyncToolAdmission(2)
+
+    def healthy(args: dict[str, object]) -> str:
+        nonlocal started
+        with started_lock:
+            started += 1
+        release.wait()
+        return str(args["value"])
+
+    registry.register("healthy", "Healthy", {"type": "object", "properties": {}}, healthy)
+
+    async def run() -> list[str]:
+        tasks = [
+            asyncio.create_task(
+                registry.execute_async(
+                    "healthy",
+                    {"value": index},
+                    tool_timeout_sec=1,
+                )
+            )
+            for index in range(6)
+        ]
+        deadline = asyncio.get_running_loop().time() + 0.5
+        while started < 2:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("initial healthy workers did not start")
+            await asyncio.sleep(0.001)
+        assert any(not task.done() for task in tasks[2:])
+        release.set()
+        return await asyncio.gather(*tasks)
+
+    try:
+        results = asyncio.run(run())
+        assert results == [str(index) for index in range(6)]
+        assert tools_module._SYNC_TOOL_ADMISSION.counts() == (0, 0)
+    finally:
+        release.set()
+        tools_module._SYNC_TOOL_ADMISSION = original_admission
+
+
+def test_sync_tool_admission_timeout_and_no_timeout_overload() -> None:
     import eggthreads.tools as tools_module
 
     registry = ToolRegistry()
     release = threading.Event()
     original_admission = tools_module._SYNC_TOOL_ADMISSION
-    tools_module._SYNC_TOOL_ADMISSION = tools_module._SyncToolAdmission(2)
+    original_wait = tools_module._SYNC_TOOL_ADMISSION_WAIT_SEC
+    tools_module._SYNC_TOOL_ADMISSION = tools_module._SyncToolAdmission(1)
+    tools_module._SYNC_TOOL_ADMISSION_WAIT_SEC = 0.02
 
-    def stuck(args: dict[str, object]) -> str:
-        release.wait()
-        return "released"
+    registry.register(
+        "stuck", "Stuck", {"type": "object", "properties": {}}, lambda args: release.wait()
+    )
+    registry.register(
+        "fast", "Fast", {"type": "object", "properties": {}}, lambda args: "fast"
+    )
 
-    registry.register("stuck", "Stuck", {"type": "object", "properties": {}}, stuck)
-    registry.register("fast", "Fast", {"type": "object", "properties": {}}, lambda args: "fast-ok")
-
-    async def run() -> tuple[list[ToolExecutionResult], str]:
-        first = asyncio.create_task(
-            registry.execute_async(
-                "stuck", {}, tool_timeout_sec=0.01, preserve_tool_result=True
-            )
-        )
-        second = asyncio.create_task(
+    async def run() -> tuple[ToolExecutionResult, ToolExecutionResult]:
+        stuck = asyncio.create_task(
             registry.execute_async(
                 "stuck", {}, tool_timeout_sec=0.01, preserve_tool_result=True
             )
         )
         await asyncio.sleep(0.02)
-        overloaded = await registry.execute_async(
-            "fast", {}, tool_timeout_sec=0.5, preserve_tool_result=True
+        timed = await registry.execute_async(
+            "fast", {}, tool_timeout_sec=0.02, preserve_tool_result=True
         )
-        assert isinstance(overloaded, ToolExecutionResult)
-        assert overloaded.reason == "overloaded"
-        release.set()
-        timed_out = await asyncio.gather(first, second)
-        deadline = asyncio.get_running_loop().time() + 0.5
-        while tools_module._SYNC_TOOL_ADMISSION.counts() != (0, 0):
-            if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError("sync admission was not released")
-            await asyncio.sleep(0.001)
-        healthy = await registry.execute_async("fast", {}, tool_timeout_sec=0.5)
-        return timed_out, healthy
+        unbounded = await registry.execute_async(
+            "fast", {}, preserve_tool_result=True
+        )
+        assert (await stuck).reason == "timeout"
+        return timed, unbounded
 
     try:
-        timed_out, healthy = asyncio.run(run())
+        timed, unbounded = asyncio.run(run())
     finally:
         release.set()
+        deadline = __import__("time").monotonic() + 0.5
+        while tools_module._SYNC_TOOL_ADMISSION.counts() != (0, 0):
+            if __import__("time").monotonic() >= deadline:
+                raise AssertionError("admission did not clean up")
+            __import__("time").sleep(0.001)
         tools_module._SYNC_TOOL_ADMISSION = original_admission
+        tools_module._SYNC_TOOL_ADMISSION_WAIT_SEC = original_wait
 
-    assert all(item.reason == "timeout" for item in timed_out)
-    assert healthy == "fast-ok"
+    assert timed.reason == "timeout"
+    assert unbounded.reason == "overloaded"
 
 
 def test_daemon_thread_cap_and_process_exit_are_safe() -> None:
@@ -566,6 +611,7 @@ def test_daemon_thread_cap_and_process_exit_are_safe() -> None:
         from eggthreads.tools import ToolExecutionResult, ToolRegistry
 
         tools_module._SYNC_TOOL_ADMISSION = tools_module._SyncToolAdmission(2)
+        tools_module._SYNC_TOOL_ADMISSION_WAIT_SEC = 0.02
         registry = ToolRegistry()
         never_release = threading.Event()
         registry.register(
@@ -596,7 +642,6 @@ def test_daemon_thread_cap_and_process_exit_are_safe() -> None:
             overloaded = await registry.execute_async(
                 "fast",
                 {},
-                tool_timeout_sec=0.5,
                 preserve_tool_result=True,
             )
             assert first.reason == second.reason == "timeout"
@@ -824,17 +869,16 @@ def test_timed_context_tool_preserves_custom_db_identity() -> None:
     ) is True
 
 
-def test_timed_context_tool_preserves_memory_db_semantics() -> None:
+def test_timed_context_tool_rejects_memory_db_without_relaxing_affinity() -> None:
     registry = ToolRegistry()
     memory_db = ts.ThreadsDB(":memory:")
     memory_db.init_schema()
-
-    thread_id = ts.create_root_thread(memory_db, name="memory-root")
+    called = False
 
     def impl(args: dict[str, object], ctx: ToolContext) -> bool:
-        assert ctx.db is memory_db
-        row = ctx.db.get_thread(thread_id)
-        return row is not None and row.name == "memory-root"
+        nonlocal called
+        called = True
+        return True
 
     registry.register(
         "memory_db_context_tool",
@@ -844,12 +888,29 @@ def test_timed_context_tool_preserves_memory_db_semantics() -> None:
         accepts_context=True,
     )
 
-    # In-memory SQLite cannot be cloned by path without changing its contents.
-    # ThreadsDB explicitly allows its serialized connection to move to this one
-    # bounded worker, preserving identity and data.
-    assert registry.execute(
+    result = registry.execute(
         "memory_db_context_tool",
         {},
         db=memory_db,
         tool_timeout_sec=1,
-    ) is True
+        preserve_tool_result=True,
+    )
+
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "unsupported"
+    assert "in-memory ThreadsDB" in result.output
+    assert called is False
+
+    errors: list[BaseException] = []
+
+    def cross_thread_probe() -> None:
+        try:
+            memory_db.conn.execute("SELECT 1")
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=cross_thread_probe)
+    thread.start()
+    thread.join()
+    assert errors
+    assert "same thread" in str(errors[0]).lower()
