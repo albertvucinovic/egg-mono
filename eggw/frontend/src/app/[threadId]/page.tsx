@@ -24,6 +24,7 @@ import { HelpDialog } from "@/components/HelpDialog";
 import { OverlayPanel } from "@/components/ui/OverlayPanel";
 import { ControlGroup, IconButton, Select, StatusChip, Switch } from "@/components/ui/primitives";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { isToggleAutoApprovalShortcut, isToggleSandboxingShortcut } from "@/lib/keyboardShortcuts";
 
 export default function ThreadPage() {
   const params = useParams();
@@ -174,6 +175,29 @@ export default function ThreadPage() {
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // Safety toggles remain available while the composer is focused. Ctrl+Alt+A/X
+    // avoid common browser/terminal shortcuts and audited Readline/tmux/Sway bindings.
+    if (!document.querySelector('[role="dialog"][aria-modal="true"]') && isToggleAutoApprovalShortcut(e)) {
+      e.preventDefault();
+      if (threadId && !autoApprovalMutation.isPending) {
+        autoApprovalMutation.mutate({
+          threadId,
+          operationId: createClientOperationId("auto-approval-shortcut"),
+          enabled: !threadSettings?.auto_approval,
+        });
+      }
+      return;
+    }
+    if (!document.querySelector('[role="dialog"][aria-modal="true"]') && isToggleSandboxingShortcut(e)) {
+      e.preventDefault();
+      if (threadId && !sandboxMutation.isPending && sandboxStatus?.user_control_enabled !== false) {
+        sandboxMutation.mutate({ threadId, operationId: createClientOperationId("sandbox-shortcut") });
+      } else if (sandboxStatus?.user_control_enabled === false) {
+        addSystemLog("User sandbox control is disabled for this thread", "error");
+      }
+      return;
+    }
+
     // Escape - Cancel streaming or blur input
     if (e.key === "Escape") {
       // Modal surfaces own Escape so dismissing them never also interrupts a stream.
@@ -290,7 +314,7 @@ export default function ThreadPage() {
         });
       }
     }
-  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router, interruptThreadStreaming]);
+  }, [queryClient, addSystemLog, showHelp, isStreaming, threadId, setComposerDraft, router, interruptThreadStreaming, autoApprovalMutation.mutate, autoApprovalMutation.isPending, sandboxMutation.mutate, sandboxMutation.isPending, threadSettings?.auto_approval, sandboxStatus?.user_control_enabled]);
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);

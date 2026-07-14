@@ -808,6 +808,51 @@ test.describe('Composer draft and autocomplete ownership', () => {
     expect(settingsRequests).toBe(2);
   });
 
+  test('keyboard shortcuts toggle safety settings while preserving the composer draft', async ({ page }) => {
+    const threadId = 'safety-shortcuts-thread';
+    await mockThreadShell(page, threadId);
+    let autoApproval = false;
+    let sandboxEnabled = false;
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/settings`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings`, async (route) => {
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: autoApproval } });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/settings/auto-approval**`, async (route, request) => {
+      autoApproval = new URL(request.url()).searchParams.get('enabled') === 'true';
+      await route.fulfill({ status: 200, headers: mockApiHeaders, json: { auto_approval: autoApproval } });
+    });
+    await page.unroute(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`);
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/sandbox`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { enabled: sandboxEnabled, effective: sandboxEnabled, available: true, user_control_enabled: true },
+      });
+    });
+    await page.route(`${TEST_API_BASE}/api/threads/${threadId}/command`, async (route, request) => {
+      expect(request.postDataJSON()).toMatchObject({ command: '/toggleSandboxing' });
+      sandboxEnabled = !sandboxEnabled;
+      await route.fulfill({
+        status: 200,
+        headers: mockApiHeaders,
+        json: { success: true, message: `Sandboxing ${sandboxEnabled ? 'ENABLED' : 'DISABLED'}` },
+      });
+    });
+
+    await page.goto(`/${threadId}`);
+    const input = page.getByTestId('message-input');
+    await expect(input).toBeVisible();
+    await input.fill('unsent draft');
+
+    await page.keyboard.press('Control+Alt+KeyA');
+    await expect(page.getByTitle('Auto-approval ON')).toBeVisible();
+    await expect(input).toHaveValue('unsent draft');
+
+    await page.keyboard.press('Control+Alt+KeyX');
+    await expect(page.getByText('Sandbox on')).toBeVisible();
+    await expect(input).toHaveValue('unsent draft');
+  });
+
   test('gates ordinary prose and renders only the latest autocomplete response', async ({ page }) => {
     const threadId = 'autocomplete-owner-thread';
     await mockThreadShell(page, threadId);

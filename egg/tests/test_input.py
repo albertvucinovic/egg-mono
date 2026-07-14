@@ -67,6 +67,37 @@ class TestHandleKeyCtrlD:
         assert result is True
 
 
+class TestHandleKeySafetyShortcuts:
+    """Tests for mnemonic Ctrl+Alt safety toggles."""
+
+    @pytest.mark.parametrize(
+        ("key", "command"),
+        [
+            ("\x1b\x01", "/toggleAutoApproval"),
+            ("\x1b\x18", "/toggleSandboxing"),
+        ],
+    )
+    def test_ctrl_alt_shortcut_runs_command_without_changing_draft(
+        self, egg_app, monkeypatch, key, command
+    ):
+        egg_app.input_panel.editor.editor.set_text("draft stays here")
+        commands = []
+        monkeypatch.setattr(egg_app, "handle_command", commands.append)
+
+        assert egg_app.handle_key(key) is True
+
+        assert commands == [command]
+        assert egg_app.input_panel.get_text() == "draft stays here"
+
+    def test_similar_escape_sequence_is_not_a_toggle(self, egg_app, monkeypatch):
+        commands = []
+        monkeypatch.setattr(egg_app, "handle_command", commands.append)
+
+        assert egg_app.handle_key("\x1bA") is True
+
+        assert commands == []
+
+
 class TestHandleKeyCtrlC:
     """Tests for Ctrl+C key handling."""
 

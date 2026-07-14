@@ -2,12 +2,7 @@
 
 import { OverlayPanel } from "./ui/OverlayPanel";
 import { Button } from "./ui/primitives";
-
-const shortcuts = [
-  ["Cancel streaming", "Esc"], ["New thread", "Ctrl+N"], ["Spawn child thread", "Ctrl+S"],
-  ["Clear input", "Ctrl+E"], ["Paste clipboard", "Ctrl+P"], ["Focus input", "i"],
-  ["Start command", "/"], ["Show this help", "?"],
-];
+import { EGGW_SHORTCUT_GROUPS } from "@/lib/keyboardShortcuts";
 
 const commands = [
   "/model, /updateAllModels, /spawnChildThread, /spawnAutoApprovedChildThread",
@@ -36,13 +31,21 @@ export function HelpDialog({ open, onClose }: { open: boolean; onClose: () => vo
       returnFocusSelector="[aria-label='Help']"
       footer={<Button variant="primary" onClick={onClose}>Close</Button>}
     >
-      <dl className="eggw-shortcut-list">
-        {shortcuts.map(([label, key]) => (
-          <div key={label} className="eggw-shortcut-row">
-            <dt>{label}</dt><dd><kbd>{key}</kbd></dd>
-          </div>
-        ))}
-      </dl>
+      {EGGW_SHORTCUT_GROUPS.map((group, index) => {
+        const headingId = `help-shortcuts-${index}`;
+        return (
+          <section key={group.title} className="eggw-command-list" aria-labelledby={headingId}>
+            <h3 id={headingId}>{group.title}</h3>
+            <dl className="eggw-shortcut-list">
+              {group.items.map(({ label, keys }) => (
+                <div key={label} className="eggw-shortcut-row">
+                  <dt>{label}</dt><dd><kbd>{keys}</kbd></dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        );
+      })}
       <section className="eggw-command-list" aria-labelledby="help-commands-heading">
         <h3 id="help-commands-heading">Commands</h3>
         {commands.map((command) => <p key={command}>{command}</p>)}

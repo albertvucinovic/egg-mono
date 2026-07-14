@@ -273,6 +273,9 @@ def render_command_registry_help(registry: CommandRegistry) -> str:
 def _core_help_handler(context: CommandContext, arg: str) -> CommandResult:
     registry = getattr(context.app, "command_registry", None) or create_default_command_registry()
     help_text = render_command_registry_help(registry)
+    shortcut_help = getattr(context.app, "keyboard_shortcuts_help", "")
+    if isinstance(shortcut_help, str) and shortcut_help.strip():
+        help_text = f"{shortcut_help.strip()}\n\n{help_text}"
     try:
         if context.log_system is not None:
             context.log_system("Help (see console for full).")
