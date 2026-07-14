@@ -5594,9 +5594,10 @@ def wait_for_threads(
     interval = _safe_float(poll_interval)
     if interval is None or not math.isfinite(interval) or interval <= 0:
         interval = 0.2
-    # Keep cancellation/deadline observation responsive even when a caller
-    # supplies an excessively large polling interval.
-    interval = min(interval, 0.2)
+    # Keep cancellation observation responsive only when there is a callback.
+    # The precomputed deadline independently bounds the final sleep.
+    if cancel_check is not None:
+        interval = min(interval, 0.2)
     finished: Dict[str, bool] = {tid: False for tid in clean_ids}
     results: Dict[str, ThreadWaitResult] = {}
     observed: Dict[str, ThreadWaitResult] = {}

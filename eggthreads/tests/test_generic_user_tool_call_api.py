@@ -476,9 +476,7 @@ def test_wait_for_threads_uses_monotonic_deadline_and_bounded_sleep(tmp_path, mo
 
     results = ts.wait_for_threads(db, [tid], timeout_sec=60, poll_interval=100)
 
-    assert len(sleeps) == 300
-    assert all(seconds <= 0.2 for seconds in sleeps)
-    assert sum(sleeps) == pytest.approx(60.0)
+    assert sleeps == [60.0]
     assert monotonic_now[0] == pytest.approx(1060.0)
     assert results[tid].finished is False
     assert results[tid].state == "running"

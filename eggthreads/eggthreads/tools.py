@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Mapping
 
 _TOOL_SUMMARY_EMIT_INTERVAL_SEC = 5.0
 _TOOL_DEADLINE_CLEANUP_GRACE_SEC = 0.25
+_MAX_LIVE_SYNC_TOOL_CALLS = 8
 
 TOOL_TIMEOUT_ARGUMENT_NAMES = (
     "timeout",
@@ -223,21 +224,62 @@ def _consume_tool_task_result(task: "asyncio.Task[Any]") -> None:
         pass
 
 
-class _DaemonThreadCall:
-    """One sync call running in its own context-propagating daemon thread.
+class _SyncToolAdmission:
+    """Bound native threads that could become permanently detached."""
 
-    A call gets no shared executor slot, so a noncooperative implementation
-    cannot starve later tools or make asyncio wait for default-executor shutdown.
-    The thread is intentionally daemonized: timeout detaches its Python work; it
-    does not and cannot prevent arbitrary late side effects from that work.
+    def __init__(self, limit: int):
+        self.limit = max(1, int(limit))
+        self._lock = threading.Lock()
+        self._live = 0
+        self._detached = 0
+
+    def try_admit(self) -> bool:
+        with self._lock:
+            if self._live >= self.limit:
+                return False
+            self._live += 1
+            return True
+
+    def mark_detached(self) -> None:
+        with self._lock:
+            self._detached += 1
+
+    def completed(self, *, was_detached: bool) -> None:
+        with self._lock:
+            self._live = max(0, self._live - 1)
+            if was_detached:
+                self._detached = max(0, self._detached - 1)
+
+    def counts(self) -> tuple[int, int]:
+        with self._lock:
+            return self._live, self._detached
+
+
+_SYNC_TOOL_ADMISSION = _SyncToolAdmission(_MAX_LIVE_SYNC_TOOL_CALLS)
+
+
+class _SyncToolOverloaded(RuntimeError):
+    pass
+
+
+class _DaemonThreadCall:
+    """One admitted sync call in a context-propagating daemon thread.
+
+    Admission bounds all live threads because every live call could become
+    detached. Detached work retains its admission slot until it really exits,
+    preventing unlimited native threads/contexts. Python still cannot kill it or
+    prevent arbitrary late side effects.
     """
 
     def __init__(self, callback: Callable[[], Any]):
+        if not _SYNC_TOOL_ADMISSION.try_admit():
+            raise _SyncToolOverloaded("Synchronous tool execution is overloaded")
         self._done = threading.Event()
         self._lock = threading.Lock()
         self._callbacks: list[Callable[["_DaemonThreadCall"], None]] = []
         self._value: Any = None
         self._error: BaseException | None = None
+        self._detached = False
         copied_context = contextvars.copy_context()
         self._thread = threading.Thread(
             target=self._run,
@@ -245,11 +287,22 @@ class _DaemonThreadCall:
             name="egg-tool-sync",
             daemon=True,
         )
-        self._thread.start()
+        try:
+            self._thread.start()
+        except BaseException:
+            _SYNC_TOOL_ADMISSION.completed(was_detached=False)
+            raise
 
     @property
     def daemon(self) -> bool:
         return self._thread.daemon
+
+    def mark_detached(self) -> None:
+        with self._lock:
+            if self._done.is_set() or self._detached:
+                return
+            self._detached = True
+            _SYNC_TOOL_ADMISSION.mark_detached()
 
     def _run(
         self,
@@ -268,6 +321,8 @@ class _DaemonThreadCall:
             callbacks = list(self._callbacks)
             self._callbacks.clear()
             self._done.set()
+            was_detached = self._detached
+        _SYNC_TOOL_ADMISSION.completed(was_detached=was_detached)
         for done_callback in callbacks:
             try:
                 done_callback(self)
@@ -334,6 +389,9 @@ async def _run_sync_in_daemon(callback: Callable[[], Any]) -> Any:
     call.add_done_callback(completed)
     try:
         return await future
+    except asyncio.CancelledError:
+        call.mark_detached()
+        raise
     finally:
         # A detached hostile thread must not retain the event loop/future through
         # its completion callback for the rest of its arbitrary lifetime.
@@ -403,6 +461,50 @@ def _tool_timeout_result(
             publication_presentation=cleanup_result.publication_presentation,
         )
     return ToolExecutionResult(header, reason="timeout")
+
+
+def _tool_overloaded_result() -> ToolExecutionResult:
+    return ToolExecutionResult(
+        "--- OVERLOADED ---\nToo many synchronous tool calls are still running; try again after they finish.",
+        reason="overloaded",
+    )
+
+
+def _clone_tool_context_db_for_worker(
+    tool_ctx: ToolContext | None,
+) -> tuple[ToolContext | None, Callable[[], None]]:
+    """Clone a file-backed ThreadsDB for one worker and return its cleanup.
+
+    Only Egg's concrete ThreadsDB is cloned. Custom DB/context objects and
+    in-memory SQLite databases preserve their existing semantics/identity.
+    """
+
+    if tool_ctx is None or tool_ctx.db is None:
+        return tool_ctx, lambda: None
+    try:
+        from .db import ThreadsDB
+    except Exception:
+        return tool_ctx, lambda: None
+    if type(tool_ctx.db) is not ThreadsDB:
+        return tool_ctx, lambda: None
+    db_path = getattr(tool_ctx.db, "path", None)
+    if db_path is None or str(db_path) == ":memory:":
+        return tool_ctx, lambda: None
+
+    worker_db = ThreadsDB(db_path)
+    worker_ctx = replace(tool_ctx, db=worker_db)
+    raw_context = dict(worker_ctx.raw)
+    if raw_context.get("db") is tool_ctx.db:
+        raw_context["db"] = worker_db
+    worker_ctx = replace(worker_ctx, raw=raw_context)
+
+    def close() -> None:
+        try:
+            worker_db.conn.close()
+        except Exception:
+            pass
+
+    return worker_ctx, close
 
 
 class ToolRegistry:
@@ -562,6 +664,19 @@ class ToolRegistry:
             return impl(args, tool_ctx)
         return impl(args)
 
+    @classmethod
+    def _implementation_call_in_worker(
+        cls,
+        impl: Callable[..., Any],
+        args: Dict[str, Any],
+        tool_ctx: ToolContext | None,
+    ) -> Any:
+        worker_ctx, close_worker_db = _clone_tool_context_db_for_worker(tool_ctx)
+        try:
+            return cls._implementation_call(impl, args, worker_ctx)
+        finally:
+            close_worker_db()
+
     @staticmethod
     def _compose_call_cancellation(
         args: Dict[str, Any],
@@ -665,7 +780,7 @@ class ToolRegistry:
                 result = self._implementation_call(impl, args, tool_ctx)
             else:
                 result = await _run_sync_in_daemon(
-                    lambda: self._implementation_call(impl, args, tool_ctx)
+                    lambda: self._implementation_call_in_worker(impl, args, tool_ctx)
                 )
             if inspect.isawaitable(result):
                 result = await result
@@ -711,9 +826,12 @@ class ToolRegistry:
             return self._present_result(result, context)
 
         started_at = time.monotonic()
-        call = _DaemonThreadCall(
-            lambda: self._implementation_call(impl, args, tool_ctx)
-        )
+        try:
+            call = _DaemonThreadCall(
+                lambda: self._implementation_call_in_worker(impl, args, tool_ctx)
+            )
+        except _SyncToolOverloaded:
+            return self._present_result(_tool_overloaded_result(), context)
         if not call.wait(timeout_sec):
             controller.cancel()
             if call.wait(_TOOL_DEADLINE_CLEANUP_GRACE_SEC):
@@ -722,6 +840,7 @@ class ToolRegistry:
                 except BaseException:
                     cleanup_result = None
             else:
+                call.mark_detached()
                 cleanup_result = None
             return self._present_result(
                 _tool_timeout_result(timeout_sec, cleanup_result),
@@ -765,13 +884,16 @@ class ToolRegistry:
         impl, args, tool_ctx = self._prepare_call(name, arguments, context)
         tool_ctx, controller = self._compose_call_cancellation(args, tool_ctx)
         timeout_sec = self._call_timeout_sec(args, tool_ctx)
-        result = await self._execute_prepared_async(
-            impl,
-            args,
-            tool_ctx,
-            controller,
-            timeout_sec,
-        )
+        try:
+            result = await self._execute_prepared_async(
+                impl,
+                args,
+                tool_ctx,
+                controller,
+                timeout_sec,
+            )
+        except _SyncToolOverloaded:
+            result = _tool_overloaded_result()
         return self._present_result(result, context)
 
 

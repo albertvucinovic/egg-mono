@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import pytest
 
 import eggthreads as ts
 from eggthreads.plugins import FunctionPlugin, ToolPluginContext, register_plugins
@@ -499,76 +500,126 @@ def test_execute_async_composes_upstream_cancellation_check() -> None:
     ) == "cancelled"
 
 
-def test_execute_async_noncooperative_sync_timeout_does_not_block_loop_shutdown() -> None:
+def test_sync_tool_admission_cap_rejects_overload_and_recovers() -> None:
+    import eggthreads.tools as tools_module
+
     registry = ToolRegistry()
-    started = threading.Event()
-    never_release = threading.Event()
+    release = threading.Event()
+    original_admission = tools_module._SYNC_TOOL_ADMISSION
+    tools_module._SYNC_TOOL_ADMISSION = tools_module._SyncToolAdmission(2)
 
     def stuck(args: dict[str, object]) -> str:
-        started.set()
-        never_release.wait()
-        return "unreachable"
-
-    registry.register(
-        "never_returns",
-        "Never returns",
-        {"type": "object", "properties": {}},
-        stuck,
-    )
-
-    started_at = __import__("time").monotonic()
-    result = asyncio.run(
-        registry.execute_async(
-            "never_returns",
-            {},
-            tool_timeout_sec=0.01,
-            preserve_tool_result=True,
-        )
-    )
-    elapsed = __import__("time").monotonic() - started_at
-
-    assert started.is_set()
-    assert isinstance(result, ToolExecutionResult)
-    assert result.reason == "timeout"
-    assert elapsed < 0.75
-
-
-def test_stuck_sync_tools_do_not_starve_later_sync_tool() -> None:
-    registry = ToolRegistry()
-    never_release = threading.Event()
-
-    def stuck(args: dict[str, object]) -> str:
-        never_release.wait()
-        return "unreachable"
+        release.wait()
+        return "released"
 
     registry.register("stuck", "Stuck", {"type": "object", "properties": {}}, stuck)
     registry.register("fast", "Fast", {"type": "object", "properties": {}}, lambda args: "fast-ok")
 
     async def run() -> tuple[list[ToolExecutionResult], str]:
-        timed_out = await asyncio.gather(
-            *[
-                registry.execute_async(
-                    "stuck",
-                    {},
-                    tool_timeout_sec=0.01,
-                    preserve_tool_result=True,
-                )
-                for _ in range(40)
-            ]
+        first = asyncio.create_task(
+            registry.execute_async(
+                "stuck", {}, tool_timeout_sec=0.01, preserve_tool_result=True
+            )
         )
-        fast = await asyncio.wait_for(
-            registry.execute_async("fast", {}, tool_timeout_sec=0.5),
-            timeout=0.75,
+        second = asyncio.create_task(
+            registry.execute_async(
+                "stuck", {}, tool_timeout_sec=0.01, preserve_tool_result=True
+            )
         )
-        return timed_out, fast
+        await asyncio.sleep(0.02)
+        overloaded = await registry.execute_async(
+            "fast", {}, tool_timeout_sec=0.5, preserve_tool_result=True
+        )
+        assert isinstance(overloaded, ToolExecutionResult)
+        assert overloaded.reason == "overloaded"
+        release.set()
+        timed_out = await asyncio.gather(first, second)
+        deadline = asyncio.get_running_loop().time() + 0.5
+        while tools_module._SYNC_TOOL_ADMISSION.counts() != (0, 0):
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("sync admission was not released")
+            await asyncio.sleep(0.001)
+        healthy = await registry.execute_async("fast", {}, tool_timeout_sec=0.5)
+        return timed_out, healthy
 
-    started_at = __import__("time").monotonic()
-    timed_out, fast = asyncio.run(run())
-    elapsed = __import__("time").monotonic() - started_at
+    try:
+        timed_out, healthy = asyncio.run(run())
+    finally:
+        release.set()
+        tools_module._SYNC_TOOL_ADMISSION = original_admission
 
-    assert all(isinstance(item, ToolExecutionResult) and item.reason == "timeout" for item in timed_out)
-    assert fast == "fast-ok"
-    assert elapsed < 1.0
+    assert all(item.reason == "timeout" for item in timed_out)
+    assert healthy == "fast-ok"
+
+
+def test_daemon_thread_cap_and_process_exit_are_safe() -> None:
+    import subprocess
+    import sys
+    import textwrap
+
+    package_root = str(__import__("pathlib").Path(__file__).resolve().parents[1])
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+        import eggthreads.tools as tools_module
+        from eggthreads.tools import ToolExecutionResult, ToolRegistry
+
+        tools_module._SYNC_TOOL_ADMISSION = tools_module._SyncToolAdmission(2)
+        registry = ToolRegistry()
+        never_release = threading.Event()
+        registry.register(
+            "stuck",
+            "Stuck",
+            {"type": "object", "properties": {}},
+            lambda args: never_release.wait(),
+        )
+        registry.register(
+            "fast",
+            "Fast",
+            {"type": "object", "properties": {}},
+            lambda args: "fast-ok",
+        )
+
+        async def main():
+            first, second = await asyncio.gather(
+                *[
+                    registry.execute_async(
+                        "stuck",
+                        {},
+                        tool_timeout_sec=0.01,
+                        preserve_tool_result=True,
+                    )
+                    for _ in range(2)
+                ]
+            )
+            overloaded = await registry.execute_async(
+                "fast",
+                {},
+                tool_timeout_sec=0.5,
+                preserve_tool_result=True,
+            )
+            assert first.reason == second.reason == "timeout"
+            assert isinstance(overloaded, ToolExecutionResult)
+            assert overloaded.reason == "overloaded"
+            assert tools_module._SYNC_TOOL_ADMISSION.counts() == (2, 2)
+
+        asyncio.run(main())
+        print("bounded-and-exited", flush=True)
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**__import__("os").environ, "PYTHONPATH": package_root},
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "bounded-and-exited"
 
 
 def test_execute_async_sync_tool_propagates_contextvars() -> None:
@@ -601,13 +652,16 @@ def test_execute_direct_enforces_sync_tool_deadline() -> None:
     )
 
     started_at = __import__("time").monotonic()
-    result = registry.execute(
-        "direct_stuck_sync",
-        {},
-        tool_timeout_sec=0.01,
-        preserve_tool_result=True,
-    )
-    elapsed = __import__("time").monotonic() - started_at
+    try:
+        result = registry.execute(
+            "direct_stuck_sync",
+            {},
+            tool_timeout_sec=0.01,
+            preserve_tool_result=True,
+        )
+        elapsed = __import__("time").monotonic() - started_at
+    finally:
+        never_release.set()
 
     assert isinstance(result, ToolExecutionResult)
     assert result.reason == "timeout"
@@ -705,47 +759,97 @@ def test_timeout_result_does_not_contain_interrupted_text() -> None:
     assert "INTERRUPTED" not in result.output
 
 
-def test_daemon_thread_bridge_is_process_exit_safe() -> None:
-    import subprocess
-    import sys
-    import textwrap
 
-    package_root = str(__import__("pathlib").Path(__file__).resolve().parents[1])
-    script = textwrap.dedent(
-        """
-        import asyncio
-        import threading
-        from eggthreads.tools import ToolRegistry
+def test_timed_context_tool_gets_worker_owned_sqlite_connection(tmp_path) -> None:
+    db = ts.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    thread_id = ts.create_root_thread(db, name="root")
+    registry = ToolRegistry()
+    original_connection = db.conn
+    seen: dict[str, object] = {}
 
-        registry = ToolRegistry()
-        never_release = threading.Event()
-        registry.register(
-            "stuck",
-            "Stuck",
-            {"type": "object", "properties": {}},
-            lambda args: never_release.wait(),
-        )
-        result = asyncio.run(
-            registry.execute_async(
-                "stuck",
-                {},
-                tool_timeout_sec=0.01,
-                preserve_tool_result=True,
-            )
-        )
-        assert result.reason == "timeout"
-        print("exited-loop", flush=True)
-        """
+    def impl(args: dict[str, object], ctx: ToolContext) -> str:
+        seen["db"] = ctx.db
+        assert isinstance(ctx.db, ts.ThreadsDB)
+        row = ctx.db.get_thread(thread_id)
+        assert row is not None
+        return row.name or ""
+
+    registry.register(
+        "sqlite_context_tool",
+        "SQLite context tool",
+        {"type": "object", "properties": {}},
+        impl,
+        accepts_context=True,
     )
 
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        env={**__import__("os").environ, "PYTHONPATH": package_root},
-        capture_output=True,
-        text=True,
-        timeout=2,
-        check=False,
+    result = registry.execute(
+        "sqlite_context_tool",
+        {},
+        db=db,
+        thread_id=thread_id,
+        tool_timeout_sec=1,
     )
 
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == "exited-loop"
+    assert result == "root"
+    worker_db = seen["db"]
+    assert isinstance(worker_db, ts.ThreadsDB)
+    assert worker_db is not db
+    assert worker_db.conn is not original_connection
+    with pytest.raises(Exception):
+        worker_db.conn.execute("SELECT 1")
+    assert db.conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_timed_context_tool_preserves_custom_db_identity() -> None:
+    registry = ToolRegistry()
+    custom_db = object()
+
+    def impl(args: dict[str, object], ctx: ToolContext) -> bool:
+        return ctx.db is custom_db
+
+    registry.register(
+        "custom_db_context_tool",
+        "Custom DB context tool",
+        {"type": "object", "properties": {}},
+        impl,
+        accepts_context=True,
+    )
+
+    assert registry.execute(
+        "custom_db_context_tool",
+        {},
+        db=custom_db,
+        tool_timeout_sec=1,
+    ) is True
+
+
+def test_timed_context_tool_preserves_memory_db_semantics() -> None:
+    registry = ToolRegistry()
+    memory_db = ts.ThreadsDB(":memory:")
+    memory_db.init_schema()
+
+    thread_id = ts.create_root_thread(memory_db, name="memory-root")
+
+    def impl(args: dict[str, object], ctx: ToolContext) -> bool:
+        assert ctx.db is memory_db
+        row = ctx.db.get_thread(thread_id)
+        return row is not None and row.name == "memory-root"
+
+    registry.register(
+        "memory_db_context_tool",
+        "Memory DB context tool",
+        {"type": "object", "properties": {}},
+        impl,
+        accepts_context=True,
+    )
+
+    # In-memory SQLite cannot be cloned by path without changing its contents.
+    # ThreadsDB explicitly allows its serialized connection to move to this one
+    # bounded worker, preserving identity and data.
+    assert registry.execute(
+        "memory_db_context_tool",
+        {},
+        db=memory_db,
+        tool_timeout_sec=1,
+    ) is True
