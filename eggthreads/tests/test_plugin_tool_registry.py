@@ -279,3 +279,211 @@ def test_tool_execution_result_unwraps_by_default_and_can_be_preserved() -> None
 
     preserved = registry.execute("structured_tool", {}, preserve_tool_result=True)
     assert preserved == ToolExecutionResult("structured-output", reason="timeout", streamed=True)
+
+
+def test_execute_async_deadline_detaches_noncooperative_sync_tool() -> None:
+    registry = ToolRegistry()
+    release = threading.Event()
+    started = threading.Event()
+
+    def impl(args: dict[str, object]) -> str:
+        started.set()
+        release.wait()
+        return "too-late"
+
+    registry.register(
+        "stuck_sync_tool",
+        "Stuck sync tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    async def run() -> ToolExecutionResult:
+        try:
+            result = await asyncio.wait_for(
+                registry.execute_async(
+                    "stuck_sync_tool",
+                    {},
+                    tool_timeout_sec=0.01,
+                    preserve_tool_result=True,
+                ),
+                timeout=1.0,
+            )
+            assert isinstance(result, ToolExecutionResult)
+            return result
+        finally:
+            release.set()
+
+    result = asyncio.run(run())
+
+    assert started.is_set()
+    assert result.reason == "timeout"
+    assert "TIMEOUT" in result.output
+
+
+def test_execute_async_deadline_composes_sync_cooperative_cancellation() -> None:
+    registry = ToolRegistry()
+    saw_cancellation = threading.Event()
+
+    def impl(args: dict[str, object]) -> str:
+        cancel_check = args["_cancel_check"]
+        assert callable(cancel_check)
+        while not cancel_check():
+            threading.Event().wait(0.001)
+        saw_cancellation.set()
+        return "cooperatively stopped"
+
+    registry.register(
+        "cooperative_sync_tool",
+        "Cooperative sync tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    result = asyncio.run(
+        registry.execute_async(
+            "cooperative_sync_tool",
+            {},
+            tool_timeout_sec=0.01,
+            preserve_tool_result=True,
+        )
+    )
+
+    assert saw_cancellation.is_set()
+    assert isinstance(result, ToolExecutionResult)
+    assert result.reason == "timeout"
+
+
+def test_execute_async_deadline_cancels_async_tool_and_runs_cleanup() -> None:
+    registry = ToolRegistry()
+    cleanup_ran = asyncio.Event()
+
+    async def impl(args: dict[str, object]) -> str:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_ran.set()
+
+    registry.register(
+        "stuck_async_tool",
+        "Stuck async tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    async def run() -> ToolExecutionResult:
+        result = await registry.execute_async(
+            "stuck_async_tool",
+            {},
+            tool_timeout_sec=0.01,
+            preserve_tool_result=True,
+        )
+        assert isinstance(result, ToolExecutionResult)
+        await asyncio.wait_for(cleanup_ran.wait(), timeout=0.2)
+        return result
+
+    result = asyncio.run(run())
+
+    assert result.reason == "timeout"
+
+
+def test_execute_async_result_wins_deadline_race() -> None:
+    registry = ToolRegistry()
+
+    async def impl(args: dict[str, object]) -> str:
+        return "winner"
+
+    registry.register(
+        "fast_async_tool",
+        "Fast async tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    assert asyncio.run(
+        registry.execute_async("fast_async_tool", {}, tool_timeout_sec=0.01)
+    ) == "winner"
+
+
+def test_execute_async_without_timeout_remains_unbounded() -> None:
+    registry = ToolRegistry()
+    release = asyncio.Event()
+
+    async def impl(args: dict[str, object]) -> str:
+        await release.wait()
+        return "released"
+
+    registry.register(
+        "unbounded_async_tool",
+        "Unbounded async tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    async def run() -> str:
+        task = asyncio.create_task(registry.execute_async("unbounded_async_tool", {}))
+        await asyncio.sleep(0.02)
+        assert not task.done()
+        release.set()
+        return await task
+
+    assert asyncio.run(run()) == "released"
+
+
+def test_execute_async_outer_cancellation_reaches_cooperative_sync_tool() -> None:
+    registry = ToolRegistry()
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def impl(args: dict[str, object]) -> str:
+        cancel_check = args["_cancel_check"]
+        assert callable(cancel_check)
+        started.set()
+        while not cancel_check():
+            threading.Event().wait(0.001)
+        stopped.set()
+        return "stopped"
+
+    registry.register(
+        "cancelled_sync_tool",
+        "Cancelled sync tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+
+    async def run() -> None:
+        task = asyncio.create_task(registry.execute_async("cancelled_sync_tool", {}))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(result[0], asyncio.CancelledError)
+        await asyncio.wait_for(asyncio.to_thread(stopped.wait), timeout=0.2)
+
+    asyncio.run(run())
+
+
+def test_execute_async_composes_upstream_cancellation_check() -> None:
+    registry = ToolRegistry()
+    upstream_cancelled = threading.Event()
+
+    def impl(args: dict[str, object]) -> str:
+        cancel_check = args["_cancel_check"]
+        assert callable(cancel_check)
+        return "cancelled" if cancel_check() else "live"
+
+    registry.register(
+        "upstream_cancel_tool",
+        "Upstream cancel tool",
+        {"type": "object", "properties": {}},
+        impl,
+    )
+    upstream_cancelled.set()
+
+    assert asyncio.run(
+        registry.execute_async(
+            "upstream_cancel_tool",
+            {},
+            cancel_check=upstream_cancelled.is_set,
+        )
+    ) == "cancelled"

@@ -3080,11 +3080,19 @@ class ThreadRunner:
 
                     def check():
                         try:
-                            # Create a fresh connection in the executor thread if needed.
-                            # SQLite connections cannot be shared between threads.
-                            if not hasattr(local, 'conn') or local.conn is None:
-                                import sqlite3
-                                local.conn = sqlite3.connect(str(db_path), timeout=5)
+                            # Create a fresh connection per calling thread.
+                            # Async tools poll on the event-loop thread while sync
+                            # tools poll in an executor thread, and sqlite
+                            # connections cannot cross that boundary.
+                            import sqlite3
+                            current_thread_id = threading.get_ident()
+                            if (
+                                not hasattr(local, 'conn')
+                                or local.conn is None
+                                or getattr(local, 'thread_id', None) != current_thread_id
+                            ):
+                                local.conn = sqlite3.connect(str(db_path), timeout=0.1)
+                                local.thread_id = current_thread_id
                             row = local.conn.execute(
                                 """
                                 SELECT 1 FROM open_streams
@@ -3093,8 +3101,9 @@ class ThreadRunner:
                                 (thread_id, invoke_id),
                             ).fetchone()
                             return row is None  # True = cancelled (lease lost)
-                        except Exception:
-                            return False  # If we can't check, assume not cancelled
+                        except sqlite3.Error:
+                            # Busy/transient DB errors do not establish lease loss.
+                            return False
                     return check
 
                 cancel_check = make_cancel_check(self.db.path, self.thread_id, invoke_id)

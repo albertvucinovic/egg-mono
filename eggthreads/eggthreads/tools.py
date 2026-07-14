@@ -4,11 +4,13 @@ import asyncio
 import copy
 import inspect
 import json
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Mapping
 
 
 _TOOL_SUMMARY_EMIT_INTERVAL_SEC = 5.0
+_TOOL_DEADLINE_CLEANUP_GRACE_SEC = 0.25
 
 TOOL_TIMEOUT_ARGUMENT_NAMES = (
     "timeout",
@@ -181,6 +183,91 @@ class ToolCapabilities:
         data["supports_streaming"] = self.supports_streaming
         data["supports_cancellation"] = self.supports_cancellation
         return data
+
+
+class _ToolCancellationController:
+    """Thread-safe local cancellation composed with an upstream callback."""
+
+    def __init__(self, upstream: Callable[[], bool] | None = None):
+        self._event = threading.Event()
+        self._upstream = upstream
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def cancelled(self) -> bool:
+        if self._event.is_set():
+            return True
+        if self._upstream is None:
+            return False
+        try:
+            if self._upstream():
+                self._event.set()
+                return True
+        except Exception:
+            # A failed status probe does not establish cancellation.
+            return False
+        return False
+
+
+def _consume_tool_task_result(task: "asyncio.Task[Any]") -> None:
+    """Retrieve a detached task's exception so asyncio does not warn later."""
+
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _wait_for_tool_deadline(timeout_sec: float) -> None:
+    """Wait on asyncio's monotonic event-loop clock for a tool deadline."""
+
+    await asyncio.sleep(timeout_sec)
+
+
+async def _finish_or_detach_tool_task(task: "asyncio.Task[Any]") -> Any:
+    """Give cooperative cleanup a bound, then cancel/detach the await."""
+
+    try:
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=_TOOL_DEADLINE_CLEANUP_GRACE_SEC,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_tool_task_result)
+        raise
+    if task in done:
+        try:
+            return task.result()
+        except (asyncio.CancelledError, Exception):
+            return None
+
+    task.cancel()
+    task.add_done_callback(_consume_tool_task_result)
+    # Let ordinary async ``finally`` blocks begin without waiting for a task
+    # that suppresses cancellation. A to_thread await is cancelled here, not
+    # the underlying arbitrary Python thread.
+    await asyncio.sleep(0)
+    return None
+
+
+def _tool_timeout_result(
+    timeout_sec: float,
+    cleanup_result: Any = None,
+) -> ToolExecutionResult:
+    """Build the authority timeout, retaining useful cooperative output."""
+
+    if isinstance(cleanup_result, ToolExecutionResult):
+        return replace(cleanup_result, reason="timeout")
+    limit = f"{float(timeout_sec):g}"
+    return ToolExecutionResult(
+        f"--- TIMEOUT ---\nTool execution timed out after {limit} seconds.",
+        reason="timeout",
+    )
 
 
 class ToolRegistry:
@@ -360,17 +447,87 @@ class ToolRegistry:
         return result
 
     async def execute_async(self, name: str, arguments: Any, **context: Any) -> Any:
+        """Execute a tool under the registry's authoritative deadline.
+
+        Async implementations are cancelled after a bounded cooperative cleanup
+        window.  Sync implementations run through :func:`asyncio.to_thread`; the
+        same cancellation signal asks them to stop, but Python cannot forcibly
+        terminate an arbitrary executor thread.  If such a thread ignores the
+        signal, its await is detached after the durable caller can safely treat
+        this method's timeout result as terminal.
+        """
+
         impl, args, tool_ctx = self._prepare_call(name, arguments, context)
-        if inspect.iscoroutinefunction(impl):
-            result = impl(args, tool_ctx) if tool_ctx is not None else impl(args)
-        else:
-            result = await asyncio.to_thread(
-                impl,
-                args,
+        upstream_cancel_check = (
+            tool_ctx.cancel_check
+            if tool_ctx is not None
+            else args.get("_cancel_check")
+        )
+        timeout_sec = (
+            tool_ctx.timeout_sec
+            if tool_ctx is not None
+            else resolve_tool_timeout_arg(args)
+        )
+        controller = _ToolCancellationController(upstream_cancel_check)
+
+        # Every implementation receives one composed signal.  It becomes true
+        # for caller/lease cancellation and for this call's local deadline.
+        if tool_ctx is not None:
+            raw_context = dict(tool_ctx.raw)
+            raw_context["cancel_check"] = controller.cancelled
+            tool_ctx = replace(
                 tool_ctx,
-            ) if tool_ctx is not None else await asyncio.to_thread(impl, args)
-        if inspect.isawaitable(result):
-            result = await result
+                cancel_check=controller.cancelled,
+                raw=raw_context,
+            )
+        else:
+            args["_cancel_check"] = controller.cancelled
+
+        async def invoke() -> Any:
+            if inspect.iscoroutinefunction(impl):
+                result = impl(args, tool_ctx) if tool_ctx is not None else impl(args)
+            else:
+                result = await asyncio.to_thread(
+                    impl,
+                    args,
+                    tool_ctx,
+                ) if tool_ctx is not None else await asyncio.to_thread(impl, args)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+
+        implementation_task = asyncio.create_task(invoke())
+        deadline_wait: asyncio.Task[Any] | None = None
+        try:
+            if timeout_sec is None:
+                result = await asyncio.shield(implementation_task)
+            else:
+                deadline_wait = asyncio.create_task(_wait_for_tool_deadline(timeout_sec))
+                done, _pending = await asyncio.wait(
+                    {implementation_task, deadline_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if implementation_task in done:
+                    # A completed result that is observable when the deadline
+                    # wake-up is handled wins the race.
+                    result = implementation_task.result()
+                else:
+                    controller.cancel()
+                    cleanup_result = await _finish_or_detach_tool_task(implementation_task)
+                    result = _tool_timeout_result(timeout_sec, cleanup_result)
+        except asyncio.CancelledError:
+            # Shielding/waiting keeps cancellation from reaching the
+            # implementation before its cooperative signal is set.  Start
+            # bounded cleanup without swallowing the caller's cancellation.
+            controller.cancel()
+            cleanup_task = asyncio.create_task(_finish_or_detach_tool_task(implementation_task))
+            cleanup_task.add_done_callback(_consume_tool_task_result)
+            raise
+        finally:
+            if deadline_wait is not None:
+                deadline_wait.cancel()
+                deadline_wait.add_done_callback(_consume_tool_task_result)
+
         if isinstance(result, ToolExecutionResult) and not context.get("preserve_tool_result"):
             return result.presented_output()
         return result

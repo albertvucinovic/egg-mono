@@ -444,3 +444,95 @@ def test_wait_for_threads_active_open_stream_avoids_reducer_polling(tmp_path, mo
     assert reducer_calls == 0
     assert results[tid].finished is False
     assert results[tid].state == "running"
+
+
+def test_wait_for_threads_uses_monotonic_deadline_and_bounded_sleep(tmp_path, monkeypatch):
+    import eggthreads.api as api
+
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="active")
+    ts.append_message(db, tid, "user", "still working")
+
+    monotonic_now = [1000.0]
+    wall_now = [2000.0]
+    sleeps: list[float] = []
+
+    def fake_monotonic() -> float:
+        return monotonic_now[0]
+
+    def fake_time() -> float:
+        # Wall time moving backwards must not extend the wait deadline.
+        wall_now[0] -= 100.0
+        return wall_now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(float(seconds))
+        monotonic_now[0] += float(seconds)
+
+    monkeypatch.setattr(api.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(api.time, "time", fake_time)
+    monkeypatch.setattr(api.time, "sleep", fake_sleep)
+
+    results = ts.wait_for_threads(db, [tid], timeout_sec=60, poll_interval=100)
+
+    assert sleeps == [60.0]
+    assert monotonic_now[0] == 1060.0
+    assert results[tid].finished is False
+    assert results[tid].state == "running"
+
+
+def test_wait_for_threads_checks_cancellation_before_polling(tmp_path, monkeypatch):
+    import eggthreads.api as api
+
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="active")
+    polled = False
+
+    def fail_poll(*args, **kwargs):
+        nonlocal polled
+        polled = True
+        raise AssertionError("cancelled wait must not poll")
+
+    monkeypatch.setattr(api, "_thread_wait_poll_once", fail_poll)
+
+    results = ts.wait_for_threads(
+        db,
+        [tid],
+        timeout_sec=None,
+        cancel_check=lambda: True,
+    )
+
+    assert polled is False
+    assert results[tid].finished is False
+    assert results[tid].state == "cancelled"
+
+
+def test_wait_for_threads_reports_typed_timeout_without_changing_child_state(tmp_path):
+    db = _make_db(tmp_path)
+    tid = ts.create_root_thread(db, name="active")
+    ts.append_message(db, tid, "user", "still working")
+
+    result = ts.wait_for_threads(db, [tid], timeout_sec=0)[tid]
+
+    assert result.finished is False
+    assert result.state == "running"
+    assert result.timed_out is True
+    assert result.cancelled is False
+
+
+def test_wait_tool_returns_typed_timeout_result(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = ts.ThreadsDB()
+    db.init_schema()
+    tid = ts.create_root_thread(db, name="active")
+    ts.append_message(db, tid, "user", "still working")
+
+    result = ts.create_default_tools().execute(
+        "wait",
+        {"thread_ids": [tid], "timeout": 0.001},
+        preserve_tool_result=True,
+    )
+
+    assert isinstance(result, ts.ToolExecutionResult)
+    assert result.reason == "timeout"
+    assert "not finished (state=running)" in result.output

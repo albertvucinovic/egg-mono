@@ -6,7 +6,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .db import ThreadsDB, ThreadRow
 
@@ -4371,6 +4371,8 @@ class ThreadWaitResult:
     state: str
     last_assistant_message: str = ""
     short_recap: Optional[str] = None
+    timed_out: bool = False
+    cancelled: bool = False
 
 
 @dataclass
@@ -5569,6 +5571,7 @@ def wait_for_threads(
     *,
     timeout_sec: Optional[float] = None,
     poll_interval: float = 0.2,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, ThreadWaitResult]:
     """Wait for threads to finish and return structured results.
 
@@ -5576,22 +5579,52 @@ def wait_for_threads(
     open stream, no unresolved tool call, no runner-actionable work, and the
     latest API-triggering user/tool message (if any) has a later LLM result
     message.  ``timeout_sec`` only bounds how long this function blocks; it is
-    not used to decide whether a thread is finished.
+    not used to decide whether a thread is finished.  The timeout uses a
+    process-local monotonic deadline, and ``cancel_check`` is polled around each
+    database poll and bounded sleep.
     """
 
     clean_ids = [_clean_wait_thread_id(t) for t in (thread_ids or []) if isinstance(t, (str, int))]
     clean_ids = [tid for tid in clean_ids if tid]
-    start = time.time()
+    limit = _safe_float(timeout_sec)
+    deadline = time.monotonic() + limit if limit is not None and limit >= 0 else None
     finished: Dict[str, bool] = {tid: False for tid in clean_ids}
     results: Dict[str, ThreadWaitResult] = {}
+    observed: Dict[str, ThreadWaitResult] = {}
     unfinished_cache: Dict[str, _ThreadWaitUnfinishedCache] = {}
 
+    cancellation_observed = False
+
+    def cancelled() -> bool:
+        nonlocal cancellation_observed
+        if cancellation_observed:
+            return True
+        if cancel_check is None:
+            return False
+        cancellation_observed = bool(cancel_check())
+        return cancellation_observed
+
+    def deadline_expired() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    first_poll = True
     while True:
+        if cancelled() or (not first_poll and deadline_expired()):
+            break
         all_done = True
         for tid in clean_ids:
+            if cancelled() or (not first_poll and deadline_expired()):
+                all_done = False
+                break
             if finished.get(tid):
                 continue
-            result, cache_entry = _thread_wait_poll_once(db, tid, unfinished_cache.get(tid))
+            result, cache_entry = _thread_wait_poll_once(
+                db,
+                tid,
+                unfinished_cache.get(tid),
+                include_unfinished_details=tid not in observed,
+            )
+            observed[tid] = result
             if result.finished or result.state == 'not_found':
                 results[tid] = result
                 finished[tid] = True
@@ -5601,33 +5634,39 @@ def wait_for_threads(
             else:
                 unfinished_cache.pop(tid, None)
             all_done = False
-        if all_done:
+        first_poll = False
+        if all_done or cancelled() or deadline_expired():
             break
-        limit = _safe_float(timeout_sec)
-        if limit is not None and (time.time() - start) >= limit:
-            break
-        try:
-            if limit is not None:
-                remaining = max(0.0, limit - (time.time() - start))
-                time.sleep(min(float(poll_interval), remaining))
-            else:
-                time.sleep(float(poll_interval))
-        except Exception:
-            time.sleep(0.2)
 
-    # Fill in unfinished entries with their current state.
+        sleep_for = max(0.0, float(poll_interval))
+        if deadline is not None:
+            sleep_for = min(sleep_for, max(0.0, deadline - time.monotonic()))
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+    # Fill in unfinished entries with the last cheaply observed state.  Do not
+    # perform another potentially blocking DB poll after cancellation/deadline.
+    was_cancelled = cancelled()
+    was_timed_out = not was_cancelled and deadline_expired()
     for tid in clean_ids:
         if tid in results:
             continue
-        result, cache_entry = _thread_wait_poll_once(
-            db,
-            tid,
-            unfinished_cache.get(tid),
-            include_unfinished_details=True,
+        last_result = observed.get(tid)
+        results[tid] = ThreadWaitResult(
+            thread_id=tid,
+            finished=False,
+            state=(
+                last_result.state
+                if last_result is not None
+                else ('cancelled' if was_cancelled else 'running')
+            ),
+            last_assistant_message=(
+                last_result.last_assistant_message if last_result is not None else ''
+            ),
+            short_recap=(last_result.short_recap if last_result is not None else None),
+            timed_out=was_timed_out,
+            cancelled=was_cancelled,
         )
-        results[tid] = result
-        if cache_entry is not None:
-            unfinished_cache[tid] = cache_entry
     return results
 
 def set_subtree_working_directory(db: ThreadsDB, root_thread_id: str, working_dir: str, reason: str = "user") -> None:

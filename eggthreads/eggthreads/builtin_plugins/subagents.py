@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict
 
 from ..plugins import PluginContext
-from ..tools import ToolRegistry, resolve_tool_timeout_arg
+from ..tools import ToolContext, ToolExecutionResult, ToolRegistry, resolve_tool_timeout_arg
 
 
 def clean_optional_text(value: Any) -> str | None:
@@ -332,7 +332,7 @@ def get_child_status_tool(args: Dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
-def wait_tool(args: Dict[str, Any]) -> str:
+def wait_tool(args: Dict[str, Any], ctx: ToolContext) -> str | ToolExecutionResult:
     from ..api import _clean_wait_thread_id, wait_for_threads
     from ..db import ThreadsDB
 
@@ -358,8 +358,17 @@ def wait_tool(args: Dict[str, Any]) -> str:
 
     timeout_sec = resolve_tool_timeout_arg(args)
 
-    db = ThreadsDB()
-    results = wait_for_threads(db, thread_ids, timeout_sec=timeout_sec, poll_interval=0.2)
+    # This synchronous implementation runs in ToolRegistry's executor thread,
+    # so it must not reuse the runner thread's sqlite connection.
+    db_path = getattr(ctx.db, "path", None)
+    db = ThreadsDB(db_path) if db_path is not None else ThreadsDB()
+    results = wait_for_threads(
+        db,
+        thread_ids,
+        timeout_sec=timeout_sec,
+        poll_interval=0.2,
+        cancel_check=ctx.cancel_check,
+    )
 
     lines: list[str] = []
     for tid in thread_ids:
@@ -374,7 +383,19 @@ def wait_tool(args: Dict[str, Any]) -> str:
                 lines.append(f"Thread {short} not found; not waiting.")
             else:
                 lines.append(f"Thread {short} not finished (state={st}).")
-    return "\n\n".join(lines)
+    output = "\n\n".join(lines)
+    if any(result.cancelled for result in results.values()):
+        return ToolExecutionResult(
+            f"--- INTERRUPTED ---\nWait was cancelled.\n\n{output}",
+            reason="interrupted",
+        )
+    if any(result.timed_out for result in results.values()):
+        limit = f"{float(timeout_sec):g}" if timeout_sec is not None else "unknown"
+        return ToolExecutionResult(
+            f"--- TIMEOUT ---\nWait timed out after {limit} seconds.\n\n{output}",
+            reason="timeout",
+        )
+    return output
 
 
 def _command_target(context: Any, command_name: str) -> tuple[Any, str] | None:
@@ -705,6 +726,8 @@ def register_subagent_tools(registry: ToolRegistry) -> None:
         },
         impl=wait_tool,
         local_only=False,
+        accepts_context=True,
+        capabilities={"supports_cancellation": True},
     )
 
 

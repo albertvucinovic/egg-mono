@@ -767,3 +767,161 @@ class TestRunnerToolTimeoutResolution:
         assert resolve_tool_timeout_arg({"timeout_sec": 3, "_tool_timeout_sec": 30}) == 3.0
         assert resolve_tool_timeout_arg({"timeout": "bad", "_tool_timeout_sec": 30}) == 30.0
         assert resolve_tool_timeout_arg({"timeout": -1, "_tool_timeout_sec": 30}) == 30.0
+
+
+def test_runner_authoritatively_times_out_wait_declared_for_sixty_seconds(tmp_path, monkeypatch):
+    """Regression: wait(timeout=60) cannot remain TC3 after its deadline fires."""
+    import asyncio
+    import json
+    import threading
+
+    import eggthreads.api as api
+    import eggthreads.tools as tools_module
+
+    eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+    db = eggthreads.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    root = eggthreads.create_root_thread(db, name="root")
+    child = eggthreads.create_child_thread(db, root, name="child")
+    eggthreads.append_message(db, child, "user", "still working")
+    eggthreads.create_snapshot(db, child)
+
+    tcid = "tc-wait-sixty-timeout"
+    eggthreads.append_message(
+        db,
+        root,
+        "assistant",
+        "",
+        extra={
+            "tool_calls": [
+                {
+                    "id": tcid,
+                    "type": "function",
+                    "function": {
+                        "name": "wait",
+                        "arguments": json.dumps({"thread_ids": [child], "timeout": 60}),
+                    },
+                }
+            ]
+        },
+    )
+    db.append_event(
+        "approve-wait",
+        root,
+        "tool_call.approval",
+        {"tool_call_id": tcid, "decision": "granted"},
+    )
+
+    release_poll = threading.Event()
+    poll_started = threading.Event()
+    original_poll = api._thread_wait_poll_once
+
+    def stuck_poll(*args, **kwargs):
+        poll_started.set()
+        release_poll.wait()
+        return original_poll(*args, **kwargs)
+
+    observed_deadlines: list[float] = []
+
+    async def cross_declared_deadline(timeout_sec: float) -> None:
+        observed_deadlines.append(timeout_sec)
+        while not poll_started.is_set():
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(api, "_thread_wait_poll_once", stuck_poll)
+    monkeypatch.setattr(tools_module, "_wait_for_tool_deadline", cross_declared_deadline)
+
+    async def run() -> None:
+        try:
+            runner = eggthreads.ThreadRunner(
+                db,
+                root,
+                llm=object(),
+                config=eggthreads.RunnerConfig(lease_ttl_sec=5, heartbeat_sec=0.01),
+            )
+            assert await asyncio.wait_for(runner.run_once(), timeout=1.0) is True
+        finally:
+            release_poll.set()
+
+    asyncio.run(run())
+
+    assert observed_deadlines == [60.0]
+    assert db.current_open(root) is None
+    state = eggthreads.build_tool_call_states(db, root)[tcid]
+    assert state.state == "TC5"
+    assert state.finished_reason == "timeout"
+    assert "TIMEOUT" in (state.finished_output or "")
+    finished_count = db.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE thread_id=? AND type='tool_call.finished' "
+        "AND json_extract(payload_json, '$.tool_call_id')=?",
+        (root, tcid),
+    ).fetchone()[0]
+    assert finished_count == 1
+
+
+def test_runner_timeout_does_not_cancel_sibling_tool(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    eggthreads = _import_eggthreads(monkeypatch, tmp_path)
+    db = eggthreads.ThreadsDB(tmp_path / "threads.sqlite")
+    db.init_schema()
+    tid = eggthreads.create_root_thread(db, name="root")
+    registry = eggthreads.ToolRegistry()
+    release = threading.Event()
+    sibling_ran = threading.Event()
+
+    def stuck(args):
+        release.wait()
+        return "late stuck result"
+
+    def sibling(args):
+        sibling_ran.set()
+        return "sibling ok"
+
+    registry.register("stuck", "stuck", {"type": "object", "properties": {}}, stuck)
+    registry.register("sibling", "sibling", {"type": "object", "properties": {}}, sibling)
+
+    tool_calls = [
+        {
+            "id": "tc-stuck",
+            "type": "function",
+            "function": {"name": "stuck", "arguments": '{"timeout": 0.01}'},
+        },
+        {
+            "id": "tc-sibling",
+            "type": "function",
+            "function": {"name": "sibling", "arguments": '{"timeout": 1}'},
+        },
+    ]
+    eggthreads.append_message(db, tid, "assistant", "", extra={"tool_calls": tool_calls})
+    for tc in tool_calls:
+        db.append_event(
+            f"approve-{tc['id']}",
+            tid,
+            "tool_call.approval",
+            {"tool_call_id": tc["id"], "decision": "granted"},
+        )
+
+    async def run() -> None:
+        try:
+            runner = eggthreads.ThreadRunner(db, tid, llm=object(), tools=registry)
+            assert await asyncio.wait_for(runner.run_once(), timeout=0.5) is True
+        finally:
+            release.set()
+
+    asyncio.run(run())
+
+    states = eggthreads.build_tool_call_states(db, tid)
+    assert states["tc-stuck"].finished_reason == "timeout"
+    assert states["tc-sibling"].finished_reason == "success"
+    assert states["tc-sibling"].finished_output == "sibling ok"
+    assert sibling_ran.is_set()
+    counts = dict(
+        db.conn.execute(
+            "SELECT json_extract(payload_json, '$.tool_call_id'), COUNT(*) "
+            "FROM events WHERE thread_id=? AND type='tool_call.finished' GROUP BY 1",
+            (tid,),
+        ).fetchall()
+    )
+    assert counts == {"tc-sibling": 1, "tc-stuck": 1}

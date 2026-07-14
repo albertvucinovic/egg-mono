@@ -328,7 +328,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
     terminate_sent = False
     kill_sent = False
     timeout = ctx.timeout_sec
-    start = time.time()
+    start = time.monotonic()
     stop_requested_at: float | None = None
 
     def _kill_process_and_container(*, force: bool = False) -> None:
@@ -355,7 +355,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
         nonlocal timed_out, interrupted, terminate_sent, kill_sent, stop_requested_at
         while proc.returncode is None:
             await _asyncio.sleep(0.1)
-            now = time.time()
+            now = time.monotonic()
             if timeout and (now - start) >= timeout:
                 timed_out = True
                 if stop_requested_at is None:
@@ -367,7 +367,10 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                     kill_sent = True
                     _kill_process_and_container(force=True)
             if ctx.cancel_check and ctx.cancel_check():
-                interrupted = True
+                if timeout and (now - start) >= timeout:
+                    timed_out = True
+                else:
+                    interrupted = True
                 if stop_requested_at is None:
                     stop_requested_at = now
                 if not terminate_sent:
@@ -499,7 +502,7 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
                 proc_reported_exit = True
                 break
             if timed_out or interrupted:
-                now = time.time()
+                now = time.monotonic()
                 if stop_requested_at is None:
                     stop_requested_at = now
                 if not terminate_sent:
@@ -550,6 +553,12 @@ async def execute_bash_tool_streaming(args: Dict[str, Any], ctx: ToolContext) ->
 
     full_result = _sanitize_combined_output("".join(stdout_buf) + "".join(stderr_buf)) or "--- The command executed successfully and produced no output ---"
     if timed_out:
+        full_result = f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds.\n\n" + full_result
+        return ToolExecutionResult(full_result, reason="timeout", streamed=ctx.stream is not None)
+    elif interrupted and timeout and (time.monotonic() - start) >= timeout:
+        # The registry owns the same deadline and sets the composed cancellation
+        # signal first.  Preserve captured output while classifying that race as
+        # a timeout rather than a user/lease interruption.
         full_result = f"--- TIMEOUT ---\nCommand timed out after {timeout} seconds.\n\n" + full_result
         return ToolExecutionResult(full_result, reason="timeout", streamed=ctx.stream is not None)
     elif interrupted:
