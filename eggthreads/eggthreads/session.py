@@ -206,19 +206,35 @@ def _session_id_for_thread(thread_id: str) -> str:
 def docker_session_container_name(db: ThreadsDB, session_id: str) -> str:
     """Return deterministic Docker container name for a session id."""
 
-    import hashlib
-
-    db_hash = hashlib.sha256(str(db.path).encode("utf-8")).hexdigest()[:12]
+    db_hash = docker_session_db_hash(db)
     safe_session = ''.join(ch.lower() if ch.isalnum() else '-' for ch in str(session_id))
     return f"egg-rlm-{db_hash}-{safe_session[:48]}"
 
 
 def docker_session_db_hash(db: ThreadsDB) -> str:
-    """Return the stable db hash used in Docker session labels/names."""
+    """Return the stable physical-DB hash used in session labels and names.
+
+    ``ThreadsDB.path`` may be relative in one Egg process and absolute in
+    another (notably the CLI and EggW).  Hashing that spelling creates two
+    containers for one logical session; both then consume requests from the
+    same bridge directory.  Prefer SQLite's canonical main-database path so
+    every process agrees on the container identity.
+    """
 
     import hashlib
 
-    return hashlib.sha256(str(db.path).encode("utf-8")).hexdigest()[:12]
+    canonical = next(
+        (
+            str(Path(row[2]).expanduser().resolve())
+            for row in db.conn.execute("PRAGMA database_list")
+            if str(row[1]) == "main" and row[2]
+        ),
+        "",
+    )
+    if not canonical:
+        raw = str(getattr(db, "path", "") or "")
+        canonical = raw if raw == ":memory:" else str(Path(raw).expanduser().resolve())
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
 def docker_session_available() -> bool:
@@ -704,6 +720,143 @@ def _docker_inspect_running(container_name: str) -> Optional[bool]:
     return proc.stdout.strip().lower() == "true"
 
 
+def _docker_session_container_names(session_id: str) -> List[str]:
+    """Return all Docker containers claiming one logical Egg session."""
+
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "ps", "-a",
+                "--filter", "label=egg.kind=rlm-session",
+                "--filter", f"label=egg.session_id={session_id}",
+                "--format", "{{.Names}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
+def _docker_bind_mount_source(container_name: str, destination: str) -> Optional[str]:
+    """Return the resolved host source mounted at ``destination``."""
+
+    try:
+        proc = subprocess.run(
+            [
+                "docker", "inspect", "-f",
+                "{{range .Mounts}}{{if eq .Destination " + json.dumps(destination) + "}}{{.Source}}{{end}}{{end}}",
+                container_name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    source = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+    return str(Path(source).resolve()) if source else None
+
+
+def _reconcile_docker_session_containers(
+    container_name: str,
+    session_id: str,
+    bridge_dir: Path,
+    runtime_dir: Path,
+) -> None:
+    """Collapse legacy duplicate daemons without discarding the sole worker.
+
+    Older releases derived the container's DB hash from the literal path, so
+    a relative-path CLI and absolute-path EggW could run different daemons for
+    the same session.  Sharing ``/egg-bridge`` makes that unsafe: a refresh
+    request can reach one daemon and the following user eval another.
+
+    Only containers with the same session label and exact bridge/runtime
+    mounts are reconciled.  The canonical container wins when present.  If
+    there is only a legacy container, rename it so its live interpreter state
+    survives the migration.  Unrelated containers are never removed.
+    """
+
+    expected_bridge = str(bridge_dir.resolve())
+    expected_runtime = str(runtime_dir.resolve())
+
+    def matching_candidates() -> List[str]:
+        return [
+            candidate
+            for candidate in _docker_session_container_names(session_id)
+            if _docker_bind_mount_source(candidate, "/egg-bridge") == expected_bridge
+            and _docker_bind_mount_source(candidate, "/egg-runtime") == expected_runtime
+        ]
+
+    candidates = matching_candidates()
+
+    target_exists = _docker_inspect_running(container_name) is not None
+    if target_exists and container_name not in candidates:
+        # Another process may have created/renamed the canonical container
+        # between the label query and inspect. Re-query before treating it as
+        # an ownership collision.
+        candidates = matching_candidates()
+        if container_name not in candidates:
+            raise RuntimeError(
+                f"Docker container name collision for {container_name}: "
+                "the existing container does not own this Egg session bridge/runtime."
+            )
+
+    survivor = container_name if container_name in candidates else None
+    if survivor is None and candidates:
+        survivor = min(
+            candidates,
+            key=lambda name: (
+                _docker_inspect_running(name) is not True,
+                _docker_container_created_at(name) or float("inf"),
+                name,
+            ),
+        )
+        proc = subprocess.run(
+            ["docker", "rename", survivor, container_name],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if proc.returncode != 0:
+            # A concurrent upgraded process may have won the same migration.
+            candidates = matching_candidates()
+            if container_name not in candidates:
+                error = (proc.stderr or proc.stdout or "Docker rename failed").strip()
+                raise RuntimeError(f"Could not migrate legacy Docker session {survivor}: {error}")
+        else:
+            candidates = [container_name if name == survivor else name for name in candidates]
+        survivor = container_name
+
+    failures: List[str] = []
+    for candidate in candidates:
+        if candidate in {container_name, survivor}:
+            continue
+        try:
+            proc = subprocess.run(
+                ["docker", "rm", "-f", candidate],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except Exception as e:
+            failures.append(f"{candidate}: {type(e).__name__}: {e}")
+            continue
+        if proc.returncode != 0:
+            failures.append(
+                f"{candidate}: {(proc.stderr or proc.stdout or 'Docker removal failed').strip()}"
+            )
+    if failures:
+        raise RuntimeError(
+            "Could not remove competing Docker session container(s): "
+            + "; ".join(failures)
+        )
+
+
 def _start_docker_container(
     db: ThreadsDB,
     runtime_thread_id: str,
@@ -714,6 +867,14 @@ def _start_docker_container(
 ) -> bool:
     """Ensure the session container runs; return whether its process restarted."""
     expected_policy_hash = _docker_session_policy_hash(db, runtime_thread_id, cfg)
+
+    if cfg.session_id:
+        _reconcile_docker_session_containers(
+            container_name,
+            cfg.session_id,
+            bridge_dir,
+            runtime_dir,
+        )
 
     def _remove_existing_container() -> None:
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False, timeout=20)
